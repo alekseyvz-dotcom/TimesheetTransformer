@@ -43,6 +43,7 @@ jobs:
       - name: Build windowed EXE (no console)
         run: |
           pyinstaller -F -w -i icon.ico --hidden-import=tkinter -n TabelConverter timesheet_transformer.py
+          pyinstaller -F -w -i icon.ico -n TabelSuite main_app.py
 
       - name: Build console EXE (with console)
         run: |
