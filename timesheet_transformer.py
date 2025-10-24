@@ -9,6 +9,8 @@ from typing import List, Optional, Tuple, Any
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
+from openpyxl.styles import Alignment, Font, Border, Side
 
 # ===== Настройки =====
 START_ROW = 21
@@ -310,17 +312,22 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     ws_out = wb_out.active
     ws_out.title = RESULT_SHEET_NAME
 
+    # Заголовок
     ws_out.append(header)
     for cell in ws_out[1]:
         cell.font = Font(bold=True)
 
+    # Данные
     for row in rows:
         ws_out.append(row)
 
+    # Колоночные индексы
     day_start_col = 6  # после: №, ФИО, Должность, Табельный №, ID объекта
     total_days_col = day_start_col + 31
     total_hours_col = total_days_col + 1
+    last_row = ws_out.max_row
 
+    # Ширины
     for col_idx in range(1, 6):
         ws_out.column_dimensions[get_column_letter(col_idx)].width = 16 if col_idx in (2, 3) else 12
     for col_idx in range(day_start_col, day_start_col + 31):
@@ -328,33 +335,65 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     ws_out.column_dimensions[get_column_letter(total_days_col)].width = 12
     ws_out.column_dimensions[get_column_letter(total_hours_col)].width = 14
 
+    # Перенос строк в ФИО/Должность
     wrap = Alignment(wrap_text=True)
-    for row_idx in range(2, ws_out.max_row + 1):
+    for row_idx in range(2, last_row + 1):
         ws_out.cell(row_idx, 2).alignment = wrap
         ws_out.cell(row_idx, 3).alignment = wrap
 
+    # Центрирование: дни + итоги (заголовки и данные)
     center = Alignment(horizontal="center", vertical="center")
     for col_idx in range(day_start_col, day_start_col + 31):
         ws_out.cell(1, col_idx).alignment = center
-        for row_idx in range(2, ws_out.max_row + 1):
+        for row_idx in range(2, last_row + 1):
             ws_out.cell(row_idx, col_idx).alignment = center
-
     for col_idx in (total_days_col, total_hours_col):
         ws_out.cell(1, col_idx).alignment = center
-        for row_idx in range(2, ws_out.max_row + 1):
+        for row_idx in range(2, last_row + 1):
             ws_out.cell(row_idx, col_idx).alignment = center
 
+    # Форматы чисел:
+    # - Часы по дням: 0.## (до двух знаков, без хвостовых нулей — 8,25 будет 8,25; 8 → 8; 8,5 → 8,5)
+    # - Итого дней: целое
+    # - Итого часов: 0.##
     for col_idx in range(day_start_col, day_start_col + 31):
-        for row_idx in range(2, ws_out.max_row + 1):
-            ws_out.cell(row_idx, col_idx).number_format = "General"
-    for row_idx in range(2, ws_out.max_row + 1):
+        for row_idx in range(2, last_row + 1):
+            ws_out.cell(row_idx, col_idx).number_format = "0.##"
+    for row_idx in range(2, last_row + 1):
         ws_out.cell(row_idx, total_days_col).number_format = "0"
-        ws_out.cell(row_idx, total_hours_col).number_format = "General"
+        ws_out.cell(row_idx, total_hours_col).number_format = "0.##"
 
+    # Заморозка шапки
     ws_out.freeze_panes = "A2"
+
+    # Превращаем в "таблицу" с автоформатом (фильтры, полосы)
+    last_col_letter = get_column_letter(total_hours_col)
+    table_ref = f"A1:{last_col_letter}{last_row}"
+    table = Table(displayName="ResultTable", ref=table_ref)
+    style = TableStyleInfo(name="TableStyleMedium9", showFirstColumn=False,
+                           showLastColumn=False, showRowStripes=True, showColumnStripes=False)
+    table.tableStyleInfo = style
+    ws_out.add_table(table)
+
+    # Границы по всей таблице (тонкие внутри, средние по контуру)
+    apply_borders(ws_out, 1, last_row, 1, total_hours_col)
+
+    # Сохранение
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     wb_out.save(out_path)
-
+    
+def apply_borders(ws, min_row: int, max_row: int, min_col: int, max_col: int):
+    thin = Side(style="thin", color="D9D9D9")
+    medium = Side(style="medium", color="808080")
+    for r in range(min_row, max_row + 1):
+        for c in range(min_col, max_col + 1):
+            cell = ws.cell(r, c)
+            left = medium if c == min_col else thin
+            right = medium if c == max_col else thin
+            top = medium if r == min_row else thin
+            bottom = medium if r == max_row else thin
+            cell.border = Border(left=left, right=right, top=top, bottom=bottom)
+            
 def safe_save_result(header, rows, primary_out: Path) -> Path:
     try:
         save_result(header, rows, str(primary_out))
@@ -465,3 +504,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
