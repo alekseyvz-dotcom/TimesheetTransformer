@@ -578,44 +578,45 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     last_row = ws_out.max_row
     last_col = total_hours_col
 
-    # ПРЕ‑нормализация (ломаем «7,» → 7 до форматирования)
+    # 1) ПРЕ‑нормализация (ломаем все "7," и пр. ещё до форматирования/границ)
     fix_numeric_range_py(ws_out, 2, last_row, day_start_col, day_start_col + 31 - 1)
     fix_numeric_range_py(ws_out, 2, last_row, total_days_col, total_hours_col)
 
-    # Ширины
+    # 2) Ширины
     for col_idx in range(1, 6):
         ws_out.column_dimensions[get_column_letter(col_idx)].width = 16 if col_idx in (2, 3) else 12
+    # Чтобы General показывал "8,25", а не "8,3"
     for col_idx in range(day_start_col, day_start_col + 31):
-        ws_out.column_dimensions[get_column_letter(col_idx)].width = 4.25
+        ws_out.column_dimensions[get_column_letter(col_idx)].width = 5.6
     ws_out.column_dimensions[get_column_letter(total_days_col)].width = 12
     ws_out.column_dimensions[get_column_letter(total_hours_col)].width = 14
 
-    # Центрирование везде
+    # 3) Центрирование везде
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
     for r in range(1, last_row + 1):
         for c in range(1, last_col + 1):
             ws_out.cell(r, c).alignment = center
 
-    # Заморозка шапки + автофильтр (без Table)
+    # 4) Заморозка + автофильтр
     ws_out.freeze_panes = "A2"
     last_col_letter = get_column_letter(last_col)
     ws_out.auto_filter.ref = f"A1:{last_col_letter}{last_row}"
 
-    # Белая заливка для столбцов дней
+    # 5) Белая заливка для столбцов дней
     white = PatternFill(fill_type="solid", fgColor="FFFFFF")
     for c in range(day_start_col, day_start_col + 31):
         for r in range(1, last_row + 1):
             ws_out.cell(r, c).fill = white
 
-    # Границы по всей таблице
+    # 6) Границы
     apply_borders(ws_out, 1, last_row, 1, last_col)
 
-    # ФИНАЛЬНАЯ нормализация (ещё раз после всех действий)
+    # 7) ФИНАЛЬНАЯ нормализация (после всех действий, ещё раз)
     fix_numeric_range_py(ws_out, 2, last_row, day_start_col, day_start_col + 31 - 1)
     fix_numeric_range_py(ws_out, 2, last_row, total_days_col, total_hours_col)
 
-    # Формат и скрытие нулей: без мультисекций
-    # - часы по дням: если 0 → пусто, иначе формат "0.##"
+    # 8) Форматы и сокрытие нулей:
+    # - Часы по дням: General; если 0 → пусто
     for c in range(day_start_col, day_start_col + 31):
         for r in range(2, last_row + 1):
             cell = ws_out.cell(r, c)
@@ -623,29 +624,33 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
             if isinstance(v, (int, float)):
                 if abs(v) < 1e-12:
                     cell.value = None
+                    cell.number_format = "General"
                 else:
-                    cell.number_format = "0.##"
+                    cell.number_format = "General"   # принципиально: без кастомных форматов
 
-    # - Отработано часов: если 0 → пусто, иначе "0.##"
+    # - Отработано часов: General; если 0 → пусто
     for r in range(2, last_row + 1):
         ch = ws_out.cell(r, total_hours_col)
         vh = ch.value
         if isinstance(vh, (int, float)):
             if abs(vh) < 1e-12:
                 ch.value = None
+                ch.number_format = "General"
             else:
-                ch.number_format = "0.##"
+                ch.number_format = "General"
 
-    # - Отработано дней: если 0 → пусто, иначе "0"
+    # - Отработано дней: целое; если 0 → пусто
     for r in range(2, last_row + 1):
         cd = ws_out.cell(r, total_days_col)
         vd = cd.value
         if isinstance(vd, (int, float)):
             if abs(vd) < 1e-12:
                 cd.value = None
+                cd.number_format = "0"
             else:
                 cd.number_format = "0"
 
+    # 9) Сохранение
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     wb_out.save(out_path)
 
@@ -784,6 +789,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
