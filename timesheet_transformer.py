@@ -225,4 +225,189 @@ def transform_sheet(ws) -> Tuple[List[str], List[List[Any]]]:
     last_row = guess_last_row(ws, START_ROW, 2)
     log(f"guess_last_row -> {last_row}")
 
-    rows: 
+    rows: List[List[Any]] = []
+    for r in range(START_ROW, last_row + 1):
+        raw_num = only_digits(ws.cell(r, 2).value or "")
+        if not raw_num:
+            continue
+
+        fio_raw = ws.cell(r, 3).value
+        fio, title = split_fio_and_title(fio_raw)
+        tbn = clean_spaces(ws.cell(r, 5).value or "")
+
+        days_num = to_number_cell(ws.cell(r, ao_col))
+        hrs_num = None
+        if r + HOURS_OFFSET <= ws.max_row:
+            hrs_num = to_number_cell(ws.cell(r + HOURS_OFFSET, ao_col))
+        if hrs_num is None and r + 1 <= ws.max_row:
+            hrs_num = to_number_cell(ws.cell(r + 1, ao_col))
+
+        if not (has_letters(fio) and (len(tbn) > 0 or isinstance(days_num, (int, float)))):
+            continue
+
+        out = [int(raw_num), fio, title, tbn, ""]  # ID объекта пусто
+
+        # Дни 1..15: коды r, часы r+1
+        for col in day_cols_h1:
+            code_cell = ws.cell(r, col)
+            hours_cell = ws.cell(r + 1, col) if r + 1 <= ws.max_row else None
+            daily = day_hours_from_cells(code_cell, hours_cell)
+            out.append(daily if daily is not None else "")
+
+        # Дни 16..31: коды r+2, часы r+3
+        for col in day_cols_h2:
+            code_cell = ws.cell(r + 2, col) if r + 2 <= ws.max_row else None
+            hours_cell = ws.cell(r + 3, col) if r + 3 <= ws.max_row else None
+            daily = day_hours_from_cells(code_cell, hours_cell)
+            out.append(daily if daily is not None else "")
+
+        out.append(days_num if days_num is not None else "")
+        out.append(hrs_num if hrs_num is not None else "")
+
+        rows.append(out)
+
+    return header, rows
+
+def save_result(header: List[str], rows: List[List[Any]], out_path: str):
+    wb_out = Workbook()
+    ws_out = wb_out.active
+    ws_out.title = RESULT_SHEET_NAME
+
+    ws_out.append(header)
+    for cell in ws_out[1]:
+        cell.font = Font(bold=True)
+
+    for row in rows:
+        ws_out.append(row)
+
+    day_start_col = 6  # после: №, ФИО, Должность, Табельный №, ID объекта
+    total_days_col = day_start_col + 31
+    total_hours_col = total_days_col + 1
+
+    for col_idx in range(1, 6):
+        ws_out.column_dimensions[get_column_letter(col_idx)].width = 16 if col_idx in (2, 3) else 12
+    for col_idx in range(day_start_col, day_start_col + 31):
+        ws_out.column_dimensions[get_column_letter(col_idx)].width = 4.25
+    ws_out.column_dimensions[get_column_letter(total_days_col)].width = 12
+    ws_out.column_dimensions[get_column_letter(total_hours_col)].width = 14
+
+    wrap = Alignment(wrap_text=True)
+    for row_idx in range(2, ws_out.max_row + 1):
+        ws_out.cell(row_idx, 2).alignment = wrap
+        ws_out.cell(row_idx, 3).alignment = wrap
+
+    center = Alignment(horizontal="center", vertical="center")
+    for col_idx in range(day_start_col, day_start_col + 31):
+        ws_out.cell(1, col_idx).alignment = center
+        for row_idx in range(2, ws_out.max_row + 1):
+            ws_out.cell(row_idx, col_idx).alignment = center
+
+    for col_idx in (total_days_col, total_hours_col):
+        ws_out.cell(1, col_idx).alignment = center
+        for row_idx in range(2, ws_out.max_row + 1):
+            ws_out.cell(row_idx, col_idx).alignment = center
+
+    for col_idx in range(day_start_col, day_start_col + 31):
+        for row_idx in range(2, ws_out.max_row + 1):
+            ws_out.cell(row_idx, col_idx).number_format = "General"
+    for row_idx in range(2, ws_out.max_row + 1):
+        ws_out.cell(row_idx, total_days_col).number_format = "0"
+        ws_out.cell(row_idx, total_hours_col).number_format = "General"
+
+    ws_out.freeze_panes = "A2"
+
+    out_path = str(out_path)
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    wb_out.save(out_path)
+
+def safe_save_result(header, rows, primary_out: Path) -> Path:
+    try:
+        save_result(header, rows, str(primary_out))
+        return primary_out
+    except Exception as e:
+        log(f"Primary save failed: {e}")
+        alt_dir = Path.home() / "Desktop" / "TimesheetTransformer_Results"
+        alt_dir.mkdir(parents=True, exist_ok=True)
+        alt_path = alt_dir / primary_out.name
+        save_result(header, rows, str(alt_path))
+        return alt_path
+
+# ===== CLI и запуск =====
+
+def transform_file(file_path: str, out_path: Optional[str] = None):
+    try:
+        p = Path(file_path)
+        ext = p.suffix.lower()
+        if ext not in (".xlsx", ".xlsm"):
+            msg_error("Неподдерживаемый формат",
+                      f"Выбран файл: {p.name}\n\nПоддерживаются только .xlsx и .xlsm.\n"
+                      f"Откройте исходник в Excel и сохраните как .xlsx.")
+            return
+
+        log(f"Open workbook: {file_path}")
+        wb = load_workbook(file_path, data_only=True, read_only=False)  # оставим read_only=False для форматов времени
+        ws = pick_candidate_sheet(wb)
+        if ws is None:
+            msg_error("Ошибка", "Не найден лист для обработки.")
+            return
+        log(f"Sheet: {ws.title}")
+
+        header, rows = transform_sheet(ws)
+        if not out_path:
+            out_path = str(p.with_name(p.stem + "_result.xlsx"))
+
+        saved_to = safe_save_result(header, rows, Path(out_path))
+        msg_info("Готово", f"Результат сохранён:\n{saved_to}\n\nЛог: {LOG_PATH}")
+        log("Done.")
+
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        log(tb)
+        msg_error("Критическая ошибка", f"{e}\n\nПодробности в логе:\n{LOG_PATH}")
+
+def pick_file_dialog() -> Optional[str]:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        fp = filedialog.askopenfilename(
+            title="Выберите файл табеля",
+            filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")]
+        )
+        root.destroy()
+        return fp or None
+    except Exception as e:
+        log(f"File dialog failed: {e}")
+        return None
+
+def main():
+    parser = argparse.ArgumentParser(description="Преобразование табеля (1С ЗУП) в читаемую таблицу")
+    g = parser.add_mutually_exclusive_group(required=False)
+    g.add_argument("--file", help="Путь к файлу табеля (xlsx/xlsm)")
+    g.add_argument("--pick", action="store_true", help="Выбрать файл через диалог")
+    g.add_argument("--latest", help="Взять самый свежий файл из указанной папки")
+    parser.add_argument("--out", help="Путь для сохранения результата (xlsx)")
+    args = parser.parse_args()
+
+    if not any([args.file, args.pick, args.latest]):
+        args.pick = True
+
+    if args.file:
+        transform_file(args.file, args.out)
+    elif args.pick:
+        fp = pick_file_dialog()
+        if not fp:
+            msg_info("Отмена", "Файл не выбран.")
+            return
+        transform_file(fp, args.out)
+    elif args.latest:
+        fp = latest_file_in_folder(args.latest)
+        if not fp:
+            msg_error("Не найден файл", "В папке не найден подходящий файл (*.xlsx, *.xlsm).")
+            return
+        transform_file(fp, args.out)
+
+if __name__ == "__main__":
+    main()
