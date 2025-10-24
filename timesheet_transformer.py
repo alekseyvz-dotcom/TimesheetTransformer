@@ -581,7 +581,7 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     last_row = ws_out.max_row
     last_col = total_hours_col
 
-    # ПРЕ-нормализация: сразу вычистим "7," до применения таблицы и форматов
+    # ПРЕ-нормализация: сразу «ломаем» текстовые числа (убираем '7,', '40,' и т.п.)
     fix_numeric_range_py(ws_out, 2, last_row, day_start_col, day_start_col + 31 - 1)
     fix_numeric_range_py(ws_out, 2, last_row, total_days_col, total_hours_col)
 
@@ -625,19 +625,21 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     # Границы по всей таблице
     apply_borders(ws_out, 1, last_row, 1, last_col)
 
-    # ФИНАЛЬНАЯ нормализация чисел (ещё раз, после таблицы/границ — на случай, если что-то осталось текстом)
+    # ФИНАЛЬНАЯ нормализация (ещё раз, после таблицы/границ)
     fix_numeric_range_py(ws_out, 2, last_row, day_start_col, day_start_col + 31 - 1)
     fix_numeric_range_py(ws_out, 2, last_row, total_days_col, total_hours_col)
 
-    # Форматы: часы — 0.## (без хвостов), нули НЕ показывать; дни — целые, нули НЕ показывать
-for c in range(day_start_col, day_start_col + 31):
+    # Форматы: часы — до 2 знаков, нули НЕ показывать; дни — целые, нули НЕ показывать
+    # часы по дням 1–31
+    for c in range(day_start_col, day_start_col + 31):
+        for r in range(2, last_row + 1):
+            ws_out.cell(r, c).number_format = "0.##;-0.##;;"
+    # итоги
     for r in range(2, last_row + 1):
-        ws_out.cell(r, c).number_format = "0.##;-0.##;;"
+        ws_out.cell(r, total_days_col).number_format  = "0;-0;;"
+        ws_out.cell(r, total_hours_col).number_format = "0.##;-0.##;;"
 
-for r in range(2, last_row + 1):
-    ws_out.cell(r, total_days_col).number_format  = "0;-0;;"
-    ws_out.cell(r, total_hours_col).number_format = "0.##;-0.##;;"
-
+    # Сохранение
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     wb_out.save(out_path)
 
@@ -776,4 +778,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
