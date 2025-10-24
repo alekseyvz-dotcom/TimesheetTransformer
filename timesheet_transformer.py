@@ -17,8 +17,9 @@ from tkinter import filedialog, ttk
 
 # ===== БРЕНДИНГ (жёстко вшито) =====
 APP_NAME = "Табель‑конвертер"
-WELCOME_HEADER = "Добро пожаловать!"
+WELCOME_HEADER = "Табель‑конвертер"
 WELCOME_SUBTITLE = "Преобразование табеля 1С ЗУП в удобную таблицу.\nВыберите режим:"
+WELCOME_COPYRIGHT = "Разработал Алексей Зезюкин, 2025"
 
 # ===== Настройки =====
 START_ROW = 21
@@ -26,7 +27,7 @@ HOURS_OFFSET = 2
 RESULT_SHEET_NAME = "Результат"
 
 # Под 3000+ сотрудников (4 строки на сотрудника ≈ 12000 строк)
-MAX_SCAN_ROWS = 20000       # сколько строк максимум смотреть от START_ROW
+MAX_SCAN_ROWS = 20000       # максимум строк смотреть от START_ROW
 NO_GOOD_BREAK = 120         # обрывать поиск после стольких «пустых» строк подряд
 PROGRESS_EVERY = 200        # обновлять прогресс каждые N шагов
 
@@ -79,7 +80,7 @@ class WelcomeUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title(APP_NAME)
-        self.root.geometry("420x220")
+        self.root.geometry("440x240")
         self.root.resizable(False, False)
 
         title = tk.Label(self.root, text=WELCOME_HEADER, font=("Segoe UI", 14, "bold"))
@@ -93,14 +94,17 @@ class WelcomeUI:
 
         self.choice = None  # ("file", path) | ("latest", folder) | None
 
-        b1 = tk.Button(btn_frame, text="Выбрать файл…", width=20, command=self.choose_file)
+        b1 = tk.Button(btn_frame, text="Выбрать файл…", width=22, command=self.choose_file)
         b1.grid(row=0, column=0, padx=6, pady=6)
 
-        b2 = tk.Button(btn_frame, text="Последний в папке…", width=20, command=self.choose_folder)
+        b2 = tk.Button(btn_frame, text="Последний в папке…", width=22, command=self.choose_folder)
         b2.grid(row=0, column=1, padx=6, pady=6)
 
         b3 = tk.Button(self.root, text="Отмена", width=16, command=self.cancel)
-        b3.pack(pady=(6, 6))
+        b3.pack(pady=(6, 2))
+
+        copy = tk.Label(self.root, text=WELCOME_COPYRIGHT, font=("Segoe UI", 8), fg="#666666")
+        copy.pack(side="bottom", pady=(0, 8))
 
         self.root.attributes("-topmost", True)
         self.root.after(200, lambda: self.root.attributes("-topmost", False))
@@ -133,7 +137,7 @@ class ProgressUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title(f"{APP_NAME} — выполняется")
-        self.root.geometry("480x160")
+        self.root.geometry("500x170")
         self.root.resizable(False, False)
 
         self.label = tk.Label(self.root, text="Подготовка…", font=("Segoe UI", 10))
@@ -536,10 +540,13 @@ def fix_numeric_range_py(ws, r1: int, r2: int, c1: int, c2: int):
                 continue
             if isinstance(v, (int, float)):
                 cell.value = float(v)
+                # Сброс формата на General перед финальным форматированием
+                cell.number_format = "General"
                 continue
             n = parse_num_relaxed(v)
             if isinstance(n, (int, float)):
                 cell.value = float(n)
+                cell.number_format = "General"
 
 def apply_borders(ws, min_row: int, max_row: int, min_col: int, max_col: int):
     thin = Side(style="thin", color="D9D9D9")
@@ -573,6 +580,10 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     total_hours_col = total_days_col + 1
     last_row = ws_out.max_row
     last_col = total_hours_col
+
+    # ПРЕ-нормализация: сразу вычистим "7," до применения таблицы и форматов
+    fix_numeric_range_py(ws_out, 2, last_row, day_start_col, day_start_col + 31 - 1)
+    fix_numeric_range_py(ws_out, 2, last_row, total_days_col, total_hours_col)
 
     # Ширины
     for col_idx in range(1, 6):
@@ -614,7 +625,7 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     # Границы по всей таблице
     apply_borders(ws_out, 1, last_row, 1, last_col)
 
-    # Финальная нормализация чисел (убираем '7,', '40,', '8:30', '1/7' и т.п.)
+    # ФИНАЛЬНАЯ нормализация чисел (ещё раз, после таблицы/границ — на случай, если что-то осталось текстом)
     fix_numeric_range_py(ws_out, 2, last_row, day_start_col, day_start_col + 31 - 1)
     fix_numeric_range_py(ws_out, 2, last_row, total_days_col, total_hours_col)
 
@@ -635,7 +646,7 @@ def safe_save_result(header, rows, primary_out: Path) -> Path:
         return primary_out
     except Exception as e:
         log(f"Primary save failed: {e}")
-        alt_dir = Path.home() / "Desktop" / "TimesheetTransformer_Results"
+        alt_dir = Path.home() / "Desktop" / "Табель‑конвертер_Результаты"
         alt_dir.mkdir(parents=True, exist_ok=True)
         alt_path = alt_dir / primary_out.name
         save_result(header, rows, str(alt_path))
