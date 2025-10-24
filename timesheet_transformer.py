@@ -1,5 +1,6 @@
 import argparse
 import ctypes
+import json
 import re
 import sys
 from datetime import time, datetime
@@ -20,10 +21,10 @@ START_ROW = 21
 HOURS_OFFSET = 2
 RESULT_SHEET_NAME = "Результат"
 
-# Пределы сканирования (под 3000+ сотрудников)
-MAX_SCAN_ROWS = 20000
-NO_GOOD_BREAK = 80
-PROGRESS_EVERY = 200  # обновление прогресса каждые N шагов
+# Под 3000+ сотрудников (4 строки на сотрудника ≈ 12000 строк)
+MAX_SCAN_ROWS = 20000       # сколько строк максимум смотреть от START_ROW
+NO_GOOD_BREAK = 120         # обрывать поиск после стольких «пустых» строк подряд
+PROGRESS_EVERY = 200        # обновлять прогресс каждые N шагов
 
 # Полу-«ломаные» колонки дней
 DAY_COLS_HALF1_LETTERS = ["I", "K", "M", "N", "P", "R", "T", "V", "X", "Z", "AB", "AD", "AF", "AH", "AK"]          # 1..15
@@ -32,14 +33,36 @@ AO_COL_LETTER = "AO"
 
 NON_WORKING_CODES = {"В", "НН", "ОТ", "ОД", "У", "УД", "Б", "ДО", "К", "ПР", "ОЖ", "ОЗ", "НС", "Н", "НВ"}
 
-# ===== MessageBox и лог =====
+# ===== Брендинг и конфиг =====
 def exe_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path.cwd()
 
-LOG_PATH = exe_dir() / "TimesheetTransformer.log"
+def load_config() -> dict:
+    cfg_path = exe_dir() / "config.json"
+    try:
+        if cfg_path.exists():
+            return json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
 
+CFG = load_config()
+APP_DEFAULT_NAME = "TimesheetTransformer"
+APP_NAME = CFG.get("app_name", APP_DEFAULT_NAME)
+WELCOME_HEADER = CFG.get("welcome_header", APP_NAME)
+WELCOME_SUBTITLE = CFG.get(
+    "welcome_subtitle",
+    "Преобразование табеля (1С ЗУП) в читаемую таблицу.\nВыберите режим:"
+)
+
+def safe_name(name: str) -> str:
+    return re.sub(r'[<>:"/\\|?*]+', "_", str(name)).strip()
+
+LOG_PATH = exe_dir() / f"{safe_name(APP_NAME)}.log"
+
+# ===== Лог и сообщения =====
 def log(msg: str):
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
@@ -70,15 +93,14 @@ def msg_error(title: str, text: str):
 class WelcomeUI:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("АНО МЛСТ")
+        self.root.title(APP_NAME)
         self.root.geometry("420x220")
         self.root.resizable(False, False)
 
-        title = tk.Label(self.root, text="Трансформация табеля", font=("Segoe UI", 14, "bold"))
+        title = tk.Label(self.root, text=WELCOME_HEADER, font=("Segoe UI", 14, "bold"))
         title.pack(pady=(12, 4))
 
-        text = "Преобразование табеля (1С ЗУП) в читаемую таблицу.\nВыберите режим:"
-        desc = tk.Label(self.root, text=text, font=("Segoe UI", 10), justify="center")
+        desc = tk.Label(self.root, text=WELCOME_SUBTITLE, font=("Segoe UI", 10), justify="center")
         desc.pack(pady=(0, 12))
 
         btn_frame = tk.Frame(self.root)
@@ -123,9 +145,9 @@ class WelcomeUI:
 
 
 class ProgressUI:
-    def __init__(self, title="Обработка табеля"):
+    def __init__(self):
         self.root = tk.Tk()
-        self.root.title(title)
+        self.root.title(f"{APP_NAME} — выполняется")
         self.root.geometry("480x160")
         self.root.resizable(False, False)
 
@@ -457,71 +479,82 @@ def transform_sheet(ws, ui: Optional[ProgressUI]) -> Tuple[List[str], List[List[
     return header, out_rows
 
 # ===== Постобработка чисел и оформление =====
-def normalize_numeric_cells(ws, day_start_col: int, total_days_col: int, total_hours_col: int):
-    import re
-    last_row = ws.max_row
-
-    def to_num_strict(v):
-        # Уже число
-        if isinstance(v, (int, float)):
-            return float(v)
-        if v is None:
-            return None
-        s = str(v)
-
-        # 1) дроби "a/b[/c]" → сумма
-        if "/" in s:
-            total = 0.0
-            got = False
-            for part in s.split("/"):
-                n = to_number_value(part)
-                if isinstance(n, (int, float)):
-                    total += float(n)
-                    got = True
-            if got:
-                return total
-
-        # 2) обычный парсинг (время "h:mm", дробные, пробелы и т.п.)
-        n = to_number_value(s)
-        if isinstance(n, (int, float)):
-            return float(n)
-
-        # 3) жёсткая зачистка "7,", "40." и экзотических запятых/точек
-        s = s.replace("\uFF0C", ",").replace("\uFF0E", ".").replace("\u201A", ",")  # fullwidth/low-9
-        s = s.replace("\u00A0", " ").replace("\u202F", " ").replace("\u2009", " ").replace("\u200A", " ")
-        s = s.replace("\u200B", "").replace("\u2060", "").replace("\uFEFF", "")
-        s = s.strip()
-        while len(s) > 0 and s[-1] in (",", ".", "\uFF0C", "\uFF0E", "\u201A", " "):
-            s = s[:-1]
-        if not s:
-            return None
-        s2 = s.replace(",", ".")
-        m = re.search(r"[-+]?\d+(?:\.\d+)?", s2)
-        if m:
-            try:
-                return float(m.group(0))
-            except Exception:
-                return None
+def parse_num_relaxed(v: Any) -> Optional[float]:
+    """Финальный парсер: '7,' → 7; '8:30' → 8.5; '1/7' → 8; чистка экзотики."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, (int, float)):
         try:
-            return float(s2)
+            if float(v) < 1.0:
+                return float(v) * 24.0
+        except Exception:
+            pass
+        return float(v)
+    s = str(v)
+
+    # Сумма по слешу: "a/b[/c...]"
+    if "/" in s:
+        total = 0.0
+        got = False
+        for part in s.split("/"):
+            n = to_number_value(part)
+            if isinstance(n, (int, float)):
+                total += float(n)
+                got = True
+        if got:
+            return total
+
+    # Время "h:mm(:ss)"
+    if ":" in s:
+        p = s.split(":")
+        if len(p) >= 2:
+            try:
+                hh = float(re.sub(r"[^\d.+-]", "", p[0]) or 0)
+                mm = float(re.sub(r"[^\d.+-]", "", p[1]) or 0)
+                ss = float(re.sub(r"[^\d.+-]", "", p[2])) if len(p) >= 3 else 0.0
+                return hh + mm/60.0 + ss/3600.0
+            except Exception:
+                pass
+
+    # Чистка экзотики и хвостов
+    s = (s.replace("\uFF0C", ",").replace("\uFF0E", ".").replace("\u201A", ",")
+           .replace("\u00A0", " ").replace("\u202F", " ").replace("\u2009", " ").replace("\u200A", " ")
+           .replace("\u200B", "").replace("\u2060", "").replace("\uFEFF", "")
+           .replace("\u200E", "").replace("\u200F", "")
+           .replace("\u202A", "").replace("\u202B", "").replace("\u202C", "").replace("\u202D", "").replace("\u202E", "")
+           .replace("\u2066", "").replace("\u2067", "").replace("\u2068", "").replace("\u2069", ""))
+    s = s.strip()
+    while len(s) > 0 and not s[-1].isdigit():
+        s = s[:-1]
+    if not s:
+        return None
+
+    s = s.replace(",", ".")
+    m = re.search(r"[-+]?\d+(?:\.\d+)?", s)
+    if m:
+        try:
+            return float(m.group(0))
         except Exception:
             return None
+    try:
+        return float(s)
+    except Exception:
+        return None
 
-    # Пройтись по всем колонкам дней
-    for c in range(day_start_col, day_start_col + 31):
-        for r in range(2, last_row + 1):
-            v = ws.cell(r, c).value
-            n = to_num_strict(v)
+def fix_numeric_range_py(ws, r1: int, r2: int, c1: int, c2: int):
+    """Переписывает текстовые числа в float (убирает '7,', поддерживает 'h:mm', 'a/b')."""
+    for r in range(r1, r2 + 1):
+        for c in range(c1, c2 + 1):
+            cell = ws.cell(r, c)
+            v = cell.value
+            if v is None or v == "":
+                continue
+            if isinstance(v, (int, float)):
+                cell.value = float(v)
+                continue
+            n = parse_num_relaxed(v)
             if isinstance(n, (int, float)):
-                ws.cell(r, c).value = float(n)
-
-    # Итоги дней и часов
-    for c in (total_days_col, total_hours_col):
-        for r in range(2, last_row + 1):
-            v = ws.cell(r, c).value
-            n = to_num_strict(v)
-            if isinstance(n, (int, float)):
-                ws.cell(r, c).value = float(n)
+                cell.value = float(n)
 
 def apply_borders(ws, min_row: int, max_row: int, min_col: int, max_col: int):
     thin = Side(style="thin", color="D9D9D9")
@@ -549,7 +582,7 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     for row in rows:
         ws_out.append(row)
 
-    # Индексы колонок
+    # Индексы
     day_start_col = 6  # после: №, ФИО, Должность, Табельный №, ID объекта
     total_days_col = day_start_col + 31
     total_hours_col = total_days_col + 1
@@ -564,7 +597,7 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     ws_out.column_dimensions[get_column_letter(total_days_col)].width = 12
     ws_out.column_dimensions[get_column_letter(total_hours_col)].width = 14
 
-    # Центрирование везде (и заголовки, и данные)
+    # Центрирование везде
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
     for r in range(1, last_row + 1):
         for c in range(1, last_col + 1):
@@ -573,7 +606,7 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     # Заморозка шапки
     ws_out.freeze_panes = "A2"
 
-    # Таблица (без полос, чтобы столбцы дней остались белыми)
+    # Таблица без полос (чтобы дни остались белыми)
     last_col_letter = get_column_letter(last_col)
     table_ref = f"A1:{last_col_letter}{last_row}"
     table = Table(displayName="ResultTable", ref=table_ref)
@@ -587,7 +620,7 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     table.tableStyleInfo = style
     ws_out.add_table(table)
 
-    # Белая заливка для столбцов дней (поверх любого стиля)
+    # Белая заливка для столбцов дней (включая заголовок)
     white = PatternFill(fill_type="solid", fgColor="FFFFFF")
     for c in range(day_start_col, day_start_col + 31):
         for r in range(1, last_row + 1):
@@ -596,13 +629,11 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     # Границы по всей таблице
     apply_borders(ws_out, 1, last_row, 1, last_col)
 
-    # ФИНАЛЬНАЯ нормализация чисел (убираем "7," → 7 и т.п.)
-    normalize_numeric_cells(ws_out, day_start_col, total_days_col, total_hours_col)
+    # Финальная нормализация чисел (убираем '7,', '40,', '8:30', '1/7' и т.п.)
+    fix_numeric_range_py(ws_out, 2, last_row, day_start_col, day_start_col + 31 - 1)
+    fix_numeric_range_py(ws_out, 2, last_row, total_days_col, total_hours_col)
 
-    # Форматы чисел после нормализации:
-    # - Часы по дням: 0.## (до двух знаков без хвостовых нулей)
-    # - Итого дней: целое
-    # - Итого часов: 0.##
+    # Форматы: часы — 0.## (без хвостовых нулей), дни — целое
     for c in range(day_start_col, day_start_col + 31):
         for r in range(2, last_row + 1):
             ws_out.cell(r, c).number_format = "0.##"
@@ -610,7 +641,6 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
         ws_out.cell(r, total_days_col).number_format = "0"
         ws_out.cell(r, total_hours_col).number_format = "0.##"
 
-    # Сохранение
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     wb_out.save(out_path)
 
@@ -626,7 +656,7 @@ def safe_save_result(header, rows, primary_out: Path) -> Path:
         save_result(header, rows, str(alt_path))
         return alt_path
 
-# ===== CLI и запуск =====
+# ===== Сервис =====
 def latest_file_in_folder(folder: str) -> Optional[str]:
     folder = Path(folder)
     if not folder.exists():
@@ -648,6 +678,7 @@ def pick_candidate_sheet(wb) -> Optional[Any]:
             return ws
     return wb.worksheets[0] if wb.worksheets else None
 
+# ===== Запуск =====
 def transform_file(file_path: str, out_path: Optional[str] = None):
     ui = None
     try:
@@ -659,7 +690,7 @@ def transform_file(file_path: str, out_path: Optional[str] = None):
             return
 
         clog(f"Open workbook: {file_path}")
-        ui = ProgressUI("TimesheetTransformer — выполняется")
+        ui = ProgressUI()
         ui.set_phase("Открытие книги…", 100)
         ui.set_progress(10)
 
@@ -749,5 +780,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
