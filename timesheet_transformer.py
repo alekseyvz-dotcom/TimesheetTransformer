@@ -1,6 +1,5 @@
 import argparse
 import ctypes
-import json
 import re
 import sys
 from datetime import time, datetime
@@ -15,6 +14,11 @@ from openpyxl.utils import column_index_from_string, get_column_letter
 # GUI (tkinter)
 import tkinter as tk
 from tkinter import filedialog, ttk
+
+# ===== БРЕНДИНГ (жёстко вшито) =====
+APP_NAME = "Табель‑конвертер"
+WELCOME_HEADER = "Добро пожаловать!"
+WELCOME_SUBTITLE = "Преобразование табеля 1С ЗУП в удобную таблицу.\nВыберите режим:"
 
 # ===== Настройки =====
 START_ROW = 21
@@ -33,36 +37,17 @@ AO_COL_LETTER = "AO"
 
 NON_WORKING_CODES = {"В", "НН", "ОТ", "ОД", "У", "УД", "Б", "ДО", "К", "ПР", "ОЖ", "ОЗ", "НС", "Н", "НВ"}
 
-# ===== Брендинг и конфиг =====
+# ===== ЛОГ И СООБЩЕНИЯ =====
 def exe_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path.cwd()
-
-def load_config() -> dict:
-    cfg_path = exe_dir() / "config.json"
-    try:
-        if cfg_path.exists():
-            return json.loads(cfg_path.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {}
-
-CFG = load_config()
-APP_DEFAULT_NAME = "TimesheetTransformer"
-APP_NAME = CFG.get("app_name", APP_DEFAULT_NAME)
-WELCOME_HEADER = CFG.get("welcome_header", APP_NAME)
-WELCOME_SUBTITLE = CFG.get(
-    "welcome_subtitle",
-    "Преобразование табеля (1С ЗУП) в читаемую таблицу.\nВыберите режим:"
-)
 
 def safe_name(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]+', "_", str(name)).strip()
 
 LOG_PATH = exe_dir() / f"{safe_name(APP_NAME)}.log"
 
-# ===== Лог и сообщения =====
 def log(msg: str):
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
@@ -480,7 +465,7 @@ def transform_sheet(ws, ui: Optional[ProgressUI]) -> Tuple[List[str], List[List[
 
 # ===== Постобработка чисел и оформление =====
 def parse_num_relaxed(v: Any) -> Optional[float]:
-    """Финальный парсер: '7,' → 7; '8:30' → 8.5; '1/7' → 8; чистка экзотики."""
+    """Финальный парсер: '7,' → 7; '8:30' → 8.5; '1/7' → 8; чистка экзотики + хвостов."""
     if v is None or v == "":
         return None
     if isinstance(v, (int, float)):
@@ -620,7 +605,7 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     table.tableStyleInfo = style
     ws_out.add_table(table)
 
-    # Белая заливка для столбцов дней (включая заголовок)
+    # Белая заливка для столбцов дней
     white = PatternFill(fill_type="solid", fgColor="FFFFFF")
     for c in range(day_start_col, day_start_col + 31):
         for r in range(1, last_row + 1):
@@ -685,8 +670,7 @@ def transform_file(file_path: str, out_path: Optional[str] = None):
         p = Path(file_path)
         ext = p.suffix.lower()
         if ext not in (".xlsx", ".xlsm"):
-            msg_error("Неподдерживаемый формат",
-                      f"Выбран файл: {p.name}\nПоддерживаются только .xlsx и .xlsm.\nСохраните исходник как .xlsx.")
+            msg_error(APP_NAME, f"Выбран файл: {p.name}\nПоддерживаются только .xlsx и .xlsm.\nСохраните исходник как .xlsx.")
             return
 
         clog(f"Open workbook: {file_path}")
@@ -699,7 +683,7 @@ def transform_file(file_path: str, out_path: Optional[str] = None):
 
         ws = pick_candidate_sheet(wb)
         if ws is None:
-            msg_error("Ошибка", "Не найден лист для обработки.")
+            msg_error(APP_NAME, "Не найден лист для обработки.")
             ui.close()
             return
         clog(f"Sheet: {ws.title}")
@@ -707,7 +691,7 @@ def transform_file(file_path: str, out_path: Optional[str] = None):
         header, rows = transform_sheet(ws, ui)
         if ui.is_cancelled():
             ui.close()
-            msg_info("Отменено", "Операция отменена пользователем.")
+            msg_info(APP_NAME, "Операция отменена пользователем.")
             return
 
         out_path = out_path or str(p.with_name(p.stem + "_result.xlsx"))
@@ -717,20 +701,20 @@ def transform_file(file_path: str, out_path: Optional[str] = None):
         ui.set_progress(100)
         ui.close()
 
-        msg_info("Готово", f"Результат сохранён:\n{saved_to}\n\nЛог: {LOG_PATH}")
+        msg_info(APP_NAME, f"Результат сохранён:\n{saved_to}\n\nЛог: {LOG_PATH}")
         clog("Done.")
 
     except CancelledError:
         if ui:
             ui.close()
-        msg_info("Отменено", "Операция отменена пользователем.")
+        msg_info(APP_NAME, "Операция отменена пользователем.")
     except Exception as e:
         if ui:
             ui.close()
         import traceback
         tb = traceback.format_exc()
         log(tb)
-        msg_error("Критическая ошибка", f"{e}\n\nПодробности в логе:\n{LOG_PATH}")
+        msg_error(APP_NAME, f"{e}\n\nПодробности в логе:\n{LOG_PATH}")
 
 def main():
     parser = argparse.ArgumentParser(description="Преобразование табеля (1С ЗУП) в читаемую таблицу")
@@ -746,7 +730,7 @@ def main():
         welcome = WelcomeUI()
         choice = welcome.run()
         if not choice:
-            msg_info("Отмена", "Файл не выбран.")
+            msg_info(APP_NAME, "Файл не выбран.")
             return
         mode, payload = choice
         if mode == "file":
@@ -754,7 +738,7 @@ def main():
         elif mode == "latest":
             fp = latest_file_in_folder(payload)
             if not fp:
-                msg_error("Не найден файл", "В папке не найден подходящий файл (*.xlsx, *.xlsm).")
+                msg_error(APP_NAME, "В папке не найден подходящий файл (*.xlsx, *.xlsm).")
                 return
             transform_file(fp, args.out)
         return
@@ -768,13 +752,13 @@ def main():
             filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")]
         )
         if not fp:
-            msg_info("Отмена", "Файл не выбран.")
+            msg_info(APP_NAME, "Файл не выбран.")
             return
         transform_file(fp, args.out)
     elif args.latest:
         fp = latest_file_in_folder(args.latest)
         if not fp:
-            msg_error("Не найден файл", "В папке не найден подходящий файл (*.xlsx, *.xlsm).")
+            msg_error(APP_NAME, "В папке не найден подходящий файл (*.xlsx, *.xlsm).")
             return
         transform_file(fp, args.out)
 
