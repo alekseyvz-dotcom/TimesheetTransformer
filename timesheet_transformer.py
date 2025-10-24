@@ -21,7 +21,7 @@ HOURS_OFFSET = 2
 RESULT_SHEET_NAME = "Результат"
 
 # Пределы сканирования (под 3000+ сотрудников)
-MAX_SCAN_ROWS = 6000
+MAX_SCAN_ROWS = 20000
 NO_GOOD_BREAK = 80
 PROGRESS_EVERY = 200  # обновление прогресса каждые N шагов
 
@@ -698,3 +698,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
