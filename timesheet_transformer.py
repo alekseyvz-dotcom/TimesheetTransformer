@@ -506,7 +506,7 @@ def parse_num_relaxed(v: Any) -> Optional[float]:
             except Exception:
                 pass
 
-    # нормализуем экзотику и срезаем ЛЮБОЙ хвост из , . и пробелов (включая fullwidth/low‑9)
+    # нормализуем экзотику и срезаем ЛЮБОЙ хвост из запятых/точек/пробелов (включая fullwidth/low‑9)
     s = (s.replace("\uFF0C", ",").replace("\uFF0E", ".").replace("\u201A", ",")
            .replace("\u00A0", " ").replace("\u202F", " ").replace("\u2009", " ").replace("\u200A", " ")
            .replace("\u200B", "").replace("\u2060", "").replace("\uFEFF", "")
@@ -530,7 +530,6 @@ def parse_num_relaxed(v: Any) -> Optional[float]:
         return None
 
 def fix_numeric_range_py(ws, r1: int, r2: int, c1: int, c2: int):
-    """Переписывает текстовые числа в float (убирает '7,', поддерживает 'h:mm', 'a/b')."""
     for r in range(r1, r2 + 1):
         for c in range(c1, c2 + 1):
             cell = ws.cell(r, c)
@@ -539,8 +538,7 @@ def fix_numeric_range_py(ws, r1: int, r2: int, c1: int, c2: int):
                 continue
             if isinstance(v, (int, float)):
                 cell.value = float(v)
-                # Сброс формата на General перед финальным форматированием
-                cell.number_format = "General"
+                cell.number_format = "General"   # важно: снять текстовый/нестандартный формат
                 continue
             n = parse_num_relaxed(v)
             if isinstance(n, (int, float)):
@@ -598,12 +596,12 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
         for c in range(1, last_col + 1):
             ws_out.cell(r, c).alignment = center
 
-    # Заморозка шапки и автофильтр (вместо Table)
+    # Заморозка шапки + автофильтр (без Table)
     ws_out.freeze_panes = "A2"
     last_col_letter = get_column_letter(last_col)
     ws_out.auto_filter.ref = f"A1:{last_col_letter}{last_row}"
 
-    # Белая заливка для столбцов дней (на всякий случай)
+    # Белая заливка для столбцов дней
     white = PatternFill(fill_type="solid", fgColor="FFFFFF")
     for c in range(day_start_col, day_start_col + 31):
         for r in range(1, last_row + 1):
@@ -616,15 +614,37 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     fix_numeric_range_py(ws_out, 2, last_row, day_start_col, day_start_col + 31 - 1)
     fix_numeric_range_py(ws_out, 2, last_row, total_days_col, total_hours_col)
 
-    # Форматы с сокрытием нулей:
-    # дни 1–31 — до 2 знаков, 0 не показывать
+    # Формат и скрытие нулей: без мультисекций
+    # - часы по дням: если 0 → пусто, иначе формат "0.##"
     for c in range(day_start_col, day_start_col + 31):
         for r in range(2, last_row + 1):
-            ws_out.cell(r, c).number_format = "0.##;-0.##;;"
-    # итоги
+            cell = ws_out.cell(r, c)
+            v = cell.value
+            if isinstance(v, (int, float)):
+                if abs(v) < 1e-12:
+                    cell.value = None
+                else:
+                    cell.number_format = "0.##"
+
+    # - Отработано часов: если 0 → пусто, иначе "0.##"
     for r in range(2, last_row + 1):
-        ws_out.cell(r, total_days_col).number_format  = "0;-0;;"
-        ws_out.cell(r, total_hours_col).number_format = "0.##;-0.##;;"
+        ch = ws_out.cell(r, total_hours_col)
+        vh = ch.value
+        if isinstance(vh, (int, float)):
+            if abs(vh) < 1e-12:
+                ch.value = None
+            else:
+                ch.number_format = "0.##"
+
+    # - Отработано дней: если 0 → пусто, иначе "0"
+    for r in range(2, last_row + 1):
+        cd = ws_out.cell(r, total_days_col)
+        vd = cd.value
+        if isinstance(vd, (int, float)):
+            if abs(vd) < 1e-12:
+                cd.value = None
+            else:
+                cd.number_format = "0"
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     wb_out.save(out_path)
@@ -764,6 +784,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
