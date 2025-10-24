@@ -19,7 +19,7 @@ from tkinter import filedialog, ttk
 APP_NAME = "Табель‑конвертер"
 WELCOME_HEADER = "Табель‑конвертер"
 WELCOME_SUBTITLE = "Преобразование табеля 1С ЗУП в удобную таблицу.\nВыберите режим:"
-WELCOME_COPYRIGHT = "Разработал Алексей Зезюкин, 2025"
+WELCOME_COPYRIGHT = "Разработал Алексей Зезюкин, АНО МЛСТ 2025"
 
 # ===== Настройки =====
 START_ROW = 21
@@ -789,6 +789,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
