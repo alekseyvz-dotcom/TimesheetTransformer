@@ -482,7 +482,7 @@ def parse_num_relaxed(v: Any) -> Optional[float]:
 
     s = str(v)
 
-    # a/b[/c...] → сумма
+    # "a/b[/c]" → сумма
     if "/" in s:
         total = 0.0
         got = False
@@ -494,7 +494,7 @@ def parse_num_relaxed(v: Any) -> Optional[float]:
         if got:
             return total
 
-    # h:mm(:ss) → часы
+    # "h:mm(:ss)" → часы
     if ":" in s:
         p = s.split(":")
         if len(p) >= 2:
@@ -506,15 +506,14 @@ def parse_num_relaxed(v: Any) -> Optional[float]:
             except Exception:
                 pass
 
-    # нормализуем экзотику и срезаем ЛЮБОЙ хвост из , . и пробелов (включая fullwidth/low-9)
+    # нормализуем экзотику и срезаем ЛЮБОЙ хвост из , . и пробелов (включая fullwidth/low‑9)
     s = (s.replace("\uFF0C", ",").replace("\uFF0E", ".").replace("\u201A", ",")
            .replace("\u00A0", " ").replace("\u202F", " ").replace("\u2009", " ").replace("\u200A", " ")
            .replace("\u200B", "").replace("\u2060", "").replace("\uFEFF", "")
            .replace("\u200E", "").replace("\u200F", "")
            .replace("\u202A", "").replace("\u202B", "").replace("\u202C", "").replace("\u202D", "").replace("\u202E", "")
            .replace("\u2066", "").replace("\u2067", "").replace("\u2068", "").replace("\u2069", ""))
-    s = re.sub(r'[\s,.\uFF0C\uFF0E\u201A]+$', '', s)  # <<< вот эта строка срезает хвост
-
+    s = re.sub(r'[\s,.\uFF0C\uFF0E\u201A]+$', '', s)
     if not s:
         return None
 
@@ -575,13 +574,13 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
         ws_out.append(row)
 
     # Индексы
-    day_start_col = 6  # после: №, ФИО, Должность, Табельный №, ID объекта
+    day_start_col = 6   # после: №, ФИО, Должность, Таб.№, ID
     total_days_col = day_start_col + 31
     total_hours_col = total_days_col + 1
     last_row = ws_out.max_row
     last_col = total_hours_col
 
-    # ПРЕ-нормализация: сразу «ломаем» текстовые числа (убираем '7,', '40,' и т.п.)
+    # ПРЕ‑нормализация (ломаем «7,» → 7 до форматирования)
     fix_numeric_range_py(ws_out, 2, last_row, day_start_col, day_start_col + 31 - 1)
     fix_numeric_range_py(ws_out, 2, last_row, total_days_col, total_hours_col)
 
@@ -599,24 +598,12 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
         for c in range(1, last_col + 1):
             ws_out.cell(r, c).alignment = center
 
-    # Заморозка шапки
+    # Заморозка шапки и автофильтр (вместо Table)
     ws_out.freeze_panes = "A2"
-
-    # Таблица без полос (чтобы дни остались белыми)
     last_col_letter = get_column_letter(last_col)
-    table_ref = f"A1:{last_col_letter}{last_row}"
-    table = Table(displayName="ResultTable", ref=table_ref)
-    style = TableStyleInfo(
-        name="TableStyleLight1",
-        showFirstColumn=False,
-        showLastColumn=False,
-        showRowStripes=False,
-        showColumnStripes=False
-    )
-    table.tableStyleInfo = style
-    ws_out.add_table(table)
+    ws_out.auto_filter.ref = f"A1:{last_col_letter}{last_row}"
 
-    # Белая заливка для столбцов дней
+    # Белая заливка для столбцов дней (на всякий случай)
     white = PatternFill(fill_type="solid", fgColor="FFFFFF")
     for c in range(day_start_col, day_start_col + 31):
         for r in range(1, last_row + 1):
@@ -625,12 +612,12 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     # Границы по всей таблице
     apply_borders(ws_out, 1, last_row, 1, last_col)
 
-    # ФИНАЛЬНАЯ нормализация (ещё раз, после таблицы/границ)
+    # ФИНАЛЬНАЯ нормализация (ещё раз после всех действий)
     fix_numeric_range_py(ws_out, 2, last_row, day_start_col, day_start_col + 31 - 1)
     fix_numeric_range_py(ws_out, 2, last_row, total_days_col, total_hours_col)
 
-    # Форматы: часы — до 2 знаков, нули НЕ показывать; дни — целые, нули НЕ показывать
-    # часы по дням 1–31
+    # Форматы с сокрытием нулей:
+    # дни 1–31 — до 2 знаков, 0 не показывать
     for c in range(day_start_col, day_start_col + 31):
         for r in range(2, last_row + 1):
             ws_out.cell(r, c).number_format = "0.##;-0.##;;"
@@ -639,7 +626,6 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
         ws_out.cell(r, total_days_col).number_format  = "0;-0;;"
         ws_out.cell(r, total_hours_col).number_format = "0.##;-0.##;;"
 
-    # Сохранение
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     wb_out.save(out_path)
 
@@ -778,5 +764,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
