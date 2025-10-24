@@ -15,22 +15,19 @@ START_ROW = 21
 HOURS_OFFSET = 2
 RESULT_SHEET_NAME = "Результат"
 
-# Ограничители сканирования и логирования прогресса
-MAX_SCAN_ROWS = 1500       # максимум строк, которые смотрим от START_ROW при поиске конца
-NO_GOOD_BREAK = 60        # если столько подряд "неосмысленных" строк — считаем, что данные закончились
-PROGRESS_EVERY = 100       # писать прогресс в лог каждые N строк
+# Пределы сканирования
+MAX_SCAN_ROWS = 6000       # для 3000 сотрудников с запасом
+NO_GOOD_BREAK = 80         # обрываемся после 80 «пустых» строк подряд
+PROGRESS_EVERY = 200       # лог каждые N строк
 
 # Полу-«ломаные» колонки дней
 DAY_COLS_HALF1_LETTERS = ["I", "K", "M", "N", "P", "R", "T", "V", "X", "Z", "AB", "AD", "AF", "AH", "AK"]          # 1..15
 DAY_COLS_HALF2_LETTERS = ["I", "K", "M", "N", "P", "R", "T", "V", "X", "Z", "AB", "AD", "AF", "AH", "AK", "AL"]     # 16..31
 AO_COL_LETTER = "AO"
 
-NON_WORKING_CODES = {
-    "В", "НН", "ОТ", "ОД", "У", "УД", "Б", "ДО", "К", "ПР", "ОЖ", "ОЗ", "НС", "Н", "НВ"
-}
+NON_WORKING_CODES = {"В", "НН", "ОТ", "ОД", "У", "УД", "Б", "ДО", "К", "ПР", "ОЖ", "ОЗ", "НС", "Н", "НВ"}
 
 # ===== MessageBox и лог =====
-
 def exe_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
@@ -45,6 +42,13 @@ def log(msg: str):
     except Exception:
         pass
 
+def clog(msg: str):
+    log(msg)
+    try:
+        print(msg)
+    except Exception:
+        pass
+
 def msg_info(title: str, text: str):
     ctypes.windll.user32.MessageBoxW(0, text, title, 0x40)  # MB_ICONINFORMATION
 
@@ -52,7 +56,6 @@ def msg_error(title: str, text: str):
     ctypes.windll.user32.MessageBoxW(0, text, title, 0x10)  # MB_ICONERROR
 
 # ===== Утилиты =====
-
 def only_digits(s: str) -> str:
     return "".join(ch for ch in str(s or "") if ch.isdigit())
 
@@ -90,8 +93,7 @@ def extract_code_token(s: Any) -> str:
 def is_non_working_code(code: str) -> bool:
     return code.upper().strip() in NON_WORKING_CODES
 
-# ——— Парсинг чисел/времени и «a/b» ———
-
+# ===== Парсинг чисел/времени и 'a/b' =====
 def token_to_number(t: str) -> Optional[float]:
     t = clean_spaces(t)
     if not t:
@@ -137,11 +139,8 @@ def sum_slash_parts(s: str) -> Optional[float]:
         return total
     return None
 
-def to_number_cell(cell) -> Optional[float]:
+def to_number_value(v: Any) -> Optional[float]:
     """Число часов/дней: число, время, текст, 'a/b' — сумма частей."""
-    if cell is None:
-        return None
-    v = cell.value
     if v is None or v == "":
         return None
     if isinstance(v, (int, float)):
@@ -163,50 +162,34 @@ def to_number_cell(cell) -> Optional[float]:
     n = token_to_number(s)
     return float(n) if n is not None else None
 
-# ===== Поиск конца данных (ускорённый и «осмысленный») =====
+def day_hours_from_values(code_val: Any, hours_val: Any) -> Optional[float]:
+    n = to_number_value(hours_val)
+    if n is not None:
+        return n
+    code = extract_code_token(code_val)
+    if not code:
+        return None
+    if is_non_working_code(code):
+        return 0.0
+    return None
 
-def is_good_row(ws, r: int, ao_col: int) -> bool:
-    """
-    Быстрая проверка «строка сотрудника»: в C есть буквы (ФИО) и либо:
-    - в E (таб.№) что-то есть, либо
-    - в AO есть цифры/число.
-    Без тяжёлых вычислений.
-    """
-    c_val = ws.cell(r, 3).value
-    if not has_letters(c_val):
-        return False
-    e_val = ws.cell(r, 5).value
-    if str(e_val or "").strip():
-        return True
-    ao = ws.cell(r, ao_col).value
-    if ao is None:
-        return False
-    if isinstance(ao, (int, float)):
-        return True
-    return bool(re.search(r"\d", str(ao)))
-
-from openpyxl.utils import column_index_from_string
-
+# ===== Поиск конца данных (быстрый) =====
 def find_last_data_row(ws, start_row: int = START_ROW) -> int:
     """
-    Быстро определяем конец данных:
-    - читаем диапазон [B..AO] блоком через values_only,
+    Быстро определяем конец:
+    - читаем B..AO блоком через values_only,
     - "осмысленная" строка: в C есть буквы (ФИО) и (E не пусто или AO содержит число),
-    - обрываемся после NO_GOOD_BREAK подряд неосмысленных строк
-      или по достижении MAX_SCAN_ROWS.
+    - обрыв после NO_GOOD_BREAK подряд неосмысленных или по MAX_SCAN_ROWS.
     """
     ao_col = column_index_from_string(AO_COL_LETTER)  # AO -> номер колонки
     limit = min((ws.max_row or (start_row + MAX_SCAN_ROWS - 1)), start_row + MAX_SCAN_ROWS - 1)
 
-    # читаем B..AO, values_only=True — намного быстрее, чем ws.cell в цикле
     rows_iter = ws.iter_rows(min_row=start_row, max_row=limit,
                              min_col=2, max_col=ao_col, values_only=True)
 
     last_good = start_row - 1
     no_good = 0
     r = start_row - 1
-    # индексы внутри "среза" [B..AO]: B=0, C=1, E=3, AO=ao_col-2
-    idx_B = 0
     idx_C = 1
     idx_E = 3
     idx_AO = ao_col - 2
@@ -218,9 +201,7 @@ def find_last_data_row(ws, start_row: int = START_ROW) -> int:
         ao_val = row[idx_AO]
 
         good = False
-        # C содержит буквы (ФИО)
         if has_letters(c_val):
-            # E непусто ИЛИ AO содержит число
             if (str(e_val or "").strip()) or (isinstance(ao_val, (int, float)) or re.search(r"\d", str(ao_val or ""))):
                 good = True
 
@@ -231,98 +212,99 @@ def find_last_data_row(ws, start_row: int = START_ROW) -> int:
             no_good += 1
 
         if (r - start_row) % PROGRESS_EVERY == 0:
-            log(f"scan r={r}, last_good={last_good}, no_good={no_good}")
+            clog(f"scan r={r}, last_good={last_good}, no_good={no_good}")
 
         if (last_good >= start_row and no_good >= NO_GOOD_BREAK) or (r >= limit):
             break
 
     if last_good < start_row:
         last_good = start_row
-    log(f"find_last_data_row -> {last_good}")
+    clog(f"find_last_data_row -> {last_good}")
     return last_good
 
-# ===== Трансформация =====
-
-def extract_code_token(s: Any) -> str:
-    txt = str(s) if s is not None else ""
-    m = re.search(r"([A-Za-zА-Яа-яЁё]+)", txt)
-    return m.group(1).upper() if m else ""
-
-def day_hours_from_cells(code_cell, hours_cell) -> Optional[float]:
-    n = to_number_cell(hours_cell)
-    if n is not None:
-        return n
-    code = extract_code_token(code_cell.value if code_cell else "")
-    if not code:
-        return None
-    if is_non_working_code(code):
-        return 0.0
-    return None
-
-def pick_candidate_sheet(wb) -> Optional[Any]:
-    for ws in wb.worksheets:
-        if "табел" in ws.title.lower():
-            return ws
-    for ws in wb.worksheets:
-        if ws.sheet_state == "visible":
-            return ws
-    return wb.worksheets[0] if wb.worksheets else None
-
+# ===== Трансформация (быстро) =====
 def transform_sheet(ws) -> Tuple[List[str], List[List[Any]]]:
-    day_cols_h1 = [column_index_from_string(x) for x in DAY_COLS_HALF1_LETTERS]  # 1..15
-    day_cols_h2 = [column_index_from_string(x) for x in DAY_COLS_HALF2_LETTERS]  # 16..31
     ao_col = column_index_from_string(AO_COL_LETTER)
+    day_cols_h1 = [column_index_from_string(x) for x in DAY_COLS_HALF1_LETTERS]
+    day_cols_h2 = [column_index_from_string(x) for x in DAY_COLS_HALF2_LETTERS]
+
+    # Преобразуем в индексы внутри среза [B..AO] (B=2 -> 0)
+    def idx_in_slice(col_num: int) -> int:
+        return col_num - 2
+
+    idx_B = idx_in_slice(2)
+    idx_C = idx_in_slice(3)
+    idx_E = idx_in_slice(5)
+    idx_AO = idx_in_slice(ao_col)
+    day_idx_h1 = [idx_in_slice(cn) for cn in day_cols_h1]
+    day_idx_h2 = [idx_in_slice(cn) for cn in day_cols_h2]
 
     header = ["№", "ФИО", "Должность", "Табельный №", "ID объекта"] + [str(i) for i in range(1, 32)] + ["Отработано дней", "Отработано часов"]
 
     last_row = find_last_data_row(ws, START_ROW)
-    rows: List[List[Any]] = []
+    end_fetch = min(ws.max_row, last_row + 3)
 
-    for r in range(START_ROW, last_row + 1):
-        if (r - START_ROW) % PROGRESS_EVERY == 0:
-            log(f"proc r={r}/{last_row}")
+    # Загружаем весь прямоугольник [START_ROW..end_fetch] x [B..AO] одним массивом
+    rows_values = list(ws.iter_rows(min_row=START_ROW, max_row=end_fetch,
+                                    min_col=2, max_col=ao_col, values_only=True))
+    total_rows = len(rows_values)
+    clog(f"prefetched rows: {total_rows}")
 
-        raw_num = only_digits(ws.cell(r, 2).value or "")
+    out_rows: List[List[Any]] = []
+    # Проходим по сотрудникам: i = 0 .. (last_row-START_ROW)
+    last_i = (last_row - START_ROW)
+    for i in range(0, last_i + 1):
+        if i % PROGRESS_EVERY == 0:
+            clog(f"proc i={i}/{last_i}")
+
+        row = rows_values[i]
+        row_p1 = rows_values[i + 1] if i + 1 < total_rows else None
+        row_p2 = rows_values[i + 2] if i + 2 < total_rows else None
+        row_p3 = rows_values[i + 3] if i + 3 < total_rows else None
+
+        raw_num = only_digits(row[idx_B] if row else "")
         if not raw_num:
             continue
 
-        fio_raw = ws.cell(r, 3).value
+        fio_raw = row[idx_C] if row else ""
         fio, title = split_fio_and_title(fio_raw)
-        tbn = clean_spaces(ws.cell(r, 5).value or "")
+        tbn = clean_spaces(row[idx_E] if row else "")
 
-        days_num = to_number_cell(ws.cell(r, ao_col))
+        days_num = to_number_value(row[idx_AO] if row else None)
+
         hrs_num = None
-        if r + HOURS_OFFSET <= ws.max_row:
-            hrs_num = to_number_cell(ws.cell(r + HOURS_OFFSET, ao_col))
-        if hrs_num is None and r + 1 <= ws.max_row:
-            hrs_num = to_number_cell(ws.cell(r + 1, ao_col))
+        if i + HOURS_OFFSET < total_rows:
+            hrs_num = to_number_value(rows_values[i + HOURS_OFFSET][idx_AO])
+        if hrs_num is None and row_p1 is not None:
+            hrs_num = to_number_value(row_p1[idx_AO])
 
         if not (has_letters(fio) and (len(tbn) > 0 or isinstance(days_num, (int, float)))):
             continue
 
         out = [int(raw_num), fio, title, tbn, ""]  # ID объекта пусто
 
-        # Дни 1..15: коды r, часы r+1
-        for col in day_cols_h1:
-            code_cell = ws.cell(r, col)
-            hours_cell = ws.cell(r + 1, col) if r + 1 <= ws.max_row else None
-            daily = day_hours_from_cells(code_cell, hours_cell)
+        # 1..15: коды — row, часы — row+1
+        for dj in day_idx_h1:
+            code_val = row[dj] if row else None
+            hours_val = row_p1[dj] if row_p1 else None
+            daily = day_hours_from_values(code_val, hours_val)
             out.append(daily if daily is not None else "")
 
-        # Дни 16..31: коды r+2, часы r+3
-        for col in day_cols_h2:
-            code_cell = ws.cell(r + 2, col) if r + 2 <= ws.max_row else None
-            hours_cell = ws.cell(r + 3, col) if r + 3 <= ws.max_row else None
-            daily = day_hours_from_cells(code_cell, hours_cell)
+        # 16..31: коды — row+2, часы — row+3
+        for dj in day_idx_h2:
+            code_val = row_p2[dj] if row_p2 else None
+            hours_val = row_p3[dj] if row_p3 else None
+            daily = day_hours_from_values(code_val, hours_val)
             out.append(daily if daily is not None else "")
 
         out.append(days_num if days_num is not None else "")
         out.append(hrs_num if hrs_num is not None else "")
 
-        rows.append(out)
+        out_rows.append(out)
 
-    return header, rows
+    return header, out_rows
 
+# ===== Сохранение =====
 def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     wb_out = Workbook()
     ws_out = wb_out.active
@@ -370,8 +352,6 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
         ws_out.cell(row_idx, total_hours_col).number_format = "General"
 
     ws_out.freeze_panes = "A2"
-
-    out_path = str(out_path)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     wb_out.save(out_path)
 
@@ -388,7 +368,6 @@ def safe_save_result(header, rows, primary_out: Path) -> Path:
         return alt_path
 
 # ===== CLI =====
-
 def latest_file_in_folder(folder: str) -> Optional[str]:
     folder = Path(folder)
     if not folder.exists():
@@ -419,20 +398,21 @@ def transform_file(file_path: str, out_path: Optional[str] = None):
                       f"Выбран файл: {p.name}\nПоддерживаются только .xlsx и .xlsm.\nСохраните исходник как .xlsx.")
             return
 
-        log(f"Open workbook: {file_path}")
+        clog(f"Open workbook: {file_path}")
+        # read_only=True для скорости; data_only=True — брать вычисленные значения
         wb = load_workbook(file_path, data_only=True, read_only=True)
         ws = pick_candidate_sheet(wb)
         if ws is None:
             msg_error("Ошибка", "Не найден лист для обработки.")
             return
-        log(f"Sheet: {ws.title}")
+        clog(f"Sheet: {ws.title}")
 
         header, rows = transform_sheet(ws)
         out_path = out_path or str(p.with_name(p.stem + "_result.xlsx"))
 
         saved_to = safe_save_result(header, rows, Path(out_path))
         msg_info("Готово", f"Результат сохранён:\n{saved_to}\n\nЛог: {LOG_PATH}")
-        log("Done.")
+        clog("Done.")
 
     except Exception as e:
         import traceback
@@ -457,7 +437,6 @@ def pick_file_dialog() -> Optional[str]:
         return None
 
 def main():
-    import argparse
     parser = argparse.ArgumentParser(description="Преобразование табеля (1С ЗУП) в читаемую таблицу")
     g = parser.add_mutually_exclusive_group(required=False)
     g.add_argument("--file", help="Путь к файлу табеля (xlsx/xlsm)")
@@ -486,4 +465,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
