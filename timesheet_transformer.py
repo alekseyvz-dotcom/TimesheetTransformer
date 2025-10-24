@@ -9,8 +9,8 @@ from typing import List, Optional, Tuple, Any
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.styles import Alignment, Font, Border, Side, PatternFill
 from openpyxl.worksheet.table import Table, TableStyleInfo
-from openpyxl.styles import Alignment, Font, Border, Side
 
 # ===== Настройки =====
 START_ROW = 21
@@ -306,6 +306,31 @@ def transform_sheet(ws) -> Tuple[List[str], List[List[Any]]]:
 
     return header, out_rows
 
+def normalize_numeric_cells(ws, day_start_col: int, total_days_col: int, total_hours_col: int):
+    last_row = ws.max_row
+
+    def to_num(v):
+        # использовать уже имеющуюся функцию to_number_value (у вас выше в коде)
+        return to_number_value(v)
+
+    # Нормализуем колонки дней
+    for c in range(day_start_col, day_start_col + 31):
+        for r in range(2, last_row + 1):
+            v = ws.cell(r, c).value
+            if isinstance(v, str):
+                n = to_num(v)
+                if isinstance(n, (int, float)):
+                    ws.cell(r, c).value = float(n)
+
+    # Итоги дней и часов
+    for c in (total_days_col, total_hours_col):
+        for r in range(2, last_row + 1):
+            v = ws.cell(r, c).value
+            if isinstance(v, str):
+                n = to_num(v)
+                if isinstance(n, (int, float)):
+                    ws.cell(r, c).value = float(n)
+
 # ===== Сохранение =====
 def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     wb_out = Workbook()
@@ -326,6 +351,10 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     total_days_col = day_start_col + 31
     total_hours_col = total_days_col + 1
     last_row = ws_out.max_row
+    last_col = total_hours_col
+
+    # Нормализация чисел (убираем "7," → 7)
+    normalize_numeric_cells(ws_out, day_start_col, total_days_col, total_hours_col)
 
     # Ширины
     for col_idx in range(1, 6):
@@ -335,48 +364,48 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     ws_out.column_dimensions[get_column_letter(total_days_col)].width = 12
     ws_out.column_dimensions[get_column_letter(total_hours_col)].width = 14
 
-    # Перенос строк в ФИО/Должность
-    wrap = Alignment(wrap_text=True)
-    for row_idx in range(2, last_row + 1):
-        ws_out.cell(row_idx, 2).alignment = wrap
-        ws_out.cell(row_idx, 3).alignment = wrap
-
-    # Центрирование: дни + итоги (заголовки и данные)
-    center = Alignment(horizontal="center", vertical="center")
-    for col_idx in range(day_start_col, day_start_col + 31):
-        ws_out.cell(1, col_idx).alignment = center
-        for row_idx in range(2, last_row + 1):
-            ws_out.cell(row_idx, col_idx).alignment = center
-    for col_idx in (total_days_col, total_hours_col):
-        ws_out.cell(1, col_idx).alignment = center
-        for row_idx in range(2, last_row + 1):
-            ws_out.cell(row_idx, col_idx).alignment = center
+    # Выравнивание по центру — везде (и заголовки, и данные)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for r in range(1, last_row + 1):
+        for c in range(1, last_col + 1):
+            ws_out.cell(r, c).alignment = center
 
     # Форматы чисел:
-    # - Часы по дням: 0.## (до двух знаков, без хвостовых нулей — 8,25 будет 8,25; 8 → 8; 8,5 → 8,5)
+    # - Часы по дням: 0.## (до двух знаков, без хвостовых нулей)
     # - Итого дней: целое
     # - Итого часов: 0.##
-    for col_idx in range(day_start_col, day_start_col + 31):
-        for row_idx in range(2, last_row + 1):
-            ws_out.cell(row_idx, col_idx).number_format = "0.##"
-    for row_idx in range(2, last_row + 1):
-        ws_out.cell(row_idx, total_days_col).number_format = "0"
-        ws_out.cell(row_idx, total_hours_col).number_format = "0.##"
+    for c in range(day_start_col, day_start_col + 31):
+        for r in range(2, last_row + 1):
+            ws_out.cell(r, c).number_format = "0.##"
+    for r in range(2, last_row + 1):
+        ws_out.cell(r, total_days_col).number_format = "0"
+        ws_out.cell(r, total_hours_col).number_format = "0.##"
 
     # Заморозка шапки
     ws_out.freeze_panes = "A2"
 
-    # Превращаем в "таблицу" с автоформатом (фильтры, полосы)
-    last_col_letter = get_column_letter(total_hours_col)
+    # Таблица без полос (чтобы даты не закрашивались)
+    last_col_letter = get_column_letter(last_col)
     table_ref = f"A1:{last_col_letter}{last_row}"
     table = Table(displayName="ResultTable", ref=table_ref)
-    style = TableStyleInfo(name="TableStyleMedium9", showFirstColumn=False,
-                           showLastColumn=False, showRowStripes=True, showColumnStripes=False)
+    style = TableStyleInfo(
+        name="TableStyleLight1",
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=False,   # отключаем заливку полосами
+        showColumnStripes=False
+    )
     table.tableStyleInfo = style
     ws_out.add_table(table)
 
+    # Белая заливка для столбцов дней (на всякий случай, поверх любого стиля)
+    white = PatternFill(fill_type="solid", fgColor="FFFFFF")
+    for c in range(day_start_col, day_start_col + 31):
+        for r in range(1, last_row + 1):
+            ws_out.cell(r, c).fill = white
+
     # Границы по всей таблице (тонкие внутри, средние по контуру)
-    apply_borders(ws_out, 1, last_row, 1, total_hours_col)
+    apply_borders(ws_out, 1, last_row, 1, last_col)
 
     # Сохранение
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -504,4 +533,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
