@@ -70,11 +70,11 @@ def msg_error(title: str, text: str):
 class WelcomeUI:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("TimesheetTransformer")
+        self.root.title("АНО МЛСТ")
         self.root.geometry("420x220")
         self.root.resizable(False, False)
 
-        title = tk.Label(self.root, text="TimesheetTransformer", font=("Segoe UI", 14, "bold"))
+        title = tk.Label(self.root, text="Трансформация табеля", font=("Segoe UI", 14, "bold"))
         title.pack(pady=(12, 4))
 
         text = "Преобразование табеля (1С ЗУП) в читаемую таблицу.\nВыберите режим:"
@@ -458,26 +458,70 @@ def transform_sheet(ws, ui: Optional[ProgressUI]) -> Tuple[List[str], List[List[
 
 # ===== Постобработка чисел и оформление =====
 def normalize_numeric_cells(ws, day_start_col: int, total_days_col: int, total_hours_col: int):
+    import re
     last_row = ws.max_row
 
-    def to_num(v):
-        return to_number_value(v)
+    def to_num_strict(v):
+        # Уже число
+        if isinstance(v, (int, float)):
+            return float(v)
+        if v is None:
+            return None
+        s = str(v)
 
+        # 1) дроби "a/b[/c]" → сумма
+        if "/" in s:
+            total = 0.0
+            got = False
+            for part in s.split("/"):
+                n = to_number_value(part)
+                if isinstance(n, (int, float)):
+                    total += float(n)
+                    got = True
+            if got:
+                return total
+
+        # 2) обычный парсинг (время "h:mm", дробные, пробелы и т.п.)
+        n = to_number_value(s)
+        if isinstance(n, (int, float)):
+            return float(n)
+
+        # 3) жёсткая зачистка "7,", "40." и экзотических запятых/точек
+        s = s.replace("\uFF0C", ",").replace("\uFF0E", ".").replace("\u201A", ",")  # fullwidth/low-9
+        s = s.replace("\u00A0", " ").replace("\u202F", " ").replace("\u2009", " ").replace("\u200A", " ")
+        s = s.replace("\u200B", "").replace("\u2060", "").replace("\uFEFF", "")
+        s = s.strip()
+        while len(s) > 0 and s[-1] in (",", ".", "\uFF0C", "\uFF0E", "\u201A", " "):
+            s = s[:-1]
+        if not s:
+            return None
+        s2 = s.replace(",", ".")
+        m = re.search(r"[-+]?\d+(?:\.\d+)?", s2)
+        if m:
+            try:
+                return float(m.group(0))
+            except Exception:
+                return None
+        try:
+            return float(s2)
+        except Exception:
+            return None
+
+    # Пройтись по всем колонкам дней
     for c in range(day_start_col, day_start_col + 31):
         for r in range(2, last_row + 1):
             v = ws.cell(r, c).value
-            if isinstance(v, str):
-                n = to_num(v)
-                if isinstance(n, (int, float)):
-                    ws.cell(r, c).value = float(n)
+            n = to_num_strict(v)
+            if isinstance(n, (int, float)):
+                ws.cell(r, c).value = float(n)
 
+    # Итоги дней и часов
     for c in (total_days_col, total_hours_col):
         for r in range(2, last_row + 1):
             v = ws.cell(r, c).value
-            if isinstance(v, str):
-                n = to_num(v)
-                if isinstance(n, (int, float)):
-                    ws.cell(r, c).value = float(n)
+            n = to_num_strict(v)
+            if isinstance(n, (int, float)):
+                ws.cell(r, c).value = float(n)
 
 def apply_borders(ws, min_row: int, max_row: int, min_col: int, max_col: int):
     thin = Side(style="thin", color="D9D9D9")
@@ -496,21 +540,21 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     ws_out = wb_out.active
     ws_out.title = RESULT_SHEET_NAME
 
+    # Заголовок
     ws_out.append(header)
     for cell in ws_out[1]:
         cell.font = Font(bold=True)
 
+    # Данные
     for row in rows:
         ws_out.append(row)
 
+    # Индексы колонок
     day_start_col = 6  # после: №, ФИО, Должность, Табельный №, ID объекта
     total_days_col = day_start_col + 31
     total_hours_col = total_days_col + 1
     last_row = ws_out.max_row
     last_col = total_hours_col
-
-    # Нормализация «7,» → 7 и т. п.
-    normalize_numeric_cells(ws_out, day_start_col, total_days_col, total_hours_col)
 
     # Ширины
     for col_idx in range(1, 6):
@@ -520,24 +564,16 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     ws_out.column_dimensions[get_column_letter(total_days_col)].width = 12
     ws_out.column_dimensions[get_column_letter(total_hours_col)].width = 14
 
-    # Центрирование везде
+    # Центрирование везде (и заголовки, и данные)
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
     for r in range(1, last_row + 1):
         for c in range(1, last_col + 1):
             ws_out.cell(r, c).alignment = center
 
-    # Форматы
-    for c in range(day_start_col, day_start_col + 31):
-        for r in range(2, last_row + 1):
-            ws_out.cell(r, c).number_format = "0.##"
-    for r in range(2, last_row + 1):
-        ws_out.cell(r, total_days_col).number_format = "0"
-        ws_out.cell(r, total_hours_col).number_format = "0.##"
-
     # Заморозка шапки
     ws_out.freeze_panes = "A2"
 
-    # Таблица (без полос, чтобы дни остались белыми)
+    # Таблица (без полос, чтобы столбцы дней остались белыми)
     last_col_letter = get_column_letter(last_col)
     table_ref = f"A1:{last_col_letter}{last_row}"
     table = Table(displayName="ResultTable", ref=table_ref)
@@ -551,15 +587,30 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     table.tableStyleInfo = style
     ws_out.add_table(table)
 
-    # Белая заливка на столбцы дней (на всякий случай)
+    # Белая заливка для столбцов дней (поверх любого стиля)
     white = PatternFill(fill_type="solid", fgColor="FFFFFF")
     for c in range(day_start_col, day_start_col + 31):
         for r in range(1, last_row + 1):
             ws_out.cell(r, c).fill = white
 
-    # Границы
+    # Границы по всей таблице
     apply_borders(ws_out, 1, last_row, 1, last_col)
 
+    # ФИНАЛЬНАЯ нормализация чисел (убираем "7," → 7 и т.п.)
+    normalize_numeric_cells(ws_out, day_start_col, total_days_col, total_hours_col)
+
+    # Форматы чисел после нормализации:
+    # - Часы по дням: 0.## (до двух знаков без хвостовых нулей)
+    # - Итого дней: целое
+    # - Итого часов: 0.##
+    for c in range(day_start_col, day_start_col + 31):
+        for r in range(2, last_row + 1):
+            ws_out.cell(r, c).number_format = "0.##"
+    for r in range(2, last_row + 1):
+        ws_out.cell(r, total_days_col).number_format = "0"
+        ws_out.cell(r, total_hours_col).number_format = "0.##"
+
+    # Сохранение
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     wb_out.save(out_path)
 
@@ -698,4 +749,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
