@@ -7,20 +7,23 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Any
 
 from openpyxl import load_workbook, Workbook
-from openpyxl.styles import Alignment, Font
-from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.styles import Alignment, Font, Border, Side, PatternFill
 from openpyxl.worksheet.table import Table, TableStyleInfo
+from openpyxl.utils import column_index_from_string, get_column_letter
+
+# GUI (tkinter)
+import tkinter as tk
+from tkinter import filedialog, ttk
 
 # ===== Настройки =====
 START_ROW = 21
 HOURS_OFFSET = 2
 RESULT_SHEET_NAME = "Результат"
 
-# Пределы сканирования
-MAX_SCAN_ROWS = 6000       # для 3000 сотрудников с запасом
-NO_GOOD_BREAK = 80         # обрываемся после 80 «пустых» строк подряд
-PROGRESS_EVERY = 200       # лог каждые N строк
+# Пределы сканирования (под 3000+ сотрудников)
+MAX_SCAN_ROWS = 6000
+NO_GOOD_BREAK = 80
+PROGRESS_EVERY = 200  # обновление прогресса каждые N шагов
 
 # Полу-«ломаные» колонки дней
 DAY_COLS_HALF1_LETTERS = ["I", "K", "M", "N", "P", "R", "T", "V", "X", "Z", "AB", "AD", "AF", "AH", "AK"]          # 1..15
@@ -52,10 +55,145 @@ def clog(msg: str):
         pass
 
 def msg_info(title: str, text: str):
-    ctypes.windll.user32.MessageBoxW(0, text, title, 0x40)  # MB_ICONINFORMATION
+    try:
+        ctypes.windll.user32.MessageBoxW(0, text, title, 0x40)  # MB_ICONINFORMATION
+    except Exception:
+        pass
 
 def msg_error(title: str, text: str):
-    ctypes.windll.user32.MessageBoxW(0, text, title, 0x10)  # MB_ICONERROR
+    try:
+        ctypes.windll.user32.MessageBoxW(0, text, title, 0x10)  # MB_ICONERROR
+    except Exception:
+        pass
+
+# ===== GUI: Приветствие и Прогресс =====
+class WelcomeUI:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("TimesheetTransformer")
+        self.root.geometry("420x220")
+        self.root.resizable(False, False)
+
+        title = tk.Label(self.root, text="TimesheetTransformer", font=("Segoe UI", 14, "bold"))
+        title.pack(pady=(12, 4))
+
+        text = "Преобразование табеля (1С ЗУП) в читаемую таблицу.\nВыберите режим:"
+        desc = tk.Label(self.root, text=text, font=("Segoe UI", 10), justify="center")
+        desc.pack(pady=(0, 12))
+
+        btn_frame = tk.Frame(self.root)
+        btn_frame.pack(pady=4)
+
+        self.choice = None  # ("file", path) | ("latest", folder) | None
+
+        b1 = tk.Button(btn_frame, text="Выбрать файл…", width=20, command=self.choose_file)
+        b1.grid(row=0, column=0, padx=6, pady=6)
+
+        b2 = tk.Button(btn_frame, text="Последний в папке…", width=20, command=self.choose_folder)
+        b2.grid(row=0, column=1, padx=6, pady=6)
+
+        b3 = tk.Button(self.root, text="Отмена", width=16, command=self.cancel)
+        b3.pack(pady=(6, 6))
+
+        self.root.attributes("-topmost", True)
+        self.root.after(200, lambda: self.root.attributes("-topmost", False))
+
+    def choose_file(self):
+        fp = filedialog.askopenfilename(
+            title="Выберите файл табеля",
+            filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")]
+        )
+        if fp:
+            self.choice = ("file", fp)
+            self.root.destroy()
+
+    def choose_folder(self):
+        folder = filedialog.askdirectory(title="Выберите папку с табелями")
+        if folder:
+            self.choice = ("latest", folder)
+            self.root.destroy()
+
+    def cancel(self):
+        self.choice = None
+        self.root.destroy()
+
+    def run(self):
+        self.root.mainloop()
+        return self.choice
+
+
+class ProgressUI:
+    def __init__(self, title="Обработка табеля"):
+        self.root = tk.Tk()
+        self.root.title(title)
+        self.root.geometry("480x160")
+        self.root.resizable(False, False)
+
+        self.label = tk.Label(self.root, text="Подготовка…", font=("Segoe UI", 10))
+        self.label.pack(pady=(16, 6))
+
+        self.progress = ttk.Progressbar(self.root, mode="determinate")
+        self.progress.pack(fill="x", padx=16, pady=(0, 8))
+
+        self.percent = tk.Label(self.root, text="0%", font=("Segoe UI", 9))
+        self.percent.pack()
+
+        self.cancelled = False
+        self.btn_cancel = tk.Button(self.root, text="Отмена", width=12, command=self._cancel)
+        self.btn_cancel.pack(pady=(8, 8))
+
+        self.total = 100
+        self.value = 0
+        self._set_total(100)
+        self._update()
+
+        self.root.attributes("-topmost", True)
+        self.root.after(200, lambda: self.root.attributes("-topmost", False))
+
+    def _set_total(self, total: int):
+        self.total = max(1, int(total))
+        self.progress.configure(maximum=self.total)
+
+    def set_phase(self, text: str, total: int):
+        self.label.config(text=text)
+        self._set_total(total)
+        self.value = 0
+        self.progress.configure(value=0)
+        self._update()
+
+    def set_progress(self, current: int):
+        self.value = max(0, min(self.total, int(current)))
+        self.progress.configure(value=self.value)
+        pct = int(self.value * 100 / self.total) if self.total else 0
+        self.percent.config(text=f"{pct}%")
+        self._update()
+
+    def inc(self, step: int = 1):
+        self.set_progress(self.value + step)
+
+    def _update(self):
+        try:
+            self.root.update_idletasks()
+            self.root.update()
+        except Exception:
+            pass
+
+    def _cancel(self):
+        self.cancelled = True
+        self.label.config(text="Отмена…")
+        self._update()
+
+    def is_cancelled(self) -> bool:
+        return self.cancelled
+
+    def close(self):
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+class CancelledError(Exception):
+    pass
 
 # ===== Утилиты =====
 def only_digits(s: str) -> str:
@@ -142,12 +280,10 @@ def sum_slash_parts(s: str) -> Optional[float]:
     return None
 
 def to_number_value(v: Any) -> Optional[float]:
-    """Число часов/дней: число, время, текст, 'a/b' — сумма частей."""
     if v is None or v == "":
         return None
     if isinstance(v, (int, float)):
         try:
-            # Excel-время как доля суток (<1) — воспринимаем как часы
             if float(v) < 1.0:
                 return float(v) * 24.0
         except Exception:
@@ -175,16 +311,13 @@ def day_hours_from_values(code_val: Any, hours_val: Any) -> Optional[float]:
         return 0.0
     return None
 
-# ===== Поиск конца данных (быстрый) =====
-def find_last_data_row(ws, start_row: int = START_ROW) -> int:
-    """
-    Быстро определяем конец:
-    - читаем B..AO блоком через values_only,
-    - "осмысленная" строка: в C есть буквы (ФИО) и (E не пусто или AO содержит число),
-    - обрыв после NO_GOOD_BREAK подряд неосмысленных или по MAX_SCAN_ROWS.
-    """
-    ao_col = column_index_from_string(AO_COL_LETTER)  # AO -> номер колонки
+# ===== Поиск конца данных (быстрый, с прогрессом) =====
+def find_last_data_row(ws, start_row: int, ui: Optional[ProgressUI]) -> int:
+    ao_col = column_index_from_string(AO_COL_LETTER)
     limit = min((ws.max_row or (start_row + MAX_SCAN_ROWS - 1)), start_row + MAX_SCAN_ROWS - 1)
+    total = max(1, limit - start_row + 1)
+    if ui:
+        ui.set_phase("Поиск конца данных…", total)
 
     rows_iter = ws.iter_rows(min_row=start_row, max_row=limit,
                              min_col=2, max_col=ao_col, values_only=True)
@@ -213,8 +346,10 @@ def find_last_data_row(ws, start_row: int = START_ROW) -> int:
         else:
             no_good += 1
 
-        if (r - start_row) % PROGRESS_EVERY == 0:
-            clog(f"scan r={r}, last_good={last_good}, no_good={no_good}")
+        if ui:
+            ui.set_progress(r - start_row + 1)
+            if ui.is_cancelled():
+                raise CancelledError()
 
         if (last_good >= start_row and no_good >= NO_GOOD_BREAK) or (r >= limit):
             break
@@ -224,13 +359,12 @@ def find_last_data_row(ws, start_row: int = START_ROW) -> int:
     clog(f"find_last_data_row -> {last_good}")
     return last_good
 
-# ===== Трансформация (быстро) =====
-def transform_sheet(ws) -> Tuple[List[str], List[List[Any]]]:
+# ===== Трансформация (быстро, с прогрессом) =====
+def transform_sheet(ws, ui: Optional[ProgressUI]) -> Tuple[List[str], List[List[Any]]]:
     ao_col = column_index_from_string(AO_COL_LETTER)
     day_cols_h1 = [column_index_from_string(x) for x in DAY_COLS_HALF1_LETTERS]
     day_cols_h2 = [column_index_from_string(x) for x in DAY_COLS_HALF2_LETTERS]
 
-    # Преобразуем в индексы внутри среза [B..AO] (B=2 -> 0)
     def idx_in_slice(col_num: int) -> int:
         return col_num - 2
 
@@ -243,21 +377,38 @@ def transform_sheet(ws) -> Tuple[List[str], List[List[Any]]]:
 
     header = ["№", "ФИО", "Должность", "Табельный №", "ID объекта"] + [str(i) for i in range(1, 32)] + ["Отработано дней", "Отработано часов"]
 
-    last_row = find_last_data_row(ws, START_ROW)
+    last_row = find_last_data_row(ws, START_ROW, ui)
     end_fetch = min(ws.max_row, last_row + 3)
+    fetch_total = max(1, end_fetch - START_ROW + 1)
 
-    # Загружаем весь прямоугольник [START_ROW..end_fetch] x [B..AO] одним массивом
-    rows_values = list(ws.iter_rows(min_row=START_ROW, max_row=end_fetch,
-                                    min_col=2, max_col=ao_col, values_only=True))
+    # Префетч B..AO блоком (с прогрессом)
+    if ui:
+        ui.set_phase("Загрузка данных…", fetch_total)
+
+    rows_values: List[Tuple] = []
+    r_counter = 0
+    for row in ws.iter_rows(min_row=START_ROW, max_row=end_fetch,
+                            min_col=2, max_col=ao_col, values_only=True):
+        rows_values.append(row)
+        r_counter += 1
+        if ui:
+            ui.set_progress(r_counter)
+            if ui.is_cancelled():
+                raise CancelledError()
+
     total_rows = len(rows_values)
     clog(f"prefetched rows: {total_rows}")
 
     out_rows: List[List[Any]] = []
-    # Проходим по сотрудникам: i = 0 .. (last_row-START_ROW)
     last_i = (last_row - START_ROW)
+    if ui:
+        ui.set_phase("Обработка сотрудников…", max(1, last_i + 1))
+
     for i in range(0, last_i + 1):
-        if i % PROGRESS_EVERY == 0:
-            clog(f"proc i={i}/{last_i}")
+        if ui:
+            ui.set_progress(i + 1)
+            if ui.is_cancelled():
+                raise CancelledError()
 
         row = rows_values[i]
         row_p1 = rows_values[i + 1] if i + 1 < total_rows else None
@@ -273,7 +424,6 @@ def transform_sheet(ws) -> Tuple[List[str], List[List[Any]]]:
         tbn = clean_spaces(row[idx_E] if row else "")
 
         days_num = to_number_value(row[idx_AO] if row else None)
-
         hrs_num = None
         if i + HOURS_OFFSET < total_rows:
             hrs_num = to_number_value(rows_values[i + HOURS_OFFSET][idx_AO])
@@ -306,14 +456,13 @@ def transform_sheet(ws) -> Tuple[List[str], List[List[Any]]]:
 
     return header, out_rows
 
+# ===== Постобработка чисел и оформление =====
 def normalize_numeric_cells(ws, day_start_col: int, total_days_col: int, total_hours_col: int):
     last_row = ws.max_row
 
     def to_num(v):
-        # использовать уже имеющуюся функцию to_number_value (у вас выше в коде)
         return to_number_value(v)
 
-    # Нормализуем колонки дней
     for c in range(day_start_col, day_start_col + 31):
         for r in range(2, last_row + 1):
             v = ws.cell(r, c).value
@@ -322,7 +471,6 @@ def normalize_numeric_cells(ws, day_start_col: int, total_days_col: int, total_h
                 if isinstance(n, (int, float)):
                     ws.cell(r, c).value = float(n)
 
-    # Итоги дней и часов
     for c in (total_days_col, total_hours_col):
         for r in range(2, last_row + 1):
             v = ws.cell(r, c).value
@@ -331,86 +479,6 @@ def normalize_numeric_cells(ws, day_start_col: int, total_days_col: int, total_h
                 if isinstance(n, (int, float)):
                     ws.cell(r, c).value = float(n)
 
-# ===== Сохранение =====
-def save_result(header: List[str], rows: List[List[Any]], out_path: str):
-    wb_out = Workbook()
-    ws_out = wb_out.active
-    ws_out.title = RESULT_SHEET_NAME
-
-    # Заголовок
-    ws_out.append(header)
-    for cell in ws_out[1]:
-        cell.font = Font(bold=True)
-
-    # Данные
-    for row in rows:
-        ws_out.append(row)
-
-    # Колоночные индексы
-    day_start_col = 6  # после: №, ФИО, Должность, Табельный №, ID объекта
-    total_days_col = day_start_col + 31
-    total_hours_col = total_days_col + 1
-    last_row = ws_out.max_row
-    last_col = total_hours_col
-
-    # Нормализация чисел (убираем "7," → 7)
-    normalize_numeric_cells(ws_out, day_start_col, total_days_col, total_hours_col)
-
-    # Ширины
-    for col_idx in range(1, 6):
-        ws_out.column_dimensions[get_column_letter(col_idx)].width = 16 if col_idx in (2, 3) else 12
-    for col_idx in range(day_start_col, day_start_col + 31):
-        ws_out.column_dimensions[get_column_letter(col_idx)].width = 4.25
-    ws_out.column_dimensions[get_column_letter(total_days_col)].width = 12
-    ws_out.column_dimensions[get_column_letter(total_hours_col)].width = 14
-
-    # Выравнивание по центру — везде (и заголовки, и данные)
-    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    for r in range(1, last_row + 1):
-        for c in range(1, last_col + 1):
-            ws_out.cell(r, c).alignment = center
-
-    # Форматы чисел:
-    # - Часы по дням: 0.## (до двух знаков, без хвостовых нулей)
-    # - Итого дней: целое
-    # - Итого часов: 0.##
-    for c in range(day_start_col, day_start_col + 31):
-        for r in range(2, last_row + 1):
-            ws_out.cell(r, c).number_format = "0.##"
-    for r in range(2, last_row + 1):
-        ws_out.cell(r, total_days_col).number_format = "0"
-        ws_out.cell(r, total_hours_col).number_format = "0.##"
-
-    # Заморозка шапки
-    ws_out.freeze_panes = "A2"
-
-    # Таблица без полос (чтобы даты не закрашивались)
-    last_col_letter = get_column_letter(last_col)
-    table_ref = f"A1:{last_col_letter}{last_row}"
-    table = Table(displayName="ResultTable", ref=table_ref)
-    style = TableStyleInfo(
-        name="TableStyleLight1",
-        showFirstColumn=False,
-        showLastColumn=False,
-        showRowStripes=False,   # отключаем заливку полосами
-        showColumnStripes=False
-    )
-    table.tableStyleInfo = style
-    ws_out.add_table(table)
-
-    # Белая заливка для столбцов дней (на всякий случай, поверх любого стиля)
-    white = PatternFill(fill_type="solid", fgColor="FFFFFF")
-    for c in range(day_start_col, day_start_col + 31):
-        for r in range(1, last_row + 1):
-            ws_out.cell(r, c).fill = white
-
-    # Границы по всей таблице (тонкие внутри, средние по контуру)
-    apply_borders(ws_out, 1, last_row, 1, last_col)
-
-    # Сохранение
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    wb_out.save(out_path)
-    
 def apply_borders(ws, min_row: int, max_row: int, min_col: int, max_col: int):
     thin = Side(style="thin", color="D9D9D9")
     medium = Side(style="medium", color="808080")
@@ -422,7 +490,79 @@ def apply_borders(ws, min_row: int, max_row: int, min_col: int, max_col: int):
             top = medium if r == min_row else thin
             bottom = medium if r == max_row else thin
             cell.border = Border(left=left, right=right, top=top, bottom=bottom)
-            
+
+def save_result(header: List[str], rows: List[List[Any]], out_path: str):
+    wb_out = Workbook()
+    ws_out = wb_out.active
+    ws_out.title = RESULT_SHEET_NAME
+
+    ws_out.append(header)
+    for cell in ws_out[1]:
+        cell.font = Font(bold=True)
+
+    for row in rows:
+        ws_out.append(row)
+
+    day_start_col = 6  # после: №, ФИО, Должность, Табельный №, ID объекта
+    total_days_col = day_start_col + 31
+    total_hours_col = total_days_col + 1
+    last_row = ws_out.max_row
+    last_col = total_hours_col
+
+    # Нормализация «7,» → 7 и т. п.
+    normalize_numeric_cells(ws_out, day_start_col, total_days_col, total_hours_col)
+
+    # Ширины
+    for col_idx in range(1, 6):
+        ws_out.column_dimensions[get_column_letter(col_idx)].width = 16 if col_idx in (2, 3) else 12
+    for col_idx in range(day_start_col, day_start_col + 31):
+        ws_out.column_dimensions[get_column_letter(col_idx)].width = 4.25
+    ws_out.column_dimensions[get_column_letter(total_days_col)].width = 12
+    ws_out.column_dimensions[get_column_letter(total_hours_col)].width = 14
+
+    # Центрирование везде
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for r in range(1, last_row + 1):
+        for c in range(1, last_col + 1):
+            ws_out.cell(r, c).alignment = center
+
+    # Форматы
+    for c in range(day_start_col, day_start_col + 31):
+        for r in range(2, last_row + 1):
+            ws_out.cell(r, c).number_format = "0.##"
+    for r in range(2, last_row + 1):
+        ws_out.cell(r, total_days_col).number_format = "0"
+        ws_out.cell(r, total_hours_col).number_format = "0.##"
+
+    # Заморозка шапки
+    ws_out.freeze_panes = "A2"
+
+    # Таблица (без полос, чтобы дни остались белыми)
+    last_col_letter = get_column_letter(last_col)
+    table_ref = f"A1:{last_col_letter}{last_row}"
+    table = Table(displayName="ResultTable", ref=table_ref)
+    style = TableStyleInfo(
+        name="TableStyleLight1",
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=False,
+        showColumnStripes=False
+    )
+    table.tableStyleInfo = style
+    ws_out.add_table(table)
+
+    # Белая заливка на столбцы дней (на всякий случай)
+    white = PatternFill(fill_type="solid", fgColor="FFFFFF")
+    for c in range(day_start_col, day_start_col + 31):
+        for r in range(1, last_row + 1):
+            ws_out.cell(r, c).fill = white
+
+    # Границы
+    apply_borders(ws_out, 1, last_row, 1, last_col)
+
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    wb_out.save(out_path)
+
 def safe_save_result(header, rows, primary_out: Path) -> Path:
     try:
         save_result(header, rows, str(primary_out))
@@ -435,7 +575,7 @@ def safe_save_result(header, rows, primary_out: Path) -> Path:
         save_result(header, rows, str(alt_path))
         return alt_path
 
-# ===== CLI =====
+# ===== CLI и запуск =====
 def latest_file_in_folder(folder: str) -> Optional[str]:
     folder = Path(folder)
     if not folder.exists():
@@ -458,6 +598,7 @@ def pick_candidate_sheet(wb) -> Optional[Any]:
     return wb.worksheets[0] if wb.worksheets else None
 
 def transform_file(file_path: str, out_path: Optional[str] = None):
+    ui = None
     try:
         p = Path(file_path)
         ext = p.suffix.lower()
@@ -467,42 +608,47 @@ def transform_file(file_path: str, out_path: Optional[str] = None):
             return
 
         clog(f"Open workbook: {file_path}")
-        # read_only=True для скорости; data_only=True — брать вычисленные значения
+        ui = ProgressUI("TimesheetTransformer — выполняется")
+        ui.set_phase("Открытие книги…", 100)
+        ui.set_progress(10)
+
         wb = load_workbook(file_path, data_only=True, read_only=True)
+        ui.set_progress(30)
+
         ws = pick_candidate_sheet(wb)
         if ws is None:
             msg_error("Ошибка", "Не найден лист для обработки.")
+            ui.close()
             return
         clog(f"Sheet: {ws.title}")
 
-        header, rows = transform_sheet(ws)
+        header, rows = transform_sheet(ws, ui)
+        if ui.is_cancelled():
+            ui.close()
+            msg_info("Отменено", "Операция отменена пользователем.")
+            return
+
         out_path = out_path or str(p.with_name(p.stem + "_result.xlsx"))
 
+        ui.set_phase("Сохранение результата…", 100)
         saved_to = safe_save_result(header, rows, Path(out_path))
+        ui.set_progress(100)
+        ui.close()
+
         msg_info("Готово", f"Результат сохранён:\n{saved_to}\n\nЛог: {LOG_PATH}")
         clog("Done.")
 
+    except CancelledError:
+        if ui:
+            ui.close()
+        msg_info("Отменено", "Операция отменена пользователем.")
     except Exception as e:
+        if ui:
+            ui.close()
         import traceback
         tb = traceback.format_exc()
         log(tb)
         msg_error("Критическая ошибка", f"{e}\n\nПодробности в логе:\n{LOG_PATH}")
-
-def pick_file_dialog() -> Optional[str]:
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        fp = filedialog.askopenfilename(
-            title="Выберите файл табеля",
-            filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")]
-        )
-        root.destroy()
-        return fp or None
-    except Exception as e:
-        log(f"File dialog failed: {e}")
-        return None
 
 def main():
     parser = argparse.ArgumentParser(description="Преобразование табеля (1С ЗУП) в читаемую таблицу")
@@ -513,13 +659,32 @@ def main():
     parser.add_argument("--out", help="Путь для сохранения результата (xlsx)")
     args = parser.parse_args()
 
+    # Если аргументов нет — показываем приветственное окно
     if not any([args.file, args.pick, args.latest]):
-        args.pick = True
+        welcome = WelcomeUI()
+        choice = welcome.run()
+        if not choice:
+            msg_info("Отмена", "Файл не выбран.")
+            return
+        mode, payload = choice
+        if mode == "file":
+            transform_file(payload, args.out)
+        elif mode == "latest":
+            fp = latest_file_in_folder(payload)
+            if not fp:
+                msg_error("Не найден файл", "В папке не найден подходящий файл (*.xlsx, *.xlsm).")
+                return
+            transform_file(fp, args.out)
+        return
 
+    # CLI‑режимы
     if args.file:
         transform_file(args.file, args.out)
     elif args.pick:
-        fp = pick_file_dialog()
+        fp = filedialog.askopenfilename(
+            title="Выберите файл табеля",
+            filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")]
+        )
         if not fp:
             msg_info("Отмена", "Файл не выбран.")
             return
@@ -533,5 +698,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
