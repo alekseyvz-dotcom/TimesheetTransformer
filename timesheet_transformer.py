@@ -16,9 +16,9 @@ HOURS_OFFSET = 2
 RESULT_SHEET_NAME = "Результат"
 
 # Ограничители сканирования и логирования прогресса
-MAX_SCAN_ROWS = 4000       # максимум строк, которые смотрим от START_ROW при поиске конца
-NO_GOOD_BREAK = 150        # если столько подряд "неосмысленных" строк — считаем, что данные закончились
-PROGRESS_EVERY = 200       # писать прогресс в лог каждые N строк
+MAX_SCAN_ROWS = 1500       # максимум строк, которые смотрим от START_ROW при поиске конца
+NO_GOOD_BREAK = 60        # если столько подряд "неосмысленных" строк — считаем, что данные закончились
+PROGRESS_EVERY = 100       # писать прогресс в лог каждые N строк
 
 # Полу-«ломаные» колонки дней
 DAY_COLS_HALF1_LETTERS = ["I", "K", "M", "N", "P", "R", "T", "V", "X", "Z", "AB", "AD", "AF", "AH", "AK"]          # 1..15
@@ -185,21 +185,57 @@ def is_good_row(ws, r: int, ao_col: int) -> bool:
         return True
     return bool(re.search(r"\d", str(ao)))
 
+from openpyxl.utils import column_index_from_string
+
 def find_last_data_row(ws, start_row: int = START_ROW) -> int:
-    ao_col = column_index_from_string(AO_COL_LETTER)
-    limit = min(ws.max_row or (start_row + MAX_SCAN_ROWS), start_row + MAX_SCAN_ROWS)
+    """
+    Быстро определяем конец данных:
+    - читаем диапазон [B..AO] блоком через values_only,
+    - "осмысленная" строка: в C есть буквы (ФИО) и (E не пусто или AO содержит число),
+    - обрываемся после NO_GOOD_BREAK подряд неосмысленных строк
+      или по достижении MAX_SCAN_ROWS.
+    """
+    ao_col = column_index_from_string(AO_COL_LETTER)  # AO -> номер колонки
+    limit = min((ws.max_row or (start_row + MAX_SCAN_ROWS - 1)), start_row + MAX_SCAN_ROWS - 1)
+
+    # читаем B..AO, values_only=True — намного быстрее, чем ws.cell в цикле
+    rows_iter = ws.iter_rows(min_row=start_row, max_row=limit,
+                             min_col=2, max_col=ao_col, values_only=True)
+
     last_good = start_row - 1
     no_good = 0
-    for r in range(start_row, limit + 1):
-        if is_good_row(ws, r, ao_col):
+    r = start_row - 1
+    # индексы внутри "среза" [B..AO]: B=0, C=1, E=3, AO=ao_col-2
+    idx_B = 0
+    idx_C = 1
+    idx_E = 3
+    idx_AO = ao_col - 2
+
+    for row in rows_iter:
+        r += 1
+        c_val = row[idx_C]
+        e_val = row[idx_E]
+        ao_val = row[idx_AO]
+
+        good = False
+        # C содержит буквы (ФИО)
+        if has_letters(c_val):
+            # E непусто ИЛИ AO содержит число
+            if (str(e_val or "").strip()) or (isinstance(ao_val, (int, float)) or re.search(r"\d", str(ao_val or ""))):
+                good = True
+
+        if good:
             last_good = r
             no_good = 0
         else:
             no_good += 1
-        if r % PROGRESS_EVERY == 0:
+
+        if (r - start_row) % PROGRESS_EVERY == 0:
             log(f"scan r={r}, last_good={last_good}, no_good={no_good}")
-        if last_good >= start_row and no_good >= NO_GOOD_BREAK:
+
+        if (last_good >= start_row and no_good >= NO_GOOD_BREAK) or (r >= limit):
             break
+
     if last_good < start_row:
         last_good = start_row
     log(f"find_last_data_row -> {last_good}")
@@ -450,3 +486,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
