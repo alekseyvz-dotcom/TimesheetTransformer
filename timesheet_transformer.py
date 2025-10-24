@@ -1,6 +1,5 @@
 import argparse
 import ctypes
-import os
 import re
 import sys
 from datetime import time, datetime
@@ -13,8 +12,13 @@ from openpyxl.utils import column_index_from_string, get_column_letter
 
 # ===== Настройки =====
 START_ROW = 21
-HOURS_OFFSET = 2  # на сколько строк ниже в AO лежат ИТОГО часов относительно дней
+HOURS_OFFSET = 2
 RESULT_SHEET_NAME = "Результат"
+
+# Ограничители сканирования и логирования прогресса
+MAX_SCAN_ROWS = 4000       # максимум строк, которые смотрим от START_ROW при поиске конца
+NO_GOOD_BREAK = 150        # если столько подряд "неосмысленных" строк — считаем, что данные закончились
+PROGRESS_EVERY = 200       # писать прогресс в лог каждые N строк
 
 # Полу-«ломаные» колонки дней
 DAY_COLS_HALF1_LETTERS = ["I", "K", "M", "N", "P", "R", "T", "V", "X", "Z", "AB", "AD", "AF", "AH", "AK"]          # 1..15
@@ -86,6 +90,8 @@ def extract_code_token(s: Any) -> str:
 def is_non_working_code(code: str) -> bool:
     return code.upper().strip() in NON_WORKING_CODES
 
+# ——— Парсинг чисел/времени и «a/b» ———
+
 def token_to_number(t: str) -> Optional[float]:
     t = clean_spaces(t)
     if not t:
@@ -139,8 +145,8 @@ def to_number_cell(cell) -> Optional[float]:
     if v is None or v == "":
         return None
     if isinstance(v, (int, float)):
-        # Если это excel-время (доля суток < 1) — преобразуем в часы
         try:
+            # Excel-время как доля суток (<1) — воспринимаем как часы
             if float(v) < 1.0:
                 return float(v) * 24.0
         except Exception:
@@ -156,6 +162,55 @@ def to_number_cell(cell) -> Optional[float]:
         return float(sumv)
     n = token_to_number(s)
     return float(n) if n is not None else None
+
+# ===== Поиск конца данных (ускорённый и «осмысленный») =====
+
+def is_good_row(ws, r: int, ao_col: int) -> bool:
+    """
+    Быстрая проверка «строка сотрудника»: в C есть буквы (ФИО) и либо:
+    - в E (таб.№) что-то есть, либо
+    - в AO есть цифры/число.
+    Без тяжёлых вычислений.
+    """
+    c_val = ws.cell(r, 3).value
+    if not has_letters(c_val):
+        return False
+    e_val = ws.cell(r, 5).value
+    if str(e_val or "").strip():
+        return True
+    ao = ws.cell(r, ao_col).value
+    if ao is None:
+        return False
+    if isinstance(ao, (int, float)):
+        return True
+    return bool(re.search(r"\d", str(ao)))
+
+def find_last_data_row(ws, start_row: int = START_ROW) -> int:
+    ao_col = column_index_from_string(AO_COL_LETTER)
+    limit = min(ws.max_row or (start_row + MAX_SCAN_ROWS), start_row + MAX_SCAN_ROWS)
+    last_good = start_row - 1
+    no_good = 0
+    for r in range(start_row, limit + 1):
+        if is_good_row(ws, r, ao_col):
+            last_good = r
+            no_good = 0
+        else:
+            no_good += 1
+        if r % PROGRESS_EVERY == 0:
+            log(f"scan r={r}, last_good={last_good}, no_good={no_good}")
+        if last_good >= start_row and no_good >= NO_GOOD_BREAK:
+            break
+    if last_good < start_row:
+        last_good = start_row
+    log(f"find_last_data_row -> {last_good}")
+    return last_good
+
+# ===== Трансформация =====
+
+def extract_code_token(s: Any) -> str:
+    txt = str(s) if s is not None else ""
+    m = re.search(r"([A-Za-zА-Яа-яЁё]+)", txt)
+    return m.group(1).upper() if m else ""
 
 def day_hours_from_cells(code_cell, hours_cell) -> Optional[float]:
     n = to_number_cell(hours_cell)
@@ -177,44 +232,6 @@ def pick_candidate_sheet(wb) -> Optional[Any]:
             return ws
     return wb.worksheets[0] if wb.worksheets else None
 
-def latest_file_in_folder(folder: str) -> Optional[str]:
-    folder = Path(folder)
-    if not folder.exists():
-        return None
-    cand = []
-    for ext in ("*.xlsx", "*.xlsm"):
-        cand.extend(folder.glob(ext))
-    if not cand:
-        return None
-    cand.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return str(cand[0])
-
-def guess_last_row(ws, start_row: int = START_ROW, bcol: int = 2,
-                   max_scan_rows: int = 20000, empty_break: int = 20) -> int:
-    """
-    Быстрое определение конца данных по столбцу B:
-    - сканируем сверху вниз максимум max_scan_rows строк,
-    - после появления данных завершаем при empty_break подряд пустых строк.
-    """
-    r_max = min(ws.max_row or (start_row + max_scan_rows), start_row + max_scan_rows)
-    last = start_row - 1
-    seen = False
-    empty_run = 0
-    for r in range(start_row, r_max + 1):
-        v = ws.cell(r, bcol).value
-        if v is None or str(v).strip() == "":
-            if seen:
-                empty_run += 1
-                if empty_run >= empty_break:
-                    break
-        else:
-            seen = True
-            empty_run = 0
-            last = r
-    return max(last, start_row)
-
-# ===== Трансформация =====
-
 def transform_sheet(ws) -> Tuple[List[str], List[List[Any]]]:
     day_cols_h1 = [column_index_from_string(x) for x in DAY_COLS_HALF1_LETTERS]  # 1..15
     day_cols_h2 = [column_index_from_string(x) for x in DAY_COLS_HALF2_LETTERS]  # 16..31
@@ -222,11 +239,13 @@ def transform_sheet(ws) -> Tuple[List[str], List[List[Any]]]:
 
     header = ["№", "ФИО", "Должность", "Табельный №", "ID объекта"] + [str(i) for i in range(1, 32)] + ["Отработано дней", "Отработано часов"]
 
-    last_row = guess_last_row(ws, START_ROW, 2)
-    log(f"guess_last_row -> {last_row}")
-
+    last_row = find_last_data_row(ws, START_ROW)
     rows: List[List[Any]] = []
+
     for r in range(START_ROW, last_row + 1):
+        if (r - START_ROW) % PROGRESS_EVERY == 0:
+            log(f"proc r={r}/{last_row}")
+
         raw_num = only_digits(ws.cell(r, 2).value or "")
         if not raw_num:
             continue
@@ -332,7 +351,28 @@ def safe_save_result(header, rows, primary_out: Path) -> Path:
         save_result(header, rows, str(alt_path))
         return alt_path
 
-# ===== CLI и запуск =====
+# ===== CLI =====
+
+def latest_file_in_folder(folder: str) -> Optional[str]:
+    folder = Path(folder)
+    if not folder.exists():
+        return None
+    cand = []
+    for ext in ("*.xlsx", "*.xlsm"):
+        cand.extend(folder.glob(ext))
+    if not cand:
+        return None
+    cand.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return str(cand[0])
+
+def pick_candidate_sheet(wb) -> Optional[Any]:
+    for ws in wb.worksheets:
+        if "табел" in ws.title.lower():
+            return ws
+    for ws in wb.worksheets:
+        if ws.sheet_state == "visible":
+            return ws
+    return wb.worksheets[0] if wb.worksheets else None
 
 def transform_file(file_path: str, out_path: Optional[str] = None):
     try:
@@ -340,12 +380,11 @@ def transform_file(file_path: str, out_path: Optional[str] = None):
         ext = p.suffix.lower()
         if ext not in (".xlsx", ".xlsm"):
             msg_error("Неподдерживаемый формат",
-                      f"Выбран файл: {p.name}\n\nПоддерживаются только .xlsx и .xlsm.\n"
-                      f"Откройте исходник в Excel и сохраните как .xlsx.")
+                      f"Выбран файл: {p.name}\nПоддерживаются только .xlsx и .xlsm.\nСохраните исходник как .xlsx.")
             return
 
         log(f"Open workbook: {file_path}")
-        wb = load_workbook(file_path, data_only=True, read_only=False)  # оставим read_only=False для форматов времени
+        wb = load_workbook(file_path, data_only=True, read_only=True)
         ws = pick_candidate_sheet(wb)
         if ws is None:
             msg_error("Ошибка", "Не найден лист для обработки.")
@@ -353,8 +392,7 @@ def transform_file(file_path: str, out_path: Optional[str] = None):
         log(f"Sheet: {ws.title}")
 
         header, rows = transform_sheet(ws)
-        if not out_path:
-            out_path = str(p.with_name(p.stem + "_result.xlsx"))
+        out_path = out_path or str(p.with_name(p.stem + "_result.xlsx"))
 
         saved_to = safe_save_result(header, rows, Path(out_path))
         msg_info("Готово", f"Результат сохранён:\n{saved_to}\n\nЛог: {LOG_PATH}")
@@ -383,6 +421,7 @@ def pick_file_dialog() -> Optional[str]:
         return None
 
 def main():
+    import argparse
     parser = argparse.ArgumentParser(description="Преобразование табеля (1С ЗУП) в читаемую таблицу")
     g = parser.add_mutually_exclusive_group(required=False)
     g.add_argument("--file", help="Путь к файлу табеля (xlsx/xlsm)")
