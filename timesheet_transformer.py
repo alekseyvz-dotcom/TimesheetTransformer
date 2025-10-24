@@ -469,7 +469,7 @@ def transform_sheet(ws, ui: Optional[ProgressUI]) -> Tuple[List[str], List[List[
 
 # ===== Постобработка чисел и оформление =====
 def parse_num_relaxed(v: Any) -> Optional[float]:
-    """Финальный парсер: '7,' → 7; '8:30' → 8.5; '1/7' → 8; чистка экзотики + хвостов."""
+    import re
     if v is None or v == "":
         return None
     if isinstance(v, (int, float)):
@@ -479,9 +479,10 @@ def parse_num_relaxed(v: Any) -> Optional[float]:
         except Exception:
             pass
         return float(v)
+
     s = str(v)
 
-    # Сумма по слешу: "a/b[/c...]"
+    # a/b[/c...] → сумма
     if "/" in s:
         total = 0.0
         got = False
@@ -493,7 +494,7 @@ def parse_num_relaxed(v: Any) -> Optional[float]:
         if got:
             return total
 
-    # Время "h:mm(:ss)"
+    # h:mm(:ss) → часы
     if ":" in s:
         p = s.split(":")
         if len(p) >= 2:
@@ -505,16 +506,15 @@ def parse_num_relaxed(v: Any) -> Optional[float]:
             except Exception:
                 pass
 
-    # Чистка экзотики и хвостов
+    # нормализуем экзотику и срезаем ЛЮБОЙ хвост из , . и пробелов (включая fullwidth/low-9)
     s = (s.replace("\uFF0C", ",").replace("\uFF0E", ".").replace("\u201A", ",")
            .replace("\u00A0", " ").replace("\u202F", " ").replace("\u2009", " ").replace("\u200A", " ")
            .replace("\u200B", "").replace("\u2060", "").replace("\uFEFF", "")
            .replace("\u200E", "").replace("\u200F", "")
            .replace("\u202A", "").replace("\u202B", "").replace("\u202C", "").replace("\u202D", "").replace("\u202E", "")
            .replace("\u2066", "").replace("\u2067", "").replace("\u2068", "").replace("\u2069", ""))
-    s = s.strip()
-    while len(s) > 0 and not s[-1].isdigit():
-        s = s[:-1]
+    s = re.sub(r'[\s,.\uFF0C\uFF0E\u201A]+$', '', s)  # <<< вот эта строка срезает хвост
+
     if not s:
         return None
 
@@ -629,13 +629,14 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     fix_numeric_range_py(ws_out, 2, last_row, day_start_col, day_start_col + 31 - 1)
     fix_numeric_range_py(ws_out, 2, last_row, total_days_col, total_hours_col)
 
-    # Форматы: часы — 0.## (без хвостовых нулей), дни — целое
-    for c in range(day_start_col, day_start_col + 31):
-        for r in range(2, last_row + 1):
-            ws_out.cell(r, c).number_format = "0.##"
+    # Форматы: часы — 0.## (без хвостов), нули НЕ показывать; дни — целые, нули НЕ показывать
+for c in range(day_start_col, day_start_col + 31):
     for r in range(2, last_row + 1):
-        ws_out.cell(r, total_days_col).number_format = "0"
-        ws_out.cell(r, total_hours_col).number_format = "0.##"
+        ws_out.cell(r, c).number_format = "0.##;-0.##;;"
+
+for r in range(2, last_row + 1):
+    ws_out.cell(r, total_days_col).number_format  = "0;-0;;"
+    ws_out.cell(r, total_hours_col).number_format = "0.##;-0.##;;"
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     wb_out.save(out_path)
@@ -775,3 +776,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
