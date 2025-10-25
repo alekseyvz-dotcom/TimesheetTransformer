@@ -124,6 +124,8 @@ def parse_hours_value(v: Any) -> Optional[float]:
 
 # ------------------------- Реестр строк: виджет строки -------------------------
 
+# ------------------------- Реестр строк: виджет строки -------------------------
+
 class RowWidget:
     def __init__(self, parent, idx: int, fio: str, tbn: str, get_year_month_callable):
         self.parent = parent
@@ -137,7 +139,7 @@ class RowWidget:
         self.lbl_tbn = tk.Label(self.frame, text=tbn, width=12, anchor="center")
         self.lbl_tbn.grid(row=0, column=1, padx=2, pady=1)
 
-        # 31 ячейка
+        # 31 ячейка по дням
         self.day_entries: List[tk.Entry] = []
         for d in range(1, 32):
             e = tk.Entry(self.frame, width=5, justify="center")
@@ -145,15 +147,19 @@ class RowWidget:
             e.bind("<FocusOut>", lambda ev, _d=d: self.update_total())
             self.day_entries.append(e)
 
-        # Итого + кнопки
+        # Итоги: Дней, Часы + кнопки
+        # колонки: ... 32 — последний день; 33 — Дней; 34 — Часы; 35 — 5/2; 36 — Удалить
+        self.lbl_days = tk.Label(self.frame, text="0", width=6, anchor="e")
+        self.lbl_days.grid(row=0, column=33, padx=(6,2), pady=1)
+
         self.lbl_total = tk.Label(self.frame, text="0", width=8, anchor="e")
-        self.lbl_total.grid(row=0, column=33, padx=(6,2), pady=1)
+        self.lbl_total.grid(row=0, column=34, padx=(6,2), pady=1)
 
         self.btn_52 = ttk.Button(self.frame, text="5/2", width=5, command=self.fill_52)
-        self.btn_52.grid(row=0, column=34, padx=2)
+        self.btn_52.grid(row=0, column=35, padx=2)
 
         self.btn_del = ttk.Button(self.frame, text="Удалить", width=8, command=self.delete_row)
-        self.btn_del.grid(row=0, column=35, padx=2)
+        self.btn_del.grid(row=0, column=36, padx=2)
 
     def fio(self) -> str:
         return self.lbl_fio.cget("text")
@@ -188,13 +194,16 @@ class RowWidget:
         self.update_total()
 
     def update_total(self):
-        total = 0.0
+        total_hours = 0.0
+        total_days = 0
         for e in self.day_entries:
             n = parse_hours_value(e.get().strip())
-            if isinstance(n, (int,float)):
-                total += float(n)
-        s = f"{total:.2f}".rstrip("0").rstrip(".")
-        self.lbl_total.config(text=s)
+            if isinstance(n, (int, float)) and n > 1e-12:
+                total_hours += float(n)
+                total_days += 1
+        sh = f"{total_hours:.2f}".rstrip("0").rstrip(".")
+        self.lbl_total.config(text=sh)
+        self.lbl_days.config(text=str(total_days))
 
     def fill_52(self):
         y, m = self.get_year_month()
@@ -214,7 +223,7 @@ class RowWidget:
         self.update_total()
 
     def delete_row(self):
-        # делегируем наверх
+        # делегируем удаление наверх
         self.parent.master.master.delete_row(self)
 
 # ------------------------- Объектный табель (окно) -------------------------
@@ -311,8 +320,9 @@ class ObjectTimesheet(tk.Toplevel):
         tk.Label(self.header_holder, text="Таб.№", width=12, anchor="center").grid(row=0, column=1, padx=2)
         for d in range(1, 32):
             tk.Label(self.header_holder, text=str(d), width=5, anchor="center").grid(row=0, column=1+d, padx=1)
-        tk.Label(self.header_holder, text="Итого", width=8, anchor="e").grid(row=0, column=33, padx=(6,2))
-        tk.Label(self.header_holder, text="Действия", width=12, anchor="center").grid(row=0, column=34, columnspan=2, padx=2)
+        tk.Label(self.header_holder, text="Дней", width=6, anchor="e").grid(row=0, column=33, padx=(6,2))
+        tk.Label(self.header_holder, text="Часы", width=8, anchor="e").grid(row=0, column=34, padx=(6,2))
+        tk.Label(self.header_holder, text="Действия", width=12, anchor="center").grid(row=0, column=35, columnspan=2, padx=2)
 
         # Прокручиваемая область со строками (общие H/V скроллы)
         wrap = tk.Frame(self)
@@ -343,10 +353,10 @@ class ObjectTimesheet(tk.Toplevel):
         # список строк
         self.rows: List[RowWidget] = []
 
-        # Итого по объекту
+        # Итоги по объекту (дней и часов)
         bottom = tk.Frame(self)
         bottom.pack(fill="x", padx=8, pady=(0,8))
-        self.lbl_object_total = tk.Label(bottom, text="Сумма часов (все строки): 0", font=("Segoe UI", 10, "bold"))
+        self.lbl_object_total = tk.Label(bottom, text="Сумма: дней 0 | часов 0", font=("Segoe UI", 10, "bold"))
         self.lbl_object_total.pack(side="left")
 
     # ---- прокрутка ----
@@ -358,7 +368,6 @@ class ObjectTimesheet(tk.Toplevel):
         self.rows_canvas.xview(*args)
 
     def _on_shift_wheel(self, event):
-        # Windows: delta кратен 120
         step = -1 if event.delta > 0 else 1
         self._xscroll("scroll", step, "units")
         return "break"
@@ -452,15 +461,22 @@ class ObjectTimesheet(tk.Toplevel):
             r.update_days_enabled(y, m)
 
     def _recalc_object_total(self):
-        tot = 0.0
+        tot_hours = 0.0
+        tot_days = 0
         for r in self.rows:
+            # читайте из лейблов, они пересчитываются при каждом изменении
             try:
-                t = float(r.lbl_total.cget("text").replace(",", ".") or 0)
+                h = float(r.lbl_total.cget("text").replace(",", ".") or 0)
             except:
-                t = 0.0
-            tot += t
-        s = f"{tot:.2f}".rstrip("0").rstrip(".")
-        self.lbl_object_total.config(text=f"Сумма часов (все строки): {s}")
+                h = 0.0
+            try:
+                d = int(r.lbl_days.cget("text") or 0)
+            except:
+                d = 0
+            tot_hours += h
+            tot_days += d
+        sh = f"{tot_hours:.2f}".rstrip("0").rstrip(".")
+        self.lbl_object_total.config(text=f"Сумма: дней {tot_days} | часов {sh}")
 
     # ---- загрузка/сохранение ----
 
@@ -474,18 +490,23 @@ class ObjectTimesheet(tk.Toplevel):
         return (self.base_dir / OUTPUT_DIR / f"Объектный_табель_{id_part}_{y}_{m:02d}.xlsx")
 
     def _ensure_sheet(self, wb) -> Any:
+        # проверка/инициализация листа с заголовком (включая "Итого дней")
         if "Табель" in wb.sheetnames:
             ws = wb["Табель"]
-            if str(ws.cell(1,1).value or "") == "ID объекта":
+            hdr_first = str(ws.cell(1,1).value or "")
+            # минимально ожидаемое количество колонок: 6 базовых + 31 день + 2 итога = 39
+            min_cols = 6 + 31 + 2
+            hdr_len = ws.max_column
+            if hdr_first == "ID объекта" and hdr_len >= min_cols:
                 return ws
-            # миграция старого листа
+            # миграция/переименование
             base = "Табель_OLD"; new_name = base; i = 1
             while new_name in wb.sheetnames:
                 i += 1; new_name = f"{base}{i}"
             ws.title = new_name
+
         ws2 = wb.create_sheet("Табель")
-        # заголовок
-        hdr = ["ID объекта","Адрес","Месяц","Год","ФИО","Табельный №"] + [str(i) for i in range(1,32)] + ["Итого часов"]
+        hdr = ["ID объекта","Адрес","Месяц","Год","ФИО","Табельный №"] + [str(i) for i in range(1,32)] + ["Итого дней", "Итого часов"]
         ws2.append(hdr)
         ws2.column_dimensions["A"].width = 14
         ws2.column_dimensions["B"].width = 40
@@ -495,12 +516,15 @@ class ObjectTimesheet(tk.Toplevel):
         ws2.column_dimensions["F"].width = 14
         for i in range(7, 7+31):
             ws2.column_dimensions[get_column_letter(i)].width = 6
-        ws2.column_dimensions[get_column_letter(7+31)].width = 12
+        idx_total_days  = 7 + 31
+        idx_total_hours = 7 + 31 + 1
+        ws2.column_dimensions[get_column_letter(idx_total_days)].width  = 10
+        ws2.column_dimensions[get_column_letter(idx_total_hours)].width = 12
         ws2.freeze_panes = "A2"
         return ws2
 
     def _load_existing_rows(self):
-        # очищаем текущие строки
+        # очистим текущие строки
         for r in self.rows:
             r.frame.destroy()
         self.rows.clear()
@@ -525,14 +549,13 @@ class ObjectTimesheet(tk.Toplevel):
                 tbn = (ws.cell(r,6).value or "")
                 if row_m != m or row_y != y:
                     continue
-                # фильтр по объекту
                 if oid:
                     if row_oid != oid: 
                         continue
                 else:
                     if row_addr != addr:
                         continue
-                # соберём часы 1..31
+                # часы 1..31
                 hours: List[Optional[float]] = []
                 for c in range(7, 7+31):
                     v = ws.cell(r, c).value
@@ -584,23 +607,33 @@ class ObjectTimesheet(tk.Toplevel):
             for r in reversed(to_del):
                 ws.delete_rows(r, 1)
 
+            # индексы итогов
+            idx_total_days  = 7 + 31
+            idx_total_hours = 7 + 31 + 1
+
             # добавим текущие строки
             for roww in self.rows:
                 hours = roww.get_hours()
-                total = sum(h for h in hours if isinstance(h,(int,float))) if hours else 0.0
+                total_hours = sum(h for h in hours if isinstance(h,(int,float))) if hours else 0.0
+                total_days  = sum(1 for h in hours if isinstance(h,(int,float)) and h > 1e-12)
+
                 row_values = [oid, addr, m, y, roww.fio(), roww.tbn()] + [
                     (None if hours[i] is None or abs(float(hours[i])) < 1e-12 else float(hours[i])) for i in range(31)
-                ] + [None if abs(total) < 1e-12 else float(total)]
+                ] + [total_days if total_days else None, None if abs(total_hours) < 1e-12 else float(total_hours)]
+
                 ws.append(row_values)
                 rlast = ws.max_row
-                # проставим формат General для чисел
+                # форматы
                 for c in range(7, 7+31):
                     v = ws.cell(rlast, c).value
                     if isinstance(v,(int,float)):
                         ws.cell(rlast, c).number_format = "General"
-                v = ws.cell(rlast, 7+31).value
-                if isinstance(v,(int,float)):
-                    ws.cell(rlast, 7+31).number_format = "General"
+                v_days = ws.cell(rlast, idx_total_days).value
+                if isinstance(v_days,(int,float)):
+                    ws.cell(rlast, idx_total_days).number_format = "0"
+                v_hours = ws.cell(rlast, idx_total_hours).value
+                if isinstance(v_hours,(int,float)):
+                    ws.cell(rlast, idx_total_hours).number_format = "General"
 
             wb.save(fpath)
             messagebox.showinfo("Сохранение", f"Сохранено:\n{fpath}")
