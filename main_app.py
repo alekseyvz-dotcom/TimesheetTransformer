@@ -126,40 +126,57 @@ def parse_hours_value(v: Any) -> Optional[float]:
 
 # ------------------------- Реестр строк: виджет строки -------------------------
 
+# ------------------------- Реестр строк: виджет строки -------------------------
+
 class RowWidget:
-    def __init__(self, parent, idx: int, fio: str, tbn: str, get_year_month_callable):
-        self.parent = parent
+    def __init__(self, left_parent, right_parent, idx: int, fio: str, tbn: str,
+                 get_year_month_callable, on_delete_callable):
+        self.left_parent = left_parent
+        self.right_parent = right_parent
         self.idx = idx
         self.get_year_month = get_year_month_callable
+        self.on_delete = on_delete_callable
 
-        self.frame = tk.Frame(parent, bd=0)
-        # ФИО / Таб№
-        self.lbl_fio = tk.Label(self.frame, text=fio, width=28, anchor="w")
+        # Левая "замороженная" часть — ФИО
+        self.frame_left = tk.Frame(left_parent, bd=0)
+        self.lbl_fio = tk.Label(self.frame_left, text=fio, width=28, anchor="w")
         self.lbl_fio.grid(row=0, column=0, padx=2, pady=1, sticky="w")
-        self.lbl_tbn = tk.Label(self.frame, text=tbn, width=12, anchor="center")
-        self.lbl_tbn.grid(row=0, column=1, padx=2, pady=1)
+
+        # Правая прокручиваемая часть — Таб№, 1..31, итоги, кнопки
+        self.frame_right = tk.Frame(right_parent, bd=0)
+
+        self.lbl_tbn = tk.Label(self.frame_right, text=tbn, width=12, anchor="center")
+        self.lbl_tbn.grid(row=0, column=0, padx=2, pady=1)
 
         # 31 ячейка по дням
         self.day_entries: List[tk.Entry] = []
         for d in range(1, 32):
-            e = tk.Entry(self.frame, width=5, justify="center")
-            e.grid(row=0, column=1 + d, padx=1, pady=1)
+            e = tk.Entry(self.frame_right, width=5, justify="center")
+            e.grid(row=0, column=d, padx=1, pady=1)
             e.bind("<FocusOut>", lambda ev, _d=d: self.update_total())
             self.day_entries.append(e)
 
-        # Итоги: Дней, Часы + кнопки
-        # колонки: ... 32 — последний день; 33 — Дней; 34 — Часы; 35 — 5/2; 36 — Удалить
-        self.lbl_days = tk.Label(self.frame, text="0", width=6, anchor="e")
-        self.lbl_days.grid(row=0, column=33, padx=(6,2), pady=1)
+        # Итоги и кнопки (после 31‑го дня)
+        self.lbl_days = tk.Label(self.frame_right, text="0", width=6, anchor="e")
+        self.lbl_days.grid(row=0, column=32, padx=(6,2), pady=1)
 
-        self.lbl_total = tk.Label(self.frame, text="0", width=8, anchor="e")
-        self.lbl_total.grid(row=0, column=34, padx=(6,2), pady=1)
+        self.lbl_total = tk.Label(self.frame_right, text="0", width=8, anchor="e")
+        self.lbl_total.grid(row=0, column=33, padx=(6,2), pady=1)
 
-        self.btn_52 = ttk.Button(self.frame, text="5/2", width=5, command=self.fill_52)
-        self.btn_52.grid(row=0, column=35, padx=2)
+        self.btn_52 = ttk.Button(self.frame_right, text="5/2", width=5, command=self.fill_52)
+        self.btn_52.grid(row=0, column=34, padx=2)
 
-        self.btn_del = ttk.Button(self.frame, text="Удалить", width=8, command=self.delete_row)
-        self.btn_del.grid(row=0, column=36, padx=2)
+        self.btn_del = ttk.Button(self.frame_right, text="Удалить", width=8, command=self.delete_row)
+        self.btn_del.grid(row=0, column=35, padx=2)
+
+    # размещение в холдерах
+    def grid(self, rindex: int):
+        self.frame_left.grid(row=rindex, column=0, sticky="w")
+        self.frame_right.grid(row=rindex, column=0, sticky="w")
+
+    def destroy(self):
+        self.frame_left.destroy()
+        self.frame_right.destroy()
 
     def fio(self) -> str:
         return self.lbl_fio.cget("text")
@@ -201,30 +218,29 @@ class RowWidget:
             if isinstance(n, (int, float)) and n > 1e-12:
                 total_hours += float(n)
                 total_days += 1
+        self.lbl_days.config(text=str(total_days))
         sh = f"{total_hours:.2f}".rstrip("0").rstrip(".")
         self.lbl_total.config(text=sh)
-        self.lbl_days.config(text=str(total_days))
 
     def fill_52(self):
         y, m = self.get_year_month()
         days = month_days(y, m)
         for d in range(1, days+1):
-            wd = datetime(y, m, d).weekday()  # 0=Mon..6=Sun
+            wd = datetime(y, m, d).weekday()  # 0..6
             e = self.day_entries[d-1]
             e.delete(0, "end")
-            if wd < 4:        # Пн..Чт
+            if wd < 4:      # Пн..Чт
                 e.insert(0, "8,25")
-            elif wd == 4:     # Пт
+            elif wd == 4:   # Пт
                 e.insert(0, "7")
-            else:             # Сб/Вс — пусто
-                pass
         for d in range(days+1, 32):
             self.day_entries[d-1].delete(0, "end")
         self.update_total()
 
     def delete_row(self):
-        # делегируем удаление наверх
-        self.parent.master.master.delete_row(self)
+        self.on_delete(self)
+
+# ------------------------- Объектный табель (окно) -------------------------
 
 # ------------------------- Объектный табель (окно) -------------------------
 
@@ -232,7 +248,7 @@ class ObjectTimesheet(tk.Toplevel):
     def __init__(self, master):
         super().__init__(master)
         self.title("Объектный табель")
-        self.geometry("1280x720")
+        self.geometry("1280x740")
         self.resizable(True, True)
 
         self.base_dir = exe_dir()
@@ -244,11 +260,11 @@ class ObjectTimesheet(tk.Toplevel):
         self._load_spr_data()
 
         self._build_ui()
-        self._load_existing_rows()  # первое наполнение (если выбран адрес/ID/период)
+        self._load_existing_rows()  # первое наполнение
 
     # ---- справочник ----
     def _load_spr_data(self):
-        self.employees, self.objects = load_spravochnik(self.spr_path)  # objects: [(ID, Адрес)]
+        self.employees, self.objects = load_spravochnik(self.spr_path)
         self.addr_to_ids = {}
         for oid, addr in self.objects:
             if not addr:
@@ -260,23 +276,20 @@ class ObjectTimesheet(tk.Toplevel):
 
     # ---- UI ----
     def _build_ui(self):
-        top = tk.Frame(self)
-        top.pack(fill="x", padx=8, pady=8)
+        top = tk.Frame(self); top.pack(fill="x", padx=8, pady=8)
 
         # Период
         tk.Label(top, text="Месяц:").grid(row=0, column=0, sticky="w", padx=(0,4))
         self.cmb_month = ttk.Combobox(top, state="readonly", width=12,
                                       values=[month_name_ru(i) for i in range(1,13)])
         self.cmb_month.grid(row=0, column=1, sticky="w")
-        m_now = datetime.now().month
-        self.cmb_month.current(m_now-1)
+        self.cmb_month.current(datetime.now().month-1)
         self.cmb_month.bind("<<ComboboxSelected>>", lambda e: self._on_period_change())
 
         tk.Label(top, text="Год:").grid(row=0, column=2, sticky="w", padx=(16,4))
         self.spn_year = tk.Spinbox(top, from_=2000, to=2100, width=6, command=self._on_period_change)
         self.spn_year.grid(row=0, column=3, sticky="w")
-        self.spn_year.delete(0,"end")
-        self.spn_year.insert(0, datetime.now().year)
+        self.spn_year.delete(0,"end"); self.spn_year.insert(0, datetime.now().year)
         self.spn_year.bind("<FocusOut>", lambda e: self._on_period_change())
 
         # Адрес/ID
@@ -290,94 +303,115 @@ class ObjectTimesheet(tk.Toplevel):
         self.cmb_object_id.grid(row=0, column=7, sticky="w")
         self.cmb_object_id.bind("<<ComboboxSelected>>", lambda e: self._load_existing_rows())
 
-        # ФИО / Таб№ для добавления
+        # ФИО/Таб№ для добавления
         tk.Label(top, text="ФИО:").grid(row=1, column=0, sticky="w", pady=(8,0))
         self.cmb_fio = ttk.Combobox(top, values=[e[0] for e in self.employees], width=30)
         self.cmb_fio.grid(row=1, column=1, sticky="w", pady=(8,0))
         self.cmb_fio.bind("<<ComboboxSelected>>", self._on_fio_select)
 
         tk.Label(top, text="Табельный №:").grid(row=1, column=2, sticky="w", padx=(16,4), pady=(8,0))
-        self.ent_tbn = ttk.Entry(top, width=14)
-        self.ent_tbn.grid(row=1, column=3, sticky="w", pady=(8,0))
+        self.ent_tbn = ttk.Entry(top, width=14); self.ent_tbn.grid(row=1, column=3, sticky="w", pady=(8,0))
 
-        btns = tk.Frame(top)
-        btns.grid(row=1, column=4, columnspan=4, sticky="w", padx=(20,0), pady=(8,0))
+        btns = tk.Frame(top); btns.grid(row=1, column=4, columnspan=4, sticky="w", padx=(20,0), pady=(8,0))
         ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
         ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=1, padx=4)
         ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=2, padx=4)
         ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=3, padx=4)
         ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=4, padx=4)
 
-        # Шапка (прокручиваемая по горизонтали вместе со строками)
-        header_wrap = tk.Frame(self)
-        header_wrap.pack(fill="x", padx=8)
-        self.header_canvas = tk.Canvas(header_wrap, height=26, borderwidth=0, highlightthickness=0)
-        self.header_holder = tk.Frame(self.header_canvas)
-        self.header_canvas.create_window((0,0), window=self.header_holder, anchor="nw")
-        self.header_canvas.pack(fill="x")
+        # ШАПКА: фиксированная и прокручиваемая части
+        header_wrap = tk.Frame(self); header_wrap.pack(fill="x", padx=8)
 
-        tk.Label(self.header_holder, text="ФИО", width=28, anchor="w").grid(row=0, column=0, padx=2)
-        tk.Label(self.header_holder, text="Таб.№", width=12, anchor="center").grid(row=0, column=1, padx=2)
+        # левая (ФИО)
+        self.header_fixed = tk.Canvas(header_wrap, height=26, borderwidth=0, highlightthickness=0, width=240)
+        self.header_fixed_holder = tk.Frame(self.header_fixed)
+        self.header_fixed.create_window((0,0), window=self.header_fixed_holder, anchor="nw")
+        self.header_fixed.pack(side="left")
+
+        tk.Label(self.header_fixed_holder, text="ФИО", width=28, anchor="w").grid(row=0, column=0, padx=2)
+
+        # правая (Tab№ + дни + итоги + действия)
+        self.header_scroll = tk.Canvas(header_wrap, height=26, borderwidth=0, highlightthickness=0)
+        self.header_scroll_holder = tk.Frame(self.header_scroll)
+        self.header_scroll.create_window((0,0), window=self.header_scroll_holder, anchor="nw")
+        self.header_scroll.pack(side="left", fill="x", expand=True)
+
+        tk.Label(self.header_scroll_holder, text="Таб.№", width=12, anchor="center").grid(row=0, column=0, padx=2)
         for d in range(1, 32):
-            tk.Label(self.header_holder, text=str(d), width=5, anchor="center").grid(row=0, column=1+d, padx=1)
-        tk.Label(self.header_holder, text="Дней", width=6, anchor="e").grid(row=0, column=33, padx=(6,2))
-        tk.Label(self.header_holder, text="Часы", width=8, anchor="e").grid(row=0, column=34, padx=(6,2))
-        tk.Label(self.header_holder, text="Действия", width=12, anchor="center").grid(row=0, column=35, columnspan=2, padx=2)
+            tk.Label(self.header_scroll_holder, text=str(d), width=5, anchor="center").grid(row=0, column=d, padx=1)
+        tk.Label(self.header_scroll_holder, text="Дней", width=6, anchor="e").grid(row=0, column=32, padx=(6,2))
+        tk.Label(self.header_scroll_holder, text="Часы", width=8, anchor="e").grid(row=0, column=33, padx=(6,2))
+        tk.Label(self.header_scroll_holder, text="Действия", width=12, anchor="center").grid(row=0, column=34, columnspan=2, padx=2)
 
-        # Прокручиваемая область со строками (общие H/V скроллы)
-        wrap = tk.Frame(self)
-        wrap.pack(fill="both", expand=True, padx=8, pady=(4,8))
+        # ОБЛАСТЬ СТРОК: фиксированная (ФИО) и прокручиваемая (остальное)
+        rows_wrap = tk.Frame(self); rows_wrap.pack(fill="both", expand=True, padx=8, pady=(4,8))
 
-        self.rows_canvas = tk.Canvas(wrap, borderwidth=0, highlightthickness=0)
-        self.rows_holder = tk.Frame(self.rows_canvas)
-        self.rows_canvas.create_window((0,0), window=self.rows_holder, anchor="nw")
+        self.rows_fixed = tk.Canvas(rows_wrap, borderwidth=0, highlightthickness=0, width=240)
+        self.rows_fixed_holder = tk.Frame(self.rows_fixed)
+        self.rows_fixed.create_window((0,0), window=self.rows_fixed_holder, anchor="nw")
+        self.rows_fixed.pack(side="left", fill="y")
 
-        self.vscroll = ttk.Scrollbar(wrap, orient="vertical", command=self.rows_canvas.yview)
-        self.hscroll = ttk.Scrollbar(self, orient="horizontal", command=self._xscroll)
+        self.rows_scroll = tk.Canvas(rows_wrap, borderwidth=0, highlightthickness=0)
+        self.rows_scroll_holder = tk.Frame(self.rows_scroll)
+        self.rows_scroll.create_window((0,0), window=self.rows_scroll_holder, anchor="nw")
+        self.rows_scroll.pack(side="left", fill="both", expand=True)
 
-        self.rows_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=self._hscroll_set)
-        self.header_canvas.configure(xscrollcommand=self._hscroll_set)
-
-        self.rows_holder.bind("<Configure>", lambda e: self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")))
-        self.header_holder.bind("<Configure>", lambda e: self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all")))
-
-        self.rows_canvas.pack(side="left", fill="both", expand=True)
+        # Скроллы (общие)
+        self.vscroll = ttk.Scrollbar(rows_wrap, orient="vertical",
+                                     command=self._yscroll)  # управляет обоими canvas по Y
         self.vscroll.pack(side="right", fill="y")
+
+        self.hscroll = ttk.Scrollbar(self, orient="horizontal", command=self._xscroll)
         self.hscroll.pack(fill="x", padx=8, pady=(0,8))
 
-        # Горизонтальная прокрутка колесом при нажатом Shift
-        self.rows_canvas.bind("<Shift-MouseWheel>", self._on_shift_wheel)
-        # Вертикальная прокрутка колесом
-        self.rows_canvas.bind("<MouseWheel>", self._on_wheel)
+        # Привязки команд скролла
+        self.rows_scroll.configure(yscrollcommand=self._yscroll_set, xscrollcommand=self._xscroll_set)
+        self.header_scroll.configure(xscrollcommand=self._xscroll_set)
 
-        # список строк
+        # обновление scrollregion
+        self.rows_fixed_holder.bind("<Configure>", lambda e: self.rows_fixed.configure(scrollregion=self.rows_fixed.bbox("all")))
+        self.rows_scroll_holder.bind("<Configure>", lambda e: self.rows_scroll.configure(scrollregion=self.rows_scroll.bbox("all")))
+        self.header_fixed_holder.bind("<Configure>", lambda e: self.header_fixed.configure(scrollregion=self.header_fixed.bbox("all")))
+        self.header_scroll_holder.bind("<Configure>", lambda e: self.header_scroll.configure(scrollregion=self.header_scroll.bbox("all")))
+
+        # Прокрутка колесом
+        self.rows_scroll.bind("<MouseWheel>", self._on_wheel)
+        self.rows_scroll.bind("<Shift-MouseWheel>", self._on_shift_wheel)
+
+        # строки
         self.rows: List[RowWidget] = []
 
-        # Итоги по объекту (дней и часов)
-        bottom = tk.Frame(self)
-        bottom.pack(fill="x", padx=8, pady=(0,8))
+        # Итоги по объекту
+        bottom = tk.Frame(self); bottom.pack(fill="x", padx=8, pady=(0,8))
         self.lbl_object_total = tk.Label(bottom, text="Сумма: дней 0 | часов 0", font=("Segoe UI", 10, "bold"))
         self.lbl_object_total.pack(side="left")
 
-    # ---- прокрутка ----
-    def _hscroll_set(self, *args):
+    # ---- скроллы ----
+    def _yscroll_set(self, *args):
+        self.vscroll.set(*args)
+
+    def _yscroll(self, *args):
+        self.rows_scroll.yview(*args)
+        self.rows_fixed.yview(*args)
+
+    def _xscroll_set(self, *args):
         self.hscroll.set(*args)
 
     def _xscroll(self, *args):
-        self.header_canvas.xview(*args)
-        self.rows_canvas.xview(*args)
+        self.header_scroll.xview(*args)
+        self.rows_scroll.xview(*args)
+
+    def _on_wheel(self, event):
+        self.rows_scroll.yview_scroll(int(-1*(event.delta/120)), "units")
+        self.rows_fixed.yview_moveto(self.rows_scroll.yview()[0])
+        return "break"
 
     def _on_shift_wheel(self, event):
         step = -1 if event.delta > 0 else 1
         self._xscroll("scroll", step, "units")
         return "break"
 
-    def _on_wheel(self, event):
-        self.rows_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        return "break"
-
     # ---- события шапки ----
-
     def _on_period_change(self):
         self._update_rows_days_enabled()
         self._load_existing_rows()
@@ -399,11 +433,9 @@ class ObjectTimesheet(tk.Toplevel):
         for f, num in self.employees:
             if f == fio:
                 tbn = num; break
-        self.ent_tbn.delete(0,"end")
-        self.ent_tbn.insert(0, tbn)
+        self.ent_tbn.delete(0,"end"); self.ent_tbn.insert(0, tbn)
 
     # ---- вспомогательные ----
-
     def _addr_ids(self, addr: str) -> List[str]:
         return self.addr_to_ids.get(addr, [])
 
@@ -411,19 +443,18 @@ class ObjectTimesheet(tk.Toplevel):
         return int(self.spn_year.get()), self.cmb_month.current()+1
 
     # ---- операции со строками ----
-
     def add_row(self):
         fio = self.cmb_fio.get().strip()
         tbn = self.ent_tbn.get().strip()
         if not fio:
             messagebox.showwarning("Объектный табель", "Выберите ФИО.")
             return
-        w = RowWidget(self.rows_holder, len(self.rows)+1, fio, tbn, self.get_year_month)
+        w = RowWidget(self.rows_fixed_holder, self.rows_scroll_holder,
+                      len(self.rows)+1, fio, tbn, self.get_year_month, self.delete_row)
         y, m = self.get_year_month()
         w.update_days_enabled(y, m)
         self.rows.append(w)
-        self._regrid_rows()
-        self._recalc_object_total()
+        self._regrid_rows(); self._recalc_object_total()
 
     def fill_52_all(self):
         for r in self.rows:
@@ -435,9 +466,8 @@ class ObjectTimesheet(tk.Toplevel):
             self.rows.remove(roww)
         except:
             pass
-        roww.frame.destroy()
-        self._regrid_rows()
-        self._recalc_object_total()
+        roww.destroy()
+        self._regrid_rows(); self._recalc_object_total()
 
     def clear_all_rows(self):
         if not self.rows:
@@ -445,15 +475,19 @@ class ObjectTimesheet(tk.Toplevel):
         if not messagebox.askyesno("Объектный табель", "Очистить все строки?"):
             return
         for r in self.rows:
-            r.frame.destroy()
+            r.destroy()
         self.rows.clear()
-        self._regrid_rows()
-        self._recalc_object_total()
+        self._regrid_rows(); self._recalc_object_total()
 
     def _regrid_rows(self):
         for i, r in enumerate(self.rows, start=0):
-            r.frame.grid(row=i, column=0, sticky="w")
-        self.after(50, lambda: self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")))
+            r.grid(i)
+        # обновим области скролла
+        self.after(30, lambda: (
+            self.rows_fixed.configure(scrollregion=self.rows_fixed.bbox("all")),
+            self.rows_scroll.configure(scrollregion=self.rows_scroll.bbox("all")),
+            self.header_scroll.configure(scrollregion=self.header_scroll.bbox("all"))
+        ))
 
     def _update_rows_days_enabled(self):
         y, m = self.get_year_month()
@@ -464,7 +498,6 @@ class ObjectTimesheet(tk.Toplevel):
         tot_hours = 0.0
         tot_days = 0
         for r in self.rows:
-            # читайте из лейблов, они пересчитываются при каждом изменении
             try:
                 h = float(r.lbl_total.cget("text").replace(",", ".") or 0)
             except:
@@ -473,8 +506,7 @@ class ObjectTimesheet(tk.Toplevel):
                 d = int(r.lbl_days.cget("text") or 0)
             except:
                 d = 0
-            tot_hours += h
-            tot_days += d
+            tot_hours += h; tot_days += d
         sh = f"{tot_hours:.2f}".rstrip("0").rstrip(".")
         self.lbl_object_total.config(text=f"Сумма: дней {tot_days} | часов {sh}")
 
