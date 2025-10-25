@@ -122,6 +122,8 @@ def parse_hours_value(v: Any) -> Optional[float]:
 
 # ------------------------- Реестр строк: виджет строки -------------------------
 
+# ------------------------- Реестр строк: виджет строки -------------------------
+
 class RowWidget:
     def __init__(self, parent, idx: int, fio: str, tbn: str, get_year_month_callable):
         self.parent = parent
@@ -205,7 +207,7 @@ class RowWidget:
                 e.insert(0, "8,25")
             elif wd == 4:     # Пт
                 e.insert(0, "7")
-            else:             # Сб/Вс
+            else:             # Сб/Вс — пусто
                 pass
         for d in range(days+1, 32):
             self.day_entries[d-1].delete(0, "end")
@@ -240,7 +242,7 @@ class ObjectTimesheet(tk.Toplevel):
         self.employees, self.objects = load_spravochnik(self.spr_path)  # objects: [(ID, Адрес)]
         self.addr_to_ids = {}
         for oid, addr in self.objects:
-            if not addr: 
+            if not addr:
                 continue
             self.addr_to_ids.setdefault(addr, [])
             if oid and oid not in self.addr_to_ids[addr]:
@@ -292,37 +294,51 @@ class ObjectTimesheet(tk.Toplevel):
         btns = tk.Frame(top)
         btns.grid(row=1, column=4, columnspan=4, sticky="w", padx=(20,0), pady=(8,0))
         ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
-        ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=1, padx=4)
-        ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=2, padx=4)
-        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=3, padx=4)
+        ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=1, padx=4)
+        ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=2, padx=4)
+        ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=3, padx=4)
+        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=4, padx=4)
 
-        # Заголовок столбцов (ФИО, Таб№, 1..31, Итого, Действия)
-        header = tk.Frame(self)
-        header.pack(fill="x", padx=8)
-        tk.Label(header, text="ФИО", width=28, anchor="w").grid(row=0, column=0, padx=2)
-        tk.Label(header, text="Таб.№", width=12, anchor="center").grid(row=0, column=1, padx=2)
+        # Шапка (прокручиваемая по горизонтали вместе со строками)
+        header_wrap = tk.Frame(self)
+        header_wrap.pack(fill="x", padx=8)
+        self.header_canvas = tk.Canvas(header_wrap, height=26, borderwidth=0, highlightthickness=0)
+        self.header_holder = tk.Frame(self.header_canvas)
+        self.header_canvas.create_window((0,0), window=self.header_holder, anchor="nw")
+        self.header_canvas.pack(fill="x")
+
+        tk.Label(self.header_holder, text="ФИО", width=28, anchor="w").grid(row=0, column=0, padx=2)
+        tk.Label(self.header_holder, text="Таб.№", width=12, anchor="center").grid(row=0, column=1, padx=2)
         for d in range(1, 32):
-            tk.Label(header, text=str(d), width=5, anchor="center").grid(row=0, column=1+d, padx=1)
-        tk.Label(header, text="Итого", width=8, anchor="e").grid(row=0, column=33, padx=(6,2))
-        tk.Label(header, text="Действия", width=12, anchor="center").grid(row=0, column=34, columnspan=2, padx=2)
+            tk.Label(self.header_holder, text=str(d), width=5, anchor="center").grid(row=0, column=1+d, padx=1)
+        tk.Label(self.header_holder, text="Итого", width=8, anchor="e").grid(row=0, column=33, padx=(6,2))
+        tk.Label(self.header_holder, text="Действия", width=12, anchor="center").grid(row=0, column=34, columnspan=2, padx=2)
 
-        # Прокручиваемая область со строками
+        # Прокручиваемая область со строками (общие H/V скроллы)
         wrap = tk.Frame(self)
         wrap.pack(fill="both", expand=True, padx=8, pady=(4,8))
 
-        self.canvas = tk.Canvas(wrap, borderwidth=0, highlightthickness=0)
-        vscroll = ttk.Scrollbar(wrap, orient="vertical", command=self.canvas.yview)
-        self.rows_holder = tk.Frame(self.canvas)
+        self.rows_canvas = tk.Canvas(wrap, borderwidth=0, highlightthickness=0)
+        self.rows_holder = tk.Frame(self.rows_canvas)
+        self.rows_canvas.create_window((0,0), window=self.rows_holder, anchor="nw")
 
-        self.rows_holder.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        )
-        self.canvas.create_window((0,0), window=self.rows_holder, anchor="nw")
-        self.canvas.configure(yscrollcommand=vscroll.set)
+        self.vscroll = ttk.Scrollbar(wrap, orient="vertical", command=self.rows_canvas.yview)
+        self.hscroll = ttk.Scrollbar(self, orient="horizontal", command=self._xscroll)
 
-        self.canvas.pack(side="left", fill="both", expand=True)
-        vscroll.pack(side="right", fill="y")
+        self.rows_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=self._hscroll_set)
+        self.header_canvas.configure(xscrollcommand=self._hscroll_set)
+
+        self.rows_holder.bind("<Configure>", lambda e: self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")))
+        self.header_holder.bind("<Configure>", lambda e: self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all")))
+
+        self.rows_canvas.pack(side="left", fill="both", expand=True)
+        self.vscroll.pack(side="right", fill="y")
+        self.hscroll.pack(fill="x", padx=8, pady=(0,8))
+
+        # Горизонтальная прокрутка колесом при нажатом Shift
+        self.rows_canvas.bind("<Shift-MouseWheel>", self._on_shift_wheel)
+        # Вертикальная прокрутка колесом
+        self.rows_canvas.bind("<MouseWheel>", self._on_wheel)
 
         # список строк
         self.rows: List[RowWidget] = []
@@ -332,6 +348,24 @@ class ObjectTimesheet(tk.Toplevel):
         bottom.pack(fill="x", padx=8, pady=(0,8))
         self.lbl_object_total = tk.Label(bottom, text="Сумма часов (все строки): 0", font=("Segoe UI", 10, "bold"))
         self.lbl_object_total.pack(side="left")
+
+    # ---- прокрутка ----
+    def _hscroll_set(self, *args):
+        self.hscroll.set(*args)
+
+    def _xscroll(self, *args):
+        self.header_canvas.xview(*args)
+        self.rows_canvas.xview(*args)
+
+    def _on_shift_wheel(self, event):
+        # Windows: delta кратен 120
+        step = -1 if event.delta > 0 else 1
+        self._xscroll("scroll", step, "units")
+        return "break"
+
+    def _on_wheel(self, event):
+        self.rows_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        return "break"
 
     # ---- события шапки ----
 
@@ -359,7 +393,7 @@ class ObjectTimesheet(tk.Toplevel):
         self.ent_tbn.delete(0,"end")
         self.ent_tbn.insert(0, tbn)
 
-    # ---- работа со строками ----
+    # ---- вспомогательные ----
 
     def _addr_ids(self, addr: str) -> List[str]:
         return self.addr_to_ids.get(addr, [])
@@ -367,18 +401,24 @@ class ObjectTimesheet(tk.Toplevel):
     def get_year_month(self) -> Tuple[int,int]:
         return int(self.spn_year.get()), self.cmb_month.current()+1
 
+    # ---- операции со строками ----
+
     def add_row(self):
         fio = self.cmb_fio.get().strip()
         tbn = self.ent_tbn.get().strip()
         if not fio:
             messagebox.showwarning("Объектный табель", "Выберите ФИО.")
             return
-        # создаём виджет
         w = RowWidget(self.rows_holder, len(self.rows)+1, fio, tbn, self.get_year_month)
         y, m = self.get_year_month()
         w.update_days_enabled(y, m)
         self.rows.append(w)
         self._regrid_rows()
+        self._recalc_object_total()
+
+    def fill_52_all(self):
+        for r in self.rows:
+            r.fill_52()
         self._recalc_object_total()
 
     def delete_row(self, roww: RowWidget):
@@ -402,10 +442,9 @@ class ObjectTimesheet(tk.Toplevel):
         self._recalc_object_total()
 
     def _regrid_rows(self):
-        # размещаем строки по порядку
         for i, r in enumerate(self.rows, start=0):
             r.frame.grid(row=i, column=0, sticky="w")
-        self.after(50, lambda: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.after(50, lambda: self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")))
 
     def _update_rows_days_enabled(self):
         y, m = self.get_year_month()
