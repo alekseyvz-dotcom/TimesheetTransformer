@@ -242,10 +242,6 @@ class RowWidget:
 
 # ------------------------- Объектный табель (окно) -------------------------
 
-# ------------------------- Объектный табель (окно) -------------------------
-
-# ------------------------- Объектный табель (окно) -------------------------
-
 class ObjectTimesheet(tk.Toplevel):
     def __init__(self, master):
         super().__init__(master)
@@ -324,14 +320,12 @@ class ObjectTimesheet(tk.Toplevel):
         # ---------- Шапка: фикс. ФИО + прокручиваемая часть ----------
         header_wrap = tk.Frame(self); header_wrap.pack(fill="x", padx=8)
 
-        # Левая шапка (ФИО)
         self.header_fixed = tk.Canvas(header_wrap, height=26, borderwidth=0, highlightthickness=0, width=240)
         self.header_fixed_holder = tk.Frame(self.header_fixed)
         self.header_fixed.create_window((0,0), window=self.header_fixed_holder, anchor="nw")
         self.header_fixed.pack(side="left")
         tk.Label(self.header_fixed_holder, text="ФИО", width=28, anchor="w").grid(row=0, column=0, padx=2)
 
-        # Правая шапка (Таб№ + дни + итоги + действия)
         self.header_scroll = tk.Canvas(header_wrap, height=26, borderwidth=0, highlightthickness=0)
         self.header_scroll_holder = tk.Frame(self.header_scroll)
         self.header_scroll.create_window((0,0), window=self.header_scroll_holder, anchor="nw")
@@ -358,12 +352,12 @@ class ObjectTimesheet(tk.Toplevel):
         self.rows_scroll.pack(side="left", fill="both", expand=True)
 
         # Скроллы
-        self.vscroll = ttk.Scrollbar(rows_wrap, orient="vertical", command=self._yscroll)
+        self.vscroll = ttk.Scrollbar(rows_wrap, orient="vertical", command=self._yscroll)   # перетаскивание ползунка
         self.vscroll.pack(side="right", fill="y")
         self.hscroll = ttk.Scrollbar(self, orient="horizontal", command=self._xscroll)
         self.hscroll.pack(fill="x", padx=8, pady=(0,8))
 
-        # Привязки команд скролла (ВАЖНО: rows_scroll -> _on_yview)
+        # Привязки (ВАЖНО: rows_scroll -> _on_yview)
         self.rows_scroll.configure(yscrollcommand=self._on_yview, xscrollcommand=self._xscroll_set)
         self.header_scroll.configure(xscrollcommand=self._xscroll_set)
 
@@ -373,11 +367,20 @@ class ObjectTimesheet(tk.Toplevel):
         self.header_fixed_holder.bind("<Configure>", lambda e: self.header_fixed.configure(scrollregion=self.header_fixed.bbox("all")))
         self.header_scroll_holder.bind("<Configure>", lambda e: self.header_scroll.configure(scrollregion=self.header_scroll.bbox("all")))
 
-        # Прокрутка колесом в обеих областях
-        self.rows_scroll.bind("<MouseWheel>", self._on_wheel)
-        self.rows_scroll.bind("<Shift-MouseWheel>", self._on_shift_wheel)
-        self.rows_fixed.bind("<MouseWheel>", self._on_wheel)
-        self.rows_fixed.bind("<Shift-MouseWheel>", self._on_shift_wheel)
+        # Прокрутка колёсиком — и над левой, и над правой частью
+        self.rows_scroll.bind("<MouseWheel>", self._on_wheel_local)
+        self.rows_scroll.bind("<Shift-MouseWheel>", self._on_shift_wheel_local)
+        self.rows_fixed.bind("<MouseWheel>", self._on_wheel_local)
+        self.rows_fixed.bind("<Shift-MouseWheel>", self._on_shift_wheel_local)
+
+        # Глобальная подстраховка: если колёсико крутят над дочерними Entry/Label — ловим здесь и синхронизируем
+        self.bind_all("<MouseWheel>", self._on_wheel_global)
+        self.bind_all("<Shift-MouseWheel>", self._on_shift_wheel_global)
+        # (Linux/X11) — кнопки 4/5
+        self.bind_all("<Button-4>", lambda e: self._on_wheel_global(e, linux=+1))
+        self.bind_all("<Button-5>", lambda e: self._on_wheel_global(e, linux=-1))
+        self.bind_all("<Shift-Button-4>", lambda e: self._on_shift_wheel_global(e, linux=+1))
+        self.bind_all("<Shift-Button-5>", lambda e: self._on_shift_wheel_global(e, linux=-1))
 
         # Список строк
         self.rows: List[RowWidget] = []
@@ -387,9 +390,9 @@ class ObjectTimesheet(tk.Toplevel):
         self.lbl_object_total = tk.Label(bottom, text="Сумма: дней 0 | часов 0", font=("Segoe UI", 10, "bold"))
         self.lbl_object_total.pack(side="left")
 
-    # ---- скроллы ----
+    # ---- скроллы / синхронизация ----
     def _on_yview(self, first, last):
-        # Вызывается при изменении yview у rows_scroll: синхронизируем левую часть и ползунок
+        # при любой вертикальной прокрутке правой части — тянем левую
         self.vscroll.set(first, last)
         try:
             self.rows_fixed.yview_moveto(first)
@@ -397,7 +400,7 @@ class ObjectTimesheet(tk.Toplevel):
             pass
 
     def _yscroll(self, *args):
-        # Перетаскивание вертикального ползунка
+        # перетаскивание вертикального ползунка — двигает обе части
         self.rows_scroll.yview(*args)
         self.rows_fixed.yview(*args)
 
@@ -405,18 +408,58 @@ class ObjectTimesheet(tk.Toplevel):
         self.hscroll.set(*args)
 
     def _xscroll(self, *args):
-        # Горизонтальный скролл двигает шапку и строки совместно
         self.header_scroll.xview(*args)
         self.rows_scroll.xview(*args)
 
-    def _on_wheel(self, event):
-        self.rows_scroll.yview_scroll(int(-1*(event.delta/120)), "units")
-        # Подтягиваем левую часть к тому же положению
+    def _is_under(self, widget, containers: list) -> bool:
+        # проверяем, что событие произошло внутри нужных холдеров
+        try:
+            w = widget
+            while True:
+                if w in containers:
+                    return True
+                parent_name = w.winfo_parent()
+                if not parent_name:
+                    return False
+                w = self.nametowidget(parent_name)
+        except Exception:
+            return False
+
+    def _on_wheel_local(self, event):
+        # локальная прокрутка по колесику — крутим правую часть и синхронизируем левую
+        delta = event.delta
+        units = int(-1 * (delta / 120)) if delta else 0
+        if units == 0:
+            units = -1 if delta > 0 else 1
+        self.rows_scroll.yview_scroll(units, "units")
         self.rows_fixed.yview_moveto(self.rows_scroll.yview()[0])
         return "break"
 
-    def _on_shift_wheel(self, event):
+    def _on_shift_wheel_local(self, event):
         step = -1 if event.delta > 0 else 1
+        self._xscroll("scroll", step, "units")
+        return "break"
+
+    def _on_wheel_global(self, event, linux: int = 0):
+        # срабатывает, когда колёсико крутят над Entry/Label (не над canvas)
+        if not self._is_under(event.widget, [self.rows_scroll_holder, self.rows_fixed_holder]):
+            return
+        if linux != 0:
+            units = -1 if linux < 0 else 1
+        else:
+            delta = event.delta
+            units = int(-1 * (delta / 120)) if delta else 0
+            if units == 0:
+                units = -1 if delta > 0 else 1
+        self.rows_scroll.yview_scroll(units, "units")
+        self.rows_fixed.yview_moveto(self.rows_scroll.yview()[0])
+        return "break"
+
+    def _on_shift_wheel_global(self, event, linux: int = 0):
+        # горизонталь при Shift + колесо (или Shift+кнопки 4/5)
+        if not self._is_under(event.widget, [self.rows_scroll_holder, self.header_scroll_holder]):
+            return
+        step = -1 if (linux > 0 or event.delta > 0) else 1
         self._xscroll("scroll", step, "units")
         return "break"
 
@@ -684,6 +727,7 @@ class ObjectTimesheet(tk.Toplevel):
         cur_id   = self.cmb_object_id.get().strip()
         cur_fio  = self.cmb_fio.get().strip()
 
+        self._load_spravochnik = getattr(self, "_load_spravochnik", None)
         self._load_spr_data()
 
         self.cmb_address.config(values=self.address_options)
@@ -782,22 +826,16 @@ class MainApp(tk.Tk):
     def show_help(self):
         text = (
             "Как пользоваться модулем «Объектный табель (реестр)»\n\n"
-            "1) Справочник:\n"
-            "   • Заполните файл «Справочник.xlsx» (Сотрудники: ФИО, Таб.№; Объекты: ID объекта, Адрес).\n"
-            "   • Кнопки «Открыть справочник» и «Обновить справочник» — в главном меню и в самом модуле.\n\n"
-            "2) Период и объект:\n"
+            "1) Период и объект:\n"
             "   • Выберите Месяц и Год.\n"
             "   • Выберите Адрес; список ID подставится автоматически. Если ID один — проставится сам.\n"
             "   • Если ID отсутствует, можно оставить пустым — имя файла будет по адресу.\n\n"
-            "3) Добавление сотрудников:\n"
+            "2) Добавление сотрудников:\n"
             "   • Выберите ФИО (Таб.№ подставится) → «Добавить в табель».\n"
             "   • Внизу появится строка: 31 ячейка по дням, итог, кнопки «5/2» и «Удалить».\n"
             "   • Кнопка «5/2» (по строке): Пн–Чт = 8,25; Пт = 7; Сб/Вс — пусто.\n"
             "   • Кнопка «5/2 всем» вверху — применяет график ко всем строкам.\n\n"
-            "4) Прокрутка:\n"
-            "   • Вертикальная — колесо мыши.\n"
-            "   • Горизонтальная — нижняя полоса или Shift + колесо.\n\n"
-            "5) Сохранение и загрузка:\n"
+            "3) Сохранение и загрузка:\n"
             "   • «Сохранить» — файл «Объектный_табель_{ID|Адрес}_{ГГГГ}_{ММ}.xlsx» в папке «Объектные_табели».\n"
             "   • При сохранении все строки выбранного объекта и периода в файле перезаписываются текущим реестром.\n"
             "   • При смене периода/адреса/ID строки подгружаются из уже сохранённого файла (если он есть).\n\n"
