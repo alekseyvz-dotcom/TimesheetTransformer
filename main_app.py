@@ -242,6 +242,8 @@ class RowWidget:
 
 # ------------------------- Объектный табель (окно) -------------------------
 
+# ------------------------- Объектный табель (окно) -------------------------
+
 class ObjectTimesheet(tk.Toplevel):
     def __init__(self, master):
         super().__init__(master)
@@ -254,11 +256,10 @@ class ObjectTimesheet(tk.Toplevel):
         self.out_dir = self.base_dir / OUTPUT_DIR
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
-        # Справочник (первичная загрузка)
+        # Справочник
         self._load_spr_data()
-
         self._build_ui()
-        self._load_existing_rows()  # первое наполнение
+        self._load_existing_rows()
 
     # ---- справочник ----
     def _load_spr_data(self):
@@ -317,7 +318,7 @@ class ObjectTimesheet(tk.Toplevel):
         ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=3, padx=4)
         ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=4, padx=4)
 
-        # ---------- Шапка: фикс. ФИО + прокручиваемая часть ----------
+        # ---------- Шапка ----------
         header_wrap = tk.Frame(self); header_wrap.pack(fill="x", padx=8)
 
         self.header_fixed = tk.Canvas(header_wrap, height=26, borderwidth=0, highlightthickness=0, width=240)
@@ -338,7 +339,7 @@ class ObjectTimesheet(tk.Toplevel):
         tk.Label(self.header_scroll_holder, text="Часы", width=8, anchor="e").grid(row=0, column=33, padx=(6,2))
         tk.Label(self.header_scroll_holder, text="Действия", width=12, anchor="center").grid(row=0, column=34, columnspan=2, padx=2)
 
-        # ---------- Область строк: фикс. ФИО + прокручиваемая часть ----------
+        # ---------- Строки ----------
         rows_wrap = tk.Frame(self); rows_wrap.pack(fill="both", expand=True, padx=8, pady=(4,8))
 
         self.rows_fixed = tk.Canvas(rows_wrap, borderwidth=0, highlightthickness=0, width=240)
@@ -373,26 +374,43 @@ class ObjectTimesheet(tk.Toplevel):
         self.rows_fixed.bind("<MouseWheel>", self._on_wheel_local)
         self.rows_fixed.bind("<Shift-MouseWheel>", self._on_shift_wheel_local)
 
-        # Глобальная подстраховка: если колёсико крутят над дочерними Entry/Label — ловим здесь и синхронизируем
+        # Глобальная подстраховка (колёсико над Entry/Label)
         self.bind_all("<MouseWheel>", self._on_wheel_global)
         self.bind_all("<Shift-MouseWheel>", self._on_shift_wheel_global)
-        # (Linux/X11) — кнопки 4/5
-        self.bind_all("<Button-4>", lambda e: self._on_wheel_global(e, linux=+1))
+        self.bind_all("<Button-4>", lambda e: self._on_wheel_global(e, linux=+1))   # X11
         self.bind_all("<Button-5>", lambda e: self._on_wheel_global(e, linux=-1))
-        self.bind_all("<Shift-Button-4>", lambda e: self._on_shift_wheel_global(e, linux=+1))
-        self.bind_all("<Shift-Button-5>", lambda e: self._on_shift_wheel_global(e, linux=-1))
+
+        # Жёсткая синхронизация: обёртка над yview правого canvas
+        self._patch_rows_scroll_yview()
 
         # Список строк
         self.rows: List[RowWidget] = []
 
-        # Итоги по объекту
+        # Итоги
         bottom = tk.Frame(self); bottom.pack(fill="x", padx=8, pady=(0,8))
         self.lbl_object_total = tk.Label(bottom, text="Сумма: дней 0 | часов 0", font=("Segoe UI", 10, "bold"))
         self.lbl_object_total.pack(side="left")
 
+    # ---- монки‑патч yview правого canvas ----
+    def _patch_rows_scroll_yview(self):
+        self._orig_rows_yview = self.rows_scroll.yview
+
+        def _yview_sync(*args):
+            r = self._orig_rows_yview(*args)        # двигаем правую часть
+            try:
+                first, last = self.rows_scroll.yview()
+                self.rows_fixed.yview_moveto(first) # тянем левую
+                self.vscroll.set(first, last)       # двигаем ползунок
+            except Exception:
+                pass
+            return r
+
+        # подменяем метод у инстанса
+        self.rows_scroll.yview = _yview_sync
+
     # ---- скроллы / синхронизация ----
     def _on_yview(self, first, last):
-        # при любой вертикальной прокрутке правой части — тянем левую
+        # любые изменения yview правой области отдадут сюда (на случай внешних вызовов)
         self.vscroll.set(first, last)
         try:
             self.rows_fixed.yview_moveto(first)
@@ -400,9 +418,8 @@ class ObjectTimesheet(tk.Toplevel):
             pass
 
     def _yscroll(self, *args):
-        # перетаскивание вертикального ползунка — двигает обе части
-        self.rows_scroll.yview(*args)
-        self.rows_fixed.yview(*args)
+        # перетаскивание вертикального ползунка
+        self.rows_scroll.yview(*args)   # вызовет _yview_sync → синхронизирует левую часть
 
     def _xscroll_set(self, *args):
         self.hscroll.set(*args)
@@ -411,8 +428,21 @@ class ObjectTimesheet(tk.Toplevel):
         self.header_scroll.xview(*args)
         self.rows_scroll.xview(*args)
 
+    def _on_wheel_local(self, event):
+        # локальная прокрутка колёсиком (над левым/правым canvas)
+        delta = event.delta
+        units = int(-1 * (delta / 120)) if delta else 0
+        if units == 0:
+            units = -1 if delta > 0 else 1
+        self.rows_scroll.yview_scroll(units, "units")   # вызовет _yview_sync
+        return "break"
+
+    def _on_shift_wheel_local(self, event):
+        step = -1 if event.delta > 0 else 1
+        self._xscroll("scroll", step, "units")
+        return "break"
+
     def _is_under(self, widget, containers: list) -> bool:
-        # проверяем, что событие произошло внутри нужных холдеров
         try:
             w = widget
             while True:
@@ -425,23 +455,8 @@ class ObjectTimesheet(tk.Toplevel):
         except Exception:
             return False
 
-    def _on_wheel_local(self, event):
-        # локальная прокрутка по колесику — крутим правую часть и синхронизируем левую
-        delta = event.delta
-        units = int(-1 * (delta / 120)) if delta else 0
-        if units == 0:
-            units = -1 if delta > 0 else 1
-        self.rows_scroll.yview_scroll(units, "units")
-        self.rows_fixed.yview_moveto(self.rows_scroll.yview()[0])
-        return "break"
-
-    def _on_shift_wheel_local(self, event):
-        step = -1 if event.delta > 0 else 1
-        self._xscroll("scroll", step, "units")
-        return "break"
-
     def _on_wheel_global(self, event, linux: int = 0):
-        # срабатывает, когда колёсико крутят над Entry/Label (не над canvas)
+        # когда колесо крутят над дочерними Entry/Label — прокручиваем правую область → _yview_sync подтянет левую
         if not self._is_under(event.widget, [self.rows_scroll_holder, self.rows_fixed_holder]):
             return
         if linux != 0:
@@ -452,11 +467,9 @@ class ObjectTimesheet(tk.Toplevel):
             if units == 0:
                 units = -1 if delta > 0 else 1
         self.rows_scroll.yview_scroll(units, "units")
-        self.rows_fixed.yview_moveto(self.rows_scroll.yview()[0])
         return "break"
 
     def _on_shift_wheel_global(self, event, linux: int = 0):
-        # горизонталь при Shift + колесо (или Shift+кнопки 4/5)
         if not self._is_under(event.widget, [self.rows_scroll_holder, self.header_scroll_holder]):
             return
         step = -1 if (linux > 0 or event.delta > 0) else 1
@@ -534,7 +547,6 @@ class ObjectTimesheet(tk.Toplevel):
     def _regrid_rows(self):
         for i, r in enumerate(self.rows, start=0):
             r.grid(i)
-        # обновим области скролла
         self.after(30, lambda: (
             self.rows_fixed.configure(scrollregion=self.rows_fixed.bbox("all")),
             self.rows_scroll.configure(scrollregion=self.rows_scroll.bbox("all")),
@@ -573,13 +585,11 @@ class ObjectTimesheet(tk.Toplevel):
         return (self.base_dir / OUTPUT_DIR / f"Объектный_табель_{id_part}_{y}_{m:02d}.xlsx")
 
     def _ensure_sheet(self, wb) -> Any:
-        # проверка/инициализация листа с заголовком (включая "Итого дней")
         if "Табель" in wb.sheetnames:
             ws = wb["Табель"]
             hdr_first = str(ws.cell(1,1).value or "")
             if hdr_first == "ID объекта" and ws.max_column >= (6 + 31 + 2):
                 return ws
-            # миграция/переименование
             base = "Табель_OLD"; new_name = base; i = 1
             while new_name in wb.sheetnames:
                 i += 1; new_name = f"{base}{i}"
@@ -596,15 +606,12 @@ class ObjectTimesheet(tk.Toplevel):
         ws2.column_dimensions["F"].width = 14
         for i in range(7, 7+31):
             ws2.column_dimensions[get_column_letter(i)].width = 6
-        idx_total_days  = 7 + 31
-        idx_total_hours = 7 + 31 + 1
-        ws2.column_dimensions[get_column_letter(idx_total_days)].width  = 10
-        ws2.column_dimensions[get_column_letter(idx_total_hours)].width = 12
+        ws2.column_dimensions[get_column_letter(7+31)].width  = 10
+        ws2.column_dimensions[get_column_letter(7+31+1)].width = 12
         ws2.freeze_panes = "A2"
         return ws2
 
     def _load_existing_rows(self):
-        # очистим текущие строки
         for r in self.rows:
             r.destroy()
         self.rows.clear()
@@ -635,7 +642,6 @@ class ObjectTimesheet(tk.Toplevel):
                 else:
                     if row_addr != addr:
                         continue
-                # часы 1..31
                 hours: List[Optional[float]] = []
                 for c in range(7, 7+31):
                     v = ws.cell(r, c).value
@@ -644,7 +650,6 @@ class ObjectTimesheet(tk.Toplevel):
                     except:
                         n = None
                     hours.append(n)
-                # добавим строку
                 roww = RowWidget(self.rows_fixed_holder, self.rows_scroll_holder,
                                  len(self.rows)+1, fio, tbn, self.get_year_month, self.delete_row)
                 y2, m2 = self.get_year_month()
@@ -676,7 +681,6 @@ class ObjectTimesheet(tk.Toplevel):
                     wb.remove(wb.active)
             ws = self._ensure_sheet(wb)
 
-            # удалить все строки этого объекта и периода
             to_del = []
             for r in range(2, ws.max_row+1):
                 row_oid  = (ws.cell(r,1).value or "")
@@ -691,7 +695,6 @@ class ObjectTimesheet(tk.Toplevel):
             idx_total_days  = 7 + 31
             idx_total_hours = 7 + 31 + 1
 
-            # записать текущие строки
             for roww in self.rows:
                 hours = roww.get_hours()
                 total_hours = sum(h for h in hours if isinstance(h,(int,float))) if hours else 0.0
@@ -704,7 +707,6 @@ class ObjectTimesheet(tk.Toplevel):
 
                 ws.append(row_values)
                 rlast = ws.max_row
-                # форматы
                 for c in range(7, 7+31):
                     v = ws.cell(rlast, c).value
                     if isinstance(v,(int,float)):
@@ -721,13 +723,12 @@ class ObjectTimesheet(tk.Toplevel):
         except Exception as e:
             messagebox.showerror("Сохранение", f"Ошибка сохранения:\n{e}")
 
-    # ---- справочник: обновить из окна ----
+    # ---- обновление справочника ----
     def reload_spravochnik(self):
         cur_addr = self.cmb_address.get().strip()
         cur_id   = self.cmb_object_id.get().strip()
         cur_fio  = self.cmb_fio.get().strip()
 
-        self._load_spravochnik = getattr(self, "_load_spravochnik", None)
         self._load_spr_data()
 
         self.cmb_address.config(values=self.address_options)
