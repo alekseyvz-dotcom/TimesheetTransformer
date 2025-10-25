@@ -647,35 +647,49 @@ def run_converter():
 
 # ------------------------- Главное меню -------------------------
 
+# ------------------------- Главное меню -------------------------
+
 class MainApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_NAME)
-        self.geometry("640x380")
+        self.geometry("680x420")
         self.resizable(False, False)
 
         tk.Label(self, text="Выберите модуль", font=("Segoe UI", 14, "bold")).pack(pady=(16, 6))
 
-        frm = tk.Frame(self)
-        frm.pack(pady=8)
+        # 1) Объектный табель — наверху
+        ttk.Button(self, text="Объектный табель (реестр)", width=36,
+                   command=lambda: ObjectTimesheet(self))\
+            .pack(pady=(4, 10))
 
-        ttk.Button(frm, text="Конвертер табеля (1С)", width=36, command=run_converter)\
-            .grid(row=0, column=0, padx=8, pady=8)
-
-        ttk.Button(frm, text="Объектный табель (реестр)", width=36, command=lambda: ObjectTimesheet(self))\
-            .grid(row=1, column=0, padx=8, pady=8)
-
-        btn_spr = tk.Frame(self)
-        btn_spr.pack(pady=(4,0))
-        ttk.Button(btn_spr, text="Открыть справочник", width=24, command=self.open_spravochnik)\
+        # 2) Справочник (две кнопки)
+        spr_frame = tk.Frame(self)
+        spr_frame.pack(pady=(0, 12))
+        ttk.Button(spr_frame, text="Открыть справочник", width=24, command=self.open_spravochnik)\
             .grid(row=0, column=0, padx=6, pady=6)
-        ttk.Button(btn_spr, text="Обновить справочник", width=24, command=self.refresh_spravochnik_global)\
+        ttk.Button(spr_frame, text="Обновить справочник", width=24, command=self.refresh_spravochnik_global)\
             .grid(row=0, column=1, padx=6, pady=6)
 
-        ttk.Button(self, text="Выход", width=18, command=self.destroy).pack(pady=(12, 8))
+        # 3) Конвертер — после кнопок обновления
+        ttk.Button(self, text="Конвертер табеля (1С)", width=36, command=run_converter)\
+            .pack(pady=(0, 12))
 
-        tk.Label(self, text="Разработал Алексей Зезюкин, АНО МЛСТ 2025", font=("Segoe UI", 8), fg="#666")\
+        # 4) Помощь
+        ttk.Button(self, text="Помощь", width=18, command=self.show_help)\
+            .pack(pady=(0, 8))
+
+        # 5) Выход
+        ttk.Button(self, text="Выход", width=18, command=self.destroy)\
+            .pack(pady=(0, 12))
+
+        # Копирайт
+        tk.Label(self, text="Разработал Алексей Зезюкин, АНО МЛСТ 2025",
+                 font=("Segoe UI", 8), fg="#666")\
             .pack(side="bottom", pady=(0, 8))
+
+        # Горячая клавиша F1 на помощь
+        self.bind("<F1>", lambda e: self.show_help())
 
     def open_spravochnik(self):
         path = exe_dir() / SPRAVOCHNIK_FILE
@@ -688,8 +702,42 @@ class MainApp(tk.Tk):
     def refresh_spravochnik_global(self):
         path = exe_dir() / SPRAVOCHNIK_FILE
         ensure_spravochnik(path)
-        messagebox.showinfo("Справочник", "Справочник проверен/создан.\n"
-                             "В открытом окне используйте 'Обновить справочник' для перечтения.")
+        messagebox.showinfo(
+            "Справочник",
+            "Справочник проверен/создан.\n"
+            "В открытом окне используйте «Обновить справочник» для перечтения."
+        )
+
+    def show_help(self):
+        text = (
+            "Как пользоваться модулем «Объектный табель (реестр)»\n\n"
+            "1) Справочник:\n"
+            "   • Заполните файл «Справочник.xlsx» (Сотрудники: ФИО, Таб.№; Объекты: ID объекта, Адрес).\n"
+            "   • Кнопки «Открыть справочник» и «Обновить справочник» — в главном меню и в самом модуле.\n\n"
+            "2) Период и объект:\n"
+            "   • Выберите Месяц и Год.\n"
+            "   • Выберите Адрес; список ID подставится автоматически. Если ID один — проставится сам.\n"
+            "   • Если ID отсутствует, можно оставить пустым — имя файла будет по адресу.\n\n"
+            "3) Добавление сотрудников:\n"
+            "   • Выберите ФИО (Таб.№ подставится) → «Добавить в табель».\n"
+            "   • Внизу появится строка: 31 ячейка по дням, итог, кнопки «5/2» и «Удалить».\n"
+            "   • Кнопка «5/2» (по строке): Пн–Чт = 8,25; Пт = 7; Сб/Вс — пусто.\n"
+            "   • Кнопка «5/2 всем» вверху — применяет график ко всем строкам.\n\n"
+            "4) Прокрутка:\n"
+            "   • Вертикальная — колесо мыши.\n"
+            "   • Горизонтальная — нижняя полоса или Shift + колесо.\n\n"
+            "5) Сохранение и загрузка:\n"
+            "   • «Сохранить» — файл «Объектный_табель_{ID|Адрес}_{ГГГГ}_{ММ}.xlsx» в папке «Объектные_табели».\n"
+            "   • При сохранении все строки выбранного объекта и периода в файле перезаписываются текущим реестром.\n"
+            "   • При смене периода/адреса/ID строки подгружаются из уже сохранённого файла (если он есть).\n\n"
+            "6) Один сотрудник — несколько объектов (в один день):\n"
+            "   • Добавьте строку на первый ID и введите часть часов.\n"
+            "   • Смените ID, добавьте вторую строку этому же сотруднику и введите оставшиеся часы.\n\n"
+            "Подсказки:\n"
+            "   • Часы понимают форматы: 8, 8.5/8,5, 8:30, 1/7 (сумма частей).\n"
+            "   • Нули в ячейках часов не выводятся (пусто).\n"
+        )
+        messagebox.showinfo("Помощь — Объектный табель", text)
 
 if __name__ == "__main__":
     app = MainApp()
