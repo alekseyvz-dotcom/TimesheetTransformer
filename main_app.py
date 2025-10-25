@@ -14,8 +14,8 @@ from openpyxl.utils import get_column_letter
 
 APP_NAME = "Табель‑конвертер (Главное меню)"
 SPRAVOCHNIK_FILE = "Справочник.xlsx"   # рядом с exe
-CONVERTER_EXE = "TabelConverter.exe"   # ваш собранный конвертер (положить рядом)
-OUTPUT_DIR = "ObjectTimesheets"        # папка для сохранения объектных табелей
+CONVERTER_EXE = "TabelConverter.exe"   # ваш конвертер (лежит рядом)
+OUTPUT_DIR = "ObjectTimesheets"        # папка для объектных табелей
 
 # ------------------------- Утилиты -------------------------
 
@@ -41,18 +41,24 @@ def ensure_spravochnik(path: Path):
     ws1.append(["ФИО", "Табельный №"])
     ws1.append(["Иванов И. И.", "ST00-00001"])
     ws1.append(["Петров П. П.", "ST00-00002"])
-    # Лист Объекты
+    # Лист Объекты (ID + Адрес)
     ws2 = wb.create_sheet("Объекты")
-    ws2.append(["Адрес"])
-    ws2.append(["ул. Пушкина, д. 1"])
-    ws2.append(["пр. Строителей, 25"])
+    ws2.append(["ID объекта", "Адрес"])
+    ws2.append(["OBJ-0001", "ул. Пушкина, д. 1"])
+    ws2.append(["OBJ-0002", "пр. Строителей, 25"])
     wb.save(path)
 
-def load_spravochnik(path: Path) -> Tuple[List[Tuple[str,str]], List[str]]:
+def load_spravochnik(path: Path) -> Tuple[List[Tuple[str,str]], List[Tuple[str,str]]]:
+    """
+    Возвращает:
+    - employees: [(ФИО, Таб№)]
+    - objects:   [(ID, Адрес)]
+    Поддерживает старый справочник с одной колонкой 'Адрес' (ID будет пустым).
+    """
     ensure_spravochnik(path)
     wb = load_workbook(path)
     employees: List[Tuple[str,str]] = []
-    objects: List[str] = []
+    objects: List[Tuple[str,str]] = []
     # Сотрудники
     if "Сотрудники" in wb.sheetnames:
         ws = wb["Сотрудники"]
@@ -64,28 +70,35 @@ def load_spravochnik(path: Path) -> Tuple[List[Tuple[str,str]], List[str]]:
     # Объекты
     if "Объекты" in wb.sheetnames:
         ws = wb["Объекты"]
-        for r in ws.iter_rows(min_row=2, values_only=True):
-            addr = (r[0] or "").strip()
-            if addr:
-                objects.append(addr)
+        hdr = [str(c or "").strip().lower() for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
+        two_cols = ("id объекта" in hdr) or (len(hdr) >= 2)
+        if two_cols:
+            for r in ws.iter_rows(min_row=2, values_only=True):
+                oid = (r[0] or "").strip()
+                addr = (r[1] or "").strip() if len(r) > 1 else ""
+                if oid or addr:
+                    objects.append((oid, addr))
+        else:
+            # старый формат: одна колонка 'Адрес'
+            for r in ws.iter_rows(min_row=2, values_only=True):
+                addr = (r[0] or "").strip()
+                if addr:
+                    objects.append(("", addr))
     return employees, objects
 
 def parse_hours_value(v: Any) -> Optional[float]:
-    # Понимает: 8 | 8,5 | 8.5 | 8:30 | 1/7
+    # Понимает: 8 | 8,25 | 8.5 | 8:30 | 1/7
     s = str(v or "").strip()
     if not s:
         return None
-    # сумма по слэшу
     if "/" in s:
         total = 0.0
         any_part = False
         for part in s.split("/"):
             n = parse_hours_value(part)
             if isinstance(n, (int, float)):
-                total += float(n)
-                any_part = True
+                total += float(n); any_part = True
         return total if any_part else None
-    # время h:mm(:ss)
     if ":" in s:
         p = s.split(":")
         try:
@@ -93,21 +106,20 @@ def parse_hours_value(v: Any) -> Optional[float]:
             mm = float((p[1] if len(p)>1 else "0").replace(",", "."))
             ss = float((p[2] if len(p)>2 else "0").replace(",", "."))
             return hh + mm/60.0 + ss/3600.0
-        except:
-            pass
+        except: pass
     s = s.replace(",", ".")
     try:
         return float(s)
     except:
         return None
 
-# ------------------------- Объектный табель (окно) -------------------------
+# ------------------------- Объектный табель -------------------------
 
 class ObjectTimesheet(tk.Toplevel):
     def __init__(self, master):
         super().__init__(master)
         self.title("Объектный табель")
-        self.geometry("1100x600")
+        self.geometry("1120x620")
         self.resizable(True, True)
 
         self.base_dir = exe_dir()
@@ -115,7 +127,14 @@ class ObjectTimesheet(tk.Toplevel):
         self.out_dir = self.base_dir / OUTPUT_DIR
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
-        self.employees, self.objects = load_spravochnik(self.spr_path)
+        self.employees, self.objects = load_spravochnik(self.spr_path)  # objects: [(ID, Адрес)]
+        # Список для комбобокса: "ID — Адрес" (если ID пустой — только адрес)
+        self.object_options = []
+        self.object_map = {}
+        for oid, addr in self.objects:
+            text = f"{oid} — {addr}" if oid else addr
+            self.object_options.append(text)
+            self.object_map[text] = (oid, addr)
 
         self._build_ui()
 
@@ -130,16 +149,18 @@ class ObjectTimesheet(tk.Toplevel):
         self.cmb_month.grid(row=0, column=1, sticky="w")
         m_now = datetime.now().month
         self.cmb_month.current(m_now-1)
+        self.cmb_month.bind("<<ComboboxSelected>>", lambda e: self.update_day_state())
 
         tk.Label(top, text="Год:").grid(row=0, column=2, sticky="w", padx=(16,4))
-        self.spn_year = tk.Spinbox(top, from_=2000, to=2100, width=6)
+        self.spn_year = tk.Spinbox(top, from_=2000, to=2100, width=6, command=self.update_day_state)
         self.spn_year.grid(row=0, column=3, sticky="w")
         self.spn_year.delete(0,"end")
         self.spn_year.insert(0, datetime.now().year)
+        self.spn_year.bind("<FocusOut>", lambda e: self.update_day_state())
 
-        # Объект (адрес)
-        tk.Label(top, text="Объект (адрес):").grid(row=0, column=4, sticky="w", padx=(20,4))
-        self.cmb_object = ttk.Combobox(top, values=self.objects, width=40)
+        # Объект (ID — Адрес)
+        tk.Label(top, text="Объект:").grid(row=0, column=4, sticky="w", padx=(20,4))
+        self.cmb_object = ttk.Combobox(top, values=self.object_options, width=48)
         self.cmb_object.grid(row=0, column=5, sticky="w")
 
         # ФИО, Таб.№
@@ -155,7 +176,7 @@ class ObjectTimesheet(tk.Toplevel):
         # Кнопки действий
         btns = tk.Frame(top)
         btns.grid(row=1, column=4, columnspan=2, sticky="w", padx=(20,0), pady=(8,0))
-        ttk.Button(btns, text="Заполнить 8 по будням", command=self.fill_8_workdays).grid(row=0, column=0, padx=4)
+        ttk.Button(btns, text="Заполнить 8,25 по будням", command=self.fill_825_workdays).grid(row=0, column=0, padx=4)
         ttk.Button(btns, text="Очистить", command=self.clear_hours).grid(row=0, column=1, padx=4)
         ttk.Button(btns, text="Сохранить", command=self.save_timesheet).grid(row=0, column=2, padx=4)
 
@@ -166,18 +187,15 @@ class ObjectTimesheet(tk.Toplevel):
         hdr = tk.Frame(frm_table)
         hdr.pack(fill="x")
         tk.Label(hdr, text="День", width=6, anchor="center").grid(row=0, column=0, padx=2, pady=2)
-        tk.Label(hdr, text="Часы", width=7, anchor="center").grid(row=0, column=1, padx=2, pady=2)
+        tk.Label(hdr, text="Часы", width=8, anchor="center").grid(row=0, column=1, padx=2, pady=2)
         tk.Label(hdr, text="День", width=6, anchor="center").grid(row=0, column=2, padx=12, pady=2)
-        tk.Label(hdr, text="Часы", width=7, anchor="center").grid(row=0, column=3, padx=2, pady=2)
+        tk.Label(hdr, text="Часы", width=8, anchor="center").grid(row=0, column=3, padx=2, pady=2)
 
         self.entries: List[tk.Entry] = []
         self.rows_frame = tk.Frame(frm_table)
         self.rows_frame.pack(fill="both", expand=True)
 
-        # 31 день — рисуем в два столбца (чтобы помещалось по высоте)
         self._draw_day_entries()
-
-        # Итого часов
         bottom = tk.Frame(self)
         bottom.pack(fill="x", padx=8, pady=(0,8))
         self.lbl_total = tk.Label(bottom, text="Итого часов: 0", font=("Segoe UI", 10, "bold"))
@@ -186,7 +204,6 @@ class ObjectTimesheet(tk.Toplevel):
         self.update_day_state()
 
     def _draw_day_entries(self):
-        # Чистим
         for w in self.rows_frame.winfo_children():
             w.destroy()
         self.entries.clear()
@@ -195,15 +212,13 @@ class ObjectTimesheet(tk.Toplevel):
         month = self.cmb_month.current()+1
         days = month_days(year, month)
 
-        # два столбца по ~16 строк
         left_col_days = list(range(1, min(16, days)+1))
         right_col_days = list(range(17, days+1))
 
-        def make_day_row(parent, r, d, col_offset):
-            day_lbl = tk.Label(parent, text=str(d), width=6, anchor="center")
-            day_lbl.grid(row=r, column=col_offset, padx=2, pady=1)
-            ent = tk.Entry(parent, width=8, justify="center")
-            ent.grid(row=r, column=col_offset+1, padx=2, pady=1)
+        def make_day_row(parent, r, d, c0):
+            tk.Label(parent, text=str(d), width=6, anchor="center").grid(row=r, column=c0, padx=2, pady=1)
+            ent = tk.Entry(parent, width=9, justify="center")
+            ent.grid(row=r, column=c0+1, padx=2, pady=1)
             ent.bind("<FocusOut>", lambda e: self._on_entry_change())
             self.entries.append((d, ent))
 
@@ -212,7 +227,6 @@ class ObjectTimesheet(tk.Toplevel):
         for i, d in enumerate(right_col_days, start=0):
             make_day_row(self.rows_frame, i, d, 2)
 
-        # отключим отсутствующие дни (например, февраль 29..31)
         self.update_idletasks()
         self.update_total()
 
@@ -221,17 +235,14 @@ class ObjectTimesheet(tk.Toplevel):
         tbn = ""
         for f, num in self.employees:
             if f == fio:
-                tbn = num
-                break
+                tbn = num; break
         self.ent_tbn.delete(0,"end")
         self.ent_tbn.insert(0, tbn)
 
     def _on_entry_change(self):
-        # валидация и пересчёт итога по потере фокуса
         self.update_total()
 
     def update_day_state(self):
-        # Перерисовать таблицу при смене месяца/года
         self._draw_day_entries()
 
     def clear_hours(self):
@@ -239,52 +250,64 @@ class ObjectTimesheet(tk.Toplevel):
             ent.delete(0, "end")
         self.update_total()
 
-    def fill_8_workdays(self):
-        # 8 часов в будни (Пн‑Пт), пусто в выходные
+    def fill_825_workdays(self):
+        # 8,25 в будни
         year = int(self.spn_year.get())
         month = self.cmb_month.current()+1
         for d, ent in self.entries:
             wd = datetime(year, month, d).weekday()  # 0=Mon..6=Sun
             ent.delete(0, "end")
             if wd < 5:
-                ent.insert(0, "8")
+                ent.insert(0, "8,25")
         self.update_total()
 
     def update_total(self):
         total = 0.0
         for d, ent in self.entries:
-            val = ent.get().strip()
-            n = parse_hours_value(val)
+            n = parse_hours_value(ent.get().strip())
             if isinstance(n, (int,float)):
                 total += float(n)
         s = f"{total:.2f}".rstrip("0").rstrip(".")
         self.lbl_total.config(text=f"Итого часов: {s}")
 
     def _collect_hours(self) -> List[Optional[float]]:
-        # вернём массив на 31 позицию: None или число
         year = int(self.spn_year.get())
         month = self.cmb_month.current()+1
         days = month_days(year, month)
         arr: List[Optional[float]] = [None]*31
         for d, ent in self.entries:
-            s = ent.get().strip()
-            n = parse_hours_value(s)
+            n = parse_hours_value(ent.get().strip())
             arr[d-1] = n
-        # для отсутствующих дней -> None
         for d in range(days+1, 32):
             arr[d-1] = None
         return arr
 
+    def _init_object_sheet(self, ws):
+        # Заголовок: ID объекта, Адрес, Месяц, Год, ФИО, Табельный №, 1..31, Итого часов
+        hdr = ["ID объекта","Адрес","Месяц","Год","ФИО","Табельный №"] + [str(i) for i in range(1,32)] + ["Итого часов"]
+        ws.append(hdr)
+        ws.column_dimensions["A"].width = 14
+        ws.column_dimensions["B"].width = 40
+        ws.column_dimensions["C"].width = 10
+        ws.column_dimensions["D"].width = 8
+        ws.column_dimensions["E"].width = 28
+        ws.column_dimensions["F"].width = 14
+        for i in range(7, 7+31):
+            ws.column_dimensions[get_column_letter(i)].width = 6
+        ws.column_dimensions[get_column_letter(7+31)].width = 12
+        ws.freeze_panes = "A2"
+
     def save_timesheet(self):
-        # сбор данных
+        # Данные шапки
         month = self.cmb_month.current()+1
         year = int(self.spn_year.get())
-        obj = self.cmb_object.get().strip()
+        obj_text = self.cmb_object.get().strip()
+        oid, oaddr = self.object_map.get(obj_text, ("", obj_text))
         fio = self.cmb_fio.get().strip()
         tbn = self.ent_tbn.get().strip()
 
-        if not obj:
-            messagebox.showwarning("Объектный табель", "Укажите объект (адрес).")
+        if not oaddr and not oid:
+            messagebox.showwarning("Объектный табель", "Укажите объект.")
             return
         if not fio:
             messagebox.showwarning("Объектный табель", "Укажите ФИО.")
@@ -293,45 +316,51 @@ class ObjectTimesheet(tk.Toplevel):
         hours = self._collect_hours()
         total = sum(h for h in hours if isinstance(h,(int,float))) if hours else 0.0
 
-        # файл назначения
+        # Файл назначения
         fname = f"Объектный_табель_{year}_{month:02d}.xlsx"
         fpath = self.out_dir / fname
 
         if fpath.exists():
             wb = load_workbook(fpath)
+            # Проверка структуры и авто‑миграция со старого формата
+            if "Табель" in wb.sheetnames:
+                ws_chk = wb["Табель"]
+                a1 = str(ws_chk.cell(1,1).value or "")
+                if a1 != "ID объекта":
+                    # Переименуем старый лист
+                    base = "Табель_OLD"
+                    new_name = base
+                    i = 1
+                    while new_name in wb.sheetnames:
+                        i += 1
+                        new_name = f"{base}{i}"
+                    ws_chk.title = new_name
+                    ws = wb.create_sheet("Табель")
+                    self._init_object_sheet(ws)
+                else:
+                    ws = ws_chk
+            else:
+                ws = wb.create_sheet("Табель")
+                self._init_object_sheet(ws)
         else:
             wb = Workbook()
-            wb.remove(wb.active)
+            # Удалим дефолтный лист и создадим свой
+            if wb.active:
+                wb.remove(wb.active)
             ws = wb.create_sheet("Табель")
-            # Заголовок
-            hdr = ["Объект","Месяц","Год","ФИО","Табельный №"] + [str(i) for i in range(1,32)] + ["Итого часов"]
-            ws.append(hdr)
-            # ширины
-            ws.column_dimensions["A"].width = 40
-            ws.column_dimensions["B"].width = 10
-            ws.column_dimensions["C"].width = 8
-            ws.column_dimensions["D"].width = 28
-            ws.column_dimensions["E"].width = 14
-            for i in range(6, 6+31):
-                ws.column_dimensions[get_column_letter(i)].width = 6
-            ws.column_dimensions[get_column_letter(6+31)].width = 12
-            # заморозка шапки
-            ws.freeze_panes = "A2"
+            self._init_object_sheet(ws)
 
-        ws = wb["Табель"]
-
-        # проверим, есть ли уже запись (по ключу объект+месяц+год+таб№)
-        key_cols = {"Объект":1, "Месяц":2, "Год":3, "ФИО":4, "Таб№":5}
+        # Поиск строки (ключ: ID + месяц + год + таб.№)
         found_row = None
         for r in range(2, ws.max_row+1):
-            if (ws.cell(r,1).value == obj and
-                int(ws.cell(r,2).value or 0) == month and
-                int(ws.cell(r,3).value or 0) == year and
-                (ws.cell(r,5).value or "").strip() == tbn):
+            if ((ws.cell(r,1).value or "") == oid and
+                int(ws.cell(r,3).value or 0) == month and
+                int(ws.cell(r,4).value or 0) == year and
+                (ws.cell(r,6).value or "").strip() == tbn):
                 found_row = r
                 break
 
-        row_values = [obj, month, year, fio, tbn] + [
+        row_values = [oid, oaddr, month, year, fio, tbn] + [
             (None if hours[i] is None or abs(float(hours[i])) < 1e-12 else float(hours[i])) for i in range(31)
         ] + [None if abs(total) < 1e-12 else float(total)]
 
@@ -347,22 +376,21 @@ class ObjectTimesheet(tk.Toplevel):
         else:
             r = ws.max_row + 1
             ws.append(row_values)
-            # Форматы чисел = General, нули не пишем (уже None)
-            for c in range(6, 6+31):
+            # Форматы чисел = General, нули и так None
+            for c in range(7, 7+31):
                 v = ws.cell(r, c).value
                 if isinstance(v,(int,float)):
                     ws.cell(r, c).number_format = "General"
-            v = ws.cell(r, 6+31).value
+            v = ws.cell(r, 7+31).value
             if isinstance(v,(int,float)):
-                ws.cell(r, 6+31).number_format = "General"
+                ws.cell(r, 7+31).number_format = "General"
 
         wb.save(fpath)
         messagebox.showinfo("Объектный табель", f"Сохранено:\n{fpath}")
 
-# ------------------------- Конвертер (обёртка) -------------------------
+# ------------------------- Конвертер (кнопка запуска внешнего EXE) -------------------------
 
 def run_converter():
-    # Запустить собранный вами конвертер рядом с программой
     conv_path = exe_dir() / CONVERTER_EXE
     if not conv_path.exists():
         messagebox.showwarning("Конвертер", f"Не найден {CONVERTER_EXE} рядом с программой.\n"
@@ -379,7 +407,7 @@ class MainApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_NAME)
-        self.geometry("560x300")
+        self.geometry("580x320")
         self.resizable(False, False)
 
         tk.Label(self, text="Выберите модуль", font=("Segoe UI", 14, "bold")).pack(pady=(16, 6))
@@ -387,19 +415,20 @@ class MainApp(tk.Tk):
         frm = tk.Frame(self)
         frm.pack(pady=8)
 
-        ttk.Button(frm, text="Конвертер табеля (1С)", width=32, command=run_converter)\
+        ttk.Button(frm, text="Конвертер табеля (1С)", width=34, command=run_converter)\
             .grid(row=0, column=0, padx=8, pady=8)
 
-        ttk.Button(frm, text="Объектный табель", width=32, command=lambda: ObjectTimesheet(self))\
+        ttk.Button(frm, text="Объектный табель", width=34, command=lambda: ObjectTimesheet(self))\
             .grid(row=1, column=0, padx=8, pady=8)
 
-        ttk.Button(frm, text="Открыть справочник", width=32, command=self.open_spravochnik)\
+        ttk.Button(frm, text="Открыть справочник", width=34, command=self.open_spravochnik)\
             .grid(row=2, column=0, padx=8, pady=8)
 
         ttk.Button(self, text="Выход", width=18, command=self.destroy).pack(pady=(12, 8))
 
-        # Подпись
-        tk.Label(self, text="Разработал Алексей Зезюкин, 2025", font=("Segoe UI", 8), fg="#666").pack(side="bottom", pady=(0, 8))
+        # Копирайт
+        tk.Label(self, text="Разработал Алексей Зезюкин, АНО МЛСТ 2025", font=("Segoe UI", 8), fg="#666")\
+            .pack(side="bottom", pady=(0, 8))
 
     def open_spravochnik(self):
         path = exe_dir() / SPRAVOCHNIK_FILE
@@ -407,7 +436,6 @@ class MainApp(tk.Tk):
         try:
             os.startfile(path)  # Windows
         except Exception:
-            # универсально
             try:
                 subprocess.Popen(["xdg-open", str(path)])
             except Exception as e:
