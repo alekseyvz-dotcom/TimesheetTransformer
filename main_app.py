@@ -244,6 +244,8 @@ class RowWidget:
 
 # ------------------------- Объектный табель (окно) -------------------------
 
+# ------------------------- Объектный табель (окно) -------------------------
+
 class ObjectTimesheet(tk.Toplevel):
     def __init__(self, master):
         super().__init__(master)
@@ -264,7 +266,7 @@ class ObjectTimesheet(tk.Toplevel):
 
     # ---- справочник ----
     def _load_spr_data(self):
-        self.employees, self.objects = load_spravochnik(self.spr_path)
+        self.employees, self.objects = load_spravochnik(self.spr_path)  # [(ФИО, Таб№)], [(ID, Адрес)]
         self.addr_to_ids = {}
         for oid, addr in self.objects:
             if not addr:
@@ -319,18 +321,17 @@ class ObjectTimesheet(tk.Toplevel):
         ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=3, padx=4)
         ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=4, padx=4)
 
-        # ШАПКА: фиксированная и прокручиваемая части
+        # ---------- Шапка: фикс. ФИО + прокручиваемая часть ----------
         header_wrap = tk.Frame(self); header_wrap.pack(fill="x", padx=8)
 
-        # левая (ФИО)
+        # Левая шапка (ФИО)
         self.header_fixed = tk.Canvas(header_wrap, height=26, borderwidth=0, highlightthickness=0, width=240)
         self.header_fixed_holder = tk.Frame(self.header_fixed)
         self.header_fixed.create_window((0,0), window=self.header_fixed_holder, anchor="nw")
         self.header_fixed.pack(side="left")
-
         tk.Label(self.header_fixed_holder, text="ФИО", width=28, anchor="w").grid(row=0, column=0, padx=2)
 
-        # правая (Tab№ + дни + итоги + действия)
+        # Правая шапка (Таб№ + дни + итоги + действия)
         self.header_scroll = tk.Canvas(header_wrap, height=26, borderwidth=0, highlightthickness=0)
         self.header_scroll_holder = tk.Frame(self.header_scroll)
         self.header_scroll.create_window((0,0), window=self.header_scroll_holder, anchor="nw")
@@ -339,11 +340,11 @@ class ObjectTimesheet(tk.Toplevel):
         tk.Label(self.header_scroll_holder, text="Таб.№", width=12, anchor="center").grid(row=0, column=0, padx=2)
         for d in range(1, 32):
             tk.Label(self.header_scroll_holder, text=str(d), width=5, anchor="center").grid(row=0, column=d, padx=1)
-        tk.Label(self.header_scroll_holder, text="Дней", width=6, anchor="e").grid(row=0, column=32, padx=(6,2))
+        tk.Label(self.header_scroll_holder, text="Дней",  width=6, anchor="e").grid(row=0, column=32, padx=(6,2))
         tk.Label(self.header_scroll_holder, text="Часы", width=8, anchor="e").grid(row=0, column=33, padx=(6,2))
         tk.Label(self.header_scroll_holder, text="Действия", width=12, anchor="center").grid(row=0, column=34, columnspan=2, padx=2)
 
-        # ОБЛАСТЬ СТРОК: фиксированная (ФИО) и прокручиваемая (остальное)
+        # ---------- Область строк: фикс. ФИО + прокручиваемая часть ----------
         rows_wrap = tk.Frame(self); rows_wrap.pack(fill="both", expand=True, padx=8, pady=(4,8))
 
         self.rows_fixed = tk.Canvas(rows_wrap, borderwidth=0, highlightthickness=0, width=240)
@@ -356,29 +357,29 @@ class ObjectTimesheet(tk.Toplevel):
         self.rows_scroll.create_window((0,0), window=self.rows_scroll_holder, anchor="nw")
         self.rows_scroll.pack(side="left", fill="both", expand=True)
 
-        # Скроллы (общие)
-        self.vscroll = ttk.Scrollbar(rows_wrap, orient="vertical",
-                                     command=self._yscroll)  # управляет обоими canvas по Y
+        # Скроллы
+        self.vscroll = ttk.Scrollbar(rows_wrap, orient="vertical", command=self._yscroll)
         self.vscroll.pack(side="right", fill="y")
-
         self.hscroll = ttk.Scrollbar(self, orient="horizontal", command=self._xscroll)
         self.hscroll.pack(fill="x", padx=8, pady=(0,8))
 
-        # Привязки команд скролла
-        self.rows_scroll.configure(yscrollcommand=self._yscroll_set, xscrollcommand=self._xscroll_set)
+        # Привязки команд скролла (ВАЖНО: rows_scroll -> _on_yview)
+        self.rows_scroll.configure(yscrollcommand=self._on_yview, xscrollcommand=self._xscroll_set)
         self.header_scroll.configure(xscrollcommand=self._xscroll_set)
 
-        # обновление scrollregion
+        # Обновление scrollregion
         self.rows_fixed_holder.bind("<Configure>", lambda e: self.rows_fixed.configure(scrollregion=self.rows_fixed.bbox("all")))
         self.rows_scroll_holder.bind("<Configure>", lambda e: self.rows_scroll.configure(scrollregion=self.rows_scroll.bbox("all")))
         self.header_fixed_holder.bind("<Configure>", lambda e: self.header_fixed.configure(scrollregion=self.header_fixed.bbox("all")))
         self.header_scroll_holder.bind("<Configure>", lambda e: self.header_scroll.configure(scrollregion=self.header_scroll.bbox("all")))
 
-        # Прокрутка колесом
+        # Прокрутка колесом в обеих областях
         self.rows_scroll.bind("<MouseWheel>", self._on_wheel)
         self.rows_scroll.bind("<Shift-MouseWheel>", self._on_shift_wheel)
+        self.rows_fixed.bind("<MouseWheel>", self._on_wheel)
+        self.rows_fixed.bind("<Shift-MouseWheel>", self._on_shift_wheel)
 
-        # строки
+        # Список строк
         self.rows: List[RowWidget] = []
 
         # Итоги по объекту
@@ -387,10 +388,16 @@ class ObjectTimesheet(tk.Toplevel):
         self.lbl_object_total.pack(side="left")
 
     # ---- скроллы ----
-    def _yscroll_set(self, *args):
-        self.vscroll.set(*args)
+    def _on_yview(self, first, last):
+        # Вызывается при изменении yview у rows_scroll: синхронизируем левую часть и ползунок
+        self.vscroll.set(first, last)
+        try:
+            self.rows_fixed.yview_moveto(first)
+        except Exception:
+            pass
 
     def _yscroll(self, *args):
+        # Перетаскивание вертикального ползунка
         self.rows_scroll.yview(*args)
         self.rows_fixed.yview(*args)
 
@@ -398,11 +405,13 @@ class ObjectTimesheet(tk.Toplevel):
         self.hscroll.set(*args)
 
     def _xscroll(self, *args):
+        # Горизонтальный скролл двигает шапку и строки совместно
         self.header_scroll.xview(*args)
         self.rows_scroll.xview(*args)
 
     def _on_wheel(self, event):
         self.rows_scroll.yview_scroll(int(-1*(event.delta/120)), "units")
+        # Подтягиваем левую часть к тому же положению
         self.rows_fixed.yview_moveto(self.rows_scroll.yview()[0])
         return "break"
 
@@ -511,7 +520,6 @@ class ObjectTimesheet(tk.Toplevel):
         self.lbl_object_total.config(text=f"Сумма: дней {tot_days} | часов {sh}")
 
     # ---- загрузка/сохранение ----
-
     def _current_file_path(self) -> Optional[Path]:
         addr = self.cmb_address.get().strip()
         oid = self.cmb_object_id.get().strip()
@@ -526,10 +534,7 @@ class ObjectTimesheet(tk.Toplevel):
         if "Табель" in wb.sheetnames:
             ws = wb["Табель"]
             hdr_first = str(ws.cell(1,1).value or "")
-            # минимально ожидаемое количество колонок: 6 базовых + 31 день + 2 итога = 39
-            min_cols = 6 + 31 + 2
-            hdr_len = ws.max_column
-            if hdr_first == "ID объекта" and hdr_len >= min_cols:
+            if hdr_first == "ID объекта" and ws.max_column >= (6 + 31 + 2):
                 return ws
             # миграция/переименование
             base = "Табель_OLD"; new_name = base; i = 1
@@ -558,7 +563,7 @@ class ObjectTimesheet(tk.Toplevel):
     def _load_existing_rows(self):
         # очистим текущие строки
         for r in self.rows:
-            r.frame.destroy()
+            r.destroy()
         self.rows.clear()
         self._regrid_rows()
         self._recalc_object_total()
@@ -573,7 +578,7 @@ class ObjectTimesheet(tk.Toplevel):
             addr = self.cmb_address.get().strip()
             oid = self.cmb_object_id.get().strip()
             for r in range(2, ws.max_row+1):
-                row_oid = (ws.cell(r,1).value or "")
+                row_oid  = (ws.cell(r,1).value or "")
                 row_addr = (ws.cell(r,2).value or "")
                 row_m = int(ws.cell(r,3).value or 0)
                 row_y = int(ws.cell(r,4).value or 0)
@@ -597,7 +602,8 @@ class ObjectTimesheet(tk.Toplevel):
                         n = None
                     hours.append(n)
                 # добавим строку
-                roww = RowWidget(self.rows_holder, len(self.rows)+1, fio, tbn, self.get_year_month)
+                roww = RowWidget(self.rows_fixed_holder, self.rows_scroll_holder,
+                                 len(self.rows)+1, fio, tbn, self.get_year_month, self.delete_row)
                 y2, m2 = self.get_year_month()
                 roww.update_days_enabled(y2, m2)
                 roww.set_hours(hours)
@@ -614,7 +620,7 @@ class ObjectTimesheet(tk.Toplevel):
             return
 
         addr = self.cmb_address.get().strip()
-        oid = self.cmb_object_id.get().strip()
+        oid  = self.cmb_object_id.get().strip()
         y, m = self.get_year_month()
 
         try:
@@ -627,10 +633,10 @@ class ObjectTimesheet(tk.Toplevel):
                     wb.remove(wb.active)
             ws = self._ensure_sheet(wb)
 
-            # удалим все строки этого объекта и периода
+            # удалить все строки этого объекта и периода
             to_del = []
             for r in range(2, ws.max_row+1):
-                row_oid = (ws.cell(r,1).value or "")
+                row_oid  = (ws.cell(r,1).value or "")
                 row_addr = (ws.cell(r,2).value or "")
                 row_m = int(ws.cell(r,3).value or 0)
                 row_y = int(ws.cell(r,4).value or 0)
@@ -639,11 +645,10 @@ class ObjectTimesheet(tk.Toplevel):
             for r in reversed(to_del):
                 ws.delete_rows(r, 1)
 
-            # индексы итогов
             idx_total_days  = 7 + 31
             idx_total_hours = 7 + 31 + 1
 
-            # добавим текущие строки
+            # записать текущие строки
             for roww in self.rows:
                 hours = roww.get_hours()
                 total_hours = sum(h for h in hours if isinstance(h,(int,float))) if hours else 0.0
@@ -651,7 +656,8 @@ class ObjectTimesheet(tk.Toplevel):
 
                 row_values = [oid, addr, m, y, roww.fio(), roww.tbn()] + [
                     (None if hours[i] is None or abs(float(hours[i])) < 1e-12 else float(hours[i])) for i in range(31)
-                ] + [total_days if total_days else None, None if abs(total_hours) < 1e-12 else float(total_hours)]
+                ] + [total_days if total_days else None,
+                     None if abs(total_hours) < 1e-12 else float(total_hours)]
 
                 ws.append(row_values)
                 rlast = ws.max_row
@@ -675,8 +681,8 @@ class ObjectTimesheet(tk.Toplevel):
     # ---- справочник: обновить из окна ----
     def reload_spravochnik(self):
         cur_addr = self.cmb_address.get().strip()
-        cur_id = self.cmb_object_id.get().strip()
-        cur_fio = self.cmb_fio.get().strip()
+        cur_id   = self.cmb_object_id.get().strip()
+        cur_fio  = self.cmb_fio.get().strip()
 
         self._load_spr_data()
 
@@ -696,7 +702,7 @@ class ObjectTimesheet(tk.Toplevel):
             self.cmb_fio.set(cur_fio)
 
         messagebox.showinfo("Справочник", "Справочник обновлён.")
-
+        
 # ------------------------- Конвертер (запуск внешнего EXE) -------------------------
 
 def run_converter():
