@@ -1,17 +1,23 @@
-name: Build EXE
+name: Build EXE (Suite + Converter)
 
 on:
   workflow_dispatch:
   push:
     paths:
+      - main_app.py
       - timesheet_transformer.py
       - requirements.txt
       - icon.ico
       - .github/workflows/build.yml
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -35,30 +41,42 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Clean previous build
+      - name: Clean previous build folders
+        shell: pwsh
         run: |
           if (Test-Path dist)  { Remove-Item -Recurse -Force dist }
           if (Test-Path build) { Remove-Item -Recurse -Force build }
 
-      - name: Build windowed EXE (no console)
+      - name: Build TabelSuite (main menu, windowed)
+        shell: pwsh
         run: |
-          pyinstaller -F -w -i icon.ico --hidden-import=tkinter -n TabelConverter timesheet_transformer.py
-          pyinstaller -F -w -i icon.ico -n TabelSuite main_app.py
+          if (Test-Path "icon.ico") {
+            pyinstaller -F -w --clean --hidden-import=tkinter -i icon.ico -n TabelSuite main_app.py
+          } else {
+            Write-Host "icon.ico not found: building TabelSuite without custom icon"
+            pyinstaller -F -w --clean --hidden-import=tkinter -n TabelSuite main_app.py
+          }
 
-      - name: Build console EXE (with console)
+      - name: Build TabelConverter (converter, windowed)
+        shell: pwsh
         run: |
-          pyinstaller -F -i icon.ico --hidden-import=tkinter -n TabelConverter_console timesheet_transformer.py
+          if (Test-Path "icon.ico") {
+            pyinstaller -F -w --clean --hidden-import=tkinter -i icon.ico -n TabelConverter timesheet_transformer.py
+          } else {
+            Write-Host "icon.ico not found: building TabelConverter without custom icon"
+            pyinstaller -F -w --clean --hidden-import=tkinter -n TabelConverter timesheet_transformer.py
+          }
 
       - name: List dist
-        run: |
-          Get-ChildItem -Recurse dist
+        shell: pwsh
+        run: Get-ChildItem -Recurse dist
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: TabelConverter
+          name: TabelSuite_Pack
           path: |
+            dist/TabelSuite.exe
             dist/TabelConverter.exe
-            dist/TabelConverter_console.exe
           if-no-files-found: error
           retention-days: 14
