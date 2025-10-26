@@ -236,38 +236,48 @@ class RowWidget:
         self.on_delete(self)
 
 # ------------------------- Объектный табель (окно) -------------------------
+# ===== Автокомплит для ФИО =====
 class AutoCompleteCombobox(ttk.Combobox):
     def __init__(self, master=None, **kw):
         super().__init__(master, **kw)
         self._all_values: List[str] = []
-        self._var = self.cget("textvariable")
-        if not self._var:
+        # гарантируем textvariable
+        var = self.cget("textvariable")
+        if not var:
             self._var = tk.StringVar()
             self.configure(textvariable=self._var)
+        else:
+            self._var = self.master.nametowidget(var) if isinstance(var, str) else var
+        # события
         self.bind("<KeyRelease>", self._on_keyrelease)
-        # чтобы стрелка вниз открывала список
-        self.bind("<Down>", lambda e: self.event_generate("<Button-1>"))
+        self.bind("<Control-BackSpace>", self._clear_all)
+        # стрелка вниз — раскрыть
+        self.bind("<Down>", lambda e: self.event_generate("<Alt-Down>"))
 
     def set_completion_list(self, values: List[str]):
         self._all_values = list(values)
         self.configure(values=self._all_values)
 
+    def _clear_all(self, _=None):
+        self.delete(0, tk.END)
+        self.configure(values=self._all_values)
+
     def _on_keyrelease(self, event):
-        # не фильтруем служебные клавиши
-        if event.keysym in ("Up","Down","Left","Right","Home","End","Tab","Return","Escape"):
+        if event.keysym in ("Up", "Down", "Left", "Right", "Home", "End", "Return", "Escape", "Tab"):
             return
         typed = self.get().strip()
         if not typed:
             self.configure(values=self._all_values)
             return
-        # фильтр по подстроке (без учёта регистра)
         m = [x for x in self._all_values if typed.lower() in x.lower()]
         self.configure(values=m)
-        # открыть список, если есть чего показать
         if m:
-            # оставляем ввод как есть и раскрываем
-            self.event_generate("<Button-1>")
-            
+            try:
+                self.event_generate("<Alt-Down>")
+            except Exception:
+                pass
+
+# ===== Объектный табель (окно) =====
 class ObjectTimesheet(tk.Toplevel):
     def __init__(self, master):
         super().__init__(master)
@@ -289,9 +299,8 @@ class ObjectTimesheet(tk.Toplevel):
         # employees: [(fio, tbn, pos)], objects: [(id, addr)]
         self.employees, self.objects = load_spravochnik(self.spr_path)
         self.emp_names = [e[0] for e in self.employees]
-        # fio -> (tbn, pos) (если дубликаты ФИО — берём последний)
-        self.emp_info = {e[0]: (e[1], e[2] if len(e) > 2 else "") for e in self.employees}
-        # адрес -> [id...]
+        self.emp_info = {e[0]: (e[1], (e[2] if len(e) > 2 else "")) for e in self.employees}  # fio -> (tbn,pos)
+
         self.addr_to_ids = {}
         for oid, addr in self.objects:
             if not addr:
@@ -330,7 +339,7 @@ class ObjectTimesheet(tk.Toplevel):
         self.cmb_object_id.grid(row=0, column=7, sticky="w")
         self.cmb_object_id.bind("<<ComboboxSelected>>", lambda e: self._load_existing_rows())
 
-        # ФИО/Таб№/Должность для добавления (с автопоиском по ФИО)
+        # ФИО/Таб№/Должность (с автопоиском по ФИО)
         tk.Label(top, text="ФИО:").grid(row=1, column=0, sticky="w", pady=(8,0))
         self.fio_var = tk.StringVar()
         self.cmb_fio = AutoCompleteCombobox(top, textvariable=self.fio_var, width=30)
@@ -347,15 +356,14 @@ class ObjectTimesheet(tk.Toplevel):
         self.ent_pos = ttk.Entry(top, textvariable=self.pos_var, width=28, state="readonly")
         self.ent_pos.grid(row=1, column=5, sticky="w", pady=(8,0))
 
-        btns = tk.Frame(top)
-        btns.grid(row=1, column=6, columnspan=2, sticky="w", padx=(20,0), pady=(8,0))
+        btns = tk.Frame(top); btns.grid(row=1, column=6, columnspan=2, sticky="w", padx=(20,0), pady=(8,0))
         ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
         ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=1, padx=4)
         ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=2, padx=4)
         ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=3, padx=4)
         ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=4, padx=4)
 
-        # ---------- Шапка ----------
+        # Шапка (один canvas)
         header_wrap = tk.Frame(self); header_wrap.pack(fill="x", padx=8)
         self.header_canvas = tk.Canvas(header_wrap, height=26, borderwidth=0, highlightthickness=0)
         self.header_holder = tk.Frame(self.header_canvas)
@@ -370,7 +378,7 @@ class ObjectTimesheet(tk.Toplevel):
         tk.Label(self.header_holder, text="Часы", width=8, anchor="e").grid(row=0, column=34, padx=(6,2))
         tk.Label(self.header_holder, text="Действия", width=12, anchor="center").grid(row=0, column=35, columnspan=2, padx=2)
 
-        # ---------- Строки ----------
+        # Строки (один canvas)
         wrap = tk.Frame(self); wrap.pack(fill="both", expand=True, padx=8, pady=(4,8))
         self.rows_canvas = tk.Canvas(wrap, borderwidth=0, highlightthickness=0)
         self.rows_holder = tk.Frame(self.rows_canvas)
@@ -383,12 +391,11 @@ class ObjectTimesheet(tk.Toplevel):
         self.hscroll = ttk.Scrollbar(self, orient="horizontal", command=self._xscroll)
         self.hscroll.pack(fill="x", padx=8, pady=(0,8))
 
-        # Привязки скроллов
-       # шапка сообщает сюда своё xview — мы двигаем ползунок и rows_canvas
-       self.header_canvas.configure(xscrollcommand=lambda f,l: self._on_xview("header", f, l))
-       # строки сообщают сюда своё xview — двигаем ползунок и шапку
-       self.rows_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=lambda f,l: self._on_xview("rows", f, l))
+        # Привязки (строки — мастер, шапка следует)
+        self.rows_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=self._on_rows_xview)
+        self.header_canvas.configure(xscrollcommand=self._on_header_xview)
 
+        # Авто‑scrollregion
         self.rows_holder.bind("<Configure>", lambda e: self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")))
         self.header_holder.bind("<Configure>", lambda e: self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all")))
 
@@ -397,52 +404,56 @@ class ObjectTimesheet(tk.Toplevel):
         self.rows_canvas.bind("<Shift-MouseWheel>", self._on_shift_wheel)
         self.bind_all("<MouseWheel>", self._on_wheel_global)
         self.bind_all("<Shift-MouseWheel>", self._on_shift_wheel_global)
-        self.bind_all("<Button-4>", lambda e: self._on_wheel_global(e, linux=+1))
+        self.bind_all("<Button-4>", lambda e: self._on_wheel_global(e, linux=+1))   # X11
         self.bind_all("<Button-5>", lambda e: self._on_wheel_global(e, linux=-1))
 
-        # список строк
+        # Список строк
         self.rows: List[RowWidget] = []
 
         bottom = tk.Frame(self); bottom.pack(fill="x", padx=8, pady=(0,8))
         self.lbl_object_total = tk.Label(bottom, text="Сумма: дней 0 | часов 0", font=("Segoe UI", 10, "bold"))
         self.lbl_object_total.pack(side="left")
 
+    # ---- автозаполнение ФИО -> Таб№, Должность ----
     def _on_fio_select(self, *_):
         fio = self.fio_var.get().strip()
-        tbn, pos = self.emp_info.get(fio, ("",""))
-        self.ent_tbn.delete(0,"end"); self.ent_tbn.insert(0, tbn)
+        tbn, pos = self.emp_info.get(fio, ("", ""))
+        self.ent_tbn.delete(0, "end"); self.ent_tbn.insert(0, tbn)
         self.pos_var.set(pos)
 
-    # ---- прокрутка ----
-    def _on_xview(self, who: str, first: str, last: str):
-    # first/last — строки '0.00..1.00' от Tk
-    self.hscroll.set(first, last)
-    try:
-        frac = float(first)
-    except Exception:
-        return
-    # оба canvas держим в одной доле
-    if who == "rows":
-        # строки изменились -> тянем шапку
+    # ---- горизонтальная синхронизация ----
+    def _on_rows_xview(self, first, last):
+        """Строки изменили xview -> тянем шапку и ползунок."""
+        try:
+            frac = float(first)
+        except Exception:
+            frac = 0.0
         self.header_canvas.xview_moveto(frac)
-    else:
-        # шапка изменилась -> тянем строки
+        self.hscroll.set(first, last)
+
+    def _on_header_xview(self, first, last):
+        """Шапка изменила xview -> тянем строки и ползунок."""
+        try:
+            frac = float(first)
+        except Exception:
+            frac = 0.0
         self.rows_canvas.xview_moveto(frac)
+        self.hscroll.set(first, last)
 
     def _xscroll(self, *args):
-    # Двигаем только строки (мастер); _on_xview синхронизирует шапку
-    self.rows_canvas.xview(*args)
+        """Команда от горизонтального скроллбара — двигаем строки; шапка подтянется через _on_rows_xview."""
+        self.rows_canvas.xview(*args)
 
-    def _xscroll_set(self, *args):
-    self.hscroll.set(*args)
-    
+    # ---- вертикальная прокрутка ----
     def _on_wheel(self, event):
-        self.rows_canvas.yview_scroll(int(-1*(event.delta/120)), "units"); return "break"
-        
+        self.rows_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        return "break"
+
     def _on_shift_wheel(self, event):
         step = -1 if event.delta > 0 else 1
-        self._xscroll("scroll", step, "units"); return "break"
-        
+        self._xscroll("scroll", step, "units")
+        return "break"
+
     def _is_under_rows(self, widget) -> bool:
         try:
             w = widget
@@ -450,26 +461,33 @@ class ObjectTimesheet(tk.Toplevel):
                 if w is self.rows_holder:
                     return True
                 parent_name = w.winfo_parent()
-                if not parent_name: return False
+                if not parent_name:
+                    return False
                 w = self.nametowidget(parent_name)
         except Exception:
             return False
-            
+
     def _on_wheel_global(self, event, linux: int = 0):
-        if not self._is_under_rows(event.widget): return
+        if not self._is_under_rows(event.widget):  # колесо над чужим виджетом — игнор
+            return
         units = (-1 if linux < 0 else 1) if linux != 0 else int(-1*(event.delta/120))
-        if units == 0: units = -1 if event.delta > 0 else 1
-        self.rows_canvas.yview_scroll(units, "units"); return "break"
-        
+        if units == 0:
+            units = -1 if event.delta > 0 else 1
+        self.rows_canvas.yview_scroll(units, "units")
+        return "break"
+
     def _on_shift_wheel_global(self, event, linux: int = 0):
-        if not self._is_under_rows(event.widget): return
+        if not self._is_under_rows(event.widget):
+            return
         step = -1 if (linux > 0 or event.delta > 0) else 1
-        self._xscroll("scroll", step, "units"); return "break"
+        self._xscroll("scroll", step, "units")
+        return "break"
 
     # ---- события шапки ----
     def _on_period_change(self):
         self._update_rows_days_enabled()
         self._load_existing_rows()
+
     def _on_address_select(self, *_):
         addr = self.cmb_address.get().strip()
         ids = sorted(self.addr_to_ids.get(addr, []))
@@ -488,34 +506,46 @@ class ObjectTimesheet(tk.Toplevel):
         fio = self.fio_var.get().strip()
         tbn = self.ent_tbn.get().strip()
         if not fio:
-            messagebox.showwarning("Объектный табель", "Выберите ФИО."); return
+            messagebox.showwarning("Объектный табель", "Выберите ФИО.")
+            return
         w = RowWidget(self.rows_holder, len(self.rows)+1, fio, tbn, self.get_year_month, self.delete_row)
         y, m = self.get_year_month(); w.update_days_enabled(y, m)
-        self.rows.append(w); self._regrid_rows(); self._recalc_object_total()
+        self.rows.append(w)
+        self._regrid_rows(); self._recalc_object_total()
+
     def fill_52_all(self):
-        for r in self.rows: r.fill_52()
+        for r in self.rows:
+            r.fill_52()
         self._recalc_object_total()
+
     def delete_row(self, roww: RowWidget):
         try: self.rows.remove(roww)
         except: pass
-        roww.destroy(); self._regrid_rows(); self._recalc_object_total()
+        roww.destroy()
+        self._regrid_rows(); self._recalc_object_total()
+
     def clear_all_rows(self):
-        if not self.rows: return
-        if not messagebox.askyesno("Объектный табель", "Очистить все строки?"): return
+        if not self.rows:
+            return
+        if not messagebox.askyesno("Объектный табель", "Очистить все строки?"):
+            return
         for r in self.rows: r.destroy()
-        self.rows.clear(); self._regrid_rows(); self._recalc_object_total()
+        self.rows.clear()
+        self._regrid_rows(); self._recalc_object_total()
+
     def _regrid_rows(self):
-    for i, r in enumerate(self.rows, start=0):
-        r.grid(i)
-    self.after(30, lambda: (
-        self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")),
-        self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all")),
-        # шапка повторяет текущую долю строк
-        self.header_canvas.xview_moveto(self.rows_canvas.xview()[0])
-    ))
+        for i, r in enumerate(self.rows, start=0): r.grid(i)
+        self.after(30, lambda: (
+            self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")),
+            self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all")),
+            # выровнять шапку под текущую долю строк
+            self.header_canvas.xview_moveto(self.rows_canvas.xview()[0])
+        ))
+
     def _update_rows_days_enabled(self):
         y, m = self.get_year_month()
         for r in self.rows: r.update_days_enabled(y, m)
+
     def _recalc_object_total(self):
         tot_h = 0.0; tot_d = 0
         for r in self.rows:
@@ -527,7 +557,7 @@ class ObjectTimesheet(tk.Toplevel):
         sh = f"{tot_h:.2f}".rstrip("0").rstrip(".")
         self.lbl_object_total.config(text=f"Сумма: дней {tot_d} | часов {sh}")
 
-    # ---- загрузка/сохранение ----
+    # ---- загрузка/сохранение/справочник — как в вашей текущей версии ----
     def _current_file_path(self) -> Optional[Path]:
         addr = self.cmb_address.get().strip()
         oid = self.cmb_object_id.get().strip()
@@ -564,11 +594,9 @@ class ObjectTimesheet(tk.Toplevel):
         return ws2
 
     def _load_existing_rows(self):
-        for r in self.rows:
-            r.destroy()
+        for r in self.rows: r.destroy()
         self.rows.clear()
-        self._regrid_rows()
-        self._recalc_object_total()
+        self._regrid_rows(); self._recalc_object_total()
 
         fpath = self._current_file_path()
         if not fpath or not fpath.exists():
@@ -586,29 +614,22 @@ class ObjectTimesheet(tk.Toplevel):
                 row_y = int(ws.cell(r,4).value or 0)
                 fio = (ws.cell(r,5).value or "")
                 tbn = (ws.cell(r,6).value or "")
-                if row_m != m or row_y != y:
-                    continue
+                if row_m != m or row_y != y: continue
                 if oid:
-                    if row_oid != oid: 
-                        continue
+                    if row_oid != oid:  continue
                 else:
-                    if row_addr != addr:
-                        continue
+                    if row_addr != addr: continue
                 hours: List[Optional[float]] = []
                 for c in range(7, 7+31):
                     v = ws.cell(r, c).value
-                    try:
-                        n = float(v) if isinstance(v,(int,float)) else parse_hours_value(v)
-                    except:
-                        n = None
+                    try: n = float(v) if isinstance(v,(int,float)) else parse_hours_value(v)
+                    except: n = None
                     hours.append(n)
                 roww = RowWidget(self.rows_holder, len(self.rows)+1, fio, tbn, self.get_year_month, self.delete_row)
-                y2, m2 = self.get_year_month()
-                roww.update_days_enabled(y2, m2)
+                roww.update_days_enabled(y, m)
                 roww.set_hours(hours)
                 self.rows.append(roww)
-            self._regrid_rows()
-            self._recalc_object_total()
+            self._regrid_rows(); self._recalc_object_total()
         except Exception as e:
             messagebox.showerror("Загрузка", f"Не удалось загрузить существующие строки:\n{e}")
 
@@ -628,10 +649,10 @@ class ObjectTimesheet(tk.Toplevel):
             else:
                 fpath.parent.mkdir(parents=True, exist_ok=True)
                 wb = Workbook()
-                if wb.active:
-                    wb.remove(wb.active)
+                if wb.active: wb.remove(wb.active)
             ws = self._ensure_sheet(wb)
 
+            # удалить строки этого объекта и периода
             to_del = []
             for r in range(2, ws.max_row+1):
                 row_oid  = (ws.cell(r,1).value or "")
@@ -640,8 +661,7 @@ class ObjectTimesheet(tk.Toplevel):
                 row_y = int(ws.cell(r,4).value or 0)
                 if row_m == m and row_y == y and ((oid and row_oid == oid) or (not oid and row_addr == addr)):
                     to_del.append(r)
-            for r in reversed(to_del):
-                ws.delete_rows(r, 1)
+            for r in reversed(to_del): ws.delete_rows(r, 1)
 
             idx_total_days  = 7 + 31
             idx_total_hours = 7 + 31 + 1
@@ -662,11 +682,9 @@ class ObjectTimesheet(tk.Toplevel):
                     v = ws.cell(rlast, c).value
                     if isinstance(v,(int,float)):
                         ws.cell(rlast, c).number_format = "General"
-                v_days = ws.cell(rlast, idx_total_days).value
-                if isinstance(v_days,(int,float)):
+                if isinstance(ws.cell(rlast, idx_total_days).value,(int,float)):
                     ws.cell(rlast, idx_total_days).number_format = "0"
-                v_hours = ws.cell(rlast, idx_total_hours).value
-                if isinstance(v_hours,(int,float)):
+                if isinstance(ws.cell(rlast, idx_total_hours).value,(int,float)):
                     ws.cell(rlast, idx_total_hours).number_format = "General"
 
             wb.save(fpath)
@@ -678,7 +696,7 @@ class ObjectTimesheet(tk.Toplevel):
     def reload_spravochnik(self):
         cur_addr = self.cmb_address.get().strip()
         cur_id   = self.cmb_object_id.get().strip()
-        cur_fio  = self.cmb_fio.get().strip()
+        cur_fio  = self.fio_var.get().strip()
 
         self._load_spr_data()
 
@@ -689,38 +707,15 @@ class ObjectTimesheet(tk.Toplevel):
             if cur_id and cur_id in (self.cmb_object_id.cget("values") or []):
                 self.cmb_object_id.set(cur_id)
         else:
-            self.cmb_address.set("")
-            self.cmb_object_id.config(values=[])
-            self.cmb_object_id.set("")
+            self.cmb_address.set(""); self.cmb_object_id.config(values=[]); self.cmb_object_id.set("")
 
-        self.cmb_fio.config(values=[e[0] for e in self.employees])
-        if cur_fio and cur_fio in [e[0] for e in self.employees]:
-            self.cmb_fio.set(cur_fio)
-
-        messagebox.showinfo("Справочник", "Справочник обновлён.")
-
-    # ---- обновление справочника ----
-    def reload_spravochnik(self):
-        cur_addr = self.cmb_address.get().strip()
-        cur_id   = self.cmb_object_id.get().strip()
-        cur_fio  = self.cmb_fio.get().strip()
-
-        self._load_spr_data()
-
-        self.cmb_address.config(values=self.address_options)
-        if cur_addr in self.address_options:
-            self.cmb_address.set(cur_addr)
-            self._on_address_select()
-            if cur_id and cur_id in (self.cmb_object_id.cget("values") or []):
-                self.cmb_object_id.set(cur_id)
+        # обновим ФИО/Таб№/Должность
+        self.cmb_fio.set_completion_list(self.emp_names)
+        if cur_fio in self.emp_info:
+            self.fio_var.set(cur_fio)
+            self._on_fio_select()
         else:
-            self.cmb_address.set("")
-            self.cmb_object_id.config(values=[])
-            self.cmb_object_id.set("")
-
-        self.cmb_fio.config(values=[e[0] for e in self.employees])
-        if cur_fio and cur_fio in [e[0] for e in self.employees]:
-            self.cmb_fio.set(cur_fio)
+            self.fio_var.set(""); self.ent_tbn.delete(0,"end"); self.pos_var.set("")
 
         messagebox.showinfo("Справочник", "Справочник обновлён.")
         
