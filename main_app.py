@@ -236,7 +236,38 @@ class RowWidget:
         self.on_delete(self)
 
 # ------------------------- Объектный табель (окно) -------------------------
+class AutoCompleteCombobox(ttk.Combobox):
+    def __init__(self, master=None, **kw):
+        super().__init__(master, **kw)
+        self._all_values: List[str] = []
+        self._var = self.cget("textvariable")
+        if not self._var:
+            self._var = tk.StringVar()
+            self.configure(textvariable=self._var)
+        self.bind("<KeyRelease>", self._on_keyrelease)
+        # чтобы стрелка вниз открывала список
+        self.bind("<Down>", lambda e: self.event_generate("<Button-1>"))
 
+    def set_completion_list(self, values: List[str]):
+        self._all_values = list(values)
+        self.configure(values=self._all_values)
+
+    def _on_keyrelease(self, event):
+        # не фильтруем служебные клавиши
+        if event.keysym in ("Up","Down","Left","Right","Home","End","Tab","Return","Escape"):
+            return
+        typed = self.get().strip()
+        if not typed:
+            self.configure(values=self._all_values)
+            return
+        # фильтр по подстроке (без учёта регистра)
+        m = [x for x in self._all_values if typed.lower() in x.lower()]
+        self.configure(values=m)
+        # открыть список, если есть чего показать
+        if m:
+            # оставляем ввод как есть и раскрываем
+            self.event_generate("<Button-1>")
+            
 class ObjectTimesheet(tk.Toplevel):
     def __init__(self, master):
         super().__init__(master)
@@ -302,10 +333,10 @@ class ObjectTimesheet(tk.Toplevel):
         # ФИО/Таб№/Должность для добавления (с автопоиском по ФИО)
         tk.Label(top, text="ФИО:").grid(row=1, column=0, sticky="w", pady=(8,0))
         self.fio_var = tk.StringVar()
-        self.cmb_fio = ttk.Combobox(top, textvariable=self.fio_var, values=self.emp_names, width=30)
+        self.cmb_fio = AutoCompleteCombobox(top, textvariable=self.fio_var, width=30)
+        self.cmb_fio.set_completion_list(self.emp_names)
         self.cmb_fio.grid(row=1, column=1, sticky="w", pady=(8,0))
         self.cmb_fio.bind("<<ComboboxSelected>>", self._on_fio_select)
-        self.cmb_fio.bind("<KeyRelease>", self._on_fio_typed)
 
         tk.Label(top, text="Табельный №:").grid(row=1, column=2, sticky="w", padx=(16,4), pady=(8,0))
         self.ent_tbn = ttk.Entry(top, width=14)
@@ -353,8 +384,10 @@ class ObjectTimesheet(tk.Toplevel):
         self.hscroll.pack(fill="x", padx=8, pady=(0,8))
 
         # Привязки скроллов
-        self.rows_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=self._xscroll_set)
-        self.header_canvas.configure(xscrollcommand=self._xscroll_set)
+       # шапка сообщает сюда своё xview — мы двигаем ползунок и rows_canvas
+       self.header_canvas.configure(xscrollcommand=lambda f,l: self._on_xview("header", f, l))
+       # строки сообщают сюда своё xview — двигаем ползунок и шапку
+       self.rows_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=lambda f,l: self._on_xview("rows", f, l))
 
         self.rows_holder.bind("<Configure>", lambda e: self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")))
         self.header_holder.bind("<Configure>", lambda e: self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all")))
@@ -374,24 +407,6 @@ class ObjectTimesheet(tk.Toplevel):
         self.lbl_object_total = tk.Label(bottom, text="Сумма: дней 0 | часов 0", font=("Segoe UI", 10, "bold"))
         self.lbl_object_total.pack(side="left")
 
-    # ---- автопоиск по ФИО ----
-    def _on_fio_typed(self, event):
-        # фильтр по подстроке (регистр не важен)
-        typed = self.fio_var.get().strip()
-        if not typed:
-            self.cmb_fio.config(values=self.emp_names)
-            self.ent_tbn.delete(0, "end"); self.pos_var.set("")
-            return
-        m = [n for n in self.emp_names if typed.lower() in n.lower()]
-        self.cmb_fio.config(values=m)
-        # если точное совпадение — подставим таб.№ и должность
-        if typed in self.emp_info:
-            tbn, pos = self.emp_info.get(typed, ("",""))
-            self.ent_tbn.delete(0,"end"); self.ent_tbn.insert(0, tbn)
-            self.pos_var.set(pos)
-        else:
-            self.ent_tbn.delete(0, "end"); self.pos_var.set("")
-
     def _on_fio_select(self, *_):
         fio = self.fio_var.get().strip()
         tbn, pos = self.emp_info.get(fio, ("",""))
@@ -399,16 +414,35 @@ class ObjectTimesheet(tk.Toplevel):
         self.pos_var.set(pos)
 
     # ---- прокрутка ----
-    def _xscroll_set(self, *args):
-        self.hscroll.set(*args)
+    def _on_xview(self, who: str, first: str, last: str):
+    # first/last — строки '0.00..1.00' от Tk
+    self.hscroll.set(first, last)
+    try:
+        frac = float(first)
+    except Exception:
+        return
+    # оба canvas держим в одной доле
+    if who == "rows":
+        # строки изменились -> тянем шапку
+        self.header_canvas.xview_moveto(frac)
+    else:
+        # шапка изменилась -> тянем строки
+        self.rows_canvas.xview_moveto(frac)
+
     def _xscroll(self, *args):
-        self.header_canvas.xview(*args)
-        self.rows_canvas.xview(*args)
+    # Двигаем только строки (мастер); _on_xview синхронизирует шапку
+    self.rows_canvas.xview(*args)
+
+    def _xscroll_set(self, *args):
+    self.hscroll.set(*args)
+    
     def _on_wheel(self, event):
         self.rows_canvas.yview_scroll(int(-1*(event.delta/120)), "units"); return "break"
+        
     def _on_shift_wheel(self, event):
         step = -1 if event.delta > 0 else 1
         self._xscroll("scroll", step, "units"); return "break"
+        
     def _is_under_rows(self, widget) -> bool:
         try:
             w = widget
@@ -420,11 +454,13 @@ class ObjectTimesheet(tk.Toplevel):
                 w = self.nametowidget(parent_name)
         except Exception:
             return False
+            
     def _on_wheel_global(self, event, linux: int = 0):
         if not self._is_under_rows(event.widget): return
         units = (-1 if linux < 0 else 1) if linux != 0 else int(-1*(event.delta/120))
         if units == 0: units = -1 if event.delta > 0 else 1
         self.rows_canvas.yview_scroll(units, "units"); return "break"
+        
     def _on_shift_wheel_global(self, event, linux: int = 0):
         if not self._is_under_rows(event.widget): return
         step = -1 if (linux > 0 or event.delta > 0) else 1
@@ -469,11 +505,14 @@ class ObjectTimesheet(tk.Toplevel):
         for r in self.rows: r.destroy()
         self.rows.clear(); self._regrid_rows(); self._recalc_object_total()
     def _regrid_rows(self):
-        for i, r in enumerate(self.rows, start=0): r.grid(i)
-        self.after(30, lambda: (
-            self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")),
-            self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all"))
-        ))
+    for i, r in enumerate(self.rows, start=0):
+        r.grid(i)
+    self.after(30, lambda: (
+        self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")),
+        self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all")),
+        # шапка повторяет текущую долю строк
+        self.header_canvas.xview_moveto(self.rows_canvas.xview()[0])
+    ))
     def _update_rows_days_enabled(self):
         y, m = self.get_year_month()
         for r in self.rows: r.update_days_enabled(y, m)
