@@ -46,9 +46,9 @@ def ensure_spravochnik(path: Path):
     # Лист Сотрудники
     ws1 = wb.active
     ws1.title = "Сотрудники"
-    ws1.append(["ФИО", "Табельный №"])
-    ws1.append(["Иванов И. И.", "ST00-00001"])
-    ws1.append(["Петров П. П.", "ST00-00002"])
+    ws1.append(["ФИО", "Табельный №", "Должность"])
+    ws1.append(["Иванов И. И.", "ST00-00001", "Слесарь"])
+    ws1.append(["Петров П. П.", "ST00-00002", "Электромонтер"])
     # Лист Объекты (ID + Адрес)
     ws2 = wb.create_sheet("Объекты")
     ws2.append(["ID объекта", "Адрес"])
@@ -56,41 +56,46 @@ def ensure_spravochnik(path: Path):
     ws2.append(["OBJ-0002", "пр. Строителей, 25"])
     wb.save(path)
 
-def load_spravochnik(path: Path) -> Tuple[List[Tuple[str,str]], List[Tuple[str,str]]]:
+def load_spravochnik(path: Path) -> Tuple[List[Tuple[str,str,str]], List[Tuple[str,str]]]:
     """
     Возвращает:
-    - employees: [(ФИО, Таб№)]
+    - employees: [(ФИО, Таб№, Должность)]
     - objects:   [(ID, Адрес)]
-    Поддерживает старый справочник с одной колонкой 'Адрес' (ID будет пустым).
+    Поддерживает старый справочник с одной колонкой 'Адрес' и
+    с двумя колонками в 'Сотрудники' (Должность будет пустой).
     """
     ensure_spravochnik(path)
     wb = load_workbook(path)
-    employees: List[Tuple[str,str]] = []
+    employees: List[Tuple[str,str,str]] = []
     objects: List[Tuple[str,str]] = []
+
     # Сотрудники
     if "Сотрудники" in wb.sheetnames:
         ws = wb["Сотрудники"]
+        hdr = [str(c or "").strip().lower() for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
+        have_pos = ("должность" in hdr) or (len(hdr) >= 3)
         for r in ws.iter_rows(min_row=2, values_only=True):
             fio = (r[0] or "").strip()
-            tbn = (r[1] or "").strip()
+            tbn = (r[1] or "").strip() if len(r) > 1 else ""
+            pos = (r[2] or "").strip() if have_pos and len(r) > 2 else ""
             if fio:
-                employees.append((fio, tbn))
+                employees.append((fio, tbn, pos))
+
     # Объекты
     if "Объекты" in wb.sheetnames:
         ws = wb["Объекты"]
         hdr = [str(c or "").strip().lower() for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
-        two_cols = ("id объекта" in hdr) or (len(hdr) >= 2)
-        if two_cols:
-            for r in ws.iter_rows(min_row=2, values_only=True):
+        have_two = ("id объекта" in hdr) or (len(hdr) >= 2)
+        for r in ws.iter_rows(min_row=2, values_only=True):
+            if have_two:
                 oid = (r[0] or "").strip()
                 addr = (r[1] or "").strip() if len(r) > 1 else ""
-                if oid or addr:
-                    objects.append((oid, addr))
-        else:
-            for r in ws.iter_rows(min_row=2, values_only=True):
+            else:
+                oid = ""
                 addr = (r[0] or "").strip()
-                if addr:
-                    objects.append(("", addr))
+            if oid or addr:
+                objects.append((oid, addr))
+
     return employees, objects
 
 def parse_hours_value(v: Any) -> Optional[float]:
@@ -250,7 +255,12 @@ class ObjectTimesheet(tk.Toplevel):
 
     # ---- справочник ----
     def _load_spr_data(self):
+        # employees: [(fio, tbn, pos)], objects: [(id, addr)]
         self.employees, self.objects = load_spravochnik(self.spr_path)
+        self.emp_names = [e[0] for e in self.employees]
+        # fio -> (tbn, pos) (если дубликаты ФИО — берём последний)
+        self.emp_info = {e[0]: (e[1], e[2] if len(e) > 2 else "") for e in self.employees}
+        # адрес -> [id...]
         self.addr_to_ids = {}
         for oid, addr in self.objects:
             if not addr:
@@ -289,23 +299,32 @@ class ObjectTimesheet(tk.Toplevel):
         self.cmb_object_id.grid(row=0, column=7, sticky="w")
         self.cmb_object_id.bind("<<ComboboxSelected>>", lambda e: self._load_existing_rows())
 
-        # ФИО/Таб№ для добавления
+        # ФИО/Таб№/Должность для добавления (с автопоиском по ФИО)
         tk.Label(top, text="ФИО:").grid(row=1, column=0, sticky="w", pady=(8,0))
-        self.cmb_fio = ttk.Combobox(top, values=[e[0] for e in self.employees], width=30)
+        self.fio_var = tk.StringVar()
+        self.cmb_fio = ttk.Combobox(top, textvariable=self.fio_var, values=self.emp_names, width=30)
         self.cmb_fio.grid(row=1, column=1, sticky="w", pady=(8,0))
         self.cmb_fio.bind("<<ComboboxSelected>>", self._on_fio_select)
+        self.cmb_fio.bind("<KeyRelease>", self._on_fio_typed)
 
         tk.Label(top, text="Табельный №:").grid(row=1, column=2, sticky="w", padx=(16,4), pady=(8,0))
-        self.ent_tbn = ttk.Entry(top, width=14); self.ent_tbn.grid(row=1, column=3, sticky="w", pady=(8,0))
+        self.ent_tbn = ttk.Entry(top, width=14)
+        self.ent_tbn.grid(row=1, column=3, sticky="w", pady=(8,0))
 
-        btns = tk.Frame(top); btns.grid(row=1, column=4, columnspan=4, sticky="w", padx=(20,0), pady=(8,0))
+        tk.Label(top, text="Должность:").grid(row=1, column=4, sticky="w", padx=(16,4), pady=(8,0))
+        self.pos_var = tk.StringVar()
+        self.ent_pos = ttk.Entry(top, textvariable=self.pos_var, width=28, state="readonly")
+        self.ent_pos.grid(row=1, column=5, sticky="w", pady=(8,0))
+
+        btns = tk.Frame(top)
+        btns.grid(row=1, column=6, columnspan=2, sticky="w", padx=(20,0), pady=(8,0))
         ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
         ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=1, padx=4)
         ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=2, padx=4)
         ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=3, padx=4)
         ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=4, padx=4)
 
-        # ---------- Шапка (один canvas) ----------
+        # ---------- Шапка ----------
         header_wrap = tk.Frame(self); header_wrap.pack(fill="x", padx=8)
         self.header_canvas = tk.Canvas(header_wrap, height=26, borderwidth=0, highlightthickness=0)
         self.header_holder = tk.Frame(self.header_canvas)
@@ -320,7 +339,7 @@ class ObjectTimesheet(tk.Toplevel):
         tk.Label(self.header_holder, text="Часы", width=8, anchor="e").grid(row=0, column=34, padx=(6,2))
         tk.Label(self.header_holder, text="Действия", width=12, anchor="center").grid(row=0, column=35, columnspan=2, padx=2)
 
-        # ---------- Строки (один canvas) ----------
+        # ---------- Строки ----------
         wrap = tk.Frame(self); wrap.pack(fill="both", expand=True, padx=8, pady=(4,8))
         self.rows_canvas = tk.Canvas(wrap, borderwidth=0, highlightthickness=0)
         self.rows_holder = tk.Frame(self.rows_canvas)
@@ -333,47 +352,63 @@ class ObjectTimesheet(tk.Toplevel):
         self.hscroll = ttk.Scrollbar(self, orient="horizontal", command=self._xscroll)
         self.hscroll.pack(fill="x", padx=8, pady=(0,8))
 
-        # Привязки
+        # Привязки скроллов
         self.rows_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=self._xscroll_set)
         self.header_canvas.configure(xscrollcommand=self._xscroll_set)
 
-        # Scrollregion авто
         self.rows_holder.bind("<Configure>", lambda e: self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")))
         self.header_holder.bind("<Configure>", lambda e: self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all")))
 
-        # Прокрутка колёсиком (над любым виджетом внутри rows_holder)
+        # Колёсико
         self.rows_canvas.bind("<MouseWheel>", self._on_wheel)
         self.rows_canvas.bind("<Shift-MouseWheel>", self._on_shift_wheel)
         self.bind_all("<MouseWheel>", self._on_wheel_global)
         self.bind_all("<Shift-MouseWheel>", self._on_shift_wheel_global)
-        self.bind_all("<Button-4>", lambda e: self._on_wheel_global(e, linux=+1))   # X11
+        self.bind_all("<Button-4>", lambda e: self._on_wheel_global(e, linux=+1))
         self.bind_all("<Button-5>", lambda e: self._on_wheel_global(e, linux=-1))
 
         # список строк
         self.rows: List[RowWidget] = []
 
-        # Итоги
         bottom = tk.Frame(self); bottom.pack(fill="x", padx=8, pady=(0,8))
         self.lbl_object_total = tk.Label(bottom, text="Сумма: дней 0 | часов 0", font=("Segoe UI", 10, "bold"))
         self.lbl_object_total.pack(side="left")
 
+    # ---- автопоиск по ФИО ----
+    def _on_fio_typed(self, event):
+        # фильтр по подстроке (регистр не важен)
+        typed = self.fio_var.get().strip()
+        if not typed:
+            self.cmb_fio.config(values=self.emp_names)
+            self.ent_tbn.delete(0, "end"); self.pos_var.set("")
+            return
+        m = [n for n in self.emp_names if typed.lower() in n.lower()]
+        self.cmb_fio.config(values=m)
+        # если точное совпадение — подставим таб.№ и должность
+        if typed in self.emp_info:
+            tbn, pos = self.emp_info.get(typed, ("",""))
+            self.ent_tbn.delete(0,"end"); self.ent_tbn.insert(0, tbn)
+            self.pos_var.set(pos)
+        else:
+            self.ent_tbn.delete(0, "end"); self.pos_var.set("")
+
+    def _on_fio_select(self, *_):
+        fio = self.fio_var.get().strip()
+        tbn, pos = self.emp_info.get(fio, ("",""))
+        self.ent_tbn.delete(0,"end"); self.ent_tbn.insert(0, tbn)
+        self.pos_var.set(pos)
+
     # ---- прокрутка ----
     def _xscroll_set(self, *args):
         self.hscroll.set(*args)
-
     def _xscroll(self, *args):
         self.header_canvas.xview(*args)
         self.rows_canvas.xview(*args)
-
     def _on_wheel(self, event):
-        self.rows_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        return "break"
-
+        self.rows_canvas.yview_scroll(int(-1*(event.delta/120)), "units"); return "break"
     def _on_shift_wheel(self, event):
         step = -1 if event.delta > 0 else 1
-        self._xscroll("scroll", step, "units")
-        return "break"
-
+        self._xscroll("scroll", step, "units"); return "break"
     def _is_under_rows(self, widget) -> bool:
         try:
             w = widget
@@ -381,52 +416,32 @@ class ObjectTimesheet(tk.Toplevel):
                 if w is self.rows_holder:
                     return True
                 parent_name = w.winfo_parent()
-                if not parent_name:
-                    return False
+                if not parent_name: return False
                 w = self.nametowidget(parent_name)
         except Exception:
             return False
-
     def _on_wheel_global(self, event, linux: int = 0):
-        # если колёсико крутят над Entry/Label в rows_holder — прокручиваем canvas
-        if not self._is_under_rows(event.widget):
-            return
+        if not self._is_under_rows(event.widget): return
         units = (-1 if linux < 0 else 1) if linux != 0 else int(-1*(event.delta/120))
-        if units == 0:
-            units = -1 if event.delta > 0 else 1
-        self.rows_canvas.yview_scroll(units, "units")
-        return "break"
-
+        if units == 0: units = -1 if event.delta > 0 else 1
+        self.rows_canvas.yview_scroll(units, "units"); return "break"
     def _on_shift_wheel_global(self, event, linux: int = 0):
-        if not self._is_under_rows(event.widget):
-            return
+        if not self._is_under_rows(event.widget): return
         step = -1 if (linux > 0 or event.delta > 0) else 1
-        self._xscroll("scroll", step, "units")
-        return "break"
+        self._xscroll("scroll", step, "units"); return "break"
 
     # ---- события шапки ----
     def _on_period_change(self):
         self._update_rows_days_enabled()
         self._load_existing_rows()
-
     def _on_address_select(self, *_):
         addr = self.cmb_address.get().strip()
         ids = sorted(self.addr_to_ids.get(addr, []))
         if ids:
-            self.cmb_object_id.config(state="readonly", values=ids)
-            self.cmb_object_id.set(ids[0])
+            self.cmb_object_id.config(state="readonly", values=ids); self.cmb_object_id.set(ids[0])
         else:
-            self.cmb_object_id.config(state="normal", values=[])
-            self.cmb_object_id.set("")
+            self.cmb_object_id.config(state="normal", values=[]); self.cmb_object_id.set("")
         self._load_existing_rows()
-
-    def _on_fio_select(self, *_):
-        fio = self.cmb_fio.get().strip()
-        tbn = ""
-        for f, num in self.employees:
-            if f == fio:
-                tbn = num; break
-        self.ent_tbn.delete(0,"end"); self.ent_tbn.insert(0, tbn)
 
     # ---- вспомогательные ----
     def get_year_month(self) -> Tuple[int,int]:
@@ -434,70 +449,46 @@ class ObjectTimesheet(tk.Toplevel):
 
     # ---- операции со строками ----
     def add_row(self):
-        fio = self.cmb_fio.get().strip()
+        fio = self.fio_var.get().strip()
         tbn = self.ent_tbn.get().strip()
         if not fio:
-            messagebox.showwarning("Объектный табель", "Выберите ФИО.")
-            return
+            messagebox.showwarning("Объектный табель", "Выберите ФИО."); return
         w = RowWidget(self.rows_holder, len(self.rows)+1, fio, tbn, self.get_year_month, self.delete_row)
-        y, m = self.get_year_month()
-        w.update_days_enabled(y, m)
-        self.rows.append(w)
-        self._regrid_rows(); self._recalc_object_total()
-
+        y, m = self.get_year_month(); w.update_days_enabled(y, m)
+        self.rows.append(w); self._regrid_rows(); self._recalc_object_total()
     def fill_52_all(self):
-        for r in self.rows:
-            r.fill_52()
+        for r in self.rows: r.fill_52()
         self._recalc_object_total()
-
     def delete_row(self, roww: RowWidget):
-        try:
-            self.rows.remove(roww)
-        except:
-            pass
-        roww.destroy()
-        self._regrid_rows(); self._recalc_object_total()
-
+        try: self.rows.remove(roww)
+        except: pass
+        roww.destroy(); self._regrid_rows(); self._recalc_object_total()
     def clear_all_rows(self):
-        if not self.rows:
-            return
-        if not messagebox.askyesno("Объектный табель", "Очистить все строки?"):
-            return
-        for r in self.rows:
-            r.destroy()
-        self.rows.clear()
-        self._regrid_rows(); self._recalc_object_total()
-
+        if not self.rows: return
+        if not messagebox.askyesno("Объектный табель", "Очистить все строки?"): return
+        for r in self.rows: r.destroy()
+        self.rows.clear(); self._regrid_rows(); self._recalc_object_total()
     def _regrid_rows(self):
-        for i, r in enumerate(self.rows, start=0):
-            r.grid(i)
+        for i, r in enumerate(self.rows, start=0): r.grid(i)
         self.after(30, lambda: (
             self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")),
             self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all"))
         ))
-
     def _update_rows_days_enabled(self):
         y, m = self.get_year_month()
-        for r in self.rows:
-            r.update_days_enabled(y, m)
-
+        for r in self.rows: r.update_days_enabled(y, m)
     def _recalc_object_total(self):
-        tot_hours = 0.0
-        tot_days = 0
+        tot_h = 0.0; tot_d = 0
         for r in self.rows:
-            try:
-                h = float(r.lbl_total.cget("text").replace(",", ".") or 0)
-            except:
-                h = 0.0
-            try:
-                d = int(r.lbl_days.cget("text") or 0)
-            except:
-                d = 0
-            tot_hours += h; tot_days += d
-        sh = f"{tot_hours:.2f}".rstrip("0").rstrip(".")
-        self.lbl_object_total.config(text=f"Сумма: дней {tot_days} | часов {sh}")
+            try: h = float(r.lbl_total.cget("text").replace(",", ".") or 0)
+            except: h = 0.0
+            try: d = int(r.lbl_days.cget("text") or 0)
+            except: d = 0
+            tot_h += h; tot_d += d
+        sh = f"{tot_h:.2f}".rstrip("0").rstrip(".")
+        self.lbl_object_total.config(text=f"Сумма: дней {tot_d} | часов {sh}")
 
-    # ---- загрузка/сохранение (как раньше) ----
+    # ---- загрузка/сохранение ----
     def _current_file_path(self) -> Optional[Path]:
         addr = self.cmb_address.get().strip()
         oid = self.cmb_object_id.get().strip()
