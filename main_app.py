@@ -361,7 +361,7 @@ class ObjectTimesheet(tk.Toplevel):
         self.ent_pos.grid(row=1, column=5, sticky="w", pady=(8, 0))
 
         btns = tk.Frame(top)
-        btns.grid(row=2, column=0, sticky="w", padx=(20, 0), pady=(8, 0))
+        btns.grid(row=2, column=0, columnspan=2, sticky="w", padx=(20, 0), pady=(8, 0))
         ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
         ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=1, padx=4)
         ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=2, padx=4)
