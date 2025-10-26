@@ -125,8 +125,7 @@ def parse_hours_value(v: Any) -> Optional[float]:
     except:
         return None
 
-# ------------------------- Реестр строк: виджет строки -------------------------
-
+# ------------------------- Ряд реестра (строка) -------------------------
 class RowWidget:
     def __init__(self, parent, idx: int, fio: str, tbn: str, get_year_month_callable, on_delete_callable):
         self.parent = parent
@@ -136,7 +135,7 @@ class RowWidget:
 
         self.frame = tk.Frame(parent, bd=0)
 
-        # ФИО / Таб№
+        # ФИО / Таб.№
         self.lbl_fio = tk.Label(self.frame, text=fio, width=28, anchor="w")
         self.lbl_fio.grid(row=0, column=0, padx=2, pady=1, sticky="w")
 
@@ -149,23 +148,35 @@ class RowWidget:
             e = tk.Entry(self.frame, width=5, justify="center")
             e.grid(row=0, column=1 + d, padx=1, pady=1)
             e.bind("<FocusOut>", lambda ev, _d=d: self.update_total())
-            # Блокируем вставку по среднему клику (Tk по умолчанию вставляет из selection)
+            # блокируем вставку по среднему клику (чтобы не вставлялось ФИО)
             e.bind("<Button-2>", lambda ev: "break")
             e.bind("<ButtonRelease-2>", lambda ev: "break")
             self.day_entries.append(e)
 
         # Итоги и кнопки
         self.lbl_days = tk.Label(self.frame, text="0", width=6, anchor="e")
-        self.lbl_days.grid(row=0, column=33, padx=(6,2), pady=1)
+        self.lbl_days.grid(row=0, column=33, padx=(6, 2), pady=1)
 
         self.lbl_total = tk.Label(self.frame, text="0", width=8, anchor="e")
-        self.lbl_total.grid(row=0, column=34, padx=(6,2), pady=1)
+        self.lbl_total.grid(row=0, column=34, padx=(6, 2), pady=1)
 
         self.btn_52 = ttk.Button(self.frame, text="5/2", width=5, command=self.fill_52)
         self.btn_52.grid(row=0, column=35, padx=2)
 
         self.btn_del = ttk.Button(self.frame, text="Удалить", width=8, command=self.delete_row)
         self.btn_del.grid(row=0, column=36, padx=2)
+
+    # применяем фиксированные пиксельные ширины колонок к этой строке
+    def apply_pixel_column_widths(self, colpx: dict):
+        f = self.frame
+        f.grid_columnconfigure(0, minsize=colpx['fio'])
+        f.grid_columnconfigure(1, minsize=colpx['tbn'])
+        for col in range(2, 33):
+            f.grid_columnconfigure(col, minsize=colpx['day'])
+        f.grid_columnconfigure(33, minsize=colpx['days'])
+        f.grid_columnconfigure(34, minsize=colpx['hours'])
+        f.grid_columnconfigure(35, minsize=colpx['btn52'])
+        f.grid_columnconfigure(36, minsize=colpx['del'])
 
     def grid(self, rindex: int):
         self.frame.grid(row=rindex, column=0, sticky="w")
@@ -189,11 +200,7 @@ class RowWidget:
         self.update_total()
 
     def get_hours(self) -> List[Optional[float]]:
-        out: List[Optional[float]] = []
-        for e in self.day_entries:
-            n = parse_hours_value(e.get().strip())
-            out.append(n)
-        return out
+        return [parse_hours_value(e.get().strip()) for e in self.day_entries]
 
     def update_days_enabled(self, year: int, month: int):
         days = month_days(year, month)
@@ -220,16 +227,16 @@ class RowWidget:
     def fill_52(self):
         y, m = self.get_year_month()
         days = month_days(y, m)
-        for d in range(1, days+1):
-            wd = datetime(y, m, d).weekday()  # 0..6
-            e = self.day_entries[d-1]
+        for d in range(1, days + 1):
+            wd = datetime(y, m, d).weekday()  # 0=Mon..6=Sun
+            e = self.day_entries[d - 1]
             e.delete(0, "end")
-            if wd < 4:      # Пн..Чт
+            if wd < 4:
                 e.insert(0, "8,25")
-            elif wd == 4:   # Пт
+            elif wd == 4:
                 e.insert(0, "7")
-        for d in range(days+1, 32):
-            self.day_entries[d-1].delete(0, "end")
+        for d in range(days + 1, 32):
+            self.day_entries[d - 1].delete(0, "end")
         self.update_total()
 
     def delete_row(self):
@@ -264,14 +271,16 @@ class AutoCompleteCombobox(ttk.Combobox):
 
 # ===== Объектный табель (окно) =====
 class ObjectTimesheet(tk.Toplevel):
-    # фиксированные ширины колонок в пикселях (для шапки и строк)
-    COLPX_FIO = 240     # ФИО
-    COLPX_TBN = 110     # Таб.№
-    COLPX_DAY = 42      # каждая колонка дня
-    COLPX_DAYS = 50     # "Дней"
-    COLPX_HOURS = 60    # "Часы"
-    COLPX_BTN52 = 44    # "5/2"
-    COLPX_DEL = 70      # "Удалить"
+    # фиксированные ширины колонок в пикселях
+    COLPX = {
+        'fio':   240,  # ФИО
+        'tbn':   110,  # Таб.№
+        'day':    42,  # День (каждая из 31)
+        'days':   50,  # Итого дней
+        'hours':  60,  # Итого часов
+        'btn52':  44,  # 5/2
+        'del':    70   # Удалить
+    }
 
     def __init__(self, master):
         super().__init__(master)
@@ -359,7 +368,7 @@ class ObjectTimesheet(tk.Toplevel):
         ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=3, padx=4)
         ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=4, padx=4)
 
-        # Шапка (один canvas) — колонки 0..36 с одинаковыми ширинами, как в строках
+        # Шапка (один canvas) — сетка 0..36 с теми же ширинами, что у строк
         header_wrap = tk.Frame(self)
         header_wrap.pack(fill="x", padx=8)
         self.header_canvas = tk.Canvas(header_wrap, height=26, borderwidth=0, highlightthickness=0)
@@ -392,7 +401,7 @@ class ObjectTimesheet(tk.Toplevel):
 
         # Привязки (строки — мастер; шапка следует)
         self.rows_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=self._on_rows_xview)
-        # у шапки xscrollcommand не задаём — двигаем её программно; так исключаем «пинг‑понг»
+        # у шапки xscrollcommand не задаём — двигаем её программно
 
         # Авто‑scrollregion
         self.rows_holder.bind("<Configure>", lambda e: self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")))
@@ -409,30 +418,27 @@ class ObjectTimesheet(tk.Toplevel):
         # Список строк
         self.rows: List[RowWidget] = []
 
-        # Применим одинаковые ширины колонок (пиксели) и к шапке, и к строкам
+        # Применяем фиксированные ширины к шапке
         self._apply_column_widths(self.header_holder)
-        self._apply_column_widths(self.rows_holder)
 
         bottom = tk.Frame(self)
         bottom.pack(fill="x", padx=8, pady=(0, 8))
         self.lbl_object_total = tk.Label(bottom, text="Сумма: дней 0 | часов 0", font=("Segoe UI", 10, "bold"))
         self.lbl_object_total.pack(side="left")
 
-    # одинаковые ширины колонок (пиксели) для заданного контейнера
+    # фиксированные ширины колонок (для любого контейнера)
     def _apply_column_widths(self, frame: tk.Frame):
-        # 0: ФИО; 1: Таб№;
-        frame.grid_columnconfigure(0, minsize=self.COLPX_FIO)
-        frame.grid_columnconfigure(1, minsize=self.COLPX_TBN)
-        # 2..32: 31 день
+        px = self.COLPX
+        frame.grid_columnconfigure(0, minsize=px['fio'])
+        frame.grid_columnconfigure(1, minsize=px['tbn'])
         for col in range(2, 33):
-            frame.grid_columnconfigure(col, minsize=self.COLPX_DAY)
-        # 33: Дней; 34: Часы; 35: 5/2; 36: Удалить
-        frame.grid_columnconfigure(33, minsize=self.COLPX_DAYS)
-        frame.grid_columnconfigure(34, minsize=self.COLPX_HOURS)
-        frame.grid_columnconfigure(35, minsize=self.COLPX_BTN52)
-        frame.grid_columnconfigure(36, minsize=self.COLPX_DEL)
+            frame.grid_columnconfigure(col, minsize=px['day'])
+        frame.grid_columnconfigure(33, minsize=px['days'])
+        frame.grid_columnconfigure(34, minsize=px['hours'])
+        frame.grid_columnconfigure(35, minsize=px['btn52'])
+        frame.grid_columnconfigure(36, minsize=px['del'])
 
-    # ---- автозаполнение ФИО -> Таб№, Должность ----
+    # автозаполнение ФИО -> Таб№, Должность
     def _on_fio_select(self, *_):
         fio = self.fio_var.get().strip()
         tbn, pos = self.emp_info.get(fio, ("", ""))
@@ -440,7 +446,7 @@ class ObjectTimesheet(tk.Toplevel):
         self.ent_tbn.insert(0, tbn)
         self.pos_var.set(pos)
 
-    # ---- горизонтальная синхронизация (строки — мастер) ----
+    # горизонтальная синхронизация (строки — мастер)
     def _on_rows_xview(self, first, last):
         try:
             frac = float(first)
@@ -450,10 +456,9 @@ class ObjectTimesheet(tk.Toplevel):
         self.hscroll.set(first, last)
 
     def _xscroll(self, *args):
-        # Двигаем только строки; шапка подтянется из _on_rows_xview
-        self.rows_canvas.xview(*args)
+        self.rows_canvas.xview(*args)  # шапка подтянется из _on_rows_xview
 
-    # ---- вертикальная прокрутка ----
+    # вертикальная прокрутка
     def _on_wheel(self, event):
         self.rows_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         return "break"
@@ -492,7 +497,7 @@ class ObjectTimesheet(tk.Toplevel):
         self._xscroll("scroll", step, "units")
         return "break"
 
-    # ---- события шапки ----
+    # события шапки
     def _on_period_change(self):
         self._update_rows_days_enabled()
         self._load_existing_rows()
@@ -508,11 +513,11 @@ class ObjectTimesheet(tk.Toplevel):
             self.cmb_object_id.set("")
         self._load_existing_rows()
 
-    # ---- вспомогательные ----
+    # вспомогательные
     def get_year_month(self) -> Tuple[int, int]:
         return int(self.spn_year.get()), self.cmb_month.current() + 1
 
-    # ---- операции со строками ----
+    # операции со строками
     def add_row(self):
         fio = self.fio_var.get().strip()
         tbn = self.ent_tbn.get().strip()
@@ -520,6 +525,7 @@ class ObjectTimesheet(tk.Toplevel):
             messagebox.showwarning("Объектный табель", "Выберите ФИО.")
             return
         w = RowWidget(self.rows_holder, len(self.rows) + 1, fio, tbn, self.get_year_month, self.delete_row)
+        w.apply_pixel_column_widths(self.COLPX)   # ВАЖНО: задать ширины колонок строки
         y, m = self.get_year_month()
         w.update_days_enabled(y, m)
         self.rows.append(w)
@@ -554,14 +560,11 @@ class ObjectTimesheet(tk.Toplevel):
     def _regrid_rows(self):
         for i, r in enumerate(self.rows, start=0):
             r.grid(i)
-        # синхронизация и повторное применение ширин (подстраховка)
         self.after(
             30,
             lambda: (
                 self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")),
                 self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all")),
-                self._apply_column_widths(self.header_holder),
-                self._apply_column_widths(self.rows_holder),
                 self.header_canvas.xview_moveto(self.rows_canvas.xview()[0]),
             ),
         )
@@ -588,7 +591,7 @@ class ObjectTimesheet(tk.Toplevel):
         sh = f"{tot_h:.2f}".rstrip("0").rstrip(".")
         self.lbl_object_total.config(text=f"Сумма: дней {tot_d} | часов {sh}")
 
-    # ---- загрузка/сохранение/справочник ----
+    # загрузка/сохранение/справочник
     def _current_file_path(self) -> Optional[Path]:
         addr = self.cmb_address.get().strip()
         oid = self.cmb_object_id.get().strip()
@@ -670,6 +673,7 @@ class ObjectTimesheet(tk.Toplevel):
                         n = None
                     hours.append(n)
                 roww = RowWidget(self.rows_holder, len(self.rows) + 1, fio, tbn, self.get_year_month, self.delete_row)
+                roww.apply_pixel_column_widths(self.COLPX)  # <<< ВАЖНО
                 roww.update_days_enabled(y, m)
                 roww.set_hours(hours)
                 self.rows.append(roww)
