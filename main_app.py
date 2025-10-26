@@ -236,11 +236,11 @@ class RowWidget:
         self.on_delete(self)
 
 # ------------------------- Объектный табель (окно) -------------------------
+# ===== Автокомплит для ФИО =====
 class AutoCompleteCombobox(ttk.Combobox):
     def __init__(self, master=None, **kw):
         super().__init__(master, **kw)
         self._all_values: List[str] = []
-        # события
         self.bind("<KeyRelease>", self._on_keyrelease)
         self.bind("<Control-BackSpace>", self._clear_all)
 
@@ -253,16 +253,14 @@ class AutoCompleteCombobox(ttk.Combobox):
         self['values'] = self._all_values
 
     def _on_keyrelease(self, event):
-        # служебные клавиши не фильтруем
         if event.keysym in ("Up", "Down", "Left", "Right", "Home", "End", "Return", "Escape", "Tab"):
             return
         typed = self.get().strip()
         if not typed:
             self['values'] = self._all_values
             return
-        # фильтр по подстроке (без регистра)
-        m = [x for x in self._all_values if typed.lower() in x.lower()]
-        self['values'] = m
+        self['values'] = [x for x in self._all_values if typed.lower() in x.lower()]
+
 
 # ===== Объектный табель (окно) =====
 class ObjectTimesheet(tk.Toplevel):
@@ -299,93 +297,93 @@ class ObjectTimesheet(tk.Toplevel):
 
     # ---- UI ----
     def _build_ui(self):
-        top = tk.Frame(self); top.pack(fill="x", padx=8, pady=8)
+        top = tk.Frame(self)
+        top.pack(fill="x", padx=8, pady=8)
 
         # Период
-        tk.Label(top, text="Месяц:").grid(row=0, column=0, sticky="w", padx=(0,4))
-        self.cmb_month = ttk.Combobox(top, state="readonly", width=12,
-                                      values=[month_name_ru(i) for i in range(1,13)])
+        tk.Label(top, text="Месяц:").grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self.cmb_month = ttk.Combobox(top, state="readonly", width=12, values=[month_name_ru(i) for i in range(1, 13)])
         self.cmb_month.grid(row=0, column=1, sticky="w")
-        self.cmb_month.current(datetime.now().month-1)
+        self.cmb_month.current(datetime.now().month - 1)
         self.cmb_month.bind("<<ComboboxSelected>>", lambda e: self._on_period_change())
 
-        tk.Label(top, text="Год:").grid(row=0, column=2, sticky="w", padx=(16,4))
+        tk.Label(top, text="Год:").grid(row=0, column=2, sticky="w", padx=(16, 4))
         self.spn_year = tk.Spinbox(top, from_=2000, to=2100, width=6, command=self._on_period_change)
         self.spn_year.grid(row=0, column=3, sticky="w")
-        self.spn_year.delete(0,"end"); self.spn_year.insert(0, datetime.now().year)
+        self.spn_year.delete(0, "end")
+        self.spn_year.insert(0, datetime.now().year)
         self.spn_year.bind("<FocusOut>", lambda e: self._on_period_change())
 
         # Адрес/ID
-        tk.Label(top, text="Адрес:").grid(row=0, column=4, sticky="w", padx=(20,4))
+        tk.Label(top, text="Адрес:").grid(row=0, column=4, sticky="w", padx=(20, 4))
         self.cmb_address = ttk.Combobox(top, values=self.address_options, width=46)
         self.cmb_address.grid(row=0, column=5, sticky="w")
         self.cmb_address.bind("<<ComboboxSelected>>", self._on_address_select)
 
-        tk.Label(top, text="ID объекта:").grid(row=0, column=6, sticky="w", padx=(16,4))
+        tk.Label(top, text="ID объекта:").grid(row=0, column=6, sticky="w", padx=(16, 4))
         self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=18)
         self.cmb_object_id.grid(row=0, column=7, sticky="w")
         self.cmb_object_id.bind("<<ComboboxSelected>>", lambda e: self._load_existing_rows())
 
         # ФИО/Таб№/Должность (с автопоиском по ФИО)
-        tk.Label(top, text="ФИО:").grid(row=1, column=0, sticky="w", pady=(8,0))
+        tk.Label(top, text="ФИО:").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.fio_var = tk.StringVar()
         self.cmb_fio = AutoCompleteCombobox(top, textvariable=self.fio_var, width=30)
         self.cmb_fio.set_completion_list(self.emp_names)
-        self.cmb_fio.grid(row=1, column=1, sticky="w", pady=(8,0))
+        self.cmb_fio.grid(row=1, column=1, sticky="w", pady=(8, 0))
         self.cmb_fio.bind("<<ComboboxSelected>>", self._on_fio_select)
 
-        tk.Label(top, text="Табельный №:").grid(row=1, column=2, sticky="w", padx=(16,4), pady=(8,0))
+        tk.Label(top, text="Табельный №:").grid(row=1, column=2, sticky="w", padx=(16, 4), pady=(8, 0))
         self.ent_tbn = ttk.Entry(top, width=14)
-        self.ent_tbn.grid(row=1, column=3, sticky="w", pady=(8,0))
+        self.ent_tbn.grid(row=1, column=3, sticky="w", pady=(8, 0))
 
-        tk.Label(top, text="Должность:").grid(row=1, column=4, sticky="w", padx=(16,4), pady=(8,0))
+        tk.Label(top, text="Должность:").grid(row=1, column=4, sticky="w", padx=(16, 4), pady=(8, 0))
         self.pos_var = tk.StringVar()
         self.ent_pos = ttk.Entry(top, textvariable=self.pos_var, width=28, state="readonly")
-        self.ent_pos.grid(row=1, column=5, sticky="w", pady=(8,0))
+        self.ent_pos.grid(row=1, column=5, sticky="w", pady=(8, 0))
 
-        btns = tk.Frame(top); btns.grid(row=1, column=6, columnspan=2, sticky="w", padx=(20,0), pady=(8,0))
+        btns = tk.Frame(top)
+        btns.grid(row=1, column=6, columnspan=2, sticky="w", padx=(20, 0), pady=(8, 0))
         ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
         ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=1, padx=4)
         ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=2, padx=4)
         ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=3, padx=4)
         ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=4, padx=4)
 
-        # Шапка (один canvas)
-        header_wrap = tk.Frame(self); header_wrap.pack(fill="x", padx=8)
+        # Шапка (один canvas) — ВАЖНО: сетка совпадает со строками
+        header_wrap = tk.Frame(self)
+        header_wrap.pack(fill="x", padx=8)
         self.header_canvas = tk.Canvas(header_wrap, height=26, borderwidth=0, highlightthickness=0)
         self.header_holder = tk.Frame(self.header_canvas)
-        self.header_canvas.create_window((0,0), window=self.header_holder, anchor="nw")
+        self.header_canvas.create_window((0, 0), window=self.header_holder, anchor="nw")
         self.header_canvas.pack(fill="x", expand=True)
 
-        tk.Label(self.header_holder, text="ФИО",   width=28, anchor="w").grid(row=0, column=0, padx=2)
-tk.Label(self.header_holder, text="Таб.№", width=12, anchor="center").grid(row=0, column=1, padx=2)
-
-for d in range(1, 32):
-    tk.Label(self.header_holder, text=str(d), width=5, anchor="center").grid(row=0, column=1+d, padx=1)
-
-tk.Label(self.header_holder, text="Дней", width=6, anchor="e").grid(row=0, column=33, padx=(6,2))
-tk.Label(self.header_holder, text="Часы", width=8, anchor="e").grid(row=0, column=34, padx=(6,2))
-tk.Label(self.header_holder, text="5/2",     width=5, anchor="center").grid(row=0, column=35, padx=2)
-tk.Label(self.header_holder, text="Удалить", width=8, anchor="center").grid(row=0, column=36, padx=2)
+        tk.Label(self.header_holder, text="ФИО", width=28, anchor="w").grid(row=0, column=0, padx=2)
+        tk.Label(self.header_holder, text="Таб.№", width=12, anchor="center").grid(row=0, column=1, padx=2)
+        for d in range(1, 32):
+            tk.Label(self.header_holder, text=str(d), width=5, anchor="center").grid(row=0, column=1 + d, padx=1)
+        tk.Label(self.header_holder, text="Дней", width=6, anchor="e").grid(row=0, column=33, padx=(6, 2))
+        tk.Label(self.header_holder, text="Часы", width=8, anchor="e").grid(row=0, column=34, padx=(6, 2))
+        tk.Label(self.header_holder, text="5/2", width=5, anchor="center").grid(row=0, column=35, padx=2)
+        tk.Label(self.header_holder, text="Удалить", width=8, anchor="center").grid(row=0, column=36, padx=2)
 
         # Строки (один canvas)
-        wrap = tk.Frame(self); wrap.pack(fill="both", expand=True, padx=8, pady=(4,8))
+        wrap = tk.Frame(self)
+        wrap.pack(fill="both", expand=True, padx=8, pady=(4, 8))
         self.rows_canvas = tk.Canvas(wrap, borderwidth=0, highlightthickness=0)
         self.rows_holder = tk.Frame(self.rows_canvas)
-        self.rows_canvas.create_window((0,0), window=self.rows_holder, anchor="nw")
+        self.rows_canvas.create_window((0, 0), window=self.rows_holder, anchor="nw")
         self.rows_canvas.pack(side="left", fill="both", expand=True)
 
         # Скроллы
         self.vscroll = ttk.Scrollbar(wrap, orient="vertical", command=self.rows_canvas.yview)
         self.vscroll.pack(side="right", fill="y")
         self.hscroll = ttk.Scrollbar(self, orient="horizontal", command=self._xscroll)
-        self.hscroll.pack(fill="x", padx=8, pady=(0,8))
+        self.hscroll.pack(fill="x", padx=8, pady=(0, 8))
 
         # Привязки (строки — мастер; шапка следует)
         self.rows_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=self._on_rows_xview)
-        # ВАЖНО: у шапки УБИРАЕМ xscrollcommand (иначе возможен зацикленный “пинг‑понг”)
-        # Шапка двигается только из _on_rows_xview и _regrid_rows.
-        # self.header_canvas.configure(xscrollcommand=...) — не задаём!
+        # У шапки xscrollcommand НЕ задаём — двигаем её программно, чтобы не было «пинг‑понга»
 
         # Авто‑scrollregion
         self.rows_holder.bind("<Configure>", lambda e: self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")))
@@ -402,7 +400,8 @@ tk.Label(self.header_holder, text="Удалить", width=8, anchor="center").gr
         # Список строк
         self.rows: List[RowWidget] = []
 
-        bottom = tk.Frame(self); bottom.pack(fill="x", padx=8, pady=(0,8))
+        bottom = tk.Frame(self)
+        bottom.pack(fill="x", padx=8, pady=(0, 8))
         self.lbl_object_total = tk.Label(bottom, text="Сумма: дней 0 | часов 0", font=("Segoe UI", 10, "bold"))
         self.lbl_object_total.pack(side="left")
 
@@ -410,7 +409,8 @@ tk.Label(self.header_holder, text="Удалить", width=8, anchor="center").gr
     def _on_fio_select(self, *_):
         fio = self.fio_var.get().strip()
         tbn, pos = self.emp_info.get(fio, ("", ""))
-        self.ent_tbn.delete(0, "end"); self.ent_tbn.insert(0, tbn)
+        self.ent_tbn.delete(0, "end")
+        self.ent_tbn.insert(0, tbn)
         self.pos_var.set(pos)
 
     # ---- горизонтальная синхронизация (строки — мастер) ----
@@ -423,12 +423,12 @@ tk.Label(self.header_holder, text="Удалить", width=8, anchor="center").gr
         self.hscroll.set(first, last)
 
     def _xscroll(self, *args):
-        # двигаем только строки, шапка подтянется из _on_rows_xview
+        # Двигаем только строки; шапка подтянется через _on_rows_xview
         self.rows_canvas.xview(*args)
 
     # ---- вертикальная прокрутка ----
     def _on_wheel(self, event):
-        self.rows_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        self.rows_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         return "break"
 
     def _on_shift_wheel(self, event):
@@ -452,7 +452,7 @@ tk.Label(self.header_holder, text="Удалить", width=8, anchor="center").gr
     def _on_wheel_global(self, event, linux: int = 0):
         if not self._is_under_rows(event.widget):
             return
-        units = (-1 if linux < 0 else 1) if linux != 0 else int(-1*(event.delta/120))
+        units = (-1 if linux < 0 else 1) if linux != 0 else int(-1 * (event.delta / 120))
         if units == 0:
             units = -1 if event.delta > 0 else 1
         self.rows_canvas.yview_scroll(units, "units")
@@ -474,14 +474,16 @@ tk.Label(self.header_holder, text="Удалить", width=8, anchor="center").gr
         addr = self.cmb_address.get().strip()
         ids = sorted(self.addr_to_ids.get(addr, []))
         if ids:
-            self.cmb_object_id.config(state="readonly", values=ids); self.cmb_object_id.set(ids[0])
+            self.cmb_object_id.config(state="readonly", values=ids)
+            self.cmb_object_id.set(ids[0])
         else:
-            self.cmb_object_id.config(state="normal", values=[]); self.cmb_object_id.set("")
+            self.cmb_object_id.config(state="normal", values=[])
+            self.cmb_object_id.set("")
         self._load_existing_rows()
 
     # ---- вспомогательные ----
-    def get_year_month(self) -> Tuple[int,int]:
-        return int(self.spn_year.get()), self.cmb_month.current()+1
+    def get_year_month(self) -> Tuple[int, int]:
+        return int(self.spn_year.get()), self.cmb_month.current() + 1
 
     # ---- операции со строками ----
     def add_row(self):
@@ -490,110 +492,159 @@ tk.Label(self.header_holder, text="Удалить", width=8, anchor="center").gr
         if not fio:
             messagebox.showwarning("Объектный табель", "Выберите ФИО.")
             return
-        w = RowWidget(self.rows_holder, len(self.rows)+1, fio, tbn, self.get_year_month, self.delete_row)
-        y, m = self.get_year_month(); w.update_days_enabled(y, m)
+        w = RowWidget(self.rows_holder, len(self.rows) + 1, fio, tbn, self.get_year_month, self.delete_row)
+        y, m = self.get_year_month()
+        w.update_days_enabled(y, m)
         self.rows.append(w)
-        self._regrid_rows(); self._recalc_object_total()
+        self._regrid_rows()
+        self._recalc_object_total()
 
     def fill_52_all(self):
-        for r in self.rows: r.fill_52()
+        for r in self.rows:
+            r.fill_52()
         self._recalc_object_total()
 
     def delete_row(self, roww: RowWidget):
-        try: self.rows.remove(roww)
-        except: pass
+        try:
+            self.rows.remove(roww)
+        except Exception:
+            pass
         roww.destroy()
-        self._regrid_rows(); self._recalc_object_total()
+        self._regrid_rows()
+        self._recalc_object_total()
 
     def clear_all_rows(self):
-        if not self.rows: return
-        if not messagebox.askyesno("Объектный табель", "Очистить все строки?"): return
-        for r in self.rows: r.destroy()
+        if not self.rows:
+            return
+        if not messagebox.askyesno("Объектный табель", "Очистить все строки?"):
+            return
+        for r in self.rows:
+            r.destroy()
         self.rows.clear()
-        self._regrid_rows(); self._recalc_object_total()
+        self._regrid_rows()
+        self._recalc_object_total()
 
     def _regrid_rows(self):
-        for i, r in enumerate(self.rows, start=0): r.grid(i)
-        self.after(30, lambda: (
-            self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")),
-            self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all")),
-            self.header_canvas.xview_moveto(self.rows_canvas.xview()[0])
-        ))
+        for i, r in enumerate(self.rows, start=0):
+            r.grid(i)
+        self.after(
+            30,
+            lambda: (
+                self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")),
+                self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all")),
+                self.header_canvas.xview_moveto(self.rows_canvas.xview()[0]),
+            ),
+        )
 
     def _update_rows_days_enabled(self):
         y, m = self.get_year_month()
-        for r in self.rows: r.update_days_enabled(y, m)
+        for r in self.rows:
+            r.update_days_enabled(y, m)
 
     def _recalc_object_total(self):
-        tot_h = 0.0; tot_d = 0
+        tot_h = 0.0
+        tot_d = 0
         for r in self.rows:
-            try: h = float(r.lbl_total.cget("text").replace(",", ".") or 0)
-            except: h = 0.0
-            try: d = int(r.lbl_days.cget("text") or 0)
-            except: d = 0
-            tot_h += h; tot_d += d
+            try:
+                h = float(r.lbl_total.cget("text").replace(",", ".") or 0)
+            except Exception:
+                h = 0.0
+            try:
+                d = int(r.lbl_days.cget("text") or 0)
+            except Exception:
+                d = 0
+            tot_h += h
+            tot_d += d
         sh = f"{tot_h:.2f}".rstrip("0").rstrip(".")
         self.lbl_object_total.config(text=f"Сумма: дней {tot_d} | часов {sh}")
 
-    # ---- загрузка/сохранение/справочник — как в вашей текущей версии ----
+    # ---- загрузка/сохранение/справочник ----
     def _current_file_path(self) -> Optional[Path]:
         addr = self.cmb_address.get().strip()
-        oid  = self.cmb_object_id.get().strip()
-        if not addr and not oid: return None
+        oid = self.cmb_object_id.get().strip()
+        if not addr and not oid:
+            return None
         y, m = self.get_year_month()
         id_part = oid if oid else safe_filename(addr)
-        return (self.base_dir / OUTPUT_DIR / f"Объектный_табель_{id_part}_{y}_{m:02d}.xlsx")
+        return self.base_dir / OUTPUT_DIR / f"Объектный_табель_{id_part}_{y}_{m:02d}.xlsx"
 
     def _ensure_sheet(self, wb) -> Any:
         if "Табель" in wb.sheetnames:
             ws = wb["Табель"]
-            hdr_first = str(ws.cell(1,1).value or "")
-            if hdr_first == "ID объекта" and ws.max_column >= (6 + 31 + 2): return ws
-            base = "Табель_OLD"; new_name = base; i = 1
-            while new_name in wb.sheetnames: i += 1; new_name = f"{base}{i}"
+            hdr_first = str(ws.cell(1, 1).value or "")
+            if hdr_first == "ID объекта" and ws.max_column >= (6 + 31 + 2):
+                return ws
+            base = "Табель_OLD"
+            new_name = base
+            i = 1
+            while new_name in wb.sheetnames:
+                i += 1
+                new_name = f"{base}{i}"
             ws.title = new_name
         ws2 = wb.create_sheet("Табель")
-        hdr = ["ID объекта","Адрес","Месяц","Год","ФИО","Табельный №"] + [str(i) for i in range(1,32)] + ["Итого дней", "Итого часов"]
+        hdr = ["ID объекта", "Адрес", "Месяц", "Год", "ФИО", "Табельный №"] + [str(i) for i in range(1, 32)] + [
+            "Итого дней",
+            "Итого часов",
+        ]
         ws2.append(hdr)
-        ws2.column_dimensions["A"].width = 14; ws2.column_dimensions["B"].width = 40
-        ws2.column_dimensions["C"].width = 10; ws2.column_dimensions["D"].width = 8
-        ws2.column_dimensions["E"].width = 28; ws2.column_dimensions["F"].width = 14
-        for i in range(7, 7+31): ws2.column_dimensions[get_column_letter(i)].width = 6
-        ws2.column_dimensions[get_column_letter(7+31)].width  = 10
-        ws2.column_dimensions[get_column_letter(7+31+1)].width = 12
+        ws2.column_dimensions["A"].width = 14
+        ws2.column_dimensions["B"].width = 40
+        ws2.column_dimensions["C"].width = 10
+        ws2.column_dimensions["D"].width = 8
+        ws2.column_dimensions["E"].width = 28
+        ws2.column_dimensions["F"].width = 14
+        for i in range(7, 7 + 31):
+            ws2.column_dimensions[get_column_letter(i)].width = 6
+        ws2.column_dimensions[get_column_letter(7 + 31)].width = 10
+        ws2.column_dimensions[get_column_letter(7 + 31 + 1)].width = 12
         ws2.freeze_panes = "A2"
         return ws2
 
     def _load_existing_rows(self):
-        for r in self.rows: r.destroy()
+        for r in self.rows:
+            r.destroy()
         self.rows.clear()
-        self._regrid_rows(); self._recalc_object_total()
+        self._regrid_rows()
+        self._recalc_object_total()
 
         fpath = self._current_file_path()
-        if not fpath or not fpath.exists(): return
+        if not fpath or not fpath.exists():
+            return
         try:
-            wb = load_workbook(fpath); ws = self._ensure_sheet(wb)
+            wb = load_workbook(fpath)
+            ws = self._ensure_sheet(wb)
             y, m = self.get_year_month()
-            addr = self.cmb_address.get().strip(); oid  = self.cmb_object_id.get().strip()
-            for r in range(2, ws.max_row+1):
-                row_oid  = (ws.cell(r,1).value or ""); row_addr = (ws.cell(r,2).value or "")
-                row_m = int(ws.cell(r,3).value or 0); row_y = int(ws.cell(r,4).value or 0)
-                fio = (ws.cell(r,5).value or ""); tbn = (ws.cell(r,6).value or "")
-                if row_m != m or row_y != y:   continue
+            addr = self.cmb_address.get().strip()
+            oid = self.cmb_object_id.get().strip()
+            for r in range(2, ws.max_row + 1):
+                row_oid = (ws.cell(r, 1).value or "")
+                row_addr = (ws.cell(r, 2).value or "")
+                row_m = int(ws.cell(r, 3).value or 0)
+                row_y = int(ws.cell(r, 4).value or 0)
+                fio = (ws.cell(r, 5).value or "")
+                tbn = (ws.cell(r, 6).value or "")
+                if row_m != m or row_y != y:
+                    continue
                 if oid:
-                    if row_oid != oid:        continue
+                    if row_oid != oid:
+                        continue
                 else:
-                    if row_addr != addr:      continue
+                    if row_addr != addr:
+                        continue
                 hours: List[Optional[float]] = []
-                for c in range(7, 7+31):
+                for c in range(7, 7 + 31):
                     v = ws.cell(r, c).value
-                    try: n = float(v) if isinstance(v,(int,float)) else parse_hours_value(v)
-                    except: n = None
+                    try:
+                        n = float(v) if isinstance(v, (int, float)) else parse_hours_value(v)
+                    except Exception:
+                        n = None
                     hours.append(n)
-                roww = RowWidget(self.rows_holder, len(self.rows)+1, fio, tbn, self.get_year_month, self.delete_row)
-                roww.update_days_enabled(y, m); roww.set_hours(hours)
+                roww = RowWidget(self.rows_holder, len(self.rows) + 1, fio, tbn, self.get_year_month, self.delete_row)
+                roww.update_days_enabled(y, m)
+                roww.set_hours(hours)
                 self.rows.append(roww)
-            self._regrid_rows(); self._recalc_object_total()
+            self._regrid_rows()
+            self._recalc_object_total()
         except Exception as e:
             messagebox.showerror("Загрузка", f"Не удалось загрузить существующие строки:\n{e}")
 
@@ -602,42 +653,53 @@ tk.Label(self.header_holder, text="Удалить", width=8, anchor="center").gr
         if not fpath:
             messagebox.showwarning("Сохранение", "Укажите адрес и/или ID объекта, а также период.")
             return
-        addr = self.cmb_address.get().strip(); oid  = self.cmb_object_id.get().strip()
+
+        addr = self.cmb_address.get().strip()
+        oid = self.cmb_object_id.get().strip()
         y, m = self.get_year_month()
 
         try:
-            if fpath.exists(): wb = load_workbook(fpath)
+            if fpath.exists():
+                wb = load_workbook(fpath)
             else:
                 fpath.parent.mkdir(parents=True, exist_ok=True)
-                wb = Workbook(); 
-                if wb.active: wb.remove(wb.active)
+                wb = Workbook()
+                if wb.active:
+                    wb.remove(wb.active)
             ws = self._ensure_sheet(wb)
 
+            # удалить строки этого объекта/периода
             to_del = []
-            for r in range(2, ws.max_row+1):
-                row_oid  = (ws.cell(r,1).value or ""); row_addr = (ws.cell(r,2).value or "")
-                row_m = int(ws.cell(r,3).value or 0); row_y = int(ws.cell(r,4).value or 0)
+            for r in range(2, ws.max_row + 1):
+                row_oid = (ws.cell(r, 1).value or "")
+                row_addr = (ws.cell(r, 2).value or "")
+                row_m = int(ws.cell(r, 3).value or 0)
+                row_y = int(ws.cell(r, 4).value or 0)
                 if row_m == m and row_y == y and ((oid and row_oid == oid) or (not oid and row_addr == addr)):
                     to_del.append(r)
-            for r in reversed(to_del): ws.delete_rows(r, 1)
+            for r in reversed(to_del):
+                ws.delete_rows(r, 1)
 
-            idx_total_days  = 7 + 31; idx_total_hours = 7 + 31 + 1
+            idx_total_days = 7 + 31
+            idx_total_hours = 7 + 31 + 1
+
             for roww in self.rows:
                 hours = roww.get_hours()
-                total_hours = sum(h for h in hours if isinstance(h,(int,float))) if hours else 0.0
-                total_days  = sum(1 for h in hours if isinstance(h,(int,float)) and h > 1e-12)
+                total_hours = sum(h for h in hours if isinstance(h, (int, float))) if hours else 0.0
+                total_days = sum(1 for h in hours if isinstance(h, (int, float)) and h > 1e-12)
                 row_values = [oid, addr, m, y, roww.fio(), roww.tbn()] + [
-                    (None if hours[i] is None or abs(float(hours[i])) < 1e-12 else float(hours[i])) for i in range(31)
-                ] + [total_days if total_days else None,
-                     None if abs(total_hours) < 1e-12 else float(total_hours)]
+                    (None if hours[i] is None or abs(float(hours[i])) < 1e-12 else float(hours[i]))
+                    for i in range(31)
+                ] + [total_days if total_days else None, None if abs(total_hours) < 1e-12 else float(total_hours)]
                 ws.append(row_values)
                 rlast = ws.max_row
-                for c in range(7, 7+31):
+                for c in range(7, 7 + 31):
                     v = ws.cell(rlast, c).value
-                    if isinstance(v,(int,float)): ws.cell(rlast, c).number_format = "General"
-                if isinstance(ws.cell(rlast, idx_total_days).value,(int,float)):
+                    if isinstance(v, (int, float)):
+                        ws.cell(rlast, c).number_format = "General"
+                if isinstance(ws.cell(rlast, idx_total_days).value, (int, float)):
                     ws.cell(rlast, idx_total_days).number_format = "0"
-                if isinstance(ws.cell(rlast, idx_total_hours).value,(int,float)):
+                if isinstance(ws.cell(rlast, idx_total_hours).value, (int, float)):
                     ws.cell(rlast, idx_total_hours).number_format = "General"
 
             wb.save(fpath)
@@ -647,8 +709,8 @@ tk.Label(self.header_holder, text="Удалить", width=8, anchor="center").gr
 
     def reload_spravochnik(self):
         cur_addr = self.cmb_address.get().strip()
-        cur_id   = self.cmb_object_id.get().strip()
-        cur_fio  = self.fio_var.get().strip()
+        cur_id = self.cmb_object_id.get().strip()
+        cur_fio = self.fio_var.get().strip()
 
         self._load_spr_data()
 
@@ -659,13 +721,18 @@ tk.Label(self.header_holder, text="Удалить", width=8, anchor="center").gr
             if cur_id and cur_id in (self.cmb_object_id.cget("values") or []):
                 self.cmb_object_id.set(cur_id)
         else:
-            self.cmb_address.set(""); self.cmb_object_id.config(values=[]); self.cmb_object_id.set("")
+            self.cmb_address.set("")
+            self.cmb_object_id.config(values=[])
+            self.cmb_object_id.set("")
 
         self.cmb_fio.set_completion_list(self.emp_names)
         if cur_fio in self.emp_info:
-            self.fio_var.set(cur_fio); self._on_fio_select()
+            self.fio_var.set(cur_fio)
+            self._on_fio_select()
         else:
-            self.fio_var.set(""); self.ent_tbn.delete(0,"end"); self.pos_var.set("")
+            self.fio_var.set("")
+            self.ent_tbn.delete(0, "end")
+            self.pos_var.set("")
 
         messagebox.showinfo("Справочник", "Справочник обновлён.")
         
