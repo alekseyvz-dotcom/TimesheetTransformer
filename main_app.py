@@ -241,36 +241,32 @@ class AutoCompleteCombobox(ttk.Combobox):
     def __init__(self, master=None, **kw):
         super().__init__(master, **kw)
         self._all_values: List[str] = []
-        # гарантируем textvariable
-        var = self.cget("textvariable")
-        if not var:
-            self._var = tk.StringVar()
-            self.configure(textvariable=self._var)
-        else:
-            self._var = self.master.nametowidget(var) if isinstance(var, str) else var
         # события
         self.bind("<KeyRelease>", self._on_keyrelease)
         self.bind("<Control-BackSpace>", self._clear_all)
-        # стрелка вниз — раскрыть
+        # стрелка вниз — раскрыть список
         self.bind("<Down>", lambda e: self.event_generate("<Alt-Down>"))
 
     def set_completion_list(self, values: List[str]):
         self._all_values = list(values)
-        self.configure(values=self._all_values)
+        self['values'] = self._all_values
 
     def _clear_all(self, _=None):
         self.delete(0, tk.END)
-        self.configure(values=self._all_values)
+        self['values'] = self._all_values
 
     def _on_keyrelease(self, event):
+        # служебные клавиши не фильтруем
         if event.keysym in ("Up", "Down", "Left", "Right", "Home", "End", "Return", "Escape", "Tab"):
             return
         typed = self.get().strip()
         if not typed:
-            self.configure(values=self._all_values)
+            self['values'] = self._all_values
             return
+        # фильтр по подстроке (без регистра)
         m = [x for x in self._all_values if typed.lower() in x.lower()]
-        self.configure(values=m)
+        self['values'] = m
+        # аккуратно раскрыть список, если есть что показывать
         if m:
             try:
                 self.event_generate("<Alt-Down>")
@@ -404,7 +400,7 @@ class ObjectTimesheet(tk.Toplevel):
         self.rows_canvas.bind("<Shift-MouseWheel>", self._on_shift_wheel)
         self.bind_all("<MouseWheel>", self._on_wheel_global)
         self.bind_all("<Shift-MouseWheel>", self._on_shift_wheel_global)
-        self.bind_all("<Button-4>", lambda e: self._on_wheel_global(e, linux=+1))   # X11
+        self.bind_all("<Button-4>", lambda e: self._on_wheel_global(e, linux=+1))
         self.bind_all("<Button-5>", lambda e: self._on_wheel_global(e, linux=-1))
 
         # Список строк
@@ -423,25 +419,19 @@ class ObjectTimesheet(tk.Toplevel):
 
     # ---- горизонтальная синхронизация ----
     def _on_rows_xview(self, first, last):
-        """Строки изменили xview -> тянем шапку и ползунок."""
-        try:
-            frac = float(first)
-        except Exception:
-            frac = 0.0
+        try: frac = float(first)
+        except Exception: frac = 0.0
         self.header_canvas.xview_moveto(frac)
         self.hscroll.set(first, last)
 
     def _on_header_xview(self, first, last):
-        """Шапка изменила xview -> тянем строки и ползунок."""
-        try:
-            frac = float(first)
-        except Exception:
-            frac = 0.0
+        try: frac = float(first)
+        except Exception: frac = 0.0
         self.rows_canvas.xview_moveto(frac)
         self.hscroll.set(first, last)
 
     def _xscroll(self, *args):
-        """Команда от горизонтального скроллбара — двигаем строки; шапка подтянется через _on_rows_xview."""
+        # Двигаем только строки (мастер) — шапка подтянется через _on_rows_xview
         self.rows_canvas.xview(*args)
 
     # ---- вертикальная прокрутка ----
@@ -468,11 +458,10 @@ class ObjectTimesheet(tk.Toplevel):
             return False
 
     def _on_wheel_global(self, event, linux: int = 0):
-        if not self._is_under_rows(event.widget):  # колесо над чужим виджетом — игнор
+        if not self._is_under_rows(event.widget):
             return
         units = (-1 if linux < 0 else 1) if linux != 0 else int(-1*(event.delta/120))
-        if units == 0:
-            units = -1 if event.delta > 0 else 1
+        if units == 0: units = -1 if event.delta > 0 else 1
         self.rows_canvas.yview_scroll(units, "units")
         return "break"
 
@@ -514,8 +503,7 @@ class ObjectTimesheet(tk.Toplevel):
         self._regrid_rows(); self._recalc_object_total()
 
     def fill_52_all(self):
-        for r in self.rows:
-            r.fill_52()
+        for r in self.rows: r.fill_52()
         self._recalc_object_total()
 
     def delete_row(self, roww: RowWidget):
@@ -525,10 +513,8 @@ class ObjectTimesheet(tk.Toplevel):
         self._regrid_rows(); self._recalc_object_total()
 
     def clear_all_rows(self):
-        if not self.rows:
-            return
-        if not messagebox.askyesno("Объектный табель", "Очистить все строки?"):
-            return
+        if not self.rows: return
+        if not messagebox.askyesno("Объектный табель", "Очистить все строки?"): return
         for r in self.rows: r.destroy()
         self.rows.clear()
         self._regrid_rows(); self._recalc_object_total()
@@ -538,7 +524,6 @@ class ObjectTimesheet(tk.Toplevel):
         self.after(30, lambda: (
             self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")),
             self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all")),
-            # выровнять шапку под текущую долю строк
             self.header_canvas.xview_moveto(self.rows_canvas.xview()[0])
         ))
 
@@ -560,7 +545,7 @@ class ObjectTimesheet(tk.Toplevel):
     # ---- загрузка/сохранение/справочник — как в вашей текущей версии ----
     def _current_file_path(self) -> Optional[Path]:
         addr = self.cmb_address.get().strip()
-        oid = self.cmb_object_id.get().strip()
+        oid  = self.cmb_object_id.get().strip()
         if not addr and not oid:
             return None
         y, m = self.get_year_month()
@@ -606,7 +591,7 @@ class ObjectTimesheet(tk.Toplevel):
             ws = self._ensure_sheet(wb)
             y, m = self.get_year_month()
             addr = self.cmb_address.get().strip()
-            oid = self.cmb_object_id.get().strip()
+            oid  = self.cmb_object_id.get().strip()
             for r in range(2, ws.max_row+1):
                 row_oid  = (ws.cell(r,1).value or "")
                 row_addr = (ws.cell(r,2).value or "")
@@ -614,11 +599,11 @@ class ObjectTimesheet(tk.Toplevel):
                 row_y = int(ws.cell(r,4).value or 0)
                 fio = (ws.cell(r,5).value or "")
                 tbn = (ws.cell(r,6).value or "")
-                if row_m != m or row_y != y: continue
+                if row_m != m or row_y != y:   continue
                 if oid:
-                    if row_oid != oid:  continue
+                    if row_oid != oid:        continue
                 else:
-                    if row_addr != addr: continue
+                    if row_addr != addr:      continue
                 hours: List[Optional[float]] = []
                 for c in range(7, 7+31):
                     v = ws.cell(r, c).value
@@ -626,8 +611,7 @@ class ObjectTimesheet(tk.Toplevel):
                     except: n = None
                     hours.append(n)
                 roww = RowWidget(self.rows_holder, len(self.rows)+1, fio, tbn, self.get_year_month, self.delete_row)
-                roww.update_days_enabled(y, m)
-                roww.set_hours(hours)
+                roww.update_days_enabled(y, m); roww.set_hours(hours)
                 self.rows.append(roww)
             self._regrid_rows(); self._recalc_object_total()
         except Exception as e:
@@ -652,7 +636,7 @@ class ObjectTimesheet(tk.Toplevel):
                 if wb.active: wb.remove(wb.active)
             ws = self._ensure_sheet(wb)
 
-            # удалить строки этого объекта и периода
+            # удалить строки этого объекта/периода
             to_del = []
             for r in range(2, ws.max_row+1):
                 row_oid  = (ws.cell(r,1).value or "")
@@ -680,8 +664,7 @@ class ObjectTimesheet(tk.Toplevel):
                 rlast = ws.max_row
                 for c in range(7, 7+31):
                     v = ws.cell(rlast, c).value
-                    if isinstance(v,(int,float)):
-                        ws.cell(rlast, c).number_format = "General"
+                    if isinstance(v,(int,float)): ws.cell(rlast, c).number_format = "General"
                 if isinstance(ws.cell(rlast, idx_total_days).value,(int,float)):
                     ws.cell(rlast, idx_total_days).number_format = "0"
                 if isinstance(ws.cell(rlast, idx_total_hours).value,(int,float)):
@@ -692,7 +675,6 @@ class ObjectTimesheet(tk.Toplevel):
         except Exception as e:
             messagebox.showerror("Сохранение", f"Ошибка сохранения:\n{e}")
 
-    # ---- обновление справочника ----
     def reload_spravochnik(self):
         cur_addr = self.cmb_address.get().strip()
         cur_id   = self.cmb_object_id.get().strip()
@@ -709,11 +691,9 @@ class ObjectTimesheet(tk.Toplevel):
         else:
             self.cmb_address.set(""); self.cmb_object_id.config(values=[]); self.cmb_object_id.set("")
 
-        # обновим ФИО/Таб№/Должность
         self.cmb_fio.set_completion_list(self.emp_names)
         if cur_fio in self.emp_info:
-            self.fio_var.set(cur_fio)
-            self._on_fio_select()
+            self.fio_var.set(cur_fio); self._on_fio_select()
         else:
             self.fio_var.set(""); self.ent_tbn.delete(0,"end"); self.pos_var.set("")
 
@@ -731,8 +711,6 @@ def run_converter():
         subprocess.Popen([str(conv_path)], shell=False)
     except Exception as e:
         messagebox.showerror("Конвертер", f"Не удалось запустить конвертер:\n{e}")
-
-# ------------------------- Главное меню -------------------------
 
 # ------------------------- Главное меню -------------------------
 
