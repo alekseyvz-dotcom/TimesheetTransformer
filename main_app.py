@@ -264,6 +264,15 @@ class AutoCompleteCombobox(ttk.Combobox):
 
 # ===== Объектный табель (окно) =====
 class ObjectTimesheet(tk.Toplevel):
+    # фиксированные ширины колонок в пикселях (для шапки и строк)
+    COLPX_FIO = 240     # ФИО
+    COLPX_TBN = 110     # Таб.№
+    COLPX_DAY = 42      # каждая колонка дня
+    COLPX_DAYS = 50     # "Дней"
+    COLPX_HOURS = 60    # "Часы"
+    COLPX_BTN52 = 44    # "5/2"
+    COLPX_DEL = 70      # "Удалить"
+
     def __init__(self, master):
         super().__init__(master)
         self.title("Объектный табель")
@@ -350,7 +359,7 @@ class ObjectTimesheet(tk.Toplevel):
         ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=3, padx=4)
         ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=4, padx=4)
 
-        # Шапка (один canvas) — ВАЖНО: сетка совпадает со строками
+        # Шапка (один canvas) — колонки 0..36 с одинаковыми ширинами, как в строках
         header_wrap = tk.Frame(self)
         header_wrap.pack(fill="x", padx=8)
         self.header_canvas = tk.Canvas(header_wrap, height=26, borderwidth=0, highlightthickness=0)
@@ -383,7 +392,7 @@ class ObjectTimesheet(tk.Toplevel):
 
         # Привязки (строки — мастер; шапка следует)
         self.rows_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=self._on_rows_xview)
-        # У шапки xscrollcommand НЕ задаём — двигаем её программно, чтобы не было «пинг‑понга»
+        # у шапки xscrollcommand не задаём — двигаем её программно; так исключаем «пинг‑понг»
 
         # Авто‑scrollregion
         self.rows_holder.bind("<Configure>", lambda e: self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")))
@@ -400,10 +409,28 @@ class ObjectTimesheet(tk.Toplevel):
         # Список строк
         self.rows: List[RowWidget] = []
 
+        # Применим одинаковые ширины колонок (пиксели) и к шапке, и к строкам
+        self._apply_column_widths(self.header_holder)
+        self._apply_column_widths(self.rows_holder)
+
         bottom = tk.Frame(self)
         bottom.pack(fill="x", padx=8, pady=(0, 8))
         self.lbl_object_total = tk.Label(bottom, text="Сумма: дней 0 | часов 0", font=("Segoe UI", 10, "bold"))
         self.lbl_object_total.pack(side="left")
+
+    # одинаковые ширины колонок (пиксели) для заданного контейнера
+    def _apply_column_widths(self, frame: tk.Frame):
+        # 0: ФИО; 1: Таб№;
+        frame.grid_columnconfigure(0, minsize=self.COLPX_FIO)
+        frame.grid_columnconfigure(1, minsize=self.COLPX_TBN)
+        # 2..32: 31 день
+        for col in range(2, 33):
+            frame.grid_columnconfigure(col, minsize=self.COLPX_DAY)
+        # 33: Дней; 34: Часы; 35: 5/2; 36: Удалить
+        frame.grid_columnconfigure(33, minsize=self.COLPX_DAYS)
+        frame.grid_columnconfigure(34, minsize=self.COLPX_HOURS)
+        frame.grid_columnconfigure(35, minsize=self.COLPX_BTN52)
+        frame.grid_columnconfigure(36, minsize=self.COLPX_DEL)
 
     # ---- автозаполнение ФИО -> Таб№, Должность ----
     def _on_fio_select(self, *_):
@@ -423,7 +450,7 @@ class ObjectTimesheet(tk.Toplevel):
         self.hscroll.set(first, last)
 
     def _xscroll(self, *args):
-        # Двигаем только строки; шапка подтянется через _on_rows_xview
+        # Двигаем только строки; шапка подтянется из _on_rows_xview
         self.rows_canvas.xview(*args)
 
     # ---- вертикальная прокрутка ----
@@ -527,11 +554,14 @@ class ObjectTimesheet(tk.Toplevel):
     def _regrid_rows(self):
         for i, r in enumerate(self.rows, start=0):
             r.grid(i)
+        # синхронизация и повторное применение ширин (подстраховка)
         self.after(
             30,
             lambda: (
                 self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")),
                 self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all")),
+                self._apply_column_widths(self.header_holder),
+                self._apply_column_widths(self.rows_holder),
                 self.header_canvas.xview_moveto(self.rows_canvas.xview()[0]),
             ),
         )
