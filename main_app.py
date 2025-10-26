@@ -357,13 +357,16 @@ class ObjectTimesheet(tk.Toplevel):
         self.header_canvas.create_window((0,0), window=self.header_holder, anchor="nw")
         self.header_canvas.pack(fill="x", expand=True)
 
-        tk.Label(self.header_holder, text="ФИО", width=28, anchor="w").grid(row=0, column=0, padx=2)
-        tk.Label(self.header_holder, text="Таб.№", width=12, anchor="center").grid(row=0, column=1, padx=2)
-        for d in range(1, 32):
-            tk.Label(self.header_holder, text=str(d), width=5, anchor="center").grid(row=0, column=1+d, padx=1)
-        tk.Label(self.header_holder, text="Дней",  width=6, anchor="e").grid(row=0, column=33, padx=(6,2))
-        tk.Label(self.header_holder, text="Часы", width=8, anchor="e").grid(row=0, column=34, padx=(6,2))
-        tk.Label(self.header_holder, text="Действия", width=12, anchor="center").grid(row=0, column=35, columnspan=2, padx=2)
+        tk.Label(self.header_holder, text="ФИО",   width=28, anchor="w").grid(row=0, column=0, padx=2)
+tk.Label(self.header_holder, text="Таб.№", width=12, anchor="center").grid(row=0, column=1, padx=2)
+
+for d in range(1, 32):
+    tk.Label(self.header_holder, text=str(d), width=5, anchor="center").grid(row=0, column=1+d, padx=1)
+
+tk.Label(self.header_holder, text="Дней", width=6, anchor="e").grid(row=0, column=33, padx=(6,2))
+tk.Label(self.header_holder, text="Часы", width=8, anchor="e").grid(row=0, column=34, padx=(6,2))
+tk.Label(self.header_holder, text="5/2",     width=5, anchor="center").grid(row=0, column=35, padx=2)
+tk.Label(self.header_holder, text="Удалить", width=8, anchor="center").grid(row=0, column=36, padx=2)
 
         # Строки (один canvas)
         wrap = tk.Frame(self); wrap.pack(fill="both", expand=True, padx=8, pady=(4,8))
