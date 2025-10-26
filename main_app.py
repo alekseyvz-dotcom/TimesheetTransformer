@@ -236,7 +236,6 @@ class RowWidget:
         self.on_delete(self)
 
 # ------------------------- Объектный табель (окно) -------------------------
-# ===== Автокомплит для ФИО =====
 class AutoCompleteCombobox(ttk.Combobox):
     def __init__(self, master=None, **kw):
         super().__init__(master, **kw)
@@ -244,8 +243,6 @@ class AutoCompleteCombobox(ttk.Combobox):
         # события
         self.bind("<KeyRelease>", self._on_keyrelease)
         self.bind("<Control-BackSpace>", self._clear_all)
-        # стрелка вниз — раскрыть список
-        self.bind("<Down>", lambda e: self.event_generate("<Alt-Down>"))
 
     def set_completion_list(self, values: List[str]):
         self._all_values = list(values)
@@ -266,12 +263,6 @@ class AutoCompleteCombobox(ttk.Combobox):
         # фильтр по подстроке (без регистра)
         m = [x for x in self._all_values if typed.lower() in x.lower()]
         self['values'] = m
-        # аккуратно раскрыть список, если есть что показывать
-        if m:
-            try:
-                self.event_generate("<Alt-Down>")
-            except Exception:
-                pass
 
 # ===== Объектный табель (окно) =====
 class ObjectTimesheet(tk.Toplevel):
@@ -387,9 +378,11 @@ class ObjectTimesheet(tk.Toplevel):
         self.hscroll = ttk.Scrollbar(self, orient="horizontal", command=self._xscroll)
         self.hscroll.pack(fill="x", padx=8, pady=(0,8))
 
-        # Привязки (строки — мастер, шапка следует)
+        # Привязки (строки — мастер; шапка следует)
         self.rows_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=self._on_rows_xview)
-        self.header_canvas.configure(xscrollcommand=self._on_header_xview)
+        # ВАЖНО: у шапки УБИРАЕМ xscrollcommand (иначе возможен зацикленный “пинг‑понг”)
+        # Шапка двигается только из _on_rows_xview и _regrid_rows.
+        # self.header_canvas.configure(xscrollcommand=...) — не задаём!
 
         # Авто‑scrollregion
         self.rows_holder.bind("<Configure>", lambda e: self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")))
@@ -417,21 +410,17 @@ class ObjectTimesheet(tk.Toplevel):
         self.ent_tbn.delete(0, "end"); self.ent_tbn.insert(0, tbn)
         self.pos_var.set(pos)
 
-    # ---- горизонтальная синхронизация ----
+    # ---- горизонтальная синхронизация (строки — мастер) ----
     def _on_rows_xview(self, first, last):
-        try: frac = float(first)
-        except Exception: frac = 0.0
+        try:
+            frac = float(first)
+        except Exception:
+            frac = 0.0
         self.header_canvas.xview_moveto(frac)
         self.hscroll.set(first, last)
 
-    def _on_header_xview(self, first, last):
-        try: frac = float(first)
-        except Exception: frac = 0.0
-        self.rows_canvas.xview_moveto(frac)
-        self.hscroll.set(first, last)
-
     def _xscroll(self, *args):
-        # Двигаем только строки (мастер) — шапка подтянется через _on_rows_xview
+        # двигаем только строки, шапка подтянется из _on_rows_xview
         self.rows_canvas.xview(*args)
 
     # ---- вертикальная прокрутка ----
@@ -461,7 +450,8 @@ class ObjectTimesheet(tk.Toplevel):
         if not self._is_under_rows(event.widget):
             return
         units = (-1 if linux < 0 else 1) if linux != 0 else int(-1*(event.delta/120))
-        if units == 0: units = -1 if event.delta > 0 else 1
+        if units == 0:
+            units = -1 if event.delta > 0 else 1
         self.rows_canvas.yview_scroll(units, "units")
         return "break"
 
@@ -546,8 +536,7 @@ class ObjectTimesheet(tk.Toplevel):
     def _current_file_path(self) -> Optional[Path]:
         addr = self.cmb_address.get().strip()
         oid  = self.cmb_object_id.get().strip()
-        if not addr and not oid:
-            return None
+        if not addr and not oid: return None
         y, m = self.get_year_month()
         id_part = oid if oid else safe_filename(addr)
         return (self.base_dir / OUTPUT_DIR / f"Объектный_табель_{id_part}_{y}_{m:02d}.xlsx")
@@ -556,23 +545,17 @@ class ObjectTimesheet(tk.Toplevel):
         if "Табель" in wb.sheetnames:
             ws = wb["Табель"]
             hdr_first = str(ws.cell(1,1).value or "")
-            if hdr_first == "ID объекта" and ws.max_column >= (6 + 31 + 2):
-                return ws
+            if hdr_first == "ID объекта" and ws.max_column >= (6 + 31 + 2): return ws
             base = "Табель_OLD"; new_name = base; i = 1
-            while new_name in wb.sheetnames:
-                i += 1; new_name = f"{base}{i}"
+            while new_name in wb.sheetnames: i += 1; new_name = f"{base}{i}"
             ws.title = new_name
         ws2 = wb.create_sheet("Табель")
         hdr = ["ID объекта","Адрес","Месяц","Год","ФИО","Табельный №"] + [str(i) for i in range(1,32)] + ["Итого дней", "Итого часов"]
         ws2.append(hdr)
-        ws2.column_dimensions["A"].width = 14
-        ws2.column_dimensions["B"].width = 40
-        ws2.column_dimensions["C"].width = 10
-        ws2.column_dimensions["D"].width = 8
-        ws2.column_dimensions["E"].width = 28
-        ws2.column_dimensions["F"].width = 14
-        for i in range(7, 7+31):
-            ws2.column_dimensions[get_column_letter(i)].width = 6
+        ws2.column_dimensions["A"].width = 14; ws2.column_dimensions["B"].width = 40
+        ws2.column_dimensions["C"].width = 10; ws2.column_dimensions["D"].width = 8
+        ws2.column_dimensions["E"].width = 28; ws2.column_dimensions["F"].width = 14
+        for i in range(7, 7+31): ws2.column_dimensions[get_column_letter(i)].width = 6
         ws2.column_dimensions[get_column_letter(7+31)].width  = 10
         ws2.column_dimensions[get_column_letter(7+31+1)].width = 12
         ws2.freeze_panes = "A2"
@@ -584,21 +567,15 @@ class ObjectTimesheet(tk.Toplevel):
         self._regrid_rows(); self._recalc_object_total()
 
         fpath = self._current_file_path()
-        if not fpath or not fpath.exists():
-            return
+        if not fpath or not fpath.exists(): return
         try:
-            wb = load_workbook(fpath)
-            ws = self._ensure_sheet(wb)
+            wb = load_workbook(fpath); ws = self._ensure_sheet(wb)
             y, m = self.get_year_month()
-            addr = self.cmb_address.get().strip()
-            oid  = self.cmb_object_id.get().strip()
+            addr = self.cmb_address.get().strip(); oid  = self.cmb_object_id.get().strip()
             for r in range(2, ws.max_row+1):
-                row_oid  = (ws.cell(r,1).value or "")
-                row_addr = (ws.cell(r,2).value or "")
-                row_m = int(ws.cell(r,3).value or 0)
-                row_y = int(ws.cell(r,4).value or 0)
-                fio = (ws.cell(r,5).value or "")
-                tbn = (ws.cell(r,6).value or "")
+                row_oid  = (ws.cell(r,1).value or ""); row_addr = (ws.cell(r,2).value or "")
+                row_m = int(ws.cell(r,3).value or 0); row_y = int(ws.cell(r,4).value or 0)
+                fio = (ws.cell(r,5).value or ""); tbn = (ws.cell(r,6).value or "")
                 if row_m != m or row_y != y:   continue
                 if oid:
                     if row_oid != oid:        continue
@@ -622,44 +599,34 @@ class ObjectTimesheet(tk.Toplevel):
         if not fpath:
             messagebox.showwarning("Сохранение", "Укажите адрес и/или ID объекта, а также период.")
             return
-
-        addr = self.cmb_address.get().strip()
-        oid  = self.cmb_object_id.get().strip()
+        addr = self.cmb_address.get().strip(); oid  = self.cmb_object_id.get().strip()
         y, m = self.get_year_month()
 
         try:
-            if fpath.exists():
-                wb = load_workbook(fpath)
+            if fpath.exists(): wb = load_workbook(fpath)
             else:
                 fpath.parent.mkdir(parents=True, exist_ok=True)
-                wb = Workbook()
+                wb = Workbook(); 
                 if wb.active: wb.remove(wb.active)
             ws = self._ensure_sheet(wb)
 
-            # удалить строки этого объекта/периода
             to_del = []
             for r in range(2, ws.max_row+1):
-                row_oid  = (ws.cell(r,1).value or "")
-                row_addr = (ws.cell(r,2).value or "")
-                row_m = int(ws.cell(r,3).value or 0)
-                row_y = int(ws.cell(r,4).value or 0)
+                row_oid  = (ws.cell(r,1).value or ""); row_addr = (ws.cell(r,2).value or "")
+                row_m = int(ws.cell(r,3).value or 0); row_y = int(ws.cell(r,4).value or 0)
                 if row_m == m and row_y == y and ((oid and row_oid == oid) or (not oid and row_addr == addr)):
                     to_del.append(r)
             for r in reversed(to_del): ws.delete_rows(r, 1)
 
-            idx_total_days  = 7 + 31
-            idx_total_hours = 7 + 31 + 1
-
+            idx_total_days  = 7 + 31; idx_total_hours = 7 + 31 + 1
             for roww in self.rows:
                 hours = roww.get_hours()
                 total_hours = sum(h for h in hours if isinstance(h,(int,float))) if hours else 0.0
                 total_days  = sum(1 for h in hours if isinstance(h,(int,float)) and h > 1e-12)
-
                 row_values = [oid, addr, m, y, roww.fio(), roww.tbn()] + [
                     (None if hours[i] is None or abs(float(hours[i])) < 1e-12 else float(hours[i])) for i in range(31)
                 ] + [total_days if total_days else None,
                      None if abs(total_hours) < 1e-12 else float(total_hours)]
-
                 ws.append(row_values)
                 rlast = ws.max_row
                 for c in range(7, 7+31):
