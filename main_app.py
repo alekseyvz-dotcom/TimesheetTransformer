@@ -283,9 +283,9 @@ class AutoCompleteCombobox(ttk.Combobox):
 class ObjectTimesheet(tk.Toplevel):
     # фиксированные ширины колонок в пикселях
     COLPX = {
-        'fio':   240,  # ФИО
+        'fio':   180,  # ФИО
         'tbn':   110,  # Таб.№
-        'day':    42,  # День (каждая из 31)
+        'day':    40,  # День (каждая из 31)
         'days':   50,  # Итого дней
         'hours':  60,  # Итого часов
         'btn52':  44,  # 5/2
@@ -367,7 +367,7 @@ class ObjectTimesheet(tk.Toplevel):
 
         tk.Label(top, text="Должность:").grid(row=1, column=4, sticky="w", padx=(16, 4), pady=(8, 0))
         self.pos_var = tk.StringVar()
-        self.ent_pos = ttk.Entry(top, textvariable=self.pos_var, width=28, state="readonly")
+        self.ent_pos = ttk.Entry(top, textvariable=self.pos_var, width=40, state="readonly")
         self.ent_pos.grid(row=1, column=5, sticky="w", pady=(8, 0))
 
         btns = tk.Frame(top)
