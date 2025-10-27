@@ -252,6 +252,7 @@ class RowWidget:
     def delete_row(self):
         self.on_delete(self)
 
+# ------------------------- Объектный табель (окно) -------------------------
 # ===== Автокомплит для ФИО =====
 class AutoCompleteCombobox(ttk.Combobox):
     def __init__(self, master=None, **kw):
@@ -276,6 +277,8 @@ class AutoCompleteCombobox(ttk.Combobox):
             self['values'] = self._all_values
             return
         self['values'] = [x for x in self._all_values if typed.lower() in x.lower()]
+
+# ===== Диалог копирования из другого месяца =====
 class CopyFromDialog(simpledialog.Dialog):
     def __init__(self, parent, init_year: int, init_month: int):
         self.init_year = init_year
@@ -395,7 +398,6 @@ class ObjectTimesheet(tk.Toplevel):
         self.spn_year.bind("<FocusOut>", lambda e: self._on_period_change())
 
          # Адрес/ID
-  
         tk.Label(top, text="Адрес:").grid(row=0, column=4, sticky="w", padx=(20, 4))
         self.cmb_address = AutoCompleteCombobox(top, width=46)
         self.cmb_address.set_completion_list(self.address_options)
@@ -509,7 +511,6 @@ class ObjectTimesheet(tk.Toplevel):
         else:
             self.cmb_object_id.config(state="normal", values=[])
             self.cmb_object_id.set("")
-
 
     # фиксированные ширины колонок (для любого контейнера)
     def _apply_column_widths(self, frame: tk.Frame):
@@ -688,6 +689,14 @@ class ObjectTimesheet(tk.Toplevel):
         id_part = oid if oid else safe_filename(addr)
         return self.base_dir / OUTPUT_DIR / f"Объектный_табель_{id_part}_{y}_{m:02d}.xlsx"
 
+    def _file_path_for(self, year: int, month: int, addr: Optional[str] = None, oid: Optional[str] = None) -> Optional[Path]:
+        addr = (addr if addr is not None else self.cmb_address.get().strip())
+        oid = (oid if oid is not None else self.cmb_object_id.get().strip())
+        if not addr and not oid:
+            return None
+        id_part = oid if oid else safe_filename(addr)
+        return self.base_dir / OUTPUT_DIR / f"Объектный_табель_{id_part}_{year}_{month:02d}.xlsx"
+
     def _ensure_sheet(self, wb) -> Any:
         if "Табель" in wb.sheetnames:
             ws = wb["Табель"]
@@ -827,46 +836,6 @@ class ObjectTimesheet(tk.Toplevel):
             messagebox.showinfo("Сохранение", f"Сохранено:\n{fpath}")
         except Exception as e:
             messagebox.showerror("Сохранение", f"Ошибка сохранения:\n{e}")
-            
-    def reload_spravochnik(self):
-        cur_addr = self.cmb_address.get().strip()
-        cur_id = self.cmb_object_id.get().strip()
-        cur_fio = self.fio_var.get().strip()
-
-        self._load_spr_data()
-
-        self.cmb_address.set_completion_list(self.address_options)
-        if cur_addr in self.address_options:
-          self.cmb_address.set(cur_addr)
-        else:
-          self.cmb_address.set("")
-        self._on_address_change()
-        if cur_id and cur_id in (self.cmb_object_id.cget("values") or []):
-          self.cmb_object_id.set(cur_id)
-        else:
-            self.cmb_address.set("")
-            self.cmb_object_id.config(values=[])
-            self.cmb_object_id.set("")
-
-        self.cmb_fio.set_completion_list(self.emp_names)
-        if cur_fio in self.emp_info:
-            self.fio_var.set(cur_fio)
-            self._on_fio_select()
-        else:
-            self.fio_var.set("")
-            self.ent_tbn.delete(0, "end")
-            self.pos_var.set("")
-
-        messagebox.showinfo("Справочник", "Справочник обновлён.")
-		# ВНУТРИ класса ObjectTimesheet
-
-    def _file_path_for(self, year: int, month: int, addr: Optional[str] = None, oid: Optional[str] = None) -> Optional[Path]:
-        addr = (addr if addr is not None else self.cmb_address.get().strip())
-        oid = (oid if oid is not None else self.cmb_object_id.get().strip())
-        if not addr and not oid:
-            return None
-        id_part = oid if oid else safe_filename(addr)
-        return self.base_dir / OUTPUT_DIR / f"Объектный_табель_{id_part}_{year}_{month:02d}.xlsx"
 
     def copy_from_month(self):
         addr = self.cmb_address.get().strip()
@@ -875,10 +844,11 @@ class ObjectTimesheet(tk.Toplevel):
             messagebox.showwarning("Копирование", "Укажите адрес и/или ID объекта для назначения.")
             return
 
+        # По умолчанию предложим предыдущий месяц
         cy, cm = self.get_year_month()
         src_y, src_m = cy, cm - 1
         if src_m < 1:
-           src_m = 12
+            src_m = 12
             src_y -= 1
 
         dlg = CopyFromDialog(self, init_year=src_y, init_month=src_m)
@@ -934,12 +904,13 @@ class ObjectTimesheet(tk.Toplevel):
                 messagebox.showinfo("Копирование", "В источнике нет сотрудников для выбранного объекта и периода.")
                 return
 
+            # Уникализируем по (ФИО, Таб№)
             uniq = {}
             for fio, tbn, hrs in found:
                 key = (fio.strip().lower(), tbn.strip())
                 if key not in uniq:
                     uniq[key] = (fio, tbn, hrs)
-             found = list(uniq.values())
+            found = list(uniq.values())
 
             added = 0
             if mode == "replace":
@@ -947,9 +918,9 @@ class ObjectTimesheet(tk.Toplevel):
                     r.destroy()
                 self.rows.clear()
 
-             existing = {(r.fio().strip().lower(), r.tbn().strip()) for r in self.rows}
+            existing = {(r.fio().strip().lower(), r.tbn().strip()) for r in self.rows}
 
-             dy, dm = self.get_year_month()
+            dy, dm = self.get_year_month()
             for fio, tbn, hrs in found:
                 key = (fio.strip().lower(), tbn.strip())
                 if mode == "merge" and key in existing:
@@ -959,8 +930,8 @@ class ObjectTimesheet(tk.Toplevel):
                 roww.update_days_enabled(dy, dm)
                 if with_hours and hrs:
                     roww.set_hours(hrs)
-                 self.rows.append(roww)
-                 added += 1
+                self.rows.append(roww)
+                added += 1
 
             self._regrid_rows()
             self._recalc_object_total()
@@ -968,7 +939,38 @@ class ObjectTimesheet(tk.Toplevel):
 
         except Exception as e:
             messagebox.showerror("Копирование", f"Ошибка копирования:\n{e}")
-       
+
+    def reload_spravochnik(self):
+        cur_addr = self.cmb_address.get().strip()
+        cur_id = self.cmb_object_id.get().strip()
+        cur_fio = self.fio_var.get().strip()
+
+        self._load_spr_data()
+
+        self.cmb_address.set_completion_list(self.address_options)
+        if cur_addr in self.address_options:
+          self.cmb_address.set(cur_addr)
+        else:
+          self.cmb_address.set("")
+        self._on_address_change()
+        if cur_id and cur_id in (self.cmb_object_id.cget("values") or []):
+          self.cmb_object_id.set(cur_id)
+        else:
+            self.cmb_address.set("")
+            self.cmb_object_id.config(values=[])
+            self.cmb_object_id.set("")
+
+        self.cmb_fio.set_completion_list(self.emp_names)
+        if cur_fio in self.emp_info:
+            self.fio_var.set(cur_fio)
+            self._on_fio_select()
+        else:
+            self.fio_var.set("")
+            self.ent_tbn.delete(0, "end")
+            self.pos_var.set("")
+
+        messagebox.showinfo("Справочник", "Справочник обновлён.")
+
 # ------------------------- Конвертер (запуск внешнего EXE) -------------------------
 
 def run_converter():
@@ -1065,8 +1067,8 @@ class MainApp(tk.Tk):
             "5) Копирование списка из другого месяца:\n"
             "   • Выберите месяц/год назначения и объект (Адрес/ID).\n"
             "   • Нажмите «Копировать из месяца…» и укажите месяц/год источника.\n"
-            "   • Выберите режим: «Заменить» (очистить текущий список) или «Объединить» (добавить недостающих).\n"
-            "   • По умолчанию копируются только сотрудники; можно включить перенос часов.\n\n"
+            "   • Режим: «Заменить» (перезаписать текущий список) или «Объединить» (добавить недостающих).\n"
+            "   • Можно включить «Копировать часы» — перенесутся введённые часы из источника.\n\n"
             "Подсказки:\n"
             "   • Часы понимают форматы: 8, 8.5/8,5, 8:30, 1/7 (сумма частей).\n"
             "   • Нули в ячейках часов не выводятся (пусто).\n"
