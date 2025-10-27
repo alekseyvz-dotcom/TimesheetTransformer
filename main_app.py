@@ -835,7 +835,7 @@ class ObjectTimesheet(tk.Toplevel):
             messagebox.showinfo("Сохранение", f"Сохранено:\n{fpath}")
         except Exception as e:
             messagebox.showerror("Сохранение", f"Ошибка сохранения:\n{e}")
-    def copy_from_month(self):
+def copy_from_month(self):
     addr = self.cmb_address.get().strip()
     oid = self.cmb_object_id.get().strip()
     if not addr and not oid:
