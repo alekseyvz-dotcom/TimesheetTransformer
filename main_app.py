@@ -453,7 +453,7 @@ class ObjectTimesheet(tk.Toplevel):
             self.cmb_object_id.config(state="readonly", values=ids)
             if self.cmb_object_id.get() not in ids:
                self.cmb_object_id.set(ids[0])
-      else:
+        else:
             self.cmb_object_id.config(state="normal", values=[])
             self.cmb_object_id.set("")
 
