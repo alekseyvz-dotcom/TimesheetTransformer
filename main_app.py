@@ -283,9 +283,9 @@ class AutoCompleteCombobox(ttk.Combobox):
 class ObjectTimesheet(tk.Toplevel):
     # фиксированные ширины колонок в пикселях
     COLPX = {
-        'fio':   180,  # ФИО
+        'fio':   240,  # ФИО
         'tbn':   110,  # Таб.№
-        'day':    40,  # День (каждая из 31)
+        'day':    43,  # День (каждая из 31)
         'days':   50,  # Итого дней
         'hours':  60,  # Итого часов
         'btn52':  44,  # 5/2
