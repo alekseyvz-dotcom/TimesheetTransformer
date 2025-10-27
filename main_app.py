@@ -5,7 +5,7 @@ import subprocess
 import calendar
 from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple, Optional, Any, Path
+from typing import List, Tuple, Optional, Any
 
 import tkinter as tk
 from tkinter import ttk, messagebox
