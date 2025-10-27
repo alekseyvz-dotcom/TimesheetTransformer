@@ -353,8 +353,7 @@ class ObjectTimesheet(tk.Toplevel):
 
         # обновлять ID/строки:
         self.cmb_address.bind("<<ComboboxSelected>>", self._on_address_select)
-        self.cmb_address.bind("<Return>", self._on_address_select)     # нажали Enter — применить адрес
-        self.cmb_address.bind("<FocusOut>", self._on_address_select)   # ушли с поля — применить адрес
+        self.cmb_address.bind("<Return>", lambda e: (self.cmb_address.event_generate("<<ComboboxSelected>>"), "break"))
 
         tk.Label(top, text="ID объекта:").grid(row=0, column=6, sticky="w", padx=(16, 4))
         self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=18)
@@ -521,14 +520,27 @@ class ObjectTimesheet(tk.Toplevel):
         self._load_existing_rows()
 
     def _on_address_select(self, *_):
-        addr = self.cmb_address.get().strip()
-        ids = sorted(self.addr_to_ids.get(addr, []))
-        if ids:
-            self.cmb_object_id.config(state="readonly", values=ids)
-            self.cmb_object_id.set(ids[0])
+    addr = self.cmb_address.get().strip()
+    ids = sorted(self.addr_to_ids.get(addr, []))
+
+    # Обновляем список ID и не сбрасываем выбранный, если он ещё валиден
+    cur = self.cmb_object_id.get().strip()
+    if ids:
+        self.cmb_object_id.config(state="readonly", values=ids)
+        if cur in ids:
+            self.cmb_object_id.set(cur)
         else:
-            self.cmb_object_id.config(state="normal", values=[])
-            self.cmb_object_id.set("")
+            self.cmb_object_id.set(ids[0])
+    else:
+        self.cmb_object_id.config(state="normal", values=[])
+        self.cmb_object_id.set("")
+
+    new_oid = self.cmb_object_id.get().strip()
+
+    # Перезагружаем строки только если реально изменились адрес/ID
+    if addr != self._selected_address or new_oid != self._selected_object_id:
+        self._selected_address = addr
+        self._selected_object_id = new_oid
         self._load_existing_rows()
 
     # вспомогательные
@@ -765,8 +777,9 @@ def reload_spravochnik(self):
     cur_fio = self.fio_var.get().strip()
 
     self._load_spr_data()
+    self._selected_address = ""
+    self._selected_object_id = ""
 
-    # было: self.cmb_address.config(values=self.address_options)
     self.cmb_address.set_completion_list(self.address_options)
 
     if cur_addr in self.address_options:
