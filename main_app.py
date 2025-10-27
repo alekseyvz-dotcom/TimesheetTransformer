@@ -342,11 +342,21 @@ class ObjectTimesheet(tk.Toplevel):
         self.spn_year.insert(0, datetime.now().year)
         self.spn_year.bind("<FocusOut>", lambda e: self._on_period_change())
 
-        # Адрес/ID
+         # Адрес/ID
+  
         tk.Label(top, text="Адрес:").grid(row=0, column=4, sticky="w", padx=(20, 4))
-        self.cmb_address = ttk.Combobox(top, values=self.address_options, width=46)
+        self.cmb_address = AutoCompleteCombobox(top, width=46)
+        self.cmb_address.set_completion_list(self.address_options)
         self.cmb_address.grid(row=0, column=5, sticky="w")
+
+        # при выборе из списка/Enter/потере фокуса — подтягиваем ID и подгружаем строки
         self.cmb_address.bind("<<ComboboxSelected>>", self._on_address_select)
+        self.cmb_address.bind("<FocusOut>", self._on_address_select)
+        self.cmb_address.bind("<Return>", lambda e: self._on_address_select())
+
+        # при наборе — фильтрация уже работает внутри AutoCompleteCombobox,
+        # а тут дополнительно синхронизируем список ID (без загрузки строк)
+        self.cmb_address.bind("<KeyRelease>", lambda e: self._on_address_change(), add="+")
 
         tk.Label(top, text="ID объекта:").grid(row=0, column=6, sticky="w", padx=(16, 4))
         self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=18)
@@ -436,6 +446,18 @@ class ObjectTimesheet(tk.Toplevel):
         self.lbl_object_total = tk.Label(bottom, text="Сумма: дней 0 | часов 0", font=("Segoe UI", 10, "bold"))
         self.lbl_object_total.pack(side="left")
 
+    def _on_address_change(self, *_):
+        addr = self.cmb_address.get().strip()
+        ids = sorted(self.addr_to_ids.get(addr, []))
+        if ids:
+            self.cmb_object_id.config(state="readonly", values=ids)
+            if self.cmb_object_id.get() not in ids:
+               self.cmb_object_id.set(ids[0])
+      else:
+            self.cmb_object_id.config(state="normal", values=[])
+            self.cmb_object_id.set("")
+
+
     # фиксированные ширины колонок (для любого контейнера)
     def _apply_column_widths(self, frame: tk.Frame):
         px = self.COLPX
@@ -513,6 +535,8 @@ class ObjectTimesheet(tk.Toplevel):
         self._load_existing_rows()
 
     def _on_address_select(self, *_):
+        self._on_address_change()
+        self._load_existing_rows()
         addr = self.cmb_address.get().strip()
         ids = sorted(self.addr_to_ids.get(addr, []))
         if ids:
@@ -758,12 +782,14 @@ class ObjectTimesheet(tk.Toplevel):
 
         self._load_spr_data()
 
-        self.cmb_address.config(values=self.address_options)
+        self.cmb_address.set_completion_list(self.address_options)
         if cur_addr in self.address_options:
-            self.cmb_address.set(cur_addr)
-            self._on_address_select()
-            if cur_id and cur_id in (self.cmb_object_id.cget("values") or []):
-                self.cmb_object_id.set(cur_id)
+          self.cmb_address.set(cur_addr)
+        else:
+          self.cmb_address.set("")
+        self._on_address_change()
+        if cur_id and cur_id in (self.cmb_object_id.cget("values") or []):
+          self.cmb_object_id.set(cur_id)
         else:
             self.cmb_address.set("")
             self.cmb_object_id.config(values=[])
