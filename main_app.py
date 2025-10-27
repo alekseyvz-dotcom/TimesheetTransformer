@@ -276,7 +276,7 @@ class AutoCompleteCombobox(ttk.Combobox):
             self['values'] = self._all_values
             return
         self['values'] = [x for x in self._all_values if typed.lower() in x.lower()]
-        class CopyFromDialog(simpledialog.Dialog):
+class CopyFromDialog(simpledialog.Dialog):
     def __init__(self, parent, init_year: int, init_month: int):
         self.init_year = init_year
         self.init_month = init_month  # 1..12
