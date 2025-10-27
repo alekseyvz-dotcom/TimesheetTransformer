@@ -66,10 +66,8 @@ def load_spravochnik(path: Path) -> Tuple[List[Tuple[str,str,str]], List[Tuple[s
     """
 
     def s(v) -> str:
-        # Надежно превращаем в строку
         if v is None:
             return ""
-        # Чтобы 1.0 не превращался в "1.0"
         if isinstance(v, float) and v.is_integer():
             v = int(v)
         return str(v).strip()
@@ -128,7 +126,8 @@ def parse_hours_value(v: Any) -> Optional[float]:
             mm = float((p[1] if len(p)>1 else "0").replace(",", "."))
             ss = float((p[2] if len(p)>2 else "0").replace(",", "."))
             return hh + mm/60.0 + ss/3600.0
-        except: pass
+        except:
+            pass
     s = s.replace(",", ".")
     try:
         return float(s)
@@ -145,38 +144,36 @@ class RowWidget:
 
         self.frame = tk.Frame(parent, bd=0)
 
-        # ФИО / Таб.№
-        self.lbl_fio = tk.Label(self.frame, text=fio, width=28, anchor="w")
-        self.lbl_fio.grid(row=0, column=0, padx=2, pady=1, sticky="w")
+        # ФИО / Таб.№ — не задаём большую символьную ширину, чтобы не растягивать колонку сверх minsize
+        self.lbl_fio = tk.Label(self.frame, text=fio, anchor="w")
+        self.lbl_fio.grid(row=0, column=0, padx=1, pady=1, sticky="w")
 
-        self.lbl_tbn = tk.Label(self.frame, text=tbn, width=12, anchor="center")
-        self.lbl_tbn.grid(row=0, column=1, padx=2, pady=1)
+        self.lbl_tbn = tk.Label(self.frame, text=tbn, anchor="center")
+        self.lbl_tbn.grid(row=0, column=1, padx=1, pady=1)
 
         # 31 ячейка по дням
         self.day_entries: List[tk.Entry] = []
         for d in range(1, 32):
-            e = tk.Entry(self.frame, width=5, justify="center")
-            e.grid(row=0, column=1 + d, padx=1, pady=1)
+            e = tk.Entry(self.frame, width=4, justify="center")  # width=4 компактнее
+            e.grid(row=0, column=1 + d, padx=0, pady=1)
             e.bind("<FocusOut>", lambda ev, _d=d: self.update_total())
-            # блокируем вставку по среднему клику (чтобы не вставлялось ФИО)
             e.bind("<Button-2>", lambda ev: "break")
             e.bind("<ButtonRelease-2>", lambda ev: "break")
             self.day_entries.append(e)
 
         # Итоги и кнопки
-        self.lbl_days = tk.Label(self.frame, text="0", width=6, anchor="e")
-        self.lbl_days.grid(row=0, column=33, padx=(6, 2), pady=1)
+        self.lbl_days = tk.Label(self.frame, text="0", width=5, anchor="e")
+        self.lbl_days.grid(row=0, column=33, padx=(4, 1), pady=1)
 
-        self.lbl_total = tk.Label(self.frame, text="0", width=8, anchor="e")
-        self.lbl_total.grid(row=0, column=34, padx=(6, 2), pady=1)
+        self.lbl_total = tk.Label(self.frame, text="0", width=7, anchor="e")
+        self.lbl_total.grid(row=0, column=34, padx=(4, 1), pady=1)
 
-        self.btn_52 = ttk.Button(self.frame, text="5/2", width=5, command=self.fill_52)
-        self.btn_52.grid(row=0, column=35, padx=2)
+        self.btn_52 = ttk.Button(self.frame, text="5/2", width=4, command=self.fill_52)
+        self.btn_52.grid(row=0, column=35, padx=1)
 
-        self.btn_del = ttk.Button(self.frame, text="Удалить", width=8, command=self.delete_row)
-        self.btn_del.grid(row=0, column=36, padx=2)
+        self.btn_del = ttk.Button(self.frame, text="Удалить", width=7, command=self.delete_row)
+        self.btn_del.grid(row=0, column=36, padx=1)
 
-    # применяем фиксированные пиксельные ширины колонок к этой строке
     def apply_pixel_column_widths(self, colpx: dict):
         f = self.frame
         f.grid_columnconfigure(0, minsize=colpx['fio'])
@@ -187,6 +184,10 @@ class RowWidget:
         f.grid_columnconfigure(34, minsize=colpx['hours'])
         f.grid_columnconfigure(35, minsize=colpx['btn52'])
         f.grid_columnconfigure(36, minsize=colpx['del'])
+
+    def set_day_font(self, font_tuple):
+        for e in self.day_entries:
+            e.configure(font=font_tuple)
 
     def grid(self, rindex: int):
         self.frame.grid(row=rindex, column=0, sticky="w")
@@ -252,8 +253,7 @@ class RowWidget:
     def delete_row(self):
         self.on_delete(self)
 
-# ------------------------- Объектный табель (окно) -------------------------
-# ===== Автокомплит для ФИО =====
+# ------------------------- Автокомплит -------------------------
 class AutoCompleteCombobox(ttk.Combobox):
     def __init__(self, master=None, **kw):
         super().__init__(master, **kw)
@@ -278,7 +278,7 @@ class AutoCompleteCombobox(ttk.Combobox):
             return
         self['values'] = [x for x in self._all_values if typed.lower() in x.lower()]
 
-# ===== Диалог копирования из другого месяца =====
+# ------------------------- Диалог копирования -------------------------
 class CopyFromDialog(simpledialog.Dialog):
     def __init__(self, parent, init_year: int, init_month: int):
         self.init_year = init_year
@@ -314,7 +314,7 @@ class CopyFromDialog(simpledialog.Dialog):
         ttk.Radiobutton(frame_mode, text="Объединить (добавить недостающих)", value="merge", variable=self.var_mode)\
             .pack(anchor="w")
 
-        return self.cmb_month  # фокус по умолчанию
+        return self.cmb_month
 
     def validate(self):
         try:
@@ -331,21 +331,24 @@ class CopyFromDialog(simpledialog.Dialog):
             "year": int(self.spn_year.get()),
             "month": self.cmb_month.current() + 1,
             "with_hours": bool(self.var_copy_hours.get()),
-            "mode": self.var_mode.get(),  # replace | merge
+            "mode": self.var_mode.get(),
         }
 
-# ===== Объектный табель (окно) =====
+# ------------------------- Объектный табель -------------------------
 class ObjectTimesheet(tk.Toplevel):
-    # фиксированные ширины колонок в пикселях
+    # Базовые ширины (px) — компактная версия
     COLPX = {
-        'fio':   240,  # ФИО
-        'tbn':   110,  # Таб.№
-        'day':    43,  # День (каждая из 31)
-        'days':   50,  # Итого дней
-        'hours':  60,  # Итого часов
-        'btn52':  44,  # 5/2
-        'del':    70   # Удалить
+        'fio':   200,  # ФИО (будет динамически подгоняться)
+        'tbn':   100,  # Таб.№
+        'day':    36,  # День (Entry width=4 + отступы)
+        'days':   46,  # Итого дней
+        'hours':  56,  # Итого часов
+        'btn52':  40,  # 5/2
+        'del':    66   # Удалить
     }
+    # Границы авто-подгона ФИО
+    MIN_FIO_PX = 140
+    MAX_FIO_PX = 260
 
     def __init__(self, master):
         super().__init__(master)
@@ -358,16 +361,26 @@ class ObjectTimesheet(tk.Toplevel):
         self.out_dir = self.base_dir / OUTPUT_DIR
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
+        # Компактный шрифт для ячеек дней
+        self.DAY_ENTRY_FONT = ("Segoe UI", 8)
+
+        # Джоб-дескриптор для дебаунса автоподгона
+        self._fit_job = None
+
         self._load_spr_data()
         self._build_ui()
         self._load_existing_rows()
 
+        # Автоподгон при изменении размера окна
+        self.bind("<Configure>", self._on_window_configure)
+        # Первичный автоподгон после отрисовки
+        self.after(120, self._auto_fit_columns)
+
     # ---- справочник ----
     def _load_spr_data(self):
-        # employees: [(fio, tbn, pos)], objects: [(id, addr)]
         self.employees, self.objects = load_spravochnik(self.spr_path)
         self.emp_names = [e[0] for e in self.employees]
-        self.emp_info = {e[0]: (e[1], (e[2] if len(e) > 2 else "")) for e in self.employees}  # fio -> (tbn,pos)
+        self.emp_info = {e[0]: (e[1], (e[2] if len(e) > 2 else "")) for e in self.employees}
 
         self.addr_to_ids = {}
         for oid, addr in self.objects:
@@ -397,19 +410,14 @@ class ObjectTimesheet(tk.Toplevel):
         self.spn_year.insert(0, datetime.now().year)
         self.spn_year.bind("<FocusOut>", lambda e: self._on_period_change())
 
-         # Адрес/ID
+        # Адрес/ID
         tk.Label(top, text="Адрес:").grid(row=0, column=4, sticky="w", padx=(20, 4))
         self.cmb_address = AutoCompleteCombobox(top, width=46)
         self.cmb_address.set_completion_list(self.address_options)
         self.cmb_address.grid(row=0, column=5, sticky="w")
-
-        # при выборе из списка/Enter/потере фокуса — подтягиваем ID и подгружаем строки
         self.cmb_address.bind("<<ComboboxSelected>>", self._on_address_select)
         self.cmb_address.bind("<FocusOut>", self._on_address_select)
         self.cmb_address.bind("<Return>", lambda e: self._on_address_select())
-
-        # при наборе — фильтрация уже работает внутри AutoCompleteCombobox,
-        # а тут дополнительно синхронизируем список ID (без загрузки строк)
         self.cmb_address.bind("<KeyRelease>", lambda e: self._on_address_change(), add="+")
 
         tk.Label(top, text="ID объекта:").grid(row=0, column=6, sticky="w", padx=(16, 4))
@@ -417,7 +425,7 @@ class ObjectTimesheet(tk.Toplevel):
         self.cmb_object_id.grid(row=0, column=7, sticky="w")
         self.cmb_object_id.bind("<<ComboboxSelected>>", lambda e: self._load_existing_rows())
 
-        # ФИО/Таб№/Должность (с автопоиском по ФИО)
+        # ФИО/Таб№/Должность
         tk.Label(top, text="ФИО:").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.fio_var = tk.StringVar()
         self.cmb_fio = AutoCompleteCombobox(top, textvariable=self.fio_var, width=30)
@@ -443,7 +451,7 @@ class ObjectTimesheet(tk.Toplevel):
         ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=4, padx=4)
         ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=5, padx=4)
 
-        # Шапка (один canvas) — сетка 0..36 с теми же ширинами, что у строк
+        # Шапка
         header_wrap = tk.Frame(self)
         header_wrap.pack(fill="x", padx=8)
         self.header_canvas = tk.Canvas(header_wrap, height=26, borderwidth=0, highlightthickness=0)
@@ -451,16 +459,17 @@ class ObjectTimesheet(tk.Toplevel):
         self.header_canvas.create_window((0, 0), window=self.header_holder, anchor="nw")
         self.header_canvas.pack(fill="x", expand=True)
 
-        tk.Label(self.header_holder, text="ФИО", width=28, anchor="w").grid(row=0, column=0, padx=2)
-        tk.Label(self.header_holder, text="Таб.№", width=12, anchor="center").grid(row=0, column=1, padx=2)
+        tk.Label(self.header_holder, text="ФИО", anchor="w").grid(row=0, column=0, padx=1)
+        tk.Label(self.header_holder, text="Таб.№", anchor="center").grid(row=0, column=1, padx=1)
         for d in range(1, 32):
-            tk.Label(self.header_holder, text=str(d), width=5, anchor="center").grid(row=0, column=1 + d, padx=1)
-        tk.Label(self.header_holder, text="Дней", width=6, anchor="e").grid(row=0, column=33, padx=(6, 2))
-        tk.Label(self.header_holder, text="Часы", width=8, anchor="e").grid(row=0, column=34, padx=(6, 2))
-        tk.Label(self.header_holder, text="5/2", width=5, anchor="center").grid(row=0, column=35, padx=2)
-        tk.Label(self.header_holder, text="Удалить", width=8, anchor="center").grid(row=0, column=36, padx=2)
+            tk.Label(self.header_holder, text=str(d), width=3, anchor="center", font=("Segoe UI", 8))\
+                .grid(row=0, column=1 + d, padx=0)
+        tk.Label(self.header_holder, text="Дней", width=5, anchor="e").grid(row=0, column=33, padx=(4, 1))
+        tk.Label(self.header_holder, text="Часы", width=7, anchor="e").grid(row=0, column=34, padx=(4, 1))
+        tk.Label(self.header_holder, text="5/2", width=4, anchor="center").grid(row=0, column=35, padx=1)
+        tk.Label(self.header_holder, text="Удалить", width=7, anchor="center").grid(row=0, column=36, padx=1)
 
-        # Строки (один canvas)
+        # Строки (Canvas)
         wrap = tk.Frame(self)
         wrap.pack(fill="both", expand=True, padx=8, pady=(4, 8))
         self.rows_canvas = tk.Canvas(wrap, borderwidth=0, highlightthickness=0)
@@ -474,9 +483,8 @@ class ObjectTimesheet(tk.Toplevel):
         self.hscroll = ttk.Scrollbar(self, orient="horizontal", command=self._xscroll)
         self.hscroll.pack(fill="x", padx=8, pady=(0, 8))
 
-        # Привязки (строки — мастер; шапка следует)
+        # Привязки
         self.rows_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=self._on_rows_xview)
-        # у шапки xscrollcommand не задаём — двигаем её программно
 
         # Авто‑scrollregion
         self.rows_holder.bind("<Configure>", lambda e: self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")))
@@ -512,7 +520,6 @@ class ObjectTimesheet(tk.Toplevel):
             self.cmb_object_id.config(state="normal", values=[])
             self.cmb_object_id.set("")
 
-    # фиксированные ширины колонок (для любого контейнера)
     def _apply_column_widths(self, frame: tk.Frame):
         px = self.COLPX
         frame.grid_columnconfigure(0, minsize=px['fio'])
@@ -524,7 +531,6 @@ class ObjectTimesheet(tk.Toplevel):
         frame.grid_columnconfigure(35, minsize=px['btn52'])
         frame.grid_columnconfigure(36, minsize=px['del'])
 
-    # автозаполнение ФИО -> Таб№, Должность
     def _on_fio_select(self, *_):
         fio = self.fio_var.get().strip()
         tbn, pos = self.emp_info.get(fio, ("", ""))
@@ -532,7 +538,6 @@ class ObjectTimesheet(tk.Toplevel):
         self.ent_tbn.insert(0, tbn)
         self.pos_var.set(pos)
 
-    # горизонтальная синхронизация (строки — мастер)
     def _on_rows_xview(self, first, last):
         try:
             frac = float(first)
@@ -542,9 +547,8 @@ class ObjectTimesheet(tk.Toplevel):
         self.hscroll.set(first, last)
 
     def _xscroll(self, *args):
-        self.rows_canvas.xview(*args)  # шапка подтянется из _on_rows_xview
+        self.rows_canvas.xview(*args)
 
-    # вертикальная прокрутка
     def _on_wheel(self, event):
         self.rows_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         return "break"
@@ -583,7 +587,7 @@ class ObjectTimesheet(tk.Toplevel):
         self._xscroll("scroll", step, "units")
         return "break"
 
-    # события шапки
+    # События шапки
     def _on_period_change(self):
         self._update_rows_days_enabled()
         self._load_existing_rows()
@@ -601,11 +605,58 @@ class ObjectTimesheet(tk.Toplevel):
             self.cmb_object_id.set("")
         self._load_existing_rows()
 
-    # вспомогательные
+    # Вспомогательные
     def get_year_month(self) -> Tuple[int, int]:
         return int(self.spn_year.get()), self.cmb_month.current() + 1
 
-    # операции со строками
+    def _content_total_width(self, fio_px: Optional[int] = None) -> int:
+        px = self.COLPX.copy()
+        if fio_px is not None:
+            px['fio'] = fio_px
+        return px['fio'] + px['tbn'] + 31 * px['day'] + px['days'] + px['hours'] + px['btn52'] + px['del']
+
+    def _auto_fit_columns(self):
+        try:
+            viewport = self.rows_canvas.winfo_width()
+        except Exception:
+            viewport = 0
+        if viewport <= 1:
+            # ещё не отрисовано — повторим позже
+            self.after(120, self._auto_fit_columns)
+            return
+
+        total = self._content_total_width()
+        new_fio = self.COLPX['fio']
+
+        # Подгоняем 'ФИО' в разумных пределах
+        if total > viewport:
+            deficit = total - viewport
+            new_fio = max(self.MIN_FIO_PX, self.COLPX['fio'] - deficit)
+        elif total < viewport:
+            surplus = viewport - total
+            new_fio = min(self.MAX_FIO_PX, self.COLPX['fio'] + surplus)
+
+        if int(new_fio) != int(self.COLPX['fio']):
+            self.COLPX['fio'] = int(new_fio)
+            # Применяем новые ширины
+            self._apply_column_widths(self.header_holder)
+            for r in self.rows:
+                r.apply_pixel_column_widths(self.COLPX)
+            # Обновим scrollregion и синхронизацию
+            self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all"))
+            self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all"))
+            self.header_canvas.xview_moveto(self.rows_canvas.xview()[0])
+
+    def _on_window_configure(self, _evt):
+        # Дебаунс автоподгона, чтобы не дёргать при каждом пикселе
+        if self._fit_job:
+            try:
+                self.after_cancel(self._fit_job)
+            except Exception:
+                pass
+        self._fit_job = self.after(100, self._auto_fit_columns)
+
+    # Операции со строками
     def add_row(self):
         fio = self.fio_var.get().strip()
         tbn = self.ent_tbn.get().strip()
@@ -613,7 +664,8 @@ class ObjectTimesheet(tk.Toplevel):
             messagebox.showwarning("Объектный табель", "Выберите ФИО.")
             return
         w = RowWidget(self.rows_holder, len(self.rows) + 1, fio, tbn, self.get_year_month, self.delete_row)
-        w.apply_pixel_column_widths(self.COLPX)   # ВАЖНО: задать ширины колонок строки
+        w.apply_pixel_column_widths(self.COLPX)
+        w.set_day_font(self.DAY_ENTRY_FONT)
         y, m = self.get_year_month()
         w.update_days_enabled(y, m)
         self.rows.append(w)
@@ -654,6 +706,7 @@ class ObjectTimesheet(tk.Toplevel):
                 self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")),
                 self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all")),
                 self.header_canvas.xview_moveto(self.rows_canvas.xview()[0]),
+                self._auto_fit_columns(),  # подгон после перестройки
             ),
         )
 
@@ -679,7 +732,7 @@ class ObjectTimesheet(tk.Toplevel):
         sh = f"{tot_h:.2f}".rstrip("0").rstrip(".")
         self.lbl_object_total.config(text=f"Сумма: дней {tot_d} | часов {sh}")
 
-    # загрузка/сохранение/справочник
+    # Загрузка/сохранение/справочник
     def _current_file_path(self) -> Optional[Path]:
         addr = self.cmb_address.get().strip()
         oid = self.cmb_object_id.get().strip()
@@ -738,6 +791,7 @@ class ObjectTimesheet(tk.Toplevel):
 
         fpath = self._current_file_path()
         if not fpath or not fpath.exists():
+            self._auto_fit_columns()
             return
         try:
             wb = load_workbook(fpath)
@@ -769,12 +823,14 @@ class ObjectTimesheet(tk.Toplevel):
                         n = None
                     hours.append(n)
                 roww = RowWidget(self.rows_holder, len(self.rows) + 1, fio, tbn, self.get_year_month, self.delete_row)
-                roww.apply_pixel_column_widths(self.COLPX)  # <<< ВАЖНО
+                roww.apply_pixel_column_widths(self.COLPX)
+                roww.set_day_font(self.DAY_ENTRY_FONT)
                 roww.update_days_enabled(y, m)
                 roww.set_hours(hours)
                 self.rows.append(roww)
             self._regrid_rows()
             self._recalc_object_total()
+            self._auto_fit_columns()
         except Exception as e:
             messagebox.showerror("Загрузка", f"Не удалось загрузить существующие строки:\n{e}")
 
@@ -844,7 +900,6 @@ class ObjectTimesheet(tk.Toplevel):
             messagebox.showwarning("Копирование", "Укажите адрес и/или ID объекта для назначения.")
             return
 
-        # По умолчанию предложим предыдущий месяц
         cy, cm = self.get_year_month()
         src_y, src_m = cy, cm - 1
         if src_m < 1:
@@ -858,7 +913,7 @@ class ObjectTimesheet(tk.Toplevel):
         src_y = dlg.result["year"]
         src_m = dlg.result["month"]
         with_hours = dlg.result["with_hours"]
-        mode = dlg.result["mode"]  # replace | merge
+        mode = dlg.result["mode"]
 
         src_path = self._file_path_for(src_y, src_m, addr=addr, oid=oid)
         if not src_path or not src_path.exists():
@@ -927,6 +982,7 @@ class ObjectTimesheet(tk.Toplevel):
                     continue
                 roww = RowWidget(self.rows_holder, len(self.rows) + 1, fio, tbn, self.get_year_month, self.delete_row)
                 roww.apply_pixel_column_widths(self.COLPX)
+                roww.set_day_font(self.DAY_ENTRY_FONT)
                 roww.update_days_enabled(dy, dm)
                 if with_hours and hrs:
                     roww.set_hours(hrs)
@@ -935,6 +991,7 @@ class ObjectTimesheet(tk.Toplevel):
 
             self._regrid_rows()
             self._recalc_object_total()
+            self._auto_fit_columns()
             messagebox.showinfo("Копирование", f"Добавлено сотрудников: {added}")
 
         except Exception as e:
@@ -971,7 +1028,7 @@ class ObjectTimesheet(tk.Toplevel):
 
         messagebox.showinfo("Справочник", "Справочник обновлён.")
 
-# ------------------------- Конвертер (запуск внешнего EXE) -------------------------
+# ------------------------- Конвертер (внешний EXE) -------------------------
 
 def run_converter():
     conv_path = exe_dir() / CONVERTER_EXE
@@ -995,12 +1052,9 @@ class MainApp(tk.Tk):
 
         tk.Label(self, text="Выберите модуль", font=("Segoe UI", 14, "bold")).pack(pady=(16, 6))
 
-        # 1) Объектный табель — наверху
         ttk.Button(self, text="Объектный табель (реестр)", width=36,
-                   command=lambda: ObjectTimesheet(self))\
-            .pack(pady=(4, 10))
+                   command=lambda: ObjectTimesheet(self)).pack(pady=(4, 10))
 
-        # 2) Справочник (две кнопки)
         spr_frame = tk.Frame(self)
         spr_frame.pack(pady=(0, 12))
         ttk.Button(spr_frame, text="Открыть справочник", width=24, command=self.open_spravochnik)\
@@ -1008,31 +1062,21 @@ class MainApp(tk.Tk):
         ttk.Button(spr_frame, text="Обновить справочник", width=24, command=self.refresh_spravochnik_global)\
             .grid(row=0, column=1, padx=6, pady=6)
 
-        # 3) Конвертер — после кнопок обновления
-        ttk.Button(self, text="Конвертер табеля (1С)", width=36, command=run_converter)\
-            .pack(pady=(0, 12))
+        ttk.Button(self, text="Конвертер табеля (1С)", width=36, command=run_converter).pack(pady=(0, 12))
 
-        # 4) Помощь
-        ttk.Button(self, text="Помощь", width=18, command=self.show_help)\
-            .pack(pady=(0, 8))
+        ttk.Button(self, text="Помощь", width=18, command=self.show_help).pack(pady=(0, 8))
+        ttk.Button(self, text="Выход", width=18, command=self.destroy).pack(pady=(0, 12))
 
-        # 5) Выход
-        ttk.Button(self, text="Выход", width=18, command=self.destroy)\
-            .pack(pady=(0, 12))
-
-        # Копирайт
         tk.Label(self, text="Разработал Алексей Зезюкин, АНО МЛСТ 2025",
-                 font=("Segoe UI", 8), fg="#666")\
-            .pack(side="bottom", pady=(0, 8))
+                 font=("Segoe UI", 8), fg="#666").pack(side="bottom", pady=(0, 8))
 
-        # Горячая клавиша F1 на помощь
         self.bind("<F1>", lambda e: self.show_help())
 
     def open_spravochnik(self):
         path = exe_dir() / SPRAVOCHNIK_FILE
         ensure_spravochnik(path)
         try:
-            os.startfile(path)  # Windows
+            os.startfile(path)
         except Exception as e:
             messagebox.showerror("Справочник", f"Не удалось открыть файл:\n{e}")
 
@@ -1067,8 +1111,7 @@ class MainApp(tk.Tk):
             "5) Копирование списка из другого месяца:\n"
             "   • Выберите месяц/год назначения и объект (Адрес/ID).\n"
             "   • Нажмите «Копировать из месяца…» и укажите месяц/год источника.\n"
-            "   • Режим: «Заменить» (перезаписать текущий список) или «Объединить» (добавить недостающих).\n"
-            "   • Можно включить «Копировать часы» — перенесутся введённые часы из источника.\n\n"
+            "   • Режим: «Заменить» или «Объединить»; опция «Копировать часы» переносит введённые часы.\n\n"
             "Подсказки:\n"
             "   • Часы понимают форматы: 8, 8.5/8,5, 8:30, 1/7 (сумма частей).\n"
             "   • Нули в ячейках часов не выводятся (пусто).\n"
