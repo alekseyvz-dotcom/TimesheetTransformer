@@ -759,7 +759,7 @@ class ObjectTimesheet(tk.Toplevel):
         except Exception as e:
             messagebox.showerror("Сохранение", f"Ошибка сохранения:\n{e}")
 
-    def reload_spravochnik(self):
+def reload_spravochnik(self):
     cur_addr = self.cmb_address.get().strip()
     cur_id = self.cmb_object_id.get().strip()
     cur_fio = self.fio_var.get().strip()
