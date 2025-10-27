@@ -5,7 +5,7 @@ import subprocess
 import calendar
 from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple, Optional, Any
+from typing import List, Tuple, Optional, Any, Path
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -52,8 +52,8 @@ def ensure_spravochnik(path: Path):
     # Лист Объекты (ID + Адрес)
     ws2 = wb.create_sheet("Объекты")
     ws2.append(["ID объекта", "Адрес"])
-    ws2.append(["OBJ-0001", "ул. Пушкина, д. 1"])
-    ws2.append(["OBJ-0002", "пр. Строителей, 25"])
+    ws2.append(["1", "ул. Пушкина, д. 1"])
+    ws2.append(["2", "пр. Строителей, 25"])
     wb.save(path)
 
 def load_spravochnik(path: Path) -> Tuple[List[Tuple[str,str,str]], List[Tuple[str,str]]]:
@@ -64,6 +64,16 @@ def load_spravochnik(path: Path) -> Tuple[List[Tuple[str,str,str]], List[Tuple[s
     Поддерживает старый справочник с одной колонкой 'Адрес' и
     с двумя колонками в 'Сотрудники' (Должность будет пустой).
     """
+
+    def s(v) -> str:
+        # Надежно превращаем в строку
+        if v is None:
+            return ""
+        # Чтобы 1.0 не превращался в "1.0"
+        if isinstance(v, float) and v.is_integer():
+            v = int(v)
+        return str(v).strip()
+
     ensure_spravochnik(path)
     wb = load_workbook(path, read_only=True, data_only=True)
     employees: List[Tuple[str,str,str]] = []
@@ -72,27 +82,27 @@ def load_spravochnik(path: Path) -> Tuple[List[Tuple[str,str,str]], List[Tuple[s
     # Сотрудники
     if "Сотрудники" in wb.sheetnames:
         ws = wb["Сотрудники"]
-        hdr = [str(c or "").strip().lower() for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
+        hdr = [s(c).lower() for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
         have_pos = ("должность" in hdr) or (len(hdr) >= 3)
         for r in ws.iter_rows(min_row=2, values_only=True):
-            fio = (r[0] or "").strip()
-            tbn = (r[1] or "").strip() if len(r) > 1 else ""
-            pos = (r[2] or "").strip() if have_pos and len(r) > 2 else ""
+            fio = s(r[0] if len(r) > 0 else None)
+            tbn = s(r[1] if len(r) > 1 else None)
+            pos = s(r[2] if have_pos and len(r) > 2 else None)
             if fio:
                 employees.append((fio, tbn, pos))
 
     # Объекты
     if "Объекты" in wb.sheetnames:
         ws = wb["Объекты"]
-        hdr = [str(c or "").strip().lower() for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
+        hdr = [s(c).lower() for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
         have_two = ("id объекта" in hdr) or (len(hdr) >= 2)
         for r in ws.iter_rows(min_row=2, values_only=True):
             if have_two:
-                oid = (r[0] or "").strip()
-                addr = (r[1] or "").strip() if len(r) > 1 else ""
+                oid = s(r[0] if len(r) > 0 else None)
+                addr = s(r[1] if len(r) > 1 else None)
             else:
                 oid = ""
-                addr = (r[0] or "").strip()
+                addr = s(r[0] if len(r) > 0 else None)
             if oid or addr:
                 objects.append((oid, addr))
 
