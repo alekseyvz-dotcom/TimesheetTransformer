@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Any
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
@@ -252,7 +252,6 @@ class RowWidget:
     def delete_row(self):
         self.on_delete(self)
 
-# ------------------------- Объектный табель (окно) -------------------------
 # ===== Автокомплит для ФИО =====
 class AutoCompleteCombobox(ttk.Combobox):
     def __init__(self, master=None, **kw):
@@ -277,7 +276,60 @@ class AutoCompleteCombobox(ttk.Combobox):
             self['values'] = self._all_values
             return
         self['values'] = [x for x in self._all_values if typed.lower() in x.lower()]
+        class CopyFromDialog(simpledialog.Dialog):
+    def __init__(self, parent, init_year: int, init_month: int):
+        self.init_year = init_year
+        self.init_month = init_month  # 1..12
+        self.result = None
+        super().__init__(parent, title="Копировать сотрудников из месяца")
 
+    def body(self, master):
+        tk.Label(master, text="Источник").grid(row=0, column=0, sticky="w", pady=(2, 6), columnspan=4)
+
+        tk.Label(master, text="Месяц:").grid(row=1, column=0, sticky="e")
+        self.cmb_month = ttk.Combobox(master, state="readonly", width=18,
+                                      values=[month_name_ru(i) for i in range(1, 13)])
+        self.cmb_month.grid(row=1, column=1, sticky="w")
+        self.cmb_month.current(max(0, min(11, self.init_month - 1)))
+
+        tk.Label(master, text="Год:").grid(row=1, column=2, sticky="e", padx=(10, 4))
+        self.spn_year = tk.Spinbox(master, from_=2000, to=2100, width=6)
+        self.spn_year.grid(row=1, column=3, sticky="w")
+        self.spn_year.delete(0, "end")
+        self.spn_year.insert(0, str(self.init_year))
+
+        self.var_copy_hours = tk.BooleanVar(value=False)
+        ttk.Checkbutton(master, text="Копировать часы", variable=self.var_copy_hours)\
+            .grid(row=2, column=1, sticky="w", pady=(8, 2))
+
+        tk.Label(master, text="Режим:").grid(row=3, column=0, sticky="e", pady=(6, 2))
+        self.var_mode = tk.StringVar(value="replace")
+        frame_mode = tk.Frame(master)
+        frame_mode.grid(row=3, column=1, columnspan=3, sticky="w", pady=(6, 2))
+        ttk.Radiobutton(frame_mode, text="Заменить текущий список", value="replace", variable=self.var_mode)\
+            .pack(anchor="w")
+        ttk.Radiobutton(frame_mode, text="Объединить (добавить недостающих)", value="merge", variable=self.var_mode)\
+            .pack(anchor="w")
+
+        return self.cmb_month  # фокус по умолчанию
+
+    def validate(self):
+        try:
+            y = int(self.spn_year.get())
+            if not (2000 <= y <= 2100):
+                raise ValueError
+            return True
+        except Exception:
+            messagebox.showwarning("Копирование", "Введите корректный год (2000–2100).")
+            return False
+
+    def apply(self):
+        self.result = {
+            "year": int(self.spn_year.get()),
+            "month": self.cmb_month.current() + 1,
+            "with_hours": bool(self.var_copy_hours.get()),
+            "mode": self.var_mode.get(),  # replace | merge
+        }
 
 # ===== Объектный табель (окно) =====
 class ObjectTimesheet(tk.Toplevel):
@@ -386,7 +438,8 @@ class ObjectTimesheet(tk.Toplevel):
         ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=1, padx=4)
         ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=2, padx=4)
         ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=3, padx=4)
-        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=4, padx=4)
+        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=4, padx=4)
+        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=5, padx=4)
 
         # Шапка (один canvas) — сетка 0..36 с теми же ширинами, что у строк
         header_wrap = tk.Frame(self)
@@ -635,6 +688,14 @@ class ObjectTimesheet(tk.Toplevel):
         id_part = oid if oid else safe_filename(addr)
         return self.base_dir / OUTPUT_DIR / f"Объектный_табель_{id_part}_{y}_{m:02d}.xlsx"
 
+    def _file_path_for(self, year: int, month: int, addr: Optional[str] = None, oid: Optional[str] = None) -> Optional[Path]:
+        addr = (addr if addr is not None else self.cmb_address.get().strip())
+        oid = (oid if oid is not None else self.cmb_object_id.get().strip())
+        if not addr and not oid:
+             return None
+        id_part = oid if oid else safe_filename(addr)
+        return self.base_dir / OUTPUT_DIR / f"Объектный_табель_{id_part}_{year}_{month:02d}.xlsx"
+
     def _ensure_sheet(self, wb) -> Any:
         if "Табель" in wb.sheetnames:
             ws = wb["Табель"]
@@ -774,7 +835,109 @@ class ObjectTimesheet(tk.Toplevel):
             messagebox.showinfo("Сохранение", f"Сохранено:\n{fpath}")
         except Exception as e:
             messagebox.showerror("Сохранение", f"Ошибка сохранения:\n{e}")
+    def copy_from_month(self):
+    addr = self.cmb_address.get().strip()
+    oid = self.cmb_object_id.get().strip()
+    if not addr and not oid:
+        messagebox.showwarning("Копирование", "Укажите адрес и/или ID объекта для назначения.")
+        return
 
+    # По умолчанию предложим предыдущий месяц
+    cy, cm = self.get_year_month()
+    src_y, src_m = cy, cm - 1
+    if src_m < 1:
+        src_m = 12
+        src_y -= 1
+
+    dlg = CopyFromDialog(self, init_year=src_y, init_month=src_m)
+    if not getattr(dlg, "result", None):
+        return
+
+    src_y = dlg.result["year"]
+    src_m = dlg.result["month"]
+    with_hours = dlg.result["with_hours"]
+    mode = dlg.result["mode"]  # replace | merge
+
+    src_path = self._file_path_for(src_y, src_m, addr=addr, oid=oid)
+    if not src_path or not src_path.exists():
+        messagebox.showwarning("Копирование", f"Не найден файл источника:\n{src_path}")
+        return
+
+    try:
+        wb = load_workbook(src_path, data_only=True)
+        ws = self._ensure_sheet(wb)
+
+        found = []
+        for r in range(2, ws.max_row + 1):
+            row_oid = (ws.cell(r, 1).value or "")
+            row_addr = (ws.cell(r, 2).value or "")
+            row_m = int(ws.cell(r, 3).value or 0)
+            row_y = int(ws.cell(r, 4).value or 0)
+            fio = str(ws.cell(r, 5).value or "").strip()
+            tbn = str(ws.cell(r, 6).value or "").strip()
+
+            if row_m != src_m or row_y != src_y:
+                continue
+            if oid:
+                if row_oid != oid:
+                    continue
+            else:
+                if row_addr != addr:
+                    continue
+
+            hrs = []
+            if with_hours:
+                for c in range(7, 7 + 31):
+                    v = ws.cell(r, c).value
+                    try:
+                        n = float(v) if isinstance(v, (int, float)) else parse_hours_value(v)
+                    except Exception:
+                        n = None
+                    hrs.append(n)
+
+            if fio:
+                found.append((fio, tbn, hrs))
+
+        if not found:
+            messagebox.showinfo("Копирование", "В источнике нет сотрудников для выбранного объекта и периода.")
+            return
+
+        # Уникализируем по (ФИО, Таб№), чтобы не плодить дубли
+        uniq = {}
+        for fio, tbn, hrs in found:
+            key = (fio.lower(), tbn.strip())
+            if key not in uniq:
+                uniq[key] = (fio, tbn, hrs)
+        found = list(uniq.values())
+
+        # Заменить/объединить
+        added = 0
+        if mode == "replace":
+            for r in self.rows:
+                r.destroy()
+            self.rows.clear()
+
+        existing = {(r.fio().strip().lower(), r.tbn().strip()) for r in self.rows}
+
+        dy, dm = self.get_year_month()
+        for fio, tbn, hrs in found:
+            key = (fio.strip().lower(), tbn.strip())
+            if mode == "merge" and key in existing:
+                continue
+            roww = RowWidget(self.rows_holder, len(self.rows) + 1, fio, tbn, self.get_year_month, self.delete_row)
+            roww.apply_pixel_column_widths(self.COLPX)
+            roww.update_days_enabled(dy, dm)
+            if with_hours and hrs:
+                roww.set_hours(hrs)
+            self.rows.append(roww)
+            added += 1
+
+        self._regrid_rows()
+        self._recalc_object_total()
+        messagebox.showinfo("Копирование", f"Добавлено сотрудников: {added}")
+
+    except Exception as e:
+        messagebox.showerror("Копирование", f"Ошибка копирования:\n{e}")
     def reload_spravochnik(self):
         cur_addr = self.cmb_address.get().strip()
         cur_id = self.cmb_object_id.get().strip()
@@ -899,6 +1062,11 @@ class MainApp(tk.Tk):
             "4) Один сотрудник — несколько объектов (в один день):\n"
             "   • Добавьте строку на первый ID и введите часть часов.\n"
             "   • Смените ID, добавьте вторую строку этому же сотруднику и введите оставшиеся часы.\n\n"
+            "5) Копирование списка из другого месяца:\n"
+            "   • Выберите месяц/год назначения и объект (Адрес/ID).\n"
+            "   • Нажмите «Копировать из месяца…» и укажите месяц/год источника.\n"
+            "   • Выберите режим: «Заменить» (очистить текущий список) или «Объединить» (добавить недостающих).\n"
+            "   • По умолчанию копируются только сотрудники; можно включить перенос часов.\n\n"
             "Подсказки:\n"
             "   • Часы понимают форматы: 8, 8.5/8,5, 8:30, 1/7 (сумма частей).\n"
             "   • Нули в ячейках часов не выводятся (пусто).\n"
