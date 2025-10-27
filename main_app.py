@@ -860,115 +860,115 @@ class ObjectTimesheet(tk.Toplevel):
         messagebox.showinfo("Справочник", "Справочник обновлён.")
 		# ВНУТРИ класса ObjectTimesheet
 
-	def _file_path_for(self, year: int, month: int, addr: Optional[str] = None, oid: Optional[str] = None) -> Optional[Path]:
-	    addr = (addr if addr is not None else self.cmb_address.get().strip())
-	    oid = (oid if oid is not None else self.cmb_object_id.get().strip())
-	    if not addr and not oid:
-	        return None
-	    id_part = oid if oid else safe_filename(addr)
-	    return self.base_dir / OUTPUT_DIR / f"Объектный_табель_{id_part}_{year}_{month:02d}.xlsx"
-	
-	def copy_from_month(self):
-	    addr = self.cmb_address.get().strip()
-	    oid = self.cmb_object_id.get().strip()
-	    if not addr and not oid:
-	        messagebox.showwarning("Копирование", "Укажите адрес и/или ID объекта для назначения.")
-	        return
-	
-	    cy, cm = self.get_year_month()
-	    src_y, src_m = cy, cm - 1
-	    if src_m < 1:
-	        src_m = 12
-	        src_y -= 1
-	
-	    dlg = CopyFromDialog(self, init_year=src_y, init_month=src_m)
-	    if not getattr(dlg, "result", None):
-	        return
-	
-	    src_y = dlg.result["year"]
-	    src_m = dlg.result["month"]
-	    with_hours = dlg.result["with_hours"]
-	    mode = dlg.result["mode"]  # replace | merge
-	
-	    src_path = self._file_path_for(src_y, src_m, addr=addr, oid=oid)
-	    if not src_path or not src_path.exists():
-	        messagebox.showwarning("Копирование", f"Не найден файл источника:\n{src_path}")
-	        return
-	
-	    try:
-	        wb = load_workbook(src_path, data_only=True)
-	        ws = self._ensure_sheet(wb)
-	
-	        found = []
-	        for r in range(2, ws.max_row + 1):
-	            row_oid = (ws.cell(r, 1).value or "")
-	            row_addr = (ws.cell(r, 2).value or "")
-	            row_m = int(ws.cell(r, 3).value or 0)
-	            row_y = int(ws.cell(r, 4).value or 0)
-	            fio = str(ws.cell(r, 5).value or "").strip()
-	            tbn = str(ws.cell(r, 6).value or "").strip()
-	
-	            if row_m != src_m or row_y != src_y:
-	                continue
-	            if oid:
-	                if row_oid != oid:
-	                    continue
-	            else:
-	                if row_addr != addr:
-	                    continue
-	
-	            hrs = []
-	            if with_hours:
-	                for c in range(7, 7 + 31):
-	                    v = ws.cell(r, c).value
-	                    try:
-	                        n = float(v) if isinstance(v, (int, float)) else parse_hours_value(v)
-	                    except Exception:
-	                        n = None
-	                    hrs.append(n)
-	
-	            if fio:
-	                found.append((fio, tbn, hrs))
-	
-	        if not found:
-	            messagebox.showinfo("Копирование", "В источнике нет сотрудников для выбранного объекта и периода.")
-	            return
-	
-	        uniq = {}
-	        for fio, tbn, hrs in found:
-	            key = (fio.strip().lower(), tbn.strip())
-	            if key not in uniq:
-	                uniq[key] = (fio, tbn, hrs)
-	        found = list(uniq.values())
-	
-	        added = 0
-	        if mode == "replace":
-	            for r in self.rows:
-	                r.destroy()
-	            self.rows.clear()
-	
-	        existing = {(r.fio().strip().lower(), r.tbn().strip()) for r in self.rows}
-	
-	        dy, dm = self.get_year_month()
-	        for fio, tbn, hrs in found:
-	            key = (fio.strip().lower(), tbn.strip())
-	            if mode == "merge" and key in existing:
-	                continue
-	            roww = RowWidget(self.rows_holder, len(self.rows) + 1, fio, tbn, self.get_year_month, self.delete_row)
-	            roww.apply_pixel_column_widths(self.COLPX)
-	            roww.update_days_enabled(dy, dm)
-	            if with_hours and hrs:
-	                roww.set_hours(hrs)
-	            self.rows.append(roww)
-	            added += 1
-	
-	        self._regrid_rows()
-	        self._recalc_object_total()
-	        messagebox.showinfo("Копирование", f"Добавлено сотрудников: {added}")
-	
-	    except Exception as e:
-	        messagebox.showerror("Копирование", f"Ошибка копирования:\n{e}")
-	        
+    def _file_path_for(self, year: int, month: int, addr: Optional[str] = None, oid: Optional[str] = None) -> Optional[Path]:
+        addr = (addr if addr is not None else self.cmb_address.get().strip())
+        oid = (oid if oid is not None else self.cmb_object_id.get().strip())
+        if not addr and not oid:
+            return None
+        id_part = oid if oid else safe_filename(addr)
+        return self.base_dir / OUTPUT_DIR / f"Объектный_табель_{id_part}_{year}_{month:02d}.xlsx"
+
+    def copy_from_month(self):
+        addr = self.cmb_address.get().strip()
+        oid = self.cmb_object_id.get().strip()
+        if not addr and not oid:
+            messagebox.showwarning("Копирование", "Укажите адрес и/или ID объекта для назначения.")
+            return
+
+        cy, cm = self.get_year_month()
+        src_y, src_m = cy, cm - 1
+        if src_m < 1:
+           src_m = 12
+            src_y -= 1
+
+        dlg = CopyFromDialog(self, init_year=src_y, init_month=src_m)
+        if not getattr(dlg, "result", None):
+            return
+
+        src_y = dlg.result["year"]
+        src_m = dlg.result["month"]
+        with_hours = dlg.result["with_hours"]
+        mode = dlg.result["mode"]  # replace | merge
+
+        src_path = self._file_path_for(src_y, src_m, addr=addr, oid=oid)
+        if not src_path or not src_path.exists():
+            messagebox.showwarning("Копирование", f"Не найден файл источника:\n{src_path}")
+            return
+
+        try:
+            wb = load_workbook(src_path, data_only=True)
+            ws = self._ensure_sheet(wb)
+
+            found = []
+            for r in range(2, ws.max_row + 1):
+                row_oid = (ws.cell(r, 1).value or "")
+                row_addr = (ws.cell(r, 2).value or "")
+                row_m = int(ws.cell(r, 3).value or 0)
+                row_y = int(ws.cell(r, 4).value or 0)
+                fio = str(ws.cell(r, 5).value or "").strip()
+                tbn = str(ws.cell(r, 6).value or "").strip()
+
+                if row_m != src_m or row_y != src_y:
+                    continue
+                if oid:
+                    if row_oid != oid:
+                        continue
+                else:
+                    if row_addr != addr:
+                        continue
+
+                hrs = []
+                if with_hours:
+                    for c in range(7, 7 + 31):
+                        v = ws.cell(r, c).value
+                        try:
+                            n = float(v) if isinstance(v, (int, float)) else parse_hours_value(v)
+                        except Exception:
+                            n = None
+                        hrs.append(n)
+
+                if fio:
+                    found.append((fio, tbn, hrs))
+
+            if not found:
+                messagebox.showinfo("Копирование", "В источнике нет сотрудников для выбранного объекта и периода.")
+                return
+
+            uniq = {}
+            for fio, tbn, hrs in found:
+                key = (fio.strip().lower(), tbn.strip())
+                if key not in uniq:
+                    uniq[key] = (fio, tbn, hrs)
+             found = list(uniq.values())
+
+            added = 0
+            if mode == "replace":
+                for r in self.rows:
+                    r.destroy()
+                self.rows.clear()
+
+             existing = {(r.fio().strip().lower(), r.tbn().strip()) for r in self.rows}
+
+             dy, dm = self.get_year_month()
+            for fio, tbn, hrs in found:
+                key = (fio.strip().lower(), tbn.strip())
+                if mode == "merge" and key in existing:
+                    continue
+                roww = RowWidget(self.rows_holder, len(self.rows) + 1, fio, tbn, self.get_year_month, self.delete_row)
+                roww.apply_pixel_column_widths(self.COLPX)
+                roww.update_days_enabled(dy, dm)
+                if with_hours and hrs:
+                    roww.set_hours(hrs)
+                 self.rows.append(roww)
+                 added += 1
+
+            self._regrid_rows()
+            self._recalc_object_total()
+            messagebox.showinfo("Копирование", f"Добавлено сотрудников: {added}")
+
+        except Exception as e:
+            messagebox.showerror("Копирование", f"Ошибка копирования:\n{e}")
+       
 # ------------------------- Конвертер (запуск внешнего EXE) -------------------------
 
 def run_converter():
