@@ -520,8 +520,8 @@ class ObjectTimesheet(tk.Toplevel):
         self._load_existing_rows()
 
     def _on_address_select(self, *_):
-    addr = self.cmb_address.get().strip()
-    ids = sorted(self.addr_to_ids.get(addr, []))
+        addr = self.cmb_address.get().strip()
+        ids = sorted(self.addr_to_ids.get(addr, []))
 
     # Обновляем список ID и не сбрасываем выбранный, если он ещё валиден
     cur = self.cmb_object_id.get().strip()
