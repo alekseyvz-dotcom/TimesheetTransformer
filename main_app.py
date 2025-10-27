@@ -351,10 +351,10 @@ class ObjectTimesheet(tk.Toplevel):
         self.cmb_address.set_completion_list(self.address_options)  # список для автопоиска
         self.cmb_address.grid(row=0, column=5, sticky="w")
 
-       # обновлять ID/строки:
-       self.cmb_address.bind("<<ComboboxSelected>>", self._on_address_select)
-       self.cmb_address.bind("<Return>", self._on_address_select)     # нажали Enter — применить адрес
-       self.cmb_address.bind("<FocusOut>", self._on_address_select)   # ушли с поля — применить адрес
+        # обновлять ID/строки:
+        self.cmb_address.bind("<<ComboboxSelected>>", self._on_address_select)
+        self.cmb_address.bind("<Return>", self._on_address_select)     # нажали Enter — применить адрес
+        self.cmb_address.bind("<FocusOut>", self._on_address_select)   # ушли с поля — применить адрес
 
         tk.Label(top, text="ID объекта:").grid(row=0, column=6, sticky="w", padx=(16, 4))
         self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=18)
