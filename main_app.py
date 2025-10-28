@@ -651,7 +651,7 @@ class ObjectTimesheet(tk.Toplevel):
 
         # Ряд 0 — Подразделение (слева, главное условие)
         tk.Label(top, text="Подразделение:").grid(row=0, column=0, sticky="w", padx=(0, 4))
-        self.cmb_department = ttk.Combobox(top, state="readonly", values=self.departments, width=24)
+        self.cmb_department = ttk.Combobox(top, state="readonly", values=self.departments, width=48)
         self.cmb_department.grid(row=0, column=1, sticky="w")
         # установим выбранное подразделение из ini (или "Все")
         saved_dep = get_selected_department_from_config()
