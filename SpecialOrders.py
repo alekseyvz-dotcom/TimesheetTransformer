@@ -25,12 +25,18 @@ CONFIG_FILE = "tabel_config.ini"
 CONFIG_SECTION_PATHS = "Paths"
 CONFIG_SECTION_UI = "UI"
 CONFIG_SECTION_INTEGR = "Integrations"
+CONFIG_SECTION_ORDERS = "Orders"          # секция для настроек приёма заявок
+
 KEY_SPR = "spravochnik_path"
 KEY_SELECTED_DEP = "selected_department"
 
 KEY_ORDERS_MODE = "orders_mode"                 # none | webhook
 KEY_ORDERS_WEBHOOK_URL = "orders_webhook_url"   # https://script.google.com/macros/s/.../exec
 KEY_ORDERS_WEBHOOK_TOKEN = "orders_webhook_token"
+
+# Настройки отсечки подачи заявок
+KEY_CUTOFF_ENABLED = "cutoff_enabled"  # true|false
+KEY_CUTOFF_HOUR = "cutoff_hour"        # 0..23
 
 SPRAVOCHNIK_FILE = "Справочник.xlsx"
 ORDERS_DIR = "Заявки_спецтехники"
@@ -59,12 +65,14 @@ def ensure_config():
         if KEY_SPR not in cfg[CONFIG_SECTION_PATHS]:
             cfg[CONFIG_SECTION_PATHS][KEY_SPR] = str(exe_dir() / SPRAVOCHNIK_FILE)
             changed = True
+
         if not cfg.has_section(CONFIG_SECTION_UI):
             cfg[CONFIG_SECTION_UI] = {}
             changed = True
         if KEY_SELECTED_DEP not in cfg[CONFIG_SECTION_UI]:
             cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = "Все"
             changed = True
+
         if not cfg.has_section(CONFIG_SECTION_INTEGR):
             cfg[CONFIG_SECTION_INTEGR] = {}
             changed = True
@@ -77,11 +85,23 @@ def ensure_config():
         if KEY_ORDERS_WEBHOOK_TOKEN not in cfg[CONFIG_SECTION_INTEGR]:
             cfg[CONFIG_SECTION_INTEGR][KEY_ORDERS_WEBHOOK_TOKEN] = ""
             changed = True
+
+        # Новая секция Orders
+        if not cfg.has_section(CONFIG_SECTION_ORDERS):
+            cfg[CONFIG_SECTION_ORDERS] = {}
+            changed = True
+        if KEY_CUTOFF_ENABLED not in cfg[CONFIG_SECTION_ORDERS]:
+            cfg[CONFIG_SECTION_ORDERS][KEY_CUTOFF_ENABLED] = "true"
+            changed = True
+        if KEY_CUTOFF_HOUR not in cfg[CONFIG_SECTION_ORDERS]:
+            cfg[CONFIG_SECTION_ORDERS][KEY_CUTOFF_HOUR] = "13"
+            changed = True
+
         if changed:
             with open(cp, "w", encoding="utf-8") as f:
                 cfg.write(f)
         return
-    # создаём
+    # создаём с нуля
     cfg = configparser.ConfigParser()
     cfg[CONFIG_SECTION_PATHS] = {
         KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE)
@@ -93,6 +113,10 @@ def ensure_config():
         KEY_ORDERS_MODE: "none",
         KEY_ORDERS_WEBHOOK_URL: "",
         KEY_ORDERS_WEBHOOK_TOKEN: ""
+    }
+    cfg[CONFIG_SECTION_ORDERS] = {
+        KEY_CUTOFF_ENABLED: "true",
+        KEY_CUTOFF_HOUR: "13"
     }
     with open(cp, "w", encoding="utf-8") as f:
         cfg.write(f)
@@ -134,6 +158,27 @@ def get_orders_webhook_url() -> str:
 def get_orders_webhook_token() -> str:
     cfg = read_config()
     return cfg.get(CONFIG_SECTION_INTEGR, KEY_ORDERS_WEBHOOK_TOKEN, fallback="").strip()
+
+# Настройки отсечки приёма заявок
+def get_cutoff_enabled() -> bool:
+    cfg = read_config()
+    v = cfg.get(CONFIG_SECTION_ORDERS, KEY_CUTOFF_ENABLED, fallback="true").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+def get_cutoff_hour() -> int:
+    cfg = read_config()
+    try:
+        h = int(cfg.get(CONFIG_SECTION_ORDERS, KEY_CUTOFF_HOUR, fallback="13").strip())
+        return min(23, max(0, h))
+    except Exception:
+        return 13
+
+def is_past_cutoff_for_date(req_date: date, cutoff_hour: int) -> bool:
+    now = datetime.now()
+    if req_date != now.date():
+        return False
+    cutoff = now.replace(hour=cutoff_hour, minute=0, second=0, microsecond=0)
+    return now >= cutoff
 
 def month_days(year: int, month: int) -> int:
     return calendar.monthrange(year, month)[1]
@@ -505,7 +550,7 @@ class SpecialOrdersApp(tk.Tk):
         saved_dep = get_saved_dep()
         self.cmb_dep.set(saved_dep if saved_dep in self.deps else self.deps[0])
         self.cmb_dep.grid(row=0, column=1, sticky="w", padx=(4, 12))
-        self.cmb_dep.bind("<<ComboboxSelected>>", lambda e: (set_saved_dep(self.cmb_dep.get()), self._update_fio_list()))
+        self.cmb_dep.bind("<<ComboboxSelected>>", lambda e: (set_saved_dep(self.cmb_dep.get()), self._update_fio_list(), self._update_cutoff_hint()))
 
         tk.Label(top, text="ФИО:").grid(row=0, column=2, sticky="w")
         self.fio_var = tk.StringVar()
@@ -520,8 +565,10 @@ class SpecialOrdersApp(tk.Tk):
         self.ent_date = ttk.Entry(top, width=12)
         self.ent_date.grid(row=0, column=7, sticky="w", padx=(4, 0))
         self.ent_date.insert(0, date.today().strftime("%Y-%m-%d"))
+        self.ent_date.bind("<KeyRelease>", lambda e: self._update_cutoff_hint())
+        self.ent_date.bind("<FocusOut>", lambda e: self._update_cutoff_hint())
 
-        # Ряд 2: Объект (Адрес / ID)
+        # Ряд 2: Объект (Адрес / ID) + подсказка отсечки под датой
         tk.Label(top, text="Адрес:").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.cmb_address = AutoCompleteCombobox(top, width=56)
         self.cmb_address.set_completion_list(self.addresses)
@@ -533,6 +580,10 @@ class SpecialOrdersApp(tk.Tk):
         tk.Label(top, text="ID объекта:").grid(row=1, column=4, sticky="w", pady=(8, 0))
         self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=20)
         self.cmb_object_id.grid(row=1, column=5, sticky="w", padx=(4, 12), pady=(8, 0))
+
+        # Подсказка под датой (в той же строке, что адрес/ID, но в правой части)
+        self.lbl_cutoff_hint = tk.Label(top, text="", fg="#555")
+        self.lbl_cutoff_hint.grid(row=1, column=6, columnspan=2, sticky="w", pady=(8, 0))
 
         # Ряд 3: Общий комментарий
         tk.Label(top, text="Комментарий:").grid(row=2, column=0, sticky="nw", pady=(8, 0))
@@ -580,6 +631,7 @@ class SpecialOrdersApp(tk.Tk):
 
         # Первичная инициализация
         self._update_fio_list()
+        self._update_cutoff_hint()
         # Стартовая строка
         self.add_position()
 
@@ -603,6 +655,26 @@ class SpecialOrdersApp(tk.Tk):
         if not filtered and dep != "Все":
             filtered = [r['fio'] for r in self.emps]
         self.cmb_fio.set_completion_list(filtered)
+
+    def _update_cutoff_hint(self):
+        # Универсальная подсказка (если включена отсечка)
+        if not get_cutoff_enabled():
+            self.lbl_cutoff_hint.config(text="", fg="#555")
+            return
+        ch = get_cutoff_hour()
+        hint_base = f"Приём заявок до {ch:02d}:00 (на текущую дату)"
+        # Попробуем распарсить выбранную дату и показать более точный статус
+        req = parse_date_any(self.ent_date.get())
+        today = date.today()
+        if req is None:
+            self.lbl_cutoff_hint.config(text=hint_base, fg="#555")
+            return
+        if req < today:
+            self.lbl_cutoff_hint.config(text="Выбрана прошедшая дата — заявки недоступны", fg="#b00020")
+        elif req == today and is_past_cutoff_for_date(today, ch):
+            self.lbl_cutoff_hint.config(text=f"Сегодня приём закрыт после {ch:02d}:00", fg="#b00020")
+        else:
+            self.lbl_cutoff_hint.config(text=hint_base, fg="#555")
 
     def _sync_ids_by_address(self):
         addr = (self.cmb_address.get() or "").strip()
@@ -682,7 +754,35 @@ class SpecialOrdersApp(tk.Tk):
     def save_order(self):
         if not self._validate_form():
             return
+
+        # Ограничение: прошедшие даты — всегда запрещены
+        try:
+            req_date = parse_date_any(self.ent_date.get()) or date.today()
+            if req_date < date.today():
+                messagebox.showwarning(
+                    "Заявка",
+                    "Заявки на прошедшую дату не принимаются.\nВыберите сегодняшнюю или будущую дату."
+                )
+                return
+        except Exception:
+            pass
+
+        # Ограничение: на текущую дату — после cutoff_hour запрещено
+        try:
+            req_date = parse_date_any(self.ent_date.get()) or date.today()
+            if get_cutoff_enabled() and is_past_cutoff_for_date(req_date, get_cutoff_hour()):
+                ch = get_cutoff_hour()
+                messagebox.showwarning(
+                    "Заявка",
+                    f"Приём заявок на текущую дату закрыт после {ch:02d}:00.\n"
+                    f"Выберите завтрашнюю дату и повторите."
+                )
+                return
+        except Exception:
+            pass
+
         data = self._build_order_dict()
+
         # XLSX
         ts = datetime.now().strftime("%H%M%S")
         id_part = data["object"]["id"] or safe_filename(data["object"]["address"])
@@ -794,6 +894,7 @@ class SpecialOrdersApp(tk.Tk):
             r.destroy()
         self.pos_rows.clear()
         self.add_position()
+        self._update_cutoff_hint()
 
     def open_orders_dir(self):
         try:
