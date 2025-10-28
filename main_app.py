@@ -3,6 +3,7 @@ import re
 import sys
 import subprocess
 import calendar
+import configparser
 from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple, Optional, Any
@@ -14,9 +15,15 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 
 APP_NAME = "Табель‑конвертер (Главное меню)"
-SPRAVOCHNIK_FILE = "Справочник.xlsx"            # рядом с exe
+
+# Конфиг и файлы
+CONFIG_FILE = "tabel_config.ini"                # лежит рядом с программой
+CONFIG_SECTION = "Paths"
+CONFIG_KEY_SPR = "spravochnik_path"
+
+SPRAVOCHNIK_FILE = "Справочник.xlsx"            # имя по умолчанию (если в конфиге не задан путь)
 CONVERTER_EXE = "TabelConverter.exe"            # ваш конвертер (лежит рядом)
-OUTPUT_DIR = "Объектные_табели"                 # папка для объектных табелей
+OUTPUT_DIR = "Объектные_табели"                 # папка для объектных табелей (рядом с программой)
 
 # ------------------------- Утилиты -------------------------
 
@@ -24,6 +31,36 @@ def exe_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
+
+def config_path() -> Path:
+    return exe_dir() / CONFIG_FILE
+
+def ensure_config_exists():
+    cfg_path = config_path()
+    if cfg_path.exists():
+        return
+    cfg = configparser.ConfigParser()
+    cfg[CONFIG_SECTION] = {
+        CONFIG_KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE)
+    }
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        cfg.write(f)
+
+def read_config() -> configparser.ConfigParser:
+    ensure_config_exists()
+    cfg = configparser.ConfigParser()
+    cfg.read(config_path(), encoding="utf-8")
+    return cfg
+
+def get_spravochnik_path_from_config() -> Path:
+    cfg = read_config()
+    if not cfg.has_section(CONFIG_SECTION):
+        ensure_config_exists()
+        cfg = read_config()
+    raw = cfg.get(CONFIG_SECTION, CONFIG_KEY_SPR, fallback=str(exe_dir() / SPRAVOCHNIK_FILE))
+    # Поддержка переменных окружения и UNC
+    raw_expanded = os.path.expandvars(raw)
+    return Path(raw_expanded)
 
 def month_days(year: int, month: int) -> int:
     return calendar.monthrange(year, month)[1]
@@ -40,6 +77,11 @@ def safe_filename(s: str, maxlen: int = 60) -> str:
     return s[:maxlen] if len(s) > maxlen else s
 
 def ensure_spravochnik(path: Path):
+    # Создаём директории и файл при необходимости
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
     if path.exists():
         return
     wb = Workbook()
@@ -61,8 +103,7 @@ def load_spravochnik(path: Path) -> Tuple[List[Tuple[str,str,str]], List[Tuple[s
     Возвращает:
     - employees: [(ФИО, Таб№, Должность)]
     - objects:   [(ID, Адрес)]
-    Поддерживает старый справочник с одной колонкой 'Адрес' и
-    с двумя колонками в 'Сотрудники' (Должность будет пустой).
+    Поддерживает старый справочник.
     """
     def s(v) -> str:
         if v is None:
@@ -143,7 +184,7 @@ class RowWidget:
 
         self.frame = tk.Frame(parent, bd=0)
 
-        # ФИО / Таб.№ — не задаём большую символьную ширину, чтобы не растягивать колонку сверх minsize
+        # ФИО / Таб.№ — минимальный визуальный размер задаётся minsize колонок
         self.lbl_fio = tk.Label(self.frame, text=fio, anchor="w")
         self.lbl_fio.grid(row=0, column=0, padx=1, pady=1, sticky="w")
 
@@ -153,7 +194,7 @@ class RowWidget:
         # 31 ячейка по дням
         self.day_entries: List[tk.Entry] = []
         for d in range(1, 32):
-            e = tk.Entry(self.frame, width=4, justify="center")  # компактнее
+            e = tk.Entry(self.frame, width=4, justify="center")  # компактно
             e.grid(row=0, column=1 + d, padx=0, pady=1)
             e.bind("<FocusOut>", lambda ev, _d=d: self.update_total())
             e.bind("<Button-2>", lambda ev: "break")
@@ -346,16 +387,25 @@ class HoursFillDialog(simpledialog.Dialog):
         self.spn_day = tk.Spinbox(master, from_=1, to=31, width=4)
         self.spn_day.grid(row=1, column=1, sticky="w")
         self.spn_day.delete(0, "end")
-        # по умолчанию 1‑е число
         self.spn_day.insert(0, "1")
 
-        tk.Label(master, text="Часы:").grid(row=2, column=0, sticky="e", pady=(6, 0))
+        self.var_clear = tk.BooleanVar(value=False)
+        ttk.Checkbutton(master, text="Очистить день (пусто)", variable=self.var_clear, command=self._on_toggle_clear)\
+            .grid(row=2, column=1, sticky="w", pady=(6, 2))
+
+        tk.Label(master, text="Часы:").grid(row=3, column=0, sticky="e", pady=(6, 0))
         self.ent_hours = ttk.Entry(master, width=12)
-        self.ent_hours.grid(row=2, column=1, sticky="w", pady=(6, 0))
+        self.ent_hours.grid(row=3, column=1, sticky="w", pady=(6, 0))
         self.ent_hours.insert(0, "8")
 
-        tk.Label(master, text="Форматы: 8 | 8,25 | 8:30 | 1/7").grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 2))
+        tk.Label(master, text="Форматы: 8 | 8,25 | 8:30 | 1/7").grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 2))
         return self.spn_day
+
+    def _on_toggle_clear(self):
+        if self.var_clear.get():
+            self.ent_hours.configure(state="disabled")
+        else:
+            self.ent_hours.configure(state="normal")
 
     def validate(self):
         # День
@@ -366,6 +416,13 @@ class HoursFillDialog(simpledialog.Dialog):
         except Exception:
             messagebox.showwarning("Проставить часы", "День должен быть числом от 1 до 31.")
             return False
+
+        if self.var_clear.get():
+            self._d = d
+            self._h = 0.0
+            self._clear = True
+            return True
+
         # Часы
         vraw = self.ent_hours.get().strip()
         hv = parse_hours_value(vraw)
@@ -374,12 +431,14 @@ class HoursFillDialog(simpledialog.Dialog):
             return False
         self._d = d
         self._h = float(hv)
+        self._clear = False
         return True
 
     def apply(self):
         self.result = {
             "day": self._d,
             "hours": self._h,
+            "clear": self._clear,
         }
 
 # ------------------------- Объектный табель -------------------------
@@ -405,7 +464,7 @@ class ObjectTimesheet(tk.Toplevel):
         self.resizable(True, True)
 
         self.base_dir = exe_dir()
-        self.spr_path = self.base_dir / SPRAVOCHNIK_FILE
+        self.spr_path = get_spravochnik_path_from_config()
         self.out_dir = self.base_dir / OUTPUT_DIR
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -731,11 +790,21 @@ class ObjectTimesheet(tk.Toplevel):
         if not getattr(dlg, "result", None):
             return
         day = dlg.result["day"]
-        hours_val = float(dlg.result["hours"])
+        clear = bool(dlg.result.get("clear", False))
         if day > max_day:
             messagebox.showwarning("Проставить часы", f"В {month_name_ru(m)} {y} только {max_day} дней.")
             return
-        # строка отображения с запятой
+
+        if clear:
+            for r in self.rows:
+                e = r.day_entries[day - 1]
+                e.delete(0, "end")
+                r.update_total()
+            self._recalc_object_total()
+            messagebox.showinfo("Проставить часы", f"День {day} очищен у {len(self.rows)} сотрудников.")
+            return
+
+        hours_val = float(dlg.result["hours"])
         s = f"{hours_val:.2f}".rstrip("0").rstrip(".").replace(".", ",")
         for r in self.rows:
             e = r.day_entries[day - 1]
@@ -1067,6 +1136,9 @@ class ObjectTimesheet(tk.Toplevel):
             messagebox.showerror("Копирование", f"Ошибка копирования:\n{e}")
 
     def reload_spravochnik(self):
+        # перечитать с учётом возможного изменения пути в конфиге
+        self.spr_path = get_spravochnik_path_from_config()
+
         cur_addr = self.cmb_address.get().strip()
         cur_id = self.cmb_object_id.get().strip()
         cur_fio = self.fio_var.get().strip()
@@ -1095,7 +1167,7 @@ class ObjectTimesheet(tk.Toplevel):
             self.ent_tbn.delete(0, "end")
             self.pos_var.set("")
 
-        messagebox.showinfo("Справочник", "Справочник обновлён.")
+        messagebox.showinfo("Справочник", f"Справочник перечитан.\nПуть: {self.spr_path}")
 
 # ------------------------- Конвертер (внешний EXE) -------------------------
 
@@ -1119,6 +1191,9 @@ class MainApp(tk.Tk):
         self.geometry("680x420")
         self.resizable(False, False)
 
+        # убедимся, что конфиг существует
+        ensure_config_exists()
+
         tk.Label(self, text="Выберите модуль", font=("Segoe UI", 14, "bold")).pack(pady=(16, 6))
 
         ttk.Button(self, text="Объектный табель (реестр)", width=36,
@@ -1132,7 +1207,6 @@ class MainApp(tk.Tk):
             .grid(row=0, column=1, padx=6, pady=6)
 
         ttk.Button(self, text="Конвертер табеля (1С)", width=36, command=run_converter).pack(pady=(0, 12))
-
         ttk.Button(self, text="Помощь", width=18, command=self.show_help).pack(pady=(0, 8))
         ttk.Button(self, text="Выход", width=18, command=self.destroy).pack(pady=(0, 12))
 
@@ -1142,49 +1216,49 @@ class MainApp(tk.Tk):
         self.bind("<F1>", lambda e: self.show_help())
 
     def open_spravochnik(self):
-        path = exe_dir() / SPRAVOCHNIK_FILE
+        path = get_spravochnik_path_from_config()
         ensure_spravochnik(path)
         try:
-            os.startfile(path)
+            os.startfile(path)  # Windows, поддерживает UNC
         except Exception as e:
             messagebox.showerror("Справочник", f"Не удалось открыть файл:\n{e}")
 
     def refresh_spravochnik_global(self):
-        path = exe_dir() / SPRAVOCHNIK_FILE
+        path = get_spravochnik_path_from_config()
         ensure_spravochnik(path)
         messagebox.showinfo(
             "Справочник",
-            "Справочник проверен/создан.\n"
-            "В открытом окне используйте «Обновить справочник» для перечтения."
+            f"Справочник проверен/создан по пути:\n{path}\n\n"
+            f"Путь берётся из файла конфигурации:\n{config_path()}\n"
+            f"Можно указать сетевой путь (например, \\\\server\\share\\Справочник.xlsx)."
         )
 
     def show_help(self):
+        path = get_spravochnik_path_from_config()
         text = (
             "Как пользоваться модулем «Объектный табель (реестр)»\n\n"
             "1) Период и объект:\n"
             "   • Выберите Месяц и Год.\n"
             "   • Выберите Адрес; список ID подставится автоматически. Если ID один — проставится сам.\n"
             "   • Если ID отсутствует, можно оставить пустым — имя файла будет по адресу.\n\n"
-            "2) Добавление сотрудников:\n"
-            "   • Выберите ФИО (Таб.№ подставится) → «Добавить в табель».\n"
-            "   • Внизу появится строка: 31 ячейка по дням, итог, кнопки «5/2» и «Удалить».\n"
-            "   • Кнопка «5/2» (по строке): Пн–Чт = 8,25; Пт = 7; Сб/Вс — пусто.\n"
-            "   • Кнопка «5/2 всем» вверху — применяет график ко всем строкам.\n"
-            "   • Кнопка «Проставить часы» — массово проставляет одинаковые часы всем в выбранный день.\n\n"
+            "2) Добавление и массовые действия:\n"
+            "   • «Добавить в табель» — добавить сотрудника из справочника.\n"
+            "   • «5/2 всем» — Пн–Чт 8,25; Пт 7; Сб/Вс пусто.\n"
+            "   • «Проставить часы» — выбрать день и часы для массовой проставки; есть режим «Очистить день».\n\n"
             "3) Сохранение и загрузка:\n"
             "   • «Сохранить» — файл «Объектный_табель_{ID|Адрес}_{ГГГГ}_{ММ}.xlsx» в папке «Объектные_табели».\n"
-            "   • При сохранении все строки выбранного объекта и периода в файле перезаписываются текущим реестром.\n"
-            "   • При смене периода/адреса/ID строки подгружаются из уже сохранённого файла (если он есть).\n\n"
-            "4) Один сотрудник — несколько объектов (в один день):\n"
-            "   • Добавьте строку на первый ID и введите часть часов.\n"
-            "   • Смените ID, добавьте вторую строку этому же сотруднику и введите оставшиеся часы.\n\n"
-            "5) Копирование списка из другого месяца:\n"
-            "   • Выберите месяц/год назначения и объект (Адрес/ID).\n"
-            "   • Нажмите «Копировать из месяца…» и укажите месяц/год источника.\n"
-            "   • Режим: «Заменить» или «Объединить»; опция «Копировать часы» переносит введённые часы.\n\n"
-            "Подсказки:\n"
-            "   • Часы понимают форматы: 8, 8.5/8,5, 8:30, 1/7 (сумма частей).\n"
-            "   • Нули в ячейках часов не выводятся (пусто).\n"
+            "   • При сохранении строки выбранного объекта+периода перезаписываются текущим реестром.\n"
+            "   • При смене периода/адреса/ID строки подгружаются из уже сохранённого файла (если есть).\n\n"
+            "4) Копирование списка из другого месяца:\n"
+            "   • «Копировать из месяца…» — выбрать месяц/год источника, режим (Заменить/Объединить), опционально часы.\n\n"
+            "5) Справочник сотрудников и объектов:\n"
+            "   • Путь к «Справочник.xlsx» задаётся в конфиге:\n"
+            f"     {config_path()}\n"
+            f"     Текущий путь: {path}\n"
+            "   • Можно указать сетевой UNC-путь: \\\\server\\share\\Справочник.xlsx.\n\n"
+            "Подсказки по часам:\n"
+            "   • Форматы: 8, 8.5/8,5, 8:30, 1/7 (сумма частей).\n"
+            "   • Нули не выводятся (пусто).\n"
         )
         messagebox.showinfo("Помощь — Объектный табель", text)
 
