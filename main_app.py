@@ -1,5 +1,5 @@
 import os
-import re>
+import re
 import sys
 import subprocess
 import calendar
