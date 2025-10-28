@@ -19,8 +19,10 @@ APP_NAME = "Табель‑конвертер (Главное меню)"
 # Конфиг и файлы
 CONFIG_FILE = "tabel_config.ini"                # лежит рядом с программой
 CONFIG_SECTION = "Paths"
+CONFIG_SECTION_UI = "UI"
 CONFIG_KEY_SPR = "spravochnik_path"
 CONFIG_KEY_EXPORT_PWD = "export_password"
+CONFIG_KEY_DEPARTMENT = "selected_department"
 
 SPRAVOCHNIK_FILE = "Справочник.xlsx"            # имя по умолчанию (если в конфиге не задан путь)
 CONVERTER_EXE = "TabelConverter.exe"            # ваш конвертер (лежит рядом)
@@ -41,11 +43,37 @@ def config_path() -> Path:
 def ensure_config_exists():
     cfg_path = config_path()
     if cfg_path.exists():
+        # добавим недостающие секции/ключи при необходимости
+        cfg = configparser.ConfigParser()
+        cfg.read(cfg_path, encoding="utf-8")
+        changed = False
+        if not cfg.has_section(CONFIG_SECTION):
+            cfg[CONFIG_SECTION] = {}
+            changed = True
+        if CONFIG_KEY_SPR not in cfg[CONFIG_SECTION]:
+            cfg[CONFIG_SECTION][CONFIG_KEY_SPR] = str(exe_dir() / SPRAVOCHNIK_FILE)
+            changed = True
+        if CONFIG_KEY_EXPORT_PWD not in cfg[CONFIG_SECTION]:
+            cfg[CONFIG_SECTION][CONFIG_KEY_EXPORT_PWD] = "2025"
+            changed = True
+        if not cfg.has_section(CONFIG_SECTION_UI):
+            cfg[CONFIG_SECTION_UI] = {}
+            changed = True
+        if CONFIG_KEY_DEPARTMENT not in cfg[CONFIG_SECTION_UI]:
+            cfg[CONFIG_SECTION_UI][CONFIG_KEY_DEPARTMENT] = "Все"
+            changed = True
+        if changed:
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                cfg.write(f)
         return
+    # создаём с нуля
     cfg = configparser.ConfigParser()
     cfg[CONFIG_SECTION] = {
         CONFIG_KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE),
         CONFIG_KEY_EXPORT_PWD: "2025"
+    }
+    cfg[CONFIG_SECTION_UI] = {
+        CONFIG_KEY_DEPARTMENT: "Все"
     }
     with open(cfg_path, "w", encoding="utf-8") as f:
         cfg.write(f)
@@ -56,6 +84,10 @@ def read_config() -> configparser.ConfigParser:
     cfg.read(config_path(), encoding="utf-8")
     return cfg
 
+def write_config(cfg: configparser.ConfigParser):
+    with open(config_path(), "w", encoding="utf-8") as f:
+        cfg.write(f)
+
 def get_spravochnik_path_from_config() -> Path:
     cfg = read_config()
     raw = cfg.get(CONFIG_SECTION, CONFIG_KEY_SPR, fallback=str(exe_dir() / SPRAVOCHNIK_FILE))
@@ -64,6 +96,17 @@ def get_spravochnik_path_from_config() -> Path:
 def get_export_password_from_config() -> str:
     cfg = read_config()
     return cfg.get(CONFIG_SECTION, CONFIG_KEY_EXPORT_PWD, fallback="2025")
+
+def get_selected_department_from_config() -> str:
+    cfg = read_config()
+    return cfg.get(CONFIG_SECTION_UI, CONFIG_KEY_DEPARTMENT, fallback="Все")
+
+def set_selected_department_to_config(dep: str):
+    cfg = read_config()
+    if not cfg.has_section(CONFIG_SECTION_UI):
+        cfg[CONFIG_SECTION_UI] = {}
+    cfg[CONFIG_SECTION_UI][CONFIG_KEY_DEPARTMENT] = dep or "Все"
+    write_config(cfg)
 
 def month_days(year: int, month: int) -> int:
     return calendar.monthrange(year, month)[1]
@@ -88,10 +131,9 @@ def ensure_spravochnik(path: Path):
     if path.exists():
         return
     wb = Workbook()
-    # Лист Сотрудники
+    # Лист Сотрудники — с колонкой «Подразделение»
     ws1 = wb.active
     ws1.title = "Сотрудники"
-    # Добавили «Подразделение»
     ws1.append(["ФИО", "Табельный №", "Должность", "Подразделение"])
     ws1.append(["Иванов И. И.", "ST00-00001", "Слесарь", "Монтаж"])
     ws1.append(["Петров П. П.", "ST00-00002", "Электромонтер", "Электрика"])
@@ -251,7 +293,6 @@ class RowWidget:
         self.zebra_bg = self.ZEBRA_ODD if (index0 % 2 == 1) else self.ZEBRA_EVEN
         for w in (self.lbl_fio, self.lbl_tbn, self.lbl_days, self.lbl_total):
             w.configure(bg=self.zebra_bg)
-        # перекрасим дни с учётом выходных/ошибок
         y, m = self.get_year_month()
         self._repaint_all_days(y, m)
 
@@ -608,64 +649,68 @@ class ObjectTimesheet(tk.Toplevel):
         top = tk.Frame(self)
         top.pack(fill="x", padx=8, pady=8)
 
-        # Период
-        tk.Label(top, text="Месяц:").grid(row=0, column=0, sticky="w", padx=(0, 4))
+        # Ряд 0 — Подразделение (слева, главное условие)
+        tk.Label(top, text="Подразделение:").grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self.cmb_department = ttk.Combobox(top, state="readonly", values=self.departments, width=24)
+        self.cmb_department.grid(row=0, column=1, sticky="w")
+        # установим выбранное подразделение из ini (или "Все")
+        saved_dep = get_selected_department_from_config()
+        if saved_dep in self.departments:
+            self.cmb_department.set(saved_dep)
+        else:
+            self.cmb_department.set(self.departments[0] if self.departments else "Все")
+        self.cmb_department.bind("<<ComboboxSelected>>", lambda e: self._on_department_select())
+
+        # Ряд 1 — Период и Объект
+        tk.Label(top, text="Месяц:").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(8, 0))
         self.cmb_month = ttk.Combobox(top, state="readonly", width=12, values=[month_name_ru(i) for i in range(1, 13)])
-        self.cmb_month.grid(row=0, column=1, sticky="w")
+        self.cmb_month.grid(row=1, column=1, sticky="w", pady=(8, 0))
         self.cmb_month.current(datetime.now().month - 1)
         self.cmb_month.bind("<<ComboboxSelected>>", lambda e: (self._on_period_change(), self._refresh_header_styles()))
 
-        tk.Label(top, text="Год:").grid(row=0, column=2, sticky="w", padx=(16, 4))
+        tk.Label(top, text="Год:").grid(row=1, column=2, sticky="w", padx=(16, 4), pady=(8, 0))
         self.spn_year = tk.Spinbox(top, from_=2000, to=2100, width=6, command=lambda: (self._on_period_change(), self._refresh_header_styles()))
-        self.spn_year.grid(row=0, column=3, sticky="w")
+        self.spn_year.grid(row=1, column=3, sticky="w", pady=(8, 0))
         self.spn_year.delete(0, "end")
         self.spn_year.insert(0, datetime.now().year)
         self.spn_year.bind("<FocusOut>", lambda e: (self._on_period_change(), self._refresh_header_styles()))
 
-        # Адрес/ID
-        tk.Label(top, text="Адрес:").grid(row=0, column=4, sticky="w", padx=(20, 4))
+        tk.Label(top, text="Адрес:").grid(row=1, column=4, sticky="w", padx=(20, 4), pady=(8, 0))
         self.cmb_address = AutoCompleteCombobox(top, width=46)
         self.cmb_address.set_completion_list(self.address_options)
-        self.cmb_address.grid(row=0, column=5, sticky="w")
+        self.cmb_address.grid(row=1, column=5, sticky="w", pady=(8, 0))
         self.cmb_address.bind("<<ComboboxSelected>>", self._on_address_select)
         self.cmb_address.bind("<FocusOut>", self._on_address_select)
         self.cmb_address.bind("<Return>", lambda e: self._on_address_select())
         self.cmb_address.bind("<KeyRelease>", lambda e: self._on_address_change(), add="+")
 
-        tk.Label(top, text="ID объекта:").grid(row=0, column=6, sticky="w", padx=(16, 4))
+        tk.Label(top, text="ID объекта:").grid(row=1, column=6, sticky="w", padx=(16, 4), pady=(8, 0))
         self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=18)
-        self.cmb_object_id.grid(row=0, column=7, sticky="w")
+        self.cmb_object_id.grid(row=1, column=7, sticky="w", pady=(8, 0))
         self.cmb_object_id.bind("<<ComboboxSelected>>", lambda e: self._load_existing_rows())
 
-        # Фильтр по подразделению
-        tk.Label(top, text="Подразделение:").grid(row=1, column=6, sticky="w", padx=(16, 4), pady=(8, 0))
-        self.cmb_department = ttk.Combobox(top, state="readonly", values=self.departments, width=24)
-        self.cmb_department.grid(row=1, column=7, sticky="w", pady=(8, 0))
-        if self.departments:
-            self.cmb_department.set(self.departments[0])
-        self.cmb_department.bind("<<ComboboxSelected>>", lambda e: self._on_department_select())
-
-        # ФИО/Таб№/Должность
-        tk.Label(top, text="ФИО:").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        # Ряд 2 — ФИО/Таб№/Должность (с фильтром по подразделению)
+        tk.Label(top, text="ФИО:").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.fio_var = tk.StringVar()
         self.cmb_fio = AutoCompleteCombobox(top, textvariable=self.fio_var, width=30)
-        self.cmb_fio.grid(row=1, column=1, sticky="w", pady=(8, 0))
+        self.cmb_fio.grid(row=2, column=1, sticky="w", pady=(8, 0))
         self.cmb_fio.bind("<<ComboboxSelected>>", self._on_fio_select)
 
-        tk.Label(top, text="Табельный №:").grid(row=1, column=2, sticky="w", padx=(16, 4), pady=(8, 0))
+        tk.Label(top, text="Табельный №:").grid(row=2, column=2, sticky="w", padx=(16, 4), pady=(8, 0))
         self.ent_tbn = ttk.Entry(top, width=14)
-        self.ent_tbn.grid(row=1, column=3, sticky="w", pady=(8, 0))
+        self.ent_tbn.grid(row=2, column=3, sticky="w", pady=(8, 0))
 
-        tk.Label(top, text="Должность:").grid(row=1, column=4, sticky="w", padx=(16, 4), pady=(8, 0))
+        tk.Label(top, text="Должность:").grid(row=2, column=4, sticky="w", padx=(16, 4), pady=(8, 0))
         self.pos_var = tk.StringVar()
         self.ent_pos = ttk.Entry(top, textvariable=self.pos_var, width=40, state="readonly")
-        self.ent_pos.grid(row=1, column=5, sticky="w", pady=(8, 0))
+        self.ent_pos.grid(row=2, column=5, sticky="w", pady=(8, 0))
 
-        # Изначально применим фильтр сотрудников по подразделению
+        # Подготовим список ФИО согласно текущему подразделению
         self._update_fio_list()
 
+        # Ряд 3 — Кнопки
         btns = tk.Frame(top)
-        btns.grid(row=2, column=0, columnspan=8, sticky="w", pady=(8, 0))
+        btns.grid(row=3, column=0, columnspan=8, sticky="w", pady=(8, 0))
         ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
         ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=1, padx=4)
         ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=2, padx=4)
@@ -805,7 +850,7 @@ class ObjectTimesheet(tk.Toplevel):
             names = [r['fio'] for r in self.emp_records]
         else:
             names = [r['fio'] for r in self.emp_records if (r['dep'] or "") == dep_sel]
-        # Можно убрать дубликаты ФИО внутри подразделения
+        # Удалим дубли ФИО
         seen = set()
         filtered = []
         for n in names:
@@ -821,6 +866,8 @@ class ObjectTimesheet(tk.Toplevel):
             self.pos_var.set("")
 
     def _on_department_select(self):
+        dep = (self.cmb_department.get() or "Все").strip()
+        set_selected_department_to_config(dep)   # сохраняем в ini при каждом выборе
         self._update_fio_list()
 
     def _on_rows_xview(self, first, last):
@@ -1353,8 +1400,12 @@ class ObjectTimesheet(tk.Toplevel):
 
         # Подразделения
         self.cmb_department.config(values=self.departments)
+        # приоритет: текущий выбор; если он «пропал», возьмём сохранённый в ini; иначе "Все"
+        saved_dep = get_selected_department_from_config()
         if cur_dep in self.departments:
             self.cmb_department.set(cur_dep)
+        elif saved_dep in self.departments:
+            self.cmb_department.set(saved_dep)
         else:
             self.cmb_department.set(self.departments[0] if self.departments else "Все")
 
@@ -1566,31 +1617,33 @@ class MainApp(tk.Tk):
 
     def show_help(self):
         path = get_spravochnik_path_from_config()
+        dep = get_selected_department_from_config()
         text = (
             "Как пользоваться модулем «Объектный табель (реестр)»\n\n"
-            "1) Период и объект:\n"
+            "1) Подразделение:\n"
+            "   • Вверху выберите Подразделение — в списке ФИО будут сотрудники только этого подразделения.\n"
+            f"   • Выбор сохраняется между сессиями (сейчас: «{dep}»).\n\n"
+            "2) Период и объект:\n"
             "   • Выберите Месяц и Год.\n"
-            "   • Выберите Адрес; список ID подставится автоматически. Если ID один — проставится сам.\n"
-            "   • Если ID отсутствует, можно оставить пустым — имя файла будет по адресу.\n\n"
-            "2) Подразделение и сотрудники:\n"
-            "   • Выберите Подразделение — в списке ФИО будут сотрудники только этого подразделения.\n"
-            "   • «ФИО» → автоподстановка Таб.№ и Должности.\n\n"
-            "3) Массовые действия:\n"
+            "   • Выберите Адрес; список ID подставится автоматически.\n\n"
+            "3) Сотрудники:\n"
+            "   • ФИО → автоподстановка Таб.№ и Должности.\n\n"
+            "4) Массовые действия:\n"
             "   • «5/2 всем», «Проставить часы» (есть режим очистки дня), удаление/очистка строк.\n\n"
-            "4) Сохранение и загрузка:\n"
+            "5) Сохранение и загрузка:\n"
             "   • «Сохранить» — файл «Объектный_табель_{ID|Адрес}_{ГГГГ}_{ММ}.xlsx» в папке «Объектные_табели».\n"
             "   • При смене периода/адреса/ID строки подгружаются из файла (если есть).\n\n"
-            "5) Копирование списка из другого месяца:\n"
+            "6) Копирование списка из другого месяца:\n"
             "   • «Копировать из месяца…» — выбрать месяц/год источника, режим (Заменить/Объединить), часы опционально.\n\n"
-            "6) Визуальные подсказки:\n"
+            "7) Визуальные подсказки:\n"
             "   • Выходные подсвечены, «сегодня» выделен в шапке; зебра-строки.\n"
             "   • Ошибочные ячейки (некорректный ввод, <0 или >24) подсвечиваются.\n\n"
-            "7) Справочник:\n"
-            "   • Путь к «Справочник.xlsx» задаётся в ini: {cfg}\n"
-            "   • Текущий путь: {p}\n\n"
-            "8) Сводный экспорт:\n"
+            "8) Справочник:\n"
+            "   • Путь к «Справочник.xlsx» — {cfg}\n"
+            f"   • Текущий путь: {path}\n\n"
+            "9) Сводный экспорт:\n"
             "   • Меню «Сводный экспорт (XLSX/CSV)», пароль хранится в ini (по умолчанию 2025).\n"
-        ).format(cfg=config_path(), p=path)
+        ).format(cfg=config_path())
         messagebox.showinfo("Помощь — Объектный табель", text)
 
 
