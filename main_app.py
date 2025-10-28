@@ -64,7 +64,6 @@ def load_spravochnik(path: Path) -> Tuple[List[Tuple[str,str,str]], List[Tuple[s
     Поддерживает старый справочник с одной колонкой 'Адрес' и
     с двумя колонками в 'Сотрудники' (Должность будет пустой).
     """
-
     def s(v) -> str:
         if v is None:
             return ""
@@ -154,7 +153,7 @@ class RowWidget:
         # 31 ячейка по дням
         self.day_entries: List[tk.Entry] = []
         for d in range(1, 32):
-            e = tk.Entry(self.frame, width=4, justify="center")  # width=4 компактнее
+            e = tk.Entry(self.frame, width=4, justify="center")  # компактнее
             e.grid(row=0, column=1 + d, padx=0, pady=1)
             e.bind("<FocusOut>", lambda ev, _d=d: self.update_total())
             e.bind("<Button-2>", lambda ev: "break")
@@ -278,7 +277,7 @@ class AutoCompleteCombobox(ttk.Combobox):
             return
         self['values'] = [x for x in self._all_values if typed.lower() in x.lower()]
 
-# ------------------------- Диалог копирования -------------------------
+# ------------------------- Диалоги действий -------------------------
 class CopyFromDialog(simpledialog.Dialog):
     def __init__(self, parent, init_year: int, init_month: int):
         self.init_year = init_year
@@ -332,6 +331,55 @@ class CopyFromDialog(simpledialog.Dialog):
             "month": self.cmb_month.current() + 1,
             "with_hours": bool(self.var_copy_hours.get()),
             "mode": self.var_mode.get(),
+        }
+
+class HoursFillDialog(simpledialog.Dialog):
+    def __init__(self, parent, max_day: int):
+        self.max_day = max_day
+        self.result = None
+        super().__init__(parent, title="Проставить часы всем")
+
+    def body(self, master):
+        tk.Label(master, text=f"В текущем месяце дней: {self.max_day}").grid(row=0, column=0, columnspan=3, sticky="w", pady=(2, 6))
+
+        tk.Label(master, text="День:").grid(row=1, column=0, sticky="e")
+        self.spn_day = tk.Spinbox(master, from_=1, to=31, width=4)
+        self.spn_day.grid(row=1, column=1, sticky="w")
+        self.spn_day.delete(0, "end")
+        # по умолчанию 1‑е число
+        self.spn_day.insert(0, "1")
+
+        tk.Label(master, text="Часы:").grid(row=2, column=0, sticky="e", pady=(6, 0))
+        self.ent_hours = ttk.Entry(master, width=12)
+        self.ent_hours.grid(row=2, column=1, sticky="w", pady=(6, 0))
+        self.ent_hours.insert(0, "8")
+
+        tk.Label(master, text="Форматы: 8 | 8,25 | 8:30 | 1/7").grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 2))
+        return self.spn_day
+
+    def validate(self):
+        # День
+        try:
+            d = int(self.spn_day.get())
+            if not (1 <= d <= 31):
+                raise ValueError
+        except Exception:
+            messagebox.showwarning("Проставить часы", "День должен быть числом от 1 до 31.")
+            return False
+        # Часы
+        vraw = self.ent_hours.get().strip()
+        hv = parse_hours_value(vraw)
+        if hv is None or hv < 0:
+            messagebox.showwarning("Проставить часы", "Введите корректное значение часов (например, 8, 8:30, 1/7).")
+            return False
+        self._d = d
+        self._h = float(hv)
+        return True
+
+    def apply(self):
+        self.result = {
+            "day": self._d,
+            "hours": self._h,
         }
 
 # ------------------------- Объектный табель -------------------------
@@ -446,10 +494,11 @@ class ObjectTimesheet(tk.Toplevel):
         btns.grid(row=2, column=0, columnspan=8, sticky="w", pady=(8, 0))
         ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
         ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=1, padx=4)
-        ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=2, padx=4)
-        ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=3, padx=4)
-        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=4, padx=4)
-        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=5, padx=4)
+        ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=2, padx=4)
+        ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=3, padx=4)
+        ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=4, padx=4)
+        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=5, padx=4)
+        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=6, padx=4)
 
         # Шапка
         header_wrap = tk.Frame(self)
@@ -506,7 +555,7 @@ class ObjectTimesheet(tk.Toplevel):
 
         bottom = tk.Frame(self)
         bottom.pack(fill="x", padx=8, pady=(0, 8))
-        self.lbl_object_total = tk.Label(bottom, text="Сумма: дней 0 | часов 0", font=("Segoe UI", 10, "bold"))
+        self.lbl_object_total = tk.Label(bottom, text="Сумма: сотрудников 0 | дней 0 | часов 0", font=("Segoe UI", 10, "bold"))
         self.lbl_object_total.pack(side="left")
 
     def _on_address_change(self, *_):
@@ -621,14 +670,12 @@ class ObjectTimesheet(tk.Toplevel):
         except Exception:
             viewport = 0
         if viewport <= 1:
-            # ещё не отрисовано — повторим позже
             self.after(120, self._auto_fit_columns)
             return
 
         total = self._content_total_width()
         new_fio = self.COLPX['fio']
 
-        # Подгоняем 'ФИО' в разумных пределах
         if total > viewport:
             deficit = total - viewport
             new_fio = max(self.MIN_FIO_PX, self.COLPX['fio'] - deficit)
@@ -638,17 +685,14 @@ class ObjectTimesheet(tk.Toplevel):
 
         if int(new_fio) != int(self.COLPX['fio']):
             self.COLPX['fio'] = int(new_fio)
-            # Применяем новые ширины
             self._apply_column_widths(self.header_holder)
             for r in self.rows:
                 r.apply_pixel_column_widths(self.COLPX)
-            # Обновим scrollregion и синхронизацию
             self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all"))
             self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all"))
             self.header_canvas.xview_moveto(self.rows_canvas.xview()[0])
 
     def _on_window_configure(self, _evt):
-        # Дебаунс автоподгона, чтобы не дёргать при каждом пикселе
         if self._fit_job:
             try:
                 self.after_cancel(self._fit_job)
@@ -676,6 +720,31 @@ class ObjectTimesheet(tk.Toplevel):
         for r in self.rows:
             r.fill_52()
         self._recalc_object_total()
+
+    def fill_hours_all(self):
+        if not self.rows:
+            messagebox.showinfo("Проставить часы", "Список сотрудников пуст.")
+            return
+        y, m = self.get_year_month()
+        max_day = month_days(y, m)
+        dlg = HoursFillDialog(self, max_day)
+        if not getattr(dlg, "result", None):
+            return
+        day = dlg.result["day"]
+        hours_val = float(dlg.result["hours"])
+        if day > max_day:
+            messagebox.showwarning("Проставить часы", f"В {month_name_ru(m)} {y} только {max_day} дней.")
+            return
+        # строка отображения с запятой
+        s = f"{hours_val:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+        for r in self.rows:
+            e = r.day_entries[day - 1]
+            e.delete(0, "end")
+            if hours_val > 1e-12:
+                e.insert(0, s)
+            r.update_total()
+        self._recalc_object_total()
+        messagebox.showinfo("Проставить часы", f"Проставлено {s} ч в день {day} для {len(self.rows)} сотрудников.")
 
     def delete_row(self, roww: RowWidget):
         try:
@@ -706,7 +775,7 @@ class ObjectTimesheet(tk.Toplevel):
                 self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")),
                 self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all")),
                 self.header_canvas.xview_moveto(self.rows_canvas.xview()[0]),
-                self._auto_fit_columns(),  # подгон после перестройки
+                self._auto_fit_columns(),
             ),
         )
 
@@ -730,7 +799,8 @@ class ObjectTimesheet(tk.Toplevel):
             tot_h += h
             tot_d += d
         sh = f"{tot_h:.2f}".rstrip("0").rstrip(".")
-        self.lbl_object_total.config(text=f"Сумма: дней {tot_d} | часов {sh}")
+        cnt = len(self.rows)
+        self.lbl_object_total.config(text=f"Сумма: сотрудников {cnt} | дней {tot_d} | часов {sh}")
 
     # Загрузка/сохранение/справочник
     def _current_file_path(self) -> Optional[Path]:
@@ -959,7 +1029,6 @@ class ObjectTimesheet(tk.Toplevel):
                 messagebox.showinfo("Копирование", "В источнике нет сотрудников для выбранного объекта и периода.")
                 return
 
-            # Уникализируем по (ФИО, Таб№)
             uniq = {}
             for fio, tbn, hrs in found:
                 key = (fio.strip().lower(), tbn.strip())
@@ -1100,7 +1169,8 @@ class MainApp(tk.Tk):
             "   • Выберите ФИО (Таб.№ подставится) → «Добавить в табель».\n"
             "   • Внизу появится строка: 31 ячейка по дням, итог, кнопки «5/2» и «Удалить».\n"
             "   • Кнопка «5/2» (по строке): Пн–Чт = 8,25; Пт = 7; Сб/Вс — пусто.\n"
-            "   • Кнопка «5/2 всем» вверху — применяет график ко всем строкам.\n\n"
+            "   • Кнопка «5/2 всем» вверху — применяет график ко всем строкам.\n"
+            "   • Кнопка «Проставить часы» — массово проставляет одинаковые часы всем в выбранный день.\n\n"
             "3) Сохранение и загрузка:\n"
             "   • «Сохранить» — файл «Объектный_табель_{ID|Адрес}_{ГГГГ}_{ММ}.xlsx» в папке «Объектные_табели».\n"
             "   • При сохранении все строки выбранного объекта и периода в файле перезаписываются текущим реестром.\n"
