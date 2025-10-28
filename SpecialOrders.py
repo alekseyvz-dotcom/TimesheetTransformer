@@ -2,9 +2,9 @@ import os
 import re
 import sys
 import csv
+import json
 import calendar
 import configparser
-import json
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -24,11 +24,17 @@ APP_TITLE = "Заказ спецтехники"
 CONFIG_FILE = "tabel_config.ini"
 CONFIG_SECTION_PATHS = "Paths"
 CONFIG_SECTION_UI = "UI"
+CONFIG_SECTION_INTEGR = "Integrations"
 KEY_SPR = "spravochnik_path"
 KEY_SELECTED_DEP = "selected_department"
 
+KEY_ORDERS_MODE = "orders_mode"                 # none | webhook
+KEY_ORDERS_WEBHOOK_URL = "orders_webhook_url"   # https://script.google.com/macros/s/.../exec
+KEY_ORDERS_WEBHOOK_TOKEN = "orders_webhook_token"
+
 SPRAVOCHNIK_FILE = "Справочник.xlsx"
 ORDERS_DIR = "Заявки_спецтехники"
+
 
 # ------------------------- Утилиты -------------------------
 
@@ -59,6 +65,18 @@ def ensure_config():
         if KEY_SELECTED_DEP not in cfg[CONFIG_SECTION_UI]:
             cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = "Все"
             changed = True
+        if not cfg.has_section(CONFIG_SECTION_INTEGR):
+            cfg[CONFIG_SECTION_INTEGR] = {}
+            changed = True
+        if KEY_ORDERS_MODE not in cfg[CONFIG_SECTION_INTEGR]:
+            cfg[CONFIG_SECTION_INTEGR][KEY_ORDERS_MODE] = "none"
+            changed = True
+        if KEY_ORDERS_WEBHOOK_URL not in cfg[CONFIG_SECTION_INTEGR]:
+            cfg[CONFIG_SECTION_INTEGR][KEY_ORDERS_WEBHOOK_URL] = ""
+            changed = True
+        if KEY_ORDERS_WEBHOOK_TOKEN not in cfg[CONFIG_SECTION_INTEGR]:
+            cfg[CONFIG_SECTION_INTEGR][KEY_ORDERS_WEBHOOK_TOKEN] = ""
+            changed = True
         if changed:
             with open(cp, "w", encoding="utf-8") as f:
                 cfg.write(f)
@@ -70,6 +88,11 @@ def ensure_config():
     }
     cfg[CONFIG_SECTION_UI] = {
         KEY_SELECTED_DEP: "Все"
+    }
+    cfg[CONFIG_SECTION_INTEGR] = {
+        KEY_ORDERS_MODE: "none",
+        KEY_ORDERS_WEBHOOK_URL: "",
+        KEY_ORDERS_WEBHOOK_TOKEN: ""
     }
     with open(cp, "w", encoding="utf-8") as f:
         cfg.write(f)
@@ -93,24 +116,24 @@ def get_saved_dep() -> str:
     cfg = read_config()
     return cfg.get(CONFIG_SECTION_UI, KEY_SELECTED_DEP, fallback="Все")
 
-def get_orders_mode() -> str:
-    cfg = read_config()
-    return cfg.get('Integrations', 'orders_mode', fallback='none').strip().lower()
-
-def get_orders_webhook_url() -> str:
-    cfg = read_config()
-    return cfg.get('Integrations', 'orders_webhook_url', fallback='').strip()
-
-def get_orders_webhook_token() -> str:
-    cfg = read_config()
-    return cfg.get('Integrations', 'orders_webhook_token', fallback='').strip()
-
 def set_saved_dep(dep: str):
     cfg = read_config()
     if not cfg.has_section(CONFIG_SECTION_UI):
         cfg[CONFIG_SECTION_UI] = {}
     cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = dep or "Все"
     write_config(cfg)
+
+def get_orders_mode() -> str:
+    cfg = read_config()
+    return cfg.get(CONFIG_SECTION_INTEGR, KEY_ORDERS_MODE, fallback="none").strip().lower()
+
+def get_orders_webhook_url() -> str:
+    cfg = read_config()
+    return cfg.get(CONFIG_SECTION_INTEGR, KEY_ORDERS_WEBHOOK_URL, fallback="").strip()
+
+def get_orders_webhook_token() -> str:
+    cfg = read_config()
+    return cfg.get(CONFIG_SECTION_INTEGR, KEY_ORDERS_WEBHOOK_TOKEN, fallback="").strip()
 
 def month_days(year: int, month: int) -> int:
     return calendar.monthrange(year, month)[1]
@@ -140,7 +163,6 @@ def ensure_spravochnik(path: Path):
     ws2.append(["ID объекта", "Адрес"])
     ws2.append(["OBJ-001", "ул. Пушкина, д. 1"])
     ws2.append(["OBJ-002", "пр. Строителей, 25"])
-    # Техника
     ws3 = wb.create_sheet("Техника")
     ws3.append(["Тип", "Наименование", "Гос№", "Подразделение", "Примечание"])
     ws3.append(["Автокран", "КС-45717", "А123ВС77", "", "25 т."])
@@ -149,7 +171,6 @@ def ensure_spravochnik(path: Path):
     wb.save(path)
 
 def ensure_tech_sheet(path: Path):
-    # если листа «Техника» нет — создадим
     ensure_spravochnik(path)
     try:
         wb = load_workbook(path)
@@ -167,7 +188,7 @@ def load_spravochnik(path: Path) -> Tuple[List[Dict], List[Tuple[str,str]], List
     """
     employees: [{'fio','tbn','pos','dep'}]
     objects:   [(id, addr)]
-    techs:     [{'type','name','plate','dep','note','disp'}] disp — строка для отображения
+    techs:     [{'type','name','plate','dep','note','disp'}]
     """
     def s(v) -> str:
         if v is None:
@@ -213,8 +234,7 @@ def load_spravochnik(path: Path) -> Tuple[List[Dict], List[Tuple[str,str]], List
 
     if "Техника" in wb.sheetnames:
         ws = wb["Техника"]
-        hdr = [s(c).lower() for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
-        # Ожидаем: Тип, Наименование, Гос№, Подразделение, Примечание
+        _ = [s(c).lower() for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
         for r in ws.iter_rows(min_row=2, values_only=True):
             tp  = s(r[0] if len(r) > 0 else None)
             nm  = s(r[1] if len(r) > 1 else None)
@@ -271,37 +291,14 @@ def parse_date_any(s: str) -> Optional[date]:
     s = (s or "").strip()
     if not s:
         return None
-    for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y"):
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y"):
         try:
             return datetime.strptime(s, fmt).date()
         except:
             pass
     return None
-    
-def post_json(url: str, payload: dict, token: str = '') -> Tuple[bool, str]:
-    try:
-    body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
-    if token:
-    sep = '&' if ('?' in url) else '?'
-    url = f"{url}{sep}token={urllib.parse.quote(token)}"
-    req = urllib.request.Request(
-    url,
-    data=body,
-    headers={'Content-Type': 'application/json; charset=utf-8'},
-    method='POST'
-    )
-    with urllib.request.urlopen(req, timeout=12) as resp:
-    code = resp.getcode()
-    text = resp.read().decode('utf-8', errors='replace')
-    return (200 <= code < 300, f"{code}: {text}")
-    except urllib.error.HTTPError as e:
-    try:
-    txt = e.read().decode('utf-8', errors='replace')
-    except Exception:
-    txt = str(e)
-    return (False, f"HTTPError {e.code}: {txt}")
-    except Exception as e:
-    return (False, f"Error: {e}")
+
+
 # ------------------------- Виджеты -------------------------
 
 class AutoCompleteCombobox(ttk.Combobox):
@@ -327,6 +324,7 @@ class AutoCompleteCombobox(ttk.Combobox):
             self['values'] = self._all_values
             return
         self['values'] = [x for x in self._all_values if typed.lower() in x.lower()]
+
 
 # ------------------------- Строка позиции -------------------------
 
@@ -379,10 +377,7 @@ class PositionRow:
             try:
                 w.configure(background=bg)
             except Exception:
-                try:
-                    w.configure(style="")  # ttk
-                except Exception:
-                    pass
+                pass
 
     def _delete(self):
         self.on_delete(self)
@@ -439,6 +434,35 @@ class PositionRow:
             "hours": float(parse_hours_value(self.ent_hours.get()) or 0.0),
             "note": (self.ent_note.get() or "").strip(),
         }
+
+
+# ------------------------- HTTP -------------------------
+
+def post_json(url: str, payload: dict, token: str = '') -> Tuple[bool, str]:
+    try:
+        body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        if token:
+            sep = '&' if ('?' in url) else '?'
+            url = f"{url}{sep}token={urllib.parse.quote(token)}"
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={'Content-Type': 'application/json; charset=utf-8'},
+            method='POST'
+        )
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            code = resp.getcode()
+            text = resp.read().decode('utf-8', errors='replace')
+            return (200 <= code < 300, f"{code}: {text}")
+    except urllib.error.HTTPError as e:
+        try:
+            txt = e.read().decode('utf-8', errors='replace')
+        except Exception:
+            txt = str(e)
+        return (False, f"HTTPError {e.code}: {txt}")
+    except Exception as e:
+        return (False, f"Error: {e}")
+
 
 # ------------------------- Окно заявок -------------------------
 
@@ -556,7 +580,7 @@ class SpecialOrdersApp(tk.Tk):
 
         # Первичная инициализация
         self._update_fio_list()
-        # Стартовая одна строка
+        # Стартовая строка
         self.add_position()
 
         # Колонки top — растяжение
@@ -577,7 +601,6 @@ class SpecialOrdersApp(tk.Tk):
                 seen.add(n)
                 filtered.append(n)
         if not filtered and dep != "Все":
-            # ничего в выбранном департаменте — fallback на всех
             filtered = [r['fio'] for r in self.emps]
         self.cmb_fio.set_completion_list(filtered)
 
@@ -620,14 +643,12 @@ class SpecialOrdersApp(tk.Tk):
         # дата
         d = parse_date_any(self.ent_date.get())
         if d is None:
-            ok = False
             messagebox.showwarning("Заявка", "Введите корректную дату (YYYY-MM-DD или DD.MM.YYYY).")
             return False
         # адрес/ID — хотя бы что‑то
         addr = (self.cmb_address.get() or "").strip()
         oid = (self.cmb_object_id.get() or "").strip()
         if not addr and not oid:
-            ok = False
             messagebox.showwarning("Заявка", "Укажите Адрес и/или ID объекта.")
             return False
         # позиции
@@ -723,44 +744,43 @@ class SpecialOrdersApp(tk.Tk):
         except Exception as e:
             messagebox.showwarning("Сводный CSV", f"XLSX сохранён, но не удалось добавить в CSV:\n{e}")
 
-        messagebox.showinfo("Сохранение", f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}")
-         # Попытка онлайн-отправки (webhook)
-     try:
-         mode = get_orders_mode()
-         if mode == 'webhook':
-             url = get_orders_webhook_url()
-             token = get_orders_webhook_token()
-             if url:
-                 ok, info = post_json(url, data, token)
-                 if ok:
-                     messagebox.showinfo(
-                         "Сохранение/Отправка",
-                         f"Заявка сохранена локально и отправлена онлайн.\n\n"
-                         f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\nОтвет сервера:\n{info}"
-                     )
-                 else:
-                     messagebox.showwarning(
-                         "Сохранение/Отправка",
-                         f"Локально сохранено, но онлайн-отправка не удалась.\n\n"
-                         f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\n{info}"
-                     )
-                 return
-             else:
-                 messagebox.showinfo(
-                     "Сохранение",
-                     f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}\n(Онлайн-отправка не настроена)"
-                 )
-                 return
-         else:
-             messagebox.showinfo("Сохранение", f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}")
-             return
-     except Exception as e:
-         messagebox.showwarning(
-             "Сохранение/Отправка",
-             f"Локально сохранено, но онлайн-отправка упала с ошибкой:\n{e}\n\n"
-             f"XLSX:\n{fpath}\nCSV:\n{csv_path}"
-         )
-         return
+        # Попытка онлайн-отправки (webhook)
+        try:
+            mode = get_orders_mode()
+            if mode == 'webhook':
+                url = get_orders_webhook_url()
+                token = get_orders_webhook_token()
+                if url:
+                    ok, info = post_json(url, data, token)
+                    if ok:
+                        messagebox.showinfo(
+                            "Сохранение/Отправка",
+                            f"Заявка сохранена локально и отправлена онлайн.\n\n"
+                            f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\nОтвет сервера:\n{info}"
+                        )
+                    else:
+                        messagebox.showwarning(
+                            "Сохранение/Отправка",
+                            f"Локально сохранено, но онлайн-отправка не удалась.\n\n"
+                            f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\n{info}"
+                        )
+                    return
+                else:
+                    messagebox.showinfo(
+                        "Сохранение",
+                        f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}\n(Онлайн-отправка не настроена)"
+                    )
+                    return
+            else:
+                messagebox.showinfo("Сохранение", f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}")
+                return
+        except Exception as e:
+            messagebox.showwarning(
+                "Сохранение/Отправка",
+                f"Локально сохранено, но онлайн-отправка упала с ошибкой:\n{e}\n\n"
+                f"XLSX:\n{fpath}\nCSV:\n{csv_path}"
+            )
+            return
 
     def clear_form(self):
         # не меняем подразделение
