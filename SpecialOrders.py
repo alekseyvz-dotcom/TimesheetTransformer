@@ -4,6 +4,10 @@ import sys
 import csv
 import calendar
 import configparser
+import json
+import urllib.request
+import urllib.error
+import urllib.parse
 from datetime import datetime, date
 from pathlib import Path
 from typing import List, Tuple, Optional, Any, Dict
@@ -88,6 +92,18 @@ def get_spr_path() -> Path:
 def get_saved_dep() -> str:
     cfg = read_config()
     return cfg.get(CONFIG_SECTION_UI, KEY_SELECTED_DEP, fallback="Все")
+
+def get_orders_mode() -> str:
+    cfg = read_config()
+    return cfg.get('Integrations', 'orders_mode', fallback='none').strip().lower()
+
+def get_orders_webhook_url() -> str:
+    cfg = read_config()
+    return cfg.get('Integrations', 'orders_webhook_url', fallback='').strip()
+
+def get_orders_webhook_token() -> str:
+    cfg = read_config()
+    return cfg.get('Integrations', 'orders_webhook_token', fallback='').strip()
 
 def set_saved_dep(dep: str):
     cfg = read_config()
@@ -261,7 +277,31 @@ def parse_date_any(s: str) -> Optional[date]:
         except:
             pass
     return None
-
+    
+def post_json(url: str, payload: dict, token: str = '') -> Tuple[bool, str]:
+    try:
+    body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+    if token:
+    sep = '&' if ('?' in url) else '?'
+    url = f"{url}{sep}token={urllib.parse.quote(token)}"
+    req = urllib.request.Request(
+    url,
+    data=body,
+    headers={'Content-Type': 'application/json; charset=utf-8'},
+    method='POST'
+    )
+    with urllib.request.urlopen(req, timeout=12) as resp:
+    code = resp.getcode()
+    text = resp.read().decode('utf-8', errors='replace')
+    return (200 <= code < 300, f"{code}: {text}")
+    except urllib.error.HTTPError as e:
+    try:
+    txt = e.read().decode('utf-8', errors='replace')
+    except Exception:
+    txt = str(e)
+    return (False, f"HTTPError {e.code}: {txt}")
+    except Exception as e:
+    return (False, f"Error: {e}")
 # ------------------------- Виджеты -------------------------
 
 class AutoCompleteCombobox(ttk.Combobox):
@@ -684,6 +724,43 @@ class SpecialOrdersApp(tk.Tk):
             messagebox.showwarning("Сводный CSV", f"XLSX сохранён, но не удалось добавить в CSV:\n{e}")
 
         messagebox.showinfo("Сохранение", f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}")
+         # Попытка онлайн-отправки (webhook)
+     try:
+         mode = get_orders_mode()
+         if mode == 'webhook':
+             url = get_orders_webhook_url()
+             token = get_orders_webhook_token()
+             if url:
+                 ok, info = post_json(url, data, token)
+                 if ok:
+                     messagebox.showinfo(
+                         "Сохранение/Отправка",
+                         f"Заявка сохранена локально и отправлена онлайн.\n\n"
+                         f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\nОтвет сервера:\n{info}"
+                     )
+                 else:
+                     messagebox.showwarning(
+                         "Сохранение/Отправка",
+                         f"Локально сохранено, но онлайн-отправка не удалась.\n\n"
+                         f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\n{info}"
+                     )
+                 return
+             else:
+                 messagebox.showinfo(
+                     "Сохранение",
+                     f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}\n(Онлайн-отправка не настроена)"
+                 )
+                 return
+         else:
+             messagebox.showinfo("Сохранение", f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}")
+             return
+     except Exception as e:
+         messagebox.showwarning(
+             "Сохранение/Отправка",
+             f"Локально сохранено, но онлайн-отправка упала с ошибкой:\n{e}\n\n"
+             f"XLSX:\n{fpath}\nCSV:\n{csv_path}"
+         )
+         return
 
     def clear_form(self):
         # не меняем подразделение
