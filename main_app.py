@@ -14,7 +14,7 @@ from tkinter import ttk, messagebox, simpledialog
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 
-APP_NAME = "Табель‑конвертер (Главное меню)"
+APP_NAME = "Управление строительством (Главное меню)"
 
 # Конфиг и файлы
 CONFIG_FILE = "tabel_config.ini"                # лежит рядом с программой
@@ -28,6 +28,7 @@ SPRAVOCHNIK_FILE = "Справочник.xlsx"            # имя по умол
 CONVERTER_EXE = "TabelConverter.exe"            # ваш конвертер (лежит рядом)
 OUTPUT_DIR = "Объектные_табели"                 # папка для объектных табелей (рядом с программой)
 SUMMARY_DIR = "Сводные_отчеты"                   # папка для сводных выгрузок
+ORDERS_EXE = "SpecialOrders.exe"  # имя exe модуля заявок, лежит рядом с программой
 
 
 # ------------------------- Утилиты и конфиг -------------------------
@@ -1435,6 +1436,17 @@ def run_converter():
     except Exception as e:
         messagebox.showerror("Конвертер", f"Не удалось запустить конвертер:\n{e}")
 
+def run_special_orders():
+    orders_path = exe_dir() / ORDERS_EXE
+    if not orders_path.exists():
+        messagebox.showwarning("Заказ спецтехники",
+                               f"Не найден {ORDERS_EXE} рядом с программой.\n"
+                               f"Соберите EXE из SpecialOrders.py и положите рядом.")
+        return
+    try:
+        subprocess.Popen([str(orders_path)], shell=False)
+    except Exception as e:
+        messagebox.showerror("Заказ спецтехники", f"Не удалось запустить модуль:\n{e}")
 
 # ------------------------- Сводный экспорт -------------------------
 
@@ -1553,6 +1565,8 @@ class MainApp(tk.Tk):
 
         ttk.Button(self, text="Объектный табель (реестр)", width=36,
                    command=lambda: ObjectTimesheet(self)).pack(pady=(4, 10))
+        ttk.Button(self, text="Заказ спецтехники", width=36, command=run_special_orders)\
+            .pack(pady=(0, 8))
 
         spr_frame = tk.Frame(self)
         spr_frame.pack(pady=(0, 12))
