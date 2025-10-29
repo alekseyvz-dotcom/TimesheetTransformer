@@ -597,7 +597,6 @@ class HoursFillDialog(simpledialog.Dialog):
         except Exception:
             messagebox.showwarning("Проставить часы", "День должен быть числом от 1 до 31.")
             return False
-
                 if self.var_clear.get():
             self._d = d
             self._h = 0.0
