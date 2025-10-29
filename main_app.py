@@ -1,3 +1,4 @@
+# pyton
 import os
 import re
 import sys
@@ -736,7 +737,6 @@ class TimesheetPage(tk.Frame):
             # Скроллбары
             self.vscroll = ttk.Scrollbar(main_frame, orient="vertical", command=self.main_canvas.yview)
             self.vscroll.grid(row=0, column=1, sticky="ns")
-            
             self.hscroll = ttk.Scrollbar(main_frame, orient="horizontal", command=self.main_canvas.xview)
             self.hscroll.grid(row=1, column=0, sticky="ew")
 
@@ -756,36 +756,36 @@ class TimesheetPage(tk.Frame):
 
             # Заголовок таблицы
             self.header_frame = tk.Frame(self.scroll_frame, relief="raised", bd=1, bg="#f0f0f0")
-            self.header_frame.pack(fill="x", pady=(0, 2))
+            # ВАЖНО: больше не растягиваем по ширине, чтобы колонкам хватало места
+            self.header_frame.pack(anchor="nw", pady=(0, 2))  # was: fill="x"
 
             # Создание заголовков
             header_labels = []
-            
             lbl = tk.Label(self.header_frame, text="ФИО", anchor="w", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
             lbl.grid(row=0, column=0, padx=1, pady=2, sticky="ew")
             header_labels.append(lbl)
-            
+
             lbl = tk.Label(self.header_frame, text="Таб.№", anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
             lbl.grid(row=0, column=1, padx=1, pady=2, sticky="ew")
             header_labels.append(lbl)
-            
+
             for d in range(1, 32):
                 lbl = tk.Label(self.header_frame, text=str(d), anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
                 lbl.grid(row=0, column=1 + d, padx=0, pady=2, sticky="ew")
                 header_labels.append(lbl)
-            
+
             lbl = tk.Label(self.header_frame, text="Дней", anchor="e", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
             lbl.grid(row=0, column=33, padx=(4, 1), pady=2, sticky="ew")
             header_labels.append(lbl)
-            
+
             lbl = tk.Label(self.header_frame, text="Часы", anchor="e", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
             lbl.grid(row=0, column=34, padx=(4, 1), pady=2, sticky="ew")
             header_labels.append(lbl)
-            
+
             lbl = tk.Label(self.header_frame, text="5/2", anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
             lbl.grid(row=0, column=35, padx=1, pady=2, sticky="ew")
             header_labels.append(lbl)
-            
+
             lbl = tk.Label(self.header_frame, text="Удалить", anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
             lbl.grid(row=0, column=36, padx=1, pady=2, sticky="ew")
             header_labels.append(lbl)
@@ -795,7 +795,8 @@ class TimesheetPage(tk.Frame):
 
             # Контейнер для строк данных
             self.rows_holder = tk.Frame(self.scroll_frame)
-            self.rows_holder.pack(fill="both", expand=True)
+            # ВАЖНО: тоже убираем растягивание по ширине
+            self.rows_holder.pack(anchor="nw")  # was: fill="both", expand=True
 
             # Обновление области прокрутки
             self.scroll_frame.bind("<Configure>", self._on_scroll_frame_configure)
@@ -803,8 +804,6 @@ class TimesheetPage(tk.Frame):
             # Обработка колеса мыши
             self.main_canvas.bind("<MouseWheel>", self._on_wheel)
             self.main_canvas.bind("<Shift-MouseWheel>", self._on_shift_wheel)
-            
-            # Привязка к колесу мыши для всех виджетов внутри canvas
             self.bind_all("<MouseWheel>", self._on_wheel_anywhere)
 
             self.rows: List[RowWidget] = []
@@ -812,8 +811,8 @@ class TimesheetPage(tk.Frame):
             # Нижняя панель
             bottom = tk.Frame(self)
             bottom.pack(fill="x", padx=8, pady=(0, 8))
-            self.lbl_object_total = tk.Label(bottom, text="Сумма: сотрудников 0 | дней 0 | часов 0", 
-                                            font=("Segoe UI", 10, "bold"))
+            self.lbl_object_total = tk.Label(bottom, text="Сумма: сотрудников 0 | дней 0 | часов 0",
+                                             font=("Segoe UI", 10, "bold"))
             self.lbl_object_total.pack(side="left")
 
             self._on_department_select()
@@ -845,11 +844,10 @@ class TimesheetPage(tk.Frame):
         if self.main_canvas.winfo_exists():
             self.main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         return "break"
-    
+
     def _on_wheel_anywhere(self, event):
         """Обработка колеса мыши для любого виджета внутри canvas"""
         try:
-            # Проверяем, что событие произошло над нашим canvas или его содержимым
             widget = event.widget
             while widget:
                 if widget == self.main_canvas or widget == self.scroll_frame or widget == self.rows_holder:
@@ -1489,6 +1487,18 @@ class ExportMonthDialog(simpledialog.Dialog):
             "fmt": self.var_fmt.get(),
         }
 
+# ------------- Домашняя страница -------------
+
+class HomePage(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master, bg="#f7f7f7")
+        wrap = tk.Frame(self, bg="#f7f7f7")
+        wrap.pack(pady=30)
+        tk.Label(wrap, text="Добро пожаловать!", font=("Segoe UI", 16, "bold"), bg="#f7f7f7").pack(anchor="center", pady=(0, 6))
+        tk.Label(wrap, text="Выберите раздел в верхнем меню.\n"
+                            "Объектный табель → Создать — для работы с табелями.",
+                 font=("Segoe UI", 10), fg="#444", bg="#f7f7f7", justify="center").pack(anchor="center")
+
 # ------------- Главное окно (единоe) -------------
 
 class MainApp(tk.Tk):
@@ -1503,6 +1513,9 @@ class MainApp(tk.Tk):
 
         # Меню
         menubar = tk.Menu(self)
+
+        # Кнопка Главная (возврат на стартовый экран)
+        menubar.add_command(label="Главная", command=self.show_home)
 
         m_ts = tk.Menu(menubar, tearoff=0)
         m_ts.add_command(label="Создать", command=lambda: self._show_page("timesheet", lambda parent: TimesheetPage(parent)))
@@ -1550,6 +1563,9 @@ class MainApp(tk.Tk):
         tk.Label(footer, text="Разработал Алексей Зезюкин, АНО МЛСТ 2025",
                  font=("Segoe UI", 8), fg="#666").pack(side="right")
 
+        # Показать домашнюю страницу при запуске
+        self.show_home()
+
     def _show_page(self, key: str, builder):
         # очистить контейнер
         for w in self.content.winfo_children():
@@ -1569,6 +1585,9 @@ class MainApp(tk.Tk):
         except Exception:
             pass
         self._pages[key] = page
+
+    def show_home(self):
+        self._show_page("home", lambda parent: HomePage(parent))
 
     # --- Справочник ---
     def open_spravochnik(self):
