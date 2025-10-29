@@ -1140,7 +1140,7 @@ class TimesheetPage(tk.Frame):
             i = 1
             while new_name in wb.sheetnames:
                 i += 1
-                                new_name = f"{base}{i}"
+                new_name = f"{base}{i}"
             ws.title = new_name
         ws2 = wb.create_sheet("Табель")
         hdr = ["ID объекта", "Адрес", "Месяц", "Год", "ФИО", "Табельный №"] + [str(i) for i in range(1, 32)] + [
