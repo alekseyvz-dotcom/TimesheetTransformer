@@ -973,7 +973,7 @@ class TimesheetPage(tk.Frame):
 
     def reload_spravochnik(self):
        """Перезагрузить справочник и обновить списки"""
-        try:
+          try:
           # Перезагрузить данные справочника
           self._load_spr_data()
         
@@ -993,7 +993,7 @@ class TimesheetPage(tk.Frame):
           self._on_department_select()
         
           messagebox.showinfo("Справочник", "Справочник успешно обновлён.")
-        except Exception as e:
+          except Exception as e:
           messagebox.showerror("Обновление справочника", f"Ошибка при обновлении справочника:\n{e}")
 
     def fill_52_all(self):
