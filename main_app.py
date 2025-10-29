@@ -319,54 +319,54 @@ class RowWidget:
         self.get_year_month = get_year_month_callable
         self.on_delete = on_delete_callable
 
-        self.zebra_bg = self.ZEBRA_EVEN
+        self.zebra_bg = self.ZEBRA_EVEN if idx % 2 == 0 else self.ZEBRA_ODD
 
-        self.frame = tk.Frame(parent, bd=0)
+        self.frame = tk.Frame(parent, bd=0, bg=self.zebra_bg)
 
         self.lbl_fio = tk.Label(self.frame, text=fio, anchor="w", bg=self.zebra_bg)
-        self.lbl_fio.grid(row=0, column=0, padx=1, pady=1, sticky="w")
+        self.lbl_fio.grid(row=0, column=0, padx=1, pady=1, sticky="ew")
 
         self.lbl_tbn = tk.Label(self.frame, text=tbn, anchor="center", bg=self.zebra_bg)
-        self.lbl_tbn.grid(row=0, column=1, padx=1, pady=1)
+        self.lbl_tbn.grid(row=0, column=1, padx=1, pady=1, sticky="ew")
 
         self.day_entries: List[tk.Entry] = []
         for d in range(1, 32):
             e = tk.Entry(self.frame, width=4, justify="center")
-            e.grid(row=0, column=1 + d, padx=0, pady=1)
+            e.grid(row=0, column=1 + d, padx=0, pady=1, sticky="ew")
             e.bind("<FocusOut>", lambda ev, _d=d: self.update_total())
             e.bind("<Button-2>", lambda ev: "break")
             e.bind("<ButtonRelease-2>", lambda ev: "break")
             self.day_entries.append(e)
 
         self.lbl_days = tk.Label(self.frame, text="0", width=5, anchor="e", bg=self.zebra_bg)
-        self.lbl_days.grid(row=0, column=33, padx=(4, 1), pady=1)
+        self.lbl_days.grid(row=0, column=33, padx=(4, 1), pady=1, sticky="ew")
 
         self.lbl_total = tk.Label(self.frame, text="0", width=7, anchor="e", bg=self.zebra_bg)
-        self.lbl_total.grid(row=0, column=34, padx=(4, 1), pady=1)
+        self.lbl_total.grid(row=0, column=34, padx=(4, 1), pady=1, sticky="ew")
 
         self.btn_52 = ttk.Button(self.frame, text="5/2", width=4, command=self.fill_52)
-        self.btn_52.grid(row=0, column=35, padx=1)
+        self.btn_52.grid(row=0, column=35, padx=1, sticky="ew")
 
         self.btn_del = ttk.Button(self.frame, text="Удалить", width=7, command=self.delete_row)
-        self.btn_del.grid(row=0, column=36, padx=1)
+        self.btn_del.grid(row=0, column=36, padx=1, sticky="ew")
 
     def apply_pixel_column_widths(self, px: dict):
         f = self.frame
-        f.grid_columnconfigure(0, minsize=px['fio'])
-        f.grid_columnconfigure(1, minsize=px['tbn'])
+        f.grid_columnconfigure(0, minsize=px['fio'], weight=0)
+        f.grid_columnconfigure(1, minsize=px['tbn'], weight=0)
         for col in range(2, 33):
-            f.grid_columnconfigure(col, minsize=px['day'])
-        f.grid_columnconfigure(33, minsize=px['days'])
-        f.grid_columnconfigure(34, minsize=px['hours'])
-        f.grid_columnconfigure(35, minsize=px['btn52'])
-        f.grid_columnconfigure(36, minsize=px['del'])
+            f.grid_columnconfigure(col, minsize=px['day'], weight=0)
+        f.grid_columnconfigure(33, minsize=px['days'], weight=0)
+        f.grid_columnconfigure(34, minsize=px['hours'], weight=0)
+        f.grid_columnconfigure(35, minsize=px['btn52'], weight=0)
+        f.grid_columnconfigure(36, minsize=px['del'], weight=0)
 
     def set_day_font(self, font_tuple):
         for e in self.day_entries:
             e.configure(font=font_tuple)
 
     def grid(self, row: int):
-        self.frame.grid(row=row, column=0, sticky="w")
+        self.frame.grid(row=row, column=0, sticky="ew", padx=0, pady=1)
 
     def destroy(self):
         self.frame.destroy()
@@ -395,7 +395,7 @@ class RowWidget:
             return self.WEEK_BG_SAT
         if wd == 6:
             return self.WEEK_BG_SUN
-        return self.zebra_bg
+        return "white"
 
     def _repaint_day_cell(self, i0: int, year: int, month: int):
         day = i0 + 1
@@ -649,59 +649,6 @@ class TimesheetPage(tk.Frame):
         addresses_set = set(self.addr_to_ids.keys()) | {addr for _, addr in self.objects if addr}
         self.address_options = sorted(addresses_set)
 
-    def reload_spravochnik(self):
-        try:
-            # Сохраняем текущие выборы
-            cur_dep = (self.cmb_department.get() or "Все").strip() if hasattr(self, "cmb_department") else "Все"
-            cur_addr = (self.cmb_address.get() or "").strip() if hasattr(self, "cmb_address") else ""
-            cur_id = (self.cmb_object_id.get() or "").strip() if hasattr(self, "cmb_object_id") else ""
-            cur_fio = (self.fio_var.get() or "").strip() if hasattr(self, "fio_var") else ""
-
-            # Перечитываем
-            self._load_spr_data()
-
-            # Подразделения
-            self.cmb_department.config(values=self.departments)
-            if cur_dep in self.departments:
-                self.cmb_department.set(cur_dep)
-            else:
-                try:
-                    saved_dep = get_selected_department_from_config()
-                    self.cmb_department.set(saved_dep if saved_dep in self.departments else self.departments[0])
-                except Exception:
-                    self.cmb_department.set(self.departments[0] if self.departments else "Все")
-
-            # Адреса/ID
-            self.cmb_address.set_completion_list(self.address_options)
-            if cur_addr in self.address_options:
-                self.cmb_address.set(cur_addr)
-            else:
-                self.cmb_address.set("")
-            self._on_address_change()
-            if cur_id and cur_id in (self.cmb_object_id.cget("values") or []):
-                self.cmb_object_id.set(cur_id)
-
-            # ФИО под подразделение
-            self._on_department_select()
-            dep_sel = (self.cmb_department.get() or "Все").strip()
-            if dep_sel == "Все":
-                allowed = [e[0] for e in self.employees]
-            else:
-                allowed = [e[0] for e in self.employees if len(e) > 3 and (e[3] or "").strip() == dep_sel]
-            seen = set()
-            allowed = [n for n in allowed if (n not in seen and not seen.add(n))]
-            if cur_fio and cur_fio in allowed:
-                self.fio_var.set(cur_fio)
-                self._on_fio_select()
-            else:
-                self.fio_var.set("")
-                self.ent_tbn.delete(0, "end")
-                self.pos_var.set("")
-
-            messagebox.showinfo("Справочник", "Справочник обновлён.")
-        except Exception as e:
-            messagebox.showerror("Справочник", f"Ошибка перечтения справочника:\n{e}")
-
     def _build_ui(self):
         try:
             top = tk.Frame(self)
@@ -778,52 +725,97 @@ class TimesheetPage(tk.Frame):
             ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=5, padx=4)
             ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=6, padx=4)
 
-            # Шапка
-            header_wrap = tk.Frame(self)
-            header_wrap.pack(fill="x", padx=8)
-            self.header_canvas = tk.Canvas(header_wrap, height=26, borderwidth=0, highlightthickness=0)
-            self.header_holder = tk.Frame(self.header_canvas)
-            self.header_canvas.create_window((0, 0), window=self.header_holder, anchor="nw")
-            self.header_canvas.pack(fill="x", expand=True)
+            # Основной контейнер с прокруткой
+            main_frame = tk.Frame(self)
+            main_frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
-            tk.Label(self.header_holder, text="ФИО", width=28, anchor="w").grid(row=0, column=0, padx=2)
-            tk.Label(self.header_holder, text="Таб.№", width=12, anchor="center").grid(row=0, column=1, padx=2)
+            # Canvas для содержимого
+            self.main_canvas = tk.Canvas(main_frame, borderwidth=0, highlightthickness=0)
+            self.main_canvas.grid(row=0, column=0, sticky="nsew")
+
+            # Скроллбары
+            self.vscroll = ttk.Scrollbar(main_frame, orient="vertical", command=self.main_canvas.yview)
+            self.vscroll.grid(row=0, column=1, sticky="ns")
+            
+            self.hscroll = ttk.Scrollbar(main_frame, orient="horizontal", command=self.main_canvas.xview)
+            self.hscroll.grid(row=1, column=0, sticky="ew")
+
+            # Настройка весов для grid
+            main_frame.grid_rowconfigure(0, weight=1)
+            main_frame.grid_columnconfigure(0, weight=1)
+
+            # Фрейм внутри Canvas
+            self.scroll_frame = tk.Frame(self.main_canvas)
+            self.canvas_window = self.main_canvas.create_window((0, 0), window=self.scroll_frame, anchor="nw")
+
+            # Привязка скроллбаров
+            self.main_canvas.configure(
+                yscrollcommand=self.vscroll.set,
+                xscrollcommand=self.hscroll.set
+            )
+
+            # Заголовок таблицы
+            self.header_frame = tk.Frame(self.scroll_frame, relief="raised", bd=1, bg="#f0f0f0")
+            self.header_frame.pack(fill="x", pady=(0, 2))
+
+            # Создание заголовков
+            header_labels = []
+            
+            lbl = tk.Label(self.header_frame, text="ФИО", anchor="w", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
+            lbl.grid(row=0, column=0, padx=1, pady=2, sticky="ew")
+            header_labels.append(lbl)
+            
+            lbl = tk.Label(self.header_frame, text="Таб.№", anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
+            lbl.grid(row=0, column=1, padx=1, pady=2, sticky="ew")
+            header_labels.append(lbl)
+            
             for d in range(1, 32):
-                tk.Label(self.header_holder, text=str(d), width=5, anchor="center").grid(row=0, column=1 + d, padx=1)
-            tk.Label(self.header_holder, text="Дней", width=6, anchor="e").grid(row=0, column=33, padx=(6, 2))
-            tk.Label(self.header_holder, text="Часы", width=8, anchor="e").grid(row=0, column=34, padx=(6, 2))
-            tk.Label(self.header_holder, text="5/2", width=5, anchor="center").grid(row=0, column=35, padx=2)
-            tk.Label(self.header_holder, text="Удалить", width=8, anchor="center").grid(row=0, column=36, padx=2)
+                lbl = tk.Label(self.header_frame, text=str(d), anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
+                lbl.grid(row=0, column=1 + d, padx=0, pady=2, sticky="ew")
+                header_labels.append(lbl)
+            
+            lbl = tk.Label(self.header_frame, text="Дней", anchor="e", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
+            lbl.grid(row=0, column=33, padx=(4, 1), pady=2, sticky="ew")
+            header_labels.append(lbl)
+            
+            lbl = tk.Label(self.header_frame, text="Часы", anchor="e", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
+            lbl.grid(row=0, column=34, padx=(4, 1), pady=2, sticky="ew")
+            header_labels.append(lbl)
+            
+            lbl = tk.Label(self.header_frame, text="5/2", anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
+            lbl.grid(row=0, column=35, padx=1, pady=2, sticky="ew")
+            header_labels.append(lbl)
+            
+            lbl = tk.Label(self.header_frame, text="Удалить", anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
+            lbl.grid(row=0, column=36, padx=1, pady=2, sticky="ew")
+            header_labels.append(lbl)
 
-            # Строки
-            wrap = tk.Frame(self)
-            wrap.pack(fill="both", expand=True, padx=8, pady=(4, 8))
-            self.rows_canvas = tk.Canvas(wrap, borderwidth=0, highlightthickness=0)
-            self.rows_holder = tk.Frame(self.rows_canvas)
-            self.rows_canvas.create_window((0, 0), window=self.rows_holder, anchor="nw")
-            self.rows_canvas.pack(side="left", fill="both", expand=True)
+            # Применяем ширины к заголовку
+            self._apply_column_widths(self.header_frame)
 
-            self.vscroll = ttk.Scrollbar(wrap, orient="vertical", command=self.rows_canvas.yview)
-            self.vscroll.pack(side="right", fill="y")
-            self.hscroll = ttk.Scrollbar(self, orient="horizontal", command=self._xscroll)
-            self.hscroll.pack(fill="x", padx=8, pady=(0, 8))
+            # Контейнер для строк данных
+            self.rows_holder = tk.Frame(self.scroll_frame)
+            self.rows_holder.pack(fill="both", expand=True)
 
-            self.rows_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=self._on_rows_xview)
-            self.rows_holder.bind("<Configure>", lambda e: self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")))
-            self.header_holder.bind("<Configure>", lambda e: self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all")))
+            # Обновление области прокрутки
+            self.scroll_frame.bind("<Configure>", self._on_scroll_frame_configure)
 
-            self.rows_canvas.bind("<MouseWheel>", self._on_wheel)
-            self.rows_canvas.bind("<Shift-MouseWheel>", self._on_shift_wheel)
+            # Обработка колеса мыши
+            self.main_canvas.bind("<MouseWheel>", self._on_wheel)
+            self.main_canvas.bind("<Shift-MouseWheel>", self._on_shift_wheel)
+            
+            # Привязка к колесу мыши для всех виджетов внутри canvas
+            self.bind_all("<MouseWheel>", self._on_wheel_anywhere)
 
             self.rows: List[RowWidget] = []
-            self._apply_column_widths(self.header_holder)
 
+            # Нижняя панель
             bottom = tk.Frame(self)
             bottom.pack(fill="x", padx=8, pady=(0, 8))
-            self.lbl_object_total = tk.Label(bottom, text="Сумма: сотрудников 0 | дней 0 | часов 0", font=("Segoe UI", 10, "bold"))
+            self.lbl_object_total = tk.Label(bottom, text="Сумма: сотрудников 0 | дней 0 | часов 0", 
+                                            font=("Segoe UI", 10, "bold"))
             self.lbl_object_total.pack(side="left")
 
-            # Фильтр сотрудников под выбранное подразделение
             self._on_department_select()
 
         except Exception:
@@ -832,17 +824,46 @@ class TimesheetPage(tk.Frame):
             messagebox.showerror("Табель — ошибка построения UI", tb)
             raise
 
-    # вспомогательные
+    def _on_scroll_frame_configure(self, event=None):
+        """Обновление области прокрутки"""
+        self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
+
     def _apply_column_widths(self, frame: tk.Frame):
+        """Применение ширин колонок"""
         px = self.COLPX
-        frame.grid_columnconfigure(0, minsize=px['fio'])
-        frame.grid_columnconfigure(1, minsize=px['tbn'])
+        frame.grid_columnconfigure(0, minsize=px['fio'], weight=0)
+        frame.grid_columnconfigure(1, minsize=px['tbn'], weight=0)
         for col in range(2, 33):
-            frame.grid_columnconfigure(col, minsize=px['day'])
-        frame.grid_columnconfigure(33, minsize=px['days'])
-        frame.grid_columnconfigure(34, minsize=px['hours'])
-        frame.grid_columnconfigure(35, minsize=px['btn52'])
-        frame.grid_columnconfigure(36, minsize=px['del'])
+            frame.grid_columnconfigure(col, minsize=px['day'], weight=0)
+        frame.grid_columnconfigure(33, minsize=px['days'], weight=0)
+        frame.grid_columnconfigure(34, minsize=px['hours'], weight=0)
+        frame.grid_columnconfigure(35, minsize=px['btn52'], weight=0)
+        frame.grid_columnconfigure(36, minsize=px['del'], weight=0)
+
+    def _on_wheel(self, event):
+        """Вертикальная прокрутка"""
+        if self.main_canvas.winfo_exists():
+            self.main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        return "break"
+    
+    def _on_wheel_anywhere(self, event):
+        """Обработка колеса мыши для любого виджета внутри canvas"""
+        try:
+            # Проверяем, что событие произошло над нашим canvas или его содержимым
+            widget = event.widget
+            while widget:
+                if widget == self.main_canvas or widget == self.scroll_frame or widget == self.rows_holder:
+                    return self._on_wheel(event)
+                widget = widget.master
+        except:
+            pass
+        return None
+
+    def _on_shift_wheel(self, event):
+        """Горизонтальная прокрутка"""
+        if self.main_canvas.winfo_exists():
+            self.main_canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+        return "break"
 
     def _on_period_change(self):
         self._update_rows_days_enabled()
@@ -866,26 +887,6 @@ class TimesheetPage(tk.Frame):
     def get_year_month(self) -> Tuple[int, int]:
         return int(self.spn_year.get()), self.cmb_month.current() + 1
 
-    def _on_rows_xview(self, first, last):
-        try:
-            frac = float(first)
-        except Exception:
-            frac = 0.0
-        # у нас один header_canvas; если нужно — можно добавить xview
-        self.hscroll.set(first, last)
-
-    def _xscroll(self, *args):
-        self.rows_canvas.xview(*args)
-
-    def _on_wheel(self, event):
-        self.rows_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        return "break"
-
-    def _on_shift_wheel(self, event):
-        step = -1 if event.delta > 0 else 1
-        self._xscroll("scroll", step, "units")
-        return "break"
-
     def _update_rows_days_enabled(self):
         y, m = self.get_year_month()
         for i, r in enumerate(self.rows, start=0):
@@ -898,10 +899,8 @@ class TimesheetPage(tk.Frame):
             r.grid(i)
             r.apply_pixel_column_widths(self.COLPX)
             r.set_day_font(self.DAY_ENTRY_FONT)
-        self.after(30, lambda: (
-            self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")),
-            self._auto_fit_columns(),
-        ))
+        self.after(30, self._on_scroll_frame_configure)
+        self._recalc_object_total()
 
     def _recalc_object_total(self):
         tot_h = 0.0
@@ -942,7 +941,6 @@ class TimesheetPage(tk.Frame):
         w.update_days_enabled(y, m)
         self.rows.append(w)
         self._regrid_rows()
-        self._recalc_object_total()
 
     def _on_department_select(self):
         dep_sel = (self.cmb_department.get() or "Все").strip()
@@ -973,16 +971,13 @@ class TimesheetPage(tk.Frame):
 
     def reload_spravochnik(self):
         try:
-            # Сохраняем текущие выборы
-            cur_dep = (self.cmb_department.get() or "Все").strip() if hasattr(self, "cmb_department") else "Все"
-            cur_addr = (self.cmb_address.get() or "").strip() if hasattr(self, "cmb_address") else ""
-            cur_id = (self.cmb_object_id.get() or "").strip() if hasattr(self, "cmb_object_id") else ""
-            cur_fio = (self.fio_var.get() or "").strip() if hasattr(self, "fio_var") else ""
+            cur_dep = (self.cmb_department.get() or "Все").strip()
+            cur_addr = (self.cmb_address.get() or "").strip()
+            cur_id = (self.cmb_object_id.get() or "").strip()
+            cur_fio = (self.fio_var.get() or "").strip()
 
-            # Перечитываем
             self._load_spr_data()
 
-            # Подразделения
             self.cmb_department.config(values=self.departments)
             if cur_dep in self.departments:
                 self.cmb_department.set(cur_dep)
@@ -993,7 +988,6 @@ class TimesheetPage(tk.Frame):
                 except Exception:
                     self.cmb_department.set(self.departments[0] if self.departments else "Все")
 
-            # Адреса/ID
             self.cmb_address.set_completion_list(self.address_options)
             if cur_addr in self.address_options:
                 self.cmb_address.set(cur_addr)
@@ -1003,7 +997,6 @@ class TimesheetPage(tk.Frame):
             if cur_id and cur_id in (self.cmb_object_id.cget("values") or []):
                 self.cmb_object_id.set(cur_id)
 
-            # ФИО под подразделение
             self._on_department_select()
             dep_sel = (self.cmb_department.get() or "Все").strip()
             if dep_sel == "Все":
@@ -1071,7 +1064,6 @@ class TimesheetPage(tk.Frame):
             pass
         roww.destroy()
         self._regrid_rows()
-        self._recalc_object_total()
 
     def clear_all_rows(self):
         if not self.rows:
@@ -1082,7 +1074,6 @@ class TimesheetPage(tk.Frame):
             r.destroy()
         self.rows.clear()
         self._regrid_rows()
-        self._recalc_object_total()
 
     def _current_file_path(self) -> Optional[Path]:
         addr = self.cmb_address.get().strip()
@@ -1137,7 +1128,6 @@ class TimesheetPage(tk.Frame):
             r.destroy()
         self.rows.clear()
         self._regrid_rows()
-        self._recalc_object_total()
 
         fpath = self._current_file_path()
         if not fpath or not fpath.exists():
@@ -1178,7 +1168,6 @@ class TimesheetPage(tk.Frame):
                 roww.set_hours(hours)
                 self.rows.append(roww)
             self._regrid_rows()
-            self._recalc_object_total()
         except Exception as e:
             messagebox.showerror("Загрузка", f"Не удалось загрузить существующие строки:\n{e}")
 
@@ -1328,13 +1317,11 @@ class TimesheetPage(tk.Frame):
                 added += 1
 
             self._regrid_rows()
-            self._recalc_object_total()
             messagebox.showinfo("Копирование", f"Добавлено сотрудников: {added}")
 
         except Exception as e:
             messagebox.showerror("Копирование", f"Ошибка копирования:\n{e}")
 
-    # авто-подгон ширины колонки «ФИО»
     def _content_total_width(self, fio_px: Optional[int] = None) -> int:
         px = self.COLPX.copy()
         if fio_px is not None:
@@ -1343,7 +1330,7 @@ class TimesheetPage(tk.Frame):
 
     def _auto_fit_columns(self):
         try:
-            viewport = self.rows_canvas.winfo_width()
+            viewport = self.main_canvas.winfo_width()
         except Exception:
             viewport = 0
         if viewport <= 1:
@@ -1359,10 +1346,10 @@ class TimesheetPage(tk.Frame):
             new_fio = min(self.MAX_FIO_PX, self.COLPX["fio"] + surplus)
         if int(new_fio) != int(self.COLPX["fio"]):
             self.COLPX["fio"] = int(new_fio)
-            self._apply_column_widths(self.header_holder)
+            self._apply_column_widths(self.header_frame)
             for r in self.rows:
                 r.apply_pixel_column_widths(self.COLPX)
-            self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all"))
+            self._on_scroll_frame_configure()
 
     def _on_window_configure(self, _evt):
         try:
