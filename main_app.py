@@ -326,24 +326,31 @@ class RowWidget:
 
         # Колонка 0: Фиксированная ячейка для ФИО
         self.cell_fio = tk.Frame(self.frame, width=200, height=1, bg=self.zebra_bg)
-        self.cell_fio.grid(row=0, column=0, padx=1, pady=1, sticky="nsew")
+        self.cell_fio.grid(row=0, column=0, padx=1, pady=1, sticky="w")
         self.cell_fio.grid_propagate(False)
         self.lbl_fio = tk.Label(self.cell_fio, text=fio, anchor="w", bg=self.zebra_bg)
         self.lbl_fio.pack(fill="both", expand=True)
 
         # Колонка 1: Фиксированная ячейка для Таб.№
         self.cell_tbn = tk.Frame(self.frame, width=100, height=1, bg=self.zebra_bg)
-        self.cell_tbn.grid(row=0, column=1, padx=1, pady=1, sticky="nsew")
+        self.cell_tbn.grid(row=0, column=1, padx=1, pady=1, sticky="w")
         self.cell_tbn.grid_propagate(False)
         self.lbl_tbn = tk.Label(self.cell_tbn, text=tbn, anchor="center", bg=self.zebra_bg)
         self.lbl_tbn.pack(fill="both", expand=True)
 
-        # Колонки 2-32: Дни месяца (31 колонка)
+        # Колонки 2-32: Дни месяца (31 колонка) - с фиксированными Frame
         self.day_entries: List[tk.Entry] = []
+        self.day_frames: List[tk.Frame] = []
         for d in range(1, 32):
-            e = tk.Entry(self.frame, width=4, justify="center")
-            # ✅ ИСПРАВЛЕНО: column=2+(d-1) вместо column=1+d
-            e.grid(row=0, column=2 + (d - 1), padx=0, pady=1, sticky="ew")
+            # Создаём фиксированный контейнер для каждой ячейки дня
+            day_frame = tk.Frame(self.frame, width=36, height=1, bg=self.zebra_bg)
+            day_frame.grid(row=0, column=1 + d, padx=0, pady=1, sticky="ew")
+            day_frame.grid_propagate(False)
+            self.day_frames.append(day_frame)
+            
+            # Entry внутри фиксированного Frame
+            e = tk.Entry(day_frame, width=4, justify="center", bd=1, relief="solid")
+            e.pack(fill="both", expand=True)
             e.bind("<FocusOut>", lambda ev, _d=d: self.update_total())
             e.bind("<Button-2>", lambda ev: "break")
             e.bind("<ButtonRelease-2>", lambda ev: "break")
@@ -370,21 +377,21 @@ class RowWidget:
         # Фиксируем ширины контейнеров ФИО и Таб.№
         self.cell_fio.configure(width=px['fio'])
         self.cell_tbn.configure(width=px['tbn'])
+        
+        # Фиксируем ширины контейнеров дней
+        for day_frame in self.day_frames:
+            day_frame.configure(width=px['day'])
 
         # Настраиваем минимальные размеры всех колонок сетки
         f = self.frame
         f.grid_columnconfigure(0, minsize=px['fio'], weight=0)
         f.grid_columnconfigure(1, minsize=px['tbn'], weight=0)
-        #  Колонки дат теперь 2-32 (было некорректно)
         for col in range(2, 33):
             f.grid_columnconfigure(col, minsize=px['day'], weight=0)
         f.grid_columnconfigure(33, minsize=px['days'], weight=0)
         f.grid_columnconfigure(34, minsize=px['hours'], weight=0)
         f.grid_columnconfigure(35, minsize=px['btn52'], weight=0)
         f.grid_columnconfigure(36, minsize=px['del'], weight=0)
-
-    # ... остальные методы класса остаются без изменений ...
-
 
     def set_day_font(self, font_tuple):
         for e in self.day_entries:
@@ -479,7 +486,6 @@ class RowWidget:
 
     def delete_row(self):
         self.on_delete(self)
-
 
 # ------------- Автокомплит -------------
 
@@ -784,36 +790,55 @@ class TimesheetPage(tk.Frame):
             # ВАЖНО: больше не растягиваем по ширине, чтобы колонкам хватало места
             self.header_frame.pack(anchor="nw", pady=(0, 2))  # was: fill="x"
 
-            # Создание заголовков
-            header_labels = []
-            lbl = tk.Label(self.header_frame, text="ФИО", anchor="w", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
-            lbl.grid(row=0, column=0, padx=1, pady=2, sticky="ew")
+            # Создание заголовков с фиксированными Frame
+            self.header_cells = []
 
-            lbl = tk.Label(self.header_frame, text="Таб.№", anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
-            lbl.grid(row=0, column=1, padx=1, pady=2, sticky="ew")
+            # Колонка 0: ФИО
+            cell_fio = tk.Frame(self.header_frame, width=200, height=1, bg="#f0f0f0", relief="raised", bd=1)
+            cell_fio.grid(row=0, column=0, padx=1, pady=2, sticky="ew")
+            cell_fio.grid_propagate(False)
+            lbl = tk.Label(cell_fio, text="ФИО", anchor="w", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
+            lbl.pack(fill="both", expand=True)
+            self.header_cells.append(cell_fio)
 
+            # Колонка 1: Таб.№
+            cell_tbn = tk.Frame(self.header_frame, width=100, height=1, bg="#f0f0f0", relief="raised", bd=1)
+            cell_tbn.grid(row=0, column=1, padx=1, pady=2, sticky="ew")
+            cell_tbn.grid_propagate(False)
+            lbl = tk.Label(cell_tbn, text="Таб.№", anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
+            lbl.pack(fill="both", expand=True)
+            self.header_cells.append(cell_tbn)
+
+            # Колонки 2-32: Дни месяца
+            self.header_day_cells = []
             for d in range(1, 32):
-                lbl = tk.Label(self.header_frame, text=str(d), anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
-                lbl.grid(row=0, column=2 + (d - 1), padx=0, pady=2, sticky="ew")
+                cell = tk.Frame(self.header_frame, width=36, height=1, bg="#f0f0f0", relief="raised", bd=1)
+                cell.grid(row=0, column=1 + d, padx=0, pady=2, sticky="ew")
+                cell.grid_propagate(False)
+                lbl = tk.Label(cell, text=str(d), anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
+                lbl.pack(fill="both", expand=True)
+                self.header_day_cells.append(cell)
 
+            # Колонка 33: Дней
             lbl = tk.Label(self.header_frame, text="Дней", anchor="e", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
             lbl.grid(row=0, column=33, padx=(4, 1), pady=2, sticky="ew")
-            header_labels.append(lbl)
 
+            # Колонка 34: Часы
             lbl = tk.Label(self.header_frame, text="Часы", anchor="e", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
             lbl.grid(row=0, column=34, padx=(4, 1), pady=2, sticky="ew")
-            header_labels.append(lbl)
 
+            # Колонка 35: 5/2
             lbl = tk.Label(self.header_frame, text="5/2", anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
             lbl.grid(row=0, column=35, padx=1, pady=2, sticky="ew")
-            header_labels.append(lbl)
 
+            # Колонка 36: Удалить
             lbl = tk.Label(self.header_frame, text="Удалить", anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
             lbl.grid(row=0, column=36, padx=1, pady=2, sticky="ew")
-            header_labels.append(lbl)
 
             # Применяем ширины к заголовку
             self._apply_column_widths(self.header_frame)
+            self._apply_header_widths()  # Новый метод!
+
 
             # Контейнер для строк данных
             self.rows_holder = tk.Frame(self.scroll_frame)
@@ -848,7 +873,16 @@ class TimesheetPage(tk.Frame):
     def _on_scroll_frame_configure(self, event=None):
         """Обновление области прокрутки"""
         self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
-
+        
+    def _apply_header_widths(self):
+        """Применение ширин к ячейкам заголовка"""
+        px = self.COLPX
+        if self.header_cells and len(self.header_cells) >= 2:
+            self.header_cells[0].configure(width=px['fio'])   # ФИО
+            self.header_cells[1].configure(width=px['tbn'])   # Таб.№
+        for cell in self.header_day_cells:
+            cell.configure(width=px['day'])
+            
     def _apply_column_widths(self, frame: tk.Frame):
         """Применение ширин колонок"""
         px = self.COLPX
@@ -1367,6 +1401,7 @@ class TimesheetPage(tk.Frame):
         if int(new_fio) != int(self.COLPX["fio"]):
             self.COLPX["fio"] = int(new_fio)
             self._apply_column_widths(self.header_frame)
+            self._apply_header_widths()
             for r in self.rows:
                 r.apply_pixel_column_widths(self.COLPX)
             self._on_scroll_frame_configure()
