@@ -1,4 +1,4 @@
-# pyton
+# python
 import os
 import re
 import sys
@@ -23,12 +23,12 @@ from openpyxl.utils import get_column_letter
 
 # Встроенные модули (если доступны)
 try:
-    import SpecialOrders  # должен содержать open_special_orders(parent)
+    import SpecialOrders
 except Exception:
     SpecialOrders = None
 
 try:
-    import timesheet_transformer  # должен содержать open_converter(parent)
+    import timesheet_transformer
 except Exception:
     timesheet_transformer = None
 
@@ -44,19 +44,15 @@ CONFIG_SECTION_REMOTE = "Remote"
 
 KEY_SPR = "spravochnik_path"
 KEY_OUTPUT_DIR = "output_dir"
-
 KEY_EXPORT_PWD = "export_password"
-
 KEY_SELECTED_DEP = "selected_department"
-
 KEY_REMOTE_USE = "use_remote"
 KEY_YA_PUBLIC_LINK = "yadisk_public_link"
 KEY_YA_PUBLIC_PATH = "yadisk_public_path"
 
-# Значения по умолчанию
 SPRAVOCHNIK_FILE_DEFAULT = "Справочник.xlsx"
 OUTPUT_DIR_DEFAULT = "Объектные_табели"
-CONVERTER_EXE = "TabelConverter.exe"  # резервный exe
+CONVERTER_EXE = "TabelConverter.exe"
 
 # ------------- Базовые утилиты -------------
 
@@ -116,7 +112,6 @@ def ensure_config():
                 cfg.write(f)
         return
 
-    # новый файл
     cfg = configparser.ConfigParser()
     cfg[CONFIG_SECTION_PATHS] = {
         KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE_DEFAULT),
@@ -194,7 +189,7 @@ def _s(v) -> str:
 
 def load_spravochnik_from_wb(wb) -> Tuple[List[Tuple[str,str,str,str]], List[Tuple[str,str]]]:
     employees: List[Tuple[str,str,str,str]] = []
-    objects:   List[Tuple[str,str]] = []
+    objects: List[Tuple[str,str]] = []
 
     if "Сотрудники" in wb.sheetnames:
         ws = wb["Сотрудники"]
@@ -310,9 +305,9 @@ class RowWidget:
     WEEK_BG_SAT = "#fff8e1"
     WEEK_BG_SUN = "#ffebee"
     ZEBRA_EVEN = "#ffffff"
-    ZEBRA_ODD  = "#f6f8fa"
-    ERR_BG     = "#ffccbc"
-    DISABLED_BG= "#f0f0f0"
+    ZEBRA_ODD = "#f6f8fa"
+    ERR_BG = "#ffccbc"
+    DISABLED_BG = "#f0f0f0"
 
     def __init__(self, parent, idx: int, fio: str, tbn: str, get_year_month_callable, on_delete_callable):
         self.parent = parent
@@ -321,68 +316,60 @@ class RowWidget:
         self.on_delete = on_delete_callable
 
         self.zebra_bg = self.ZEBRA_EVEN if idx % 2 == 0 else self.ZEBRA_ODD
-
         self.frame = tk.Frame(parent, bd=0, bg=self.zebra_bg)
 
-        # Колонка 0: Фиксированная ячейка для ФИО
-        self.cell_fio = tk.Frame(self.frame, width=200, height=1, bg=self.zebra_bg)
-        self.cell_fio.grid(row=0, column=0, padx=1, pady=1, sticky="w")
+        # Колонка 0: ФИО
+        self.cell_fio = tk.Frame(self.frame, width=200, height=1, bg=self.zebra_bg, bd=0)
+        self.cell_fio.grid(row=0, column=0, padx=0, pady=0, sticky="ew")
         self.cell_fio.grid_propagate(False)
-        self.lbl_fio = tk.Label(self.cell_fio, text=fio, anchor="w", bg=self.zebra_bg)
+        self.lbl_fio = tk.Label(self.cell_fio, text=fio, anchor="w", bg=self.zebra_bg, padx=2)
         self.lbl_fio.pack(fill="both", expand=True)
 
-        # Колонка 1: Фиксированная ячейка для Таб.№
-        self.cell_tbn = tk.Frame(self.frame, width=100, height=1, bg=self.zebra_bg)
-        self.cell_tbn.grid(row=0, column=1, padx=1, pady=1, sticky="w")
+        # Колонка 1: Таб.№
+        self.cell_tbn = tk.Frame(self.frame, width=100, height=1, bg=self.zebra_bg, bd=0)
+        self.cell_tbn.grid(row=0, column=1, padx=0, pady=0, sticky="ew")
         self.cell_tbn.grid_propagate(False)
         self.lbl_tbn = tk.Label(self.cell_tbn, text=tbn, anchor="center", bg=self.zebra_bg)
         self.lbl_tbn.pack(fill="both", expand=True)
 
-        # Колонки 2-32: Дни месяца (31 колонка) - с фиксированными Frame
+        # Колонки 2-32: Дни
         self.day_entries: List[tk.Entry] = []
         self.day_frames: List[tk.Frame] = []
         for d in range(1, 32):
-            # Создаём фиксированный контейнер для каждой ячейки дня
-            day_frame = tk.Frame(self.frame, width=36, height=1, bg=self.zebra_bg)
-            day_frame.grid(row=0, column=1 + d, padx=0, pady=1, sticky="ew")
+            day_frame = tk.Frame(self.frame, width=36, height=1, bg=self.zebra_bg, bd=0)
+            day_frame.grid(row=0, column=1 + d, padx=0, pady=0, sticky="ew")
             day_frame.grid_propagate(False)
             self.day_frames.append(day_frame)
             
-            # Entry внутри фиксированного Frame
             e = tk.Entry(day_frame, width=4, justify="center", bd=1, relief="solid")
-            e.pack(fill="both", expand=True)
+            e.pack(fill="both", expand=True, padx=0, pady=0)
             e.bind("<FocusOut>", lambda ev, _d=d: self.update_total())
             e.bind("<Button-2>", lambda ev: "break")
             e.bind("<ButtonRelease-2>", lambda ev: "break")
             self.day_entries.append(e)
 
-        # Колонка 33: Итого дней
+        # Колонка 33: Дней
         self.lbl_days = tk.Label(self.frame, text="0", width=5, anchor="e", bg=self.zebra_bg)
-        self.lbl_days.grid(row=0, column=33, padx=(4, 1), pady=1, sticky="ew")
+        self.lbl_days.grid(row=0, column=33, padx=(4, 1), pady=0, sticky="ew")
 
-        # Колонка 34: Итого часов
+        # Колонка 34: Часы
         self.lbl_total = tk.Label(self.frame, text="0", width=7, anchor="e", bg=self.zebra_bg)
-        self.lbl_total.grid(row=0, column=34, padx=(4, 1), pady=1, sticky="ew")
+        self.lbl_total.grid(row=0, column=34, padx=(4, 1), pady=0, sticky="ew")
 
-        # Колонка 35: Кнопка 5/2
+        # Колонка 35: 5/2
         self.btn_52 = ttk.Button(self.frame, text="5/2", width=4, command=self.fill_52)
         self.btn_52.grid(row=0, column=35, padx=1, sticky="ew")
 
-        # Колонка 36: Кнопка Удалить
+        # Колонка 36: Удалить
         self.btn_del = ttk.Button(self.frame, text="Удалить", width=7, command=self.delete_row)
         self.btn_del.grid(row=0, column=36, padx=1, sticky="ew")
 
     def apply_pixel_column_widths(self, px: dict):
-        """Применение фиксированных ширин колонок"""
-        # Фиксируем ширины контейнеров ФИО и Таб.№
         self.cell_fio.configure(width=px['fio'])
         self.cell_tbn.configure(width=px['tbn'])
-        
-        # Фиксируем ширины контейнеров дней
         for day_frame in self.day_frames:
             day_frame.configure(width=px['day'])
 
-        # Настраиваем минимальные размеры всех колонок сетки
         f = self.frame
         f.grid_columnconfigure(0, minsize=px['fio'], weight=0)
         f.grid_columnconfigure(1, minsize=px['tbn'], weight=0)
@@ -398,7 +385,7 @@ class RowWidget:
             e.configure(font=font_tuple)
 
     def grid(self, row: int):
-        self.frame.grid(row=row, column=0, sticky="ew", padx=0, pady=1)
+        self.frame.grid(row=row, column=0, sticky="ew", padx=0, pady=0)
 
     def destroy(self):
         self.frame.destroy()
@@ -486,6 +473,7 @@ class RowWidget:
 
     def delete_row(self):
         self.on_delete(self)
+
 
 # ------------- Автокомплит -------------
 
@@ -610,7 +598,7 @@ class HoursFillDialog(simpledialog.Dialog):
             messagebox.showwarning("Проставить часы", "День должен быть числом от 1 до 31.")
             return False
 
-        if self.var_clear.get():
+                if self.var_clear.get():
             self._d = d
             self._h = 0.0
             self._clear = True
@@ -785,65 +773,62 @@ class TimesheetPage(tk.Frame):
                 xscrollcommand=self.hscroll.set
             )
 
-            # Заголовок таблицы
-            self.header_frame = tk.Frame(self.scroll_frame, relief="raised", bd=1, bg="#f0f0f0")
-            # ВАЖНО: больше не растягиваем по ширине, чтобы колонкам хватало места
-            self.header_frame.pack(anchor="nw", pady=(0, 2))  # was: fill="x"
+            # Заголовок таблицы с фиксированными ячейками
+            self.header_frame = tk.Frame(self.scroll_frame, relief="flat", bd=0, bg="#e0e0e0")
+            self.header_frame.pack(anchor="nw", pady=(0, 1))
 
             # Создание заголовков с фиксированными Frame
             self.header_cells = []
 
             # Колонка 0: ФИО
-            cell_fio = tk.Frame(self.header_frame, width=200, height=1, bg="#f0f0f0", relief="raised", bd=1)
-            cell_fio.grid(row=0, column=0, padx=1, pady=2, sticky="ew")
+            cell_fio = tk.Frame(self.header_frame, width=200, height=1, bg="#d0d0d0", relief="raised", bd=1)
+            cell_fio.grid(row=0, column=0, padx=0, pady=0, sticky="ew")
             cell_fio.grid_propagate(False)
-            lbl = tk.Label(cell_fio, text="ФИО", anchor="w", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
+            lbl = tk.Label(cell_fio, text="ФИО", anchor="w", font=("Segoe UI", 9, "bold"), bg="#d0d0d0", padx=2)
             lbl.pack(fill="both", expand=True)
             self.header_cells.append(cell_fio)
 
             # Колонка 1: Таб.№
-            cell_tbn = tk.Frame(self.header_frame, width=100, height=1, bg="#f0f0f0", relief="raised", bd=1)
-            cell_tbn.grid(row=0, column=1, padx=1, pady=2, sticky="ew")
+            cell_tbn = tk.Frame(self.header_frame, width=100, height=1, bg="#d0d0d0", relief="raised", bd=1)
+            cell_tbn.grid(row=0, column=1, padx=0, pady=0, sticky="ew")
             cell_tbn.grid_propagate(False)
-            lbl = tk.Label(cell_tbn, text="Таб.№", anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
+            lbl = tk.Label(cell_tbn, text="Таб.№", anchor="center", font=("Segoe UI", 9, "bold"), bg="#d0d0d0")
             lbl.pack(fill="both", expand=True)
             self.header_cells.append(cell_tbn)
 
             # Колонки 2-32: Дни месяца
             self.header_day_cells = []
             for d in range(1, 32):
-                cell = tk.Frame(self.header_frame, width=36, height=1, bg="#f0f0f0", relief="raised", bd=1)
-                cell.grid(row=0, column=1 + d, padx=0, pady=2, sticky="ew")
+                cell = tk.Frame(self.header_frame, width=36, height=1, bg="#d0d0d0", relief="raised", bd=1)
+                cell.grid(row=0, column=1 + d, padx=0, pady=0, sticky="ew")
                 cell.grid_propagate(False)
-                lbl = tk.Label(cell, text=str(d), anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
+                lbl = tk.Label(cell, text=str(d), anchor="center", font=("Segoe UI", 8, "bold"), bg="#d0d0d0")
                 lbl.pack(fill="both", expand=True)
                 self.header_day_cells.append(cell)
 
             # Колонка 33: Дней
-            lbl = tk.Label(self.header_frame, text="Дней", anchor="e", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
-            lbl.grid(row=0, column=33, padx=(4, 1), pady=2, sticky="ew")
+            lbl = tk.Label(self.header_frame, text="Дней", anchor="e", font=("Segoe UI", 9, "bold"), bg="#d0d0d0")
+            lbl.grid(row=0, column=33, padx=(4, 1), pady=0, sticky="ew")
 
             # Колонка 34: Часы
-            lbl = tk.Label(self.header_frame, text="Часы", anchor="e", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
-            lbl.grid(row=0, column=34, padx=(4, 1), pady=2, sticky="ew")
+            lbl = tk.Label(self.header_frame, text="Часы", anchor="e", font=("Segoe UI", 9, "bold"), bg="#d0d0d0")
+            lbl.grid(row=0, column=34, padx=(4, 1), pady=0, sticky="ew")
 
             # Колонка 35: 5/2
-            lbl = tk.Label(self.header_frame, text="5/2", anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
-            lbl.grid(row=0, column=35, padx=1, pady=2, sticky="ew")
+            lbl = tk.Label(self.header_frame, text="5/2", anchor="center", font=("Segoe UI", 9, "bold"), bg="#d0d0d0")
+            lbl.grid(row=0, column=35, padx=1, pady=0, sticky="ew")
 
             # Колонка 36: Удалить
-            lbl = tk.Label(self.header_frame, text="Удалить", anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
-            lbl.grid(row=0, column=36, padx=1, pady=2, sticky="ew")
+            lbl = tk.Label(self.header_frame, text="Удалить", anchor="center", font=("Segoe UI", 9, "bold"), bg="#d0d0d0")
+            lbl.grid(row=0, column=36, padx=1, pady=0, sticky="ew")
 
             # Применяем ширины к заголовку
             self._apply_column_widths(self.header_frame)
-            self._apply_header_widths()  # Новый метод!
-
+            self._apply_header_widths()
 
             # Контейнер для строк данных
-            self.rows_holder = tk.Frame(self.scroll_frame)
-            # ВАЖНО: тоже убираем растягивание по ширине
-            self.rows_holder.pack(anchor="nw")  # was: fill="both", expand=True
+            self.rows_holder = tk.Frame(self.scroll_frame, bg="#ffffff")
+            self.rows_holder.pack(anchor="nw", fill="both", expand=True)
 
             # Обновление области прокрутки
             self.scroll_frame.bind("<Configure>", self._on_scroll_frame_configure)
@@ -873,18 +858,9 @@ class TimesheetPage(tk.Frame):
     def _on_scroll_frame_configure(self, event=None):
         """Обновление области прокрутки"""
         self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
-        
-    def _apply_header_widths(self):
-        """Применение ширин к ячейкам заголовка"""
-        px = self.COLPX
-        if self.header_cells and len(self.header_cells) >= 2:
-            self.header_cells[0].configure(width=px['fio'])   # ФИО
-            self.header_cells[1].configure(width=px['tbn'])   # Таб.№
-        for cell in self.header_day_cells:
-            cell.configure(width=px['day'])
-            
+
     def _apply_column_widths(self, frame: tk.Frame):
-        """Применение ширин колонок"""
+        """Применение ширин колонок к сетке"""
         px = self.COLPX
         frame.grid_columnconfigure(0, minsize=px['fio'], weight=0)
         frame.grid_columnconfigure(1, minsize=px['tbn'], weight=0)
@@ -894,6 +870,15 @@ class TimesheetPage(tk.Frame):
         frame.grid_columnconfigure(34, minsize=px['hours'], weight=0)
         frame.grid_columnconfigure(35, minsize=px['btn52'], weight=0)
         frame.grid_columnconfigure(36, minsize=px['del'], weight=0)
+
+    def _apply_header_widths(self):
+        """Применение ширин к ячейкам заголовка"""
+        px = self.COLPX
+        if self.header_cells and len(self.header_cells) >= 2:
+            self.header_cells[0].configure(width=px['fio'])
+            self.header_cells[1].configure(width=px['tbn'])
+        for cell in self.header_day_cells:
+            cell.configure(width=px['day'])
 
     def _on_wheel(self, event):
         """Вертикальная прокрутка"""
@@ -943,13 +928,13 @@ class TimesheetPage(tk.Frame):
 
     def _update_rows_days_enabled(self):
         y, m = self.get_year_month()
-        for i, r in enumerate(self.rows, start=0):
+        for r in self.rows:
             r.apply_pixel_column_widths(self.COLPX)
             r.set_day_font(self.DAY_ENTRY_FONT)
             r.update_days_enabled(y, m)
 
     def _regrid_rows(self):
-        for i, r in enumerate(self.rows, start=0):
+        for i, r in enumerate(self.rows):
             r.grid(i)
             r.apply_pixel_column_widths(self.COLPX)
             r.set_day_font(self.DAY_ENTRY_FONT)
@@ -981,7 +966,6 @@ class TimesheetPage(tk.Frame):
             messagebox.showwarning("Объектный табель", "Выберите ФИО.")
             return
 
-        # Защита от дублей
         key = (fio.strip().lower(), tbn.strip())
         if any((r.fio().strip().lower(), r.tbn().strip()) == key for r in self.rows):
             if not messagebox.askyesno("Дублирование",
@@ -1157,7 +1141,7 @@ class TimesheetPage(tk.Frame):
             i = 1
             while new_name in wb.sheetnames:
                 i += 1
-                new_name = f"{base}{i}"
+                                new_name = f"{base}{i}"
             ws.title = new_name
         ws2 = wb.create_sheet("Табель")
         hdr = ["ID объекта", "Адрес", "Месяц", "Год", "ФИО", "Табельный №"] + [str(i) for i in range(1, 32)] + [
@@ -1255,9 +1239,6 @@ class TimesheetPage(tk.Frame):
                     to_del.append(r)
             for r in reversed(to_del):
                 ws.delete_rows(r, 1)
-
-            idx_total_days = 7 + 31
-            idx_total_hours = 7 + 31 + 1
 
             for roww in self.rows:
                 hours = roww.get_hours()
@@ -1556,7 +1537,7 @@ class HomePage(tk.Frame):
                             "Объектный табель → Создать — для работы с табелями.",
                  font=("Segoe UI", 10), fg="#444", bg="#f7f7f7", justify="center").pack(anchor="center")
 
-# ------------- Главное окно (единоe) -------------
+# ------------- Главное окно (единое) -------------
 
 class MainApp(tk.Tk):
     def __init__(self):
@@ -1571,7 +1552,6 @@ class MainApp(tk.Tk):
         # Меню
         menubar = tk.Menu(self)
 
-        # Кнопка Главная (возврат на стартовый экран)
         menubar.add_command(label="Главная", command=self.show_home)
 
         m_ts = tk.Menu(menubar, tearoff=0)
@@ -1609,7 +1589,7 @@ class MainApp(tk.Tk):
         tk.Label(header, text="Управление строительством", font=("Segoe UI", 16, "bold")).pack(side="left")
         tk.Label(header, text="Выберите раздел в верхнем меню", font=("Segoe UI", 10), fg="#555").pack(side="right")
 
-        # Контент — контейнер для страниц
+        # Контент
         self.content = tk.Frame(self, bg="#f7f7f7")
         self.content.pack(fill="both", expand=True)
         self._pages: Dict[str, tk.Widget] = {}
@@ -1620,17 +1600,14 @@ class MainApp(tk.Tk):
         tk.Label(footer, text="Разработал Алексей Зезюкин, АНО МЛСТ 2025",
                  font=("Segoe UI", 8), fg="#666").pack(side="right")
 
-        # Показать домашнюю страницу при запуске
         self.show_home()
 
     def _show_page(self, key: str, builder):
-        # очистить контейнер
         for w in self.content.winfo_children():
             try:
                 w.destroy()
             except Exception:
                 pass
-        # построить новый
         page = builder(self.content)
         if isinstance(page, tk.Widget) and page.master is self.content:
             try:
@@ -1646,7 +1623,6 @@ class MainApp(tk.Tk):
     def show_home(self):
         self._show_page("home", lambda parent: HomePage(parent))
 
-    # --- Справочник ---
     def open_spravochnik(self):
         path = get_spr_path_from_config()
         ensure_spravochnik_local(path)
@@ -1669,7 +1645,6 @@ class MainApp(tk.Tk):
             "В окнах используйте «Обновить справочник» для перечтения."
         )
 
-    # --- Аналитика ---
     def summary_export(self):
         pwd = simpledialog.askstring("Сводный экспорт", "Введите пароль:", show="*", parent=self)
         if pwd is None:
@@ -1694,7 +1669,6 @@ class MainApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Сводный экспорт", f"Ошибка выгрузки:\n{e}")
 
-    # --- Резервные запуски внешних EXE ---
     def run_special_orders_exe(self):
         try:
             p = exe_dir() / "SpecialOrders.exe"
@@ -1718,3 +1692,5 @@ class MainApp(tk.Tk):
 if __name__ == "__main__":
     app = MainApp()
     app.mainloop()
+
+
