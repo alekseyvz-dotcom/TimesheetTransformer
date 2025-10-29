@@ -972,29 +972,57 @@ class TimesheetPage(tk.Frame):
         self.pos_var.set(pos)
 
     def reload_spravochnik(self):
-       """Перезагрузить справочник и обновить списки"""
-          try:
-          # Перезагрузить данные справочника
-          self._load_spr_data()
-        
-          # Обновить список подразделений
-          deps = self.departments if getattr(self, "departments", None) else ["Все"]
-          current_dep = self.cmb_department.get()
-          self.cmb_department['values'] = deps
-          if current_dep in deps:
-              self.cmb_department.set(current_dep)
-          else:
-              self.cmb_department.set(deps[0])
-        
-          # Обновить список адресов
-          self.cmb_address.set_completion_list(self.address_options)
-        
-          # Обновить список ФИО в соответствии с выбранным подразделением
-          self._on_department_select()
-        
-          messagebox.showinfo("Справочник", "Справочник успешно обновлён.")
-          except Exception as e:
-          messagebox.showerror("Обновление справочника", f"Ошибка при обновлении справочника:\n{e}")
+        try:
+            # Сохраняем текущие выборы
+            cur_dep = (self.cmb_department.get() or "Все").strip() if hasattr(self, "cmb_department") else "Все"
+            cur_addr = (self.cmb_address.get() or "").strip() if hasattr(self, "cmb_address") else ""
+            cur_id = (self.cmb_object_id.get() or "").strip() if hasattr(self, "cmb_object_id") else ""
+            cur_fio = (self.fio_var.get() or "").strip() if hasattr(self, "fio_var") else ""
+
+            # Перечитываем
+            self._load_spr_data()
+
+            # Подразделения
+            self.cmb_department.config(values=self.departments)
+            if cur_dep in self.departments:
+                self.cmb_department.set(cur_dep)
+            else:
+                try:
+                    saved_dep = get_selected_department_from_config()
+                    self.cmb_department.set(saved_dep if saved_dep in self.departments else self.departments[0])
+                except Exception:
+                    self.cmb_department.set(self.departments[0] if self.departments else "Все")
+
+            # Адреса/ID
+            self.cmb_address.set_completion_list(self.address_options)
+            if cur_addr in self.address_options:
+                self.cmb_address.set(cur_addr)
+            else:
+                self.cmb_address.set("")
+            self._on_address_change()
+            if cur_id and cur_id in (self.cmb_object_id.cget("values") or []):
+                self.cmb_object_id.set(cur_id)
+
+            # ФИО под подразделение
+            self._on_department_select()
+            dep_sel = (self.cmb_department.get() or "Все").strip()
+            if dep_sel == "Все":
+                allowed = [e[0] for e in self.employees]
+            else:
+                allowed = [e[0] for e in self.employees if len(e) > 3 and (e[3] or "").strip() == dep_sel]
+            seen = set()
+            allowed = [n for n in allowed if (n not in seen and not seen.add(n))]
+            if cur_fio and cur_fio in allowed:
+                self.fio_var.set(cur_fio)
+                self._on_fio_select()
+            else:
+                self.fio_var.set("")
+                self.ent_tbn.delete(0, "end")
+                self.pos_var.set("")
+
+            messagebox.showinfo("Справочник", "Справочник обновлён.")
+        except Exception as e:
+            messagebox.showerror("Справочник", f"Ошибка перечтения справочника:\n{e}")
 
     def fill_52_all(self):
         for r in self.rows:
