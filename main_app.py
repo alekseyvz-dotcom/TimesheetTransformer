@@ -20,7 +20,7 @@ from tkinter import ttk, messagebox, simpledialog
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 
-# Если есть модуль заявок и конвертера — подключим (для встроенных окон)
+# Встроенные модули (если доступны)
 try:
     import SpecialOrders  # должен содержать open_special_orders(parent)
 except Exception:
@@ -55,7 +55,7 @@ KEY_YA_PUBLIC_PATH = "yadisk_public_path"
 # Значения по умолчанию
 SPRAVOCHNIK_FILE_DEFAULT = "Справочник.xlsx"
 OUTPUT_DIR_DEFAULT = "Объектные_табели"
-CONVERTER_EXE = "TabelConverter.exe"  # резервный запуск, если нет встроенного модуля
+CONVERTER_EXE = "TabelConverter.exe"  # резервный exe
 
 # ------------- Базовые утилиты -------------
 
@@ -121,16 +121,12 @@ def ensure_config():
         KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE_DEFAULT),
         KEY_OUTPUT_DIR: str(exe_dir() / OUTPUT_DIR_DEFAULT),
     }
-    cfg[CONFIG_SECTION_UI] = {
-        KEY_SELECTED_DEP: "Все"
-    }
-    cfg[CONFIG_SECTION_INTEGR] = {
-        KEY_EXPORT_PWD: "2025"
-    }
+    cfg[CONFIG_SECTION_UI] = {KEY_SELECTED_DEP: "Все"}
+    cfg[CONFIG_SECTION_INTEGR] = {KEY_EXPORT_PWD: "2025"}
     cfg[CONFIG_SECTION_REMOTE] = {
         KEY_REMOTE_USE: "false",
         KEY_YA_PUBLIC_LINK: "",
-        KEY_YA_PUBLIC_PATH: ""
+        KEY_YA_PUBLIC_PATH: "",
     }
     with open(cp, "w", encoding="utf-8") as f:
         cfg.write(f)
@@ -170,7 +166,7 @@ def set_selected_department_in_config(dep: str):
     cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = dep or "Все"
     write_config(cfg)
 
-# ------------- Удалённый справочник: Я.Диск (публичная ссылка) -------------
+# ------------- Удалённый справочник: Я.Диск -------------
 
 def fetch_yadisk_public_bytes(public_link: str, public_path: str = "") -> bytes:
     if not public_link:
@@ -195,10 +191,7 @@ def _s(v) -> str:
         v = int(v)
     return str(v).strip()
 
-def load_spravochnik_from_wb(wb) -> Tuple[
-    List[Tuple[str,str,str,str]],
-    List[Tuple[str,str]]
-]:
+def load_spravochnik_from_wb(wb) -> Tuple[List[Tuple[str,str,str,str]], List[Tuple[str,str]]]:
     employees: List[Tuple[str,str,str,str]] = []
     objects:   List[Tuple[str,str]] = []
 
@@ -250,9 +243,7 @@ def ensure_spravochnik_local(path: Path):
     ws2.append(["OBJ-002", "пр. Строителей, 25"])
     wb.save(path)
 
-def load_spravochnik_remote_or_local(local_path: Path) -> Tuple[
-    List[Tuple[str,str,str,str]], List[Tuple[str,str]]
-]:
+def load_spravochnik_remote_or_local(local_path: Path) -> Tuple[List[Tuple[str,str,str,str]], List[Tuple[str,str]]]:
     cfg = read_config()
     use_remote = cfg.get(CONFIG_SECTION_REMOTE, KEY_REMOTE_USE, fallback="false").strip().lower() in ("1","true","yes","on")
     if use_remote:
@@ -526,7 +517,6 @@ class CopyFromDialog(simpledialog.Dialog):
             .pack(anchor="w")
         ttk.Radiobutton(frame_mode, text="Объединить (добавить недостающих)", value="merge", variable=self.var_mode)\
             .pack(anchor="w")
-
         return self.cmb_month
 
     def validate(self):
@@ -610,27 +600,15 @@ class HoursFillDialog(simpledialog.Dialog):
             "clear": self._clear,
         }
 
-# ------------- ObjectTimesheet -------------
+# ------------- Страница Объектного табеля (Frame) -------------
 
-class ObjectTimesheet(tk.Toplevel):
-    COLPX = {
-        "fio":   200,
-        "tbn":   100,
-        "day":    36,
-        "days":   46,
-        "hours":  56,
-        "btn52":  40,
-        "del":    66
-    }
+class TimesheetPage(tk.Frame):
+    COLPX = {"fio": 200, "tbn": 100, "day": 36, "days": 46, "hours": 56, "btn52": 40, "del": 66}
     MIN_FIO_PX = 140
     MAX_FIO_PX = 260
 
     def __init__(self, master):
         super().__init__(master)
-        self.title("Объектный табель")
-        self.geometry("1280x740")
-        self.resizable(True, True)
-
         self.base_dir = exe_dir()
         self.spr_path = get_spr_path_from_config()
         self.out_dir = get_output_dir_from_config()
@@ -650,21 +628,17 @@ class ObjectTimesheet(tk.Toplevel):
         try:
             employees, objects = load_spravochnik_remote_or_local(self.spr_path)
         except Exception:
-            # старый локальный загрузчик (если есть)
-            employees = []
-            objects = []
+            employees, objects = [], []
+
         self.employees = employees
         self.objects = objects
 
-        # Автоподстановка таб.№/должности
         self.emp_names = [fio for (fio, _, _, _) in self.employees]
         self.emp_info = {fio: (tbn, pos) for (fio, tbn, pos, _) in self.employees}
 
-        # Подразделения
         deps = sorted({dep.strip() for (_, _, _, dep) in self.employees if dep and dep.strip()})
         self.departments = ["Все"] + deps
 
-        # Адрес -> ID
         self.addr_to_ids = {}
         for oid, addr in self.objects:
             if not addr:
@@ -672,7 +646,6 @@ class ObjectTimesheet(tk.Toplevel):
             self.addr_to_ids.setdefault(addr, [])
             if oid and oid not in self.addr_to_ids[addr]:
                 self.addr_to_ids[addr].append(oid)
-
         addresses_set = set(self.addr_to_ids.keys()) | {addr for _, addr in self.objects if addr}
         self.address_options = sorted(addresses_set)
 
@@ -788,10 +761,6 @@ class ObjectTimesheet(tk.Toplevel):
 
             self.rows_canvas.bind("<MouseWheel>", self._on_wheel)
             self.rows_canvas.bind("<Shift-MouseWheel>", self._on_shift_wheel)
-            self.bind_all("<MouseWheel>", self._on_wheel_global)
-            self.bind_all("<Shift-MouseWheel>", self._on_shift_wheel_global)
-            self.bind_all("<Button-4>", lambda e: self._on_wheel_global(e, linux=+1))
-            self.bind_all("<Button-5>", lambda e: self._on_wheel_global(e, linux=-1))
 
             self.rows: List[RowWidget] = []
             self._apply_column_widths(self.header_holder)
@@ -801,13 +770,13 @@ class ObjectTimesheet(tk.Toplevel):
             self.lbl_object_total = tk.Label(bottom, text="Сумма: сотрудников 0 | дней 0 | часов 0", font=("Segoe UI", 10, "bold"))
             self.lbl_object_total.pack(side="left")
 
-            # Заполнить список ФИО под текущее подразделение
+            # Фильтр сотрудников под выбранное подразделение
             self._on_department_select()
 
         except Exception:
             import traceback
             tb = traceback.format_exc()
-            messagebox.showerror("ObjectTimesheet — ошибка построения UI", tb)
+            messagebox.showerror("Табель — ошибка построения UI", tb)
             raise
 
     # вспомогательные
@@ -824,7 +793,6 @@ class ObjectTimesheet(tk.Toplevel):
 
     def _on_period_change(self):
         self._update_rows_days_enabled()
-        self._refresh_header_styles()
         self._load_existing_rows()
 
     def _on_address_change(self, *_):
@@ -850,7 +818,7 @@ class ObjectTimesheet(tk.Toplevel):
             frac = float(first)
         except Exception:
             frac = 0.0
-        self.header_canvas.xview_moveto(frac)
+        # у нас один header_canvas; если нужно — можно добавить xview
         self.hscroll.set(first, last)
 
     def _xscroll(self, *args):
@@ -862,35 +830,6 @@ class ObjectTimesheet(tk.Toplevel):
 
     def _on_shift_wheel(self, event):
         step = -1 if event.delta > 0 else 1
-        self._xscroll("scroll", step, "units")
-        return "break"
-
-    def _is_under_rows(self, widget) -> bool:
-        try:
-            w = widget
-            while True:
-                if w is self.rows_holder:
-                    return True
-                parent_name = w.winfo_parent()
-                if not parent_name:
-                    return False
-                w = self.nametowidget(parent_name)
-        except Exception:
-            return False
-
-    def _on_wheel_global(self, event, linux: int = 0):
-        if not self._is_under_rows(event.widget):
-            return
-        units = (-1 if linux < 0 else 1) if linux != 0 else int(-1 * (event.delta / 120))
-        if units == 0:
-            units = -1 if event.delta > 0 else 1
-        self.rows_canvas.yview_scroll(units, "units")
-        return "break"
-
-    def _on_shift_wheel_global(self, event, linux: int = 0):
-        if not self._is_under_rows(event.widget):
-            return
-        step = -1 if (linux > 0 or event.delta > 0) else 1
         self._xscroll("scroll", step, "units")
         return "break"
 
@@ -908,8 +847,6 @@ class ObjectTimesheet(tk.Toplevel):
             r.set_day_font(self.DAY_ENTRY_FONT)
         self.after(30, lambda: (
             self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all")),
-            self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all")),
-            self.header_canvas.xview_moveto(self.rows_canvas.xview()[0]),
             self._auto_fit_columns(),
         ))
 
@@ -930,18 +867,6 @@ class ObjectTimesheet(tk.Toplevel):
         sh = f"{tot_h:.2f}".rstrip("0").rstrip(".")
         cnt = len(self.rows)
         self.lbl_object_total.config(text=f"Сумма: сотрудников {cnt} | дней {tot_d} | часов {sh}")
-
-    def _refresh_header_styles(self):
-        try:
-            y, m = self.get_year_month()
-        except Exception:
-            y, m = datetime.now().year, datetime.now().month
-        days = month_days(y, m)
-        now = datetime.now()
-        for i in range(1, 32):
-            # найдём метку в шапке (row=0, column=1+i)
-            # упрощённо — на шапке они созданы в порядке, поэтому можем обратиться по grid_slaves
-            pass  # визуал уже задан в RowWidget; в упрощённой версии оставим как есть
 
     def add_row(self):
         fio = self.fio_var.get().strip()
@@ -1085,8 +1010,7 @@ class ObjectTimesheet(tk.Toplevel):
             ws.title = new_name
         ws2 = wb.create_sheet("Табель")
         hdr = ["ID объекта", "Адрес", "Месяц", "Год", "ФИО", "Табельный №"] + [str(i) for i in range(1, 32)] + [
-            "Итого дней",
-            "Итого часов",
+            "Итого дней", "Итого часов"
         ]
         ws2.append(hdr)
         ws2.column_dimensions["A"].width = 14
@@ -1172,7 +1096,6 @@ class ObjectTimesheet(tk.Toplevel):
                     wb.remove(wb.active)
             ws = self._ensure_sheet(wb)
 
-            # удалить строки этого объекта/периода
             to_del = []
             for r in range(2, ws.max_row + 1):
                 row_oid = (ws.cell(r, 1).value or "")
@@ -1334,16 +1257,13 @@ class ObjectTimesheet(tk.Toplevel):
             for r in self.rows:
                 r.apply_pixel_column_widths(self.COLPX)
             self.rows_canvas.configure(scrollregion=self.rows_canvas.bbox("all"))
-            self.header_canvas.configure(scrollregion=self.header_canvas.bbox("all"))
-            self.header_canvas.xview_moveto(self.rows_canvas.xview()[0])
 
     def _on_window_configure(self, _evt):
-        if self._fit_job:
-            try:
-                self.after_cancel(self._fit_job)
-            except Exception:
-                pass
-        self._fit_job = self.after(100, self._auto_fit_columns)
+        try:
+            self.after_cancel(self._fit_job)
+        except Exception:
+            pass
+        self._fit_job = self.after(150, self._auto_fit_columns)
 
 # ------------- Сводный экспорт -------------
 
@@ -1476,14 +1396,15 @@ class ExportMonthDialog(simpledialog.Dialog):
             "fmt": self.var_fmt.get(),
         }
 
-# ------------- Главное окно -------------
+# ------------- Главное окно (единоe) -------------
 
 class MainApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_NAME)
-        self.geometry("880x520")
-        self.resizable(False, False)
+        self.geometry("1024x720")
+        self.minsize(980, 640)
+        self.resizable(True, True)
 
         ensure_config()
 
@@ -1491,7 +1412,7 @@ class MainApp(tk.Tk):
         menubar = tk.Menu(self)
 
         m_ts = tk.Menu(menubar, tearoff=0)
-        m_ts.add_command(label="Создать", command=lambda: ObjectTimesheet(self))
+        m_ts.add_command(label="Создать", command=lambda: self._show_page("timesheet", lambda parent: TimesheetPage(parent)))
         menubar.add_cascade(label="Объектный табель", menu=m_ts)
 
         m_transport = tk.Menu(menubar, tearoff=0)
@@ -1510,7 +1431,6 @@ class MainApp(tk.Tk):
         m_analytics.add_command(label="Экспорт свода (XLSX/CSV)", command=self.summary_export)
         menubar.add_cascade(label="Аналитика", menu=m_analytics)
 
-        # Инструменты (конвертер), опционально
         m_tools = tk.Menu(menubar, tearoff=0)
         if timesheet_transformer and hasattr(timesheet_transformer, "open_converter"):
             m_tools.add_command(label="Конвертер табеля (1С)", command=lambda: timesheet_transformer.open_converter(self))
@@ -1520,26 +1440,53 @@ class MainApp(tk.Tk):
 
         self.config(menu=menubar)
 
-        # Титул
-        tk.Label(self, text="Управление строительством", font=("Segoe UI", 16, "bold")).pack(pady=(18, 8))
-        tk.Label(self, text="Выберите раздел в верхнем меню", font=("Segoe UI", 10)).pack(pady=(0, 12))
+        # Шапка
+        header = tk.Frame(self)
+        header.pack(fill="x", padx=12, pady=(10, 4))
+        tk.Label(header, text="Управление строительством", font=("Segoe UI", 16, "bold")).pack(side="left")
+        tk.Label(header, text="Выберите раздел в верхнем меню", font=("Segoe UI", 10), fg="#555").pack(side="right")
+
+        # Контент — контейнер для страниц
+        self.content = tk.Frame(self, bg="#f7f7f7")
+        self.content.pack(fill="both", expand=True)
+        self._pages: Dict[str, tk.Widget] = {}
 
         # Копирайт
-        tk.Label(self, text="Разработал Алексей Зезюкин, АНО МЛСТ 2025",
-                 font=("Segoe UI", 8), fg="#666").pack(side="bottom", pady=(0, 8))
+        footer = tk.Frame(self)
+        footer.pack(fill="x", padx=12, pady=(0, 10))
+        tk.Label(footer, text="Разработал Алексей Зезюкин, АНО МЛСТ 2025",
+                 font=("Segoe UI", 8), fg="#666").pack(side="right")
 
-    # --- Меню: Справочник ---
+    def _show_page(self, key: str, builder):
+        # очистить контейнер
+        for w in self.content.winfo_children():
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        # построить новый
+        page = builder(self.content)
+        if isinstance(page, tk.Widget) and page.master is self.content:
+            try:
+                page.pack_forget()
+            except Exception:
+                pass
+        try:
+            page.pack(fill="both", expand=True)
+        except Exception:
+            pass
+        self._pages[key] = page
+
+    # --- Справочник ---
     def open_spravochnik(self):
-        # Откроем локальный путь (если используете удалённый — можно хранить локальную копию)
         path = get_spr_path_from_config()
         ensure_spravochnik_local(path)
         try:
-            os.startfile(path)  # Windows
+            os.startfile(path)
         except Exception as e:
             messagebox.showerror("Справочник", f"Не удалось открыть файл:\n{e}")
 
     def refresh_spravochnik_global(self):
-        # Здесь просто сообщим; в окнах есть кнопка «Обновить справочник», которая перечитывает
         cfg = read_config()
         use_remote = cfg.get(CONFIG_SECTION_REMOTE, KEY_REMOTE_USE, fallback="false")
         link = cfg.get(CONFIG_SECTION_REMOTE, KEY_YA_PUBLIC_LINK, fallback="")
@@ -1550,12 +1497,11 @@ class MainApp(tk.Tk):
             "Справочник проверен/создан локально.\n"
             f"Удалённый доступ: use_remote={use_remote}\n"
             f"Публичная ссылка: {link or '(не задана)'}\n\n"
-            "В окне реестра/заявок используйте «Обновить справочник» для перечтения."
+            "В окнах используйте «Обновить справочник» для перечтения."
         )
 
-    # --- Меню: Аналитика ---
+    # --- Аналитика ---
     def summary_export(self):
-        # пароль
         pwd = simpledialog.askstring("Сводный экспорт", "Введите пароль:", show="*", parent=self)
         if pwd is None:
             return
@@ -1579,7 +1525,7 @@ class MainApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Сводный экспорт", f"Ошибка выгрузки:\n{e}")
 
-    # --- Резервные запуски EXE (если нет встроенных модулей) ---
+    # --- Резервные запуски внешних EXE ---
     def run_special_orders_exe(self):
         try:
             p = exe_dir() / "SpecialOrders.exe"
