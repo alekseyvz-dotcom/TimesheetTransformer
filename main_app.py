@@ -503,7 +503,7 @@ class CopyFromDialog(simpledialog.Dialog):
         self.spn_year = tk.Spinbox(master, from_=2000, to=2100, width=6)
         self.spn_year.grid(row=1, column=3, sticky="w")
         self.spn_year.delete(0, "end")
-               self.spn_year.insert(0, str(self.init_year))
+        self.spn_year.insert(0, str(self.init_year))
 
         self.var_copy_hours = tk.BooleanVar(value=False)
         ttk.Checkbutton(master, text="Копировать часы", variable=self.var_copy_hours)\
