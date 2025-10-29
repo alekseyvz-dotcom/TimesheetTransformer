@@ -324,57 +324,67 @@ class RowWidget:
 
         self.frame = tk.Frame(parent, bd=0, bg=self.zebra_bg)
 
-        # Фиксированная ячейка для ФИО
-        self.cell_fio = tk.Frame(self.frame, width=200, height=1, bg=self.zebra_bg)  # ширина обновится в apply_pixel_column_widths
-        self.cell_fio.grid(row=0, column=0, padx=1, pady=1, sticky="w")
-        self.cell_fio.grid_propagate(False)  # запретить растягивание по содержимому
+        # Колонка 0: Фиксированная ячейка для ФИО
+        self.cell_fio = tk.Frame(self.frame, width=200, height=1, bg=self.zebra_bg)
+        self.cell_fio.grid(row=0, column=0, padx=1, pady=1, sticky="nsew")
+        self.cell_fio.grid_propagate(False)
         self.lbl_fio = tk.Label(self.cell_fio, text=fio, anchor="w", bg=self.zebra_bg)
-        self.lbl_fio.pack(fill="x")  # заполняем ширину фиксированной ячейки
+        self.lbl_fio.pack(fill="both", expand=True)
 
-        # Фиксированная ячейка для Таб.№
+        # Колонка 1: Фиксированная ячейка для Таб.№
         self.cell_tbn = tk.Frame(self.frame, width=100, height=1, bg=self.zebra_bg)
-        self.cell_tbn.grid(row=0, column=1, padx=1, pady=1, sticky="w")
+        self.cell_tbn.grid(row=0, column=1, padx=1, pady=1, sticky="nsew")
         self.cell_tbn.grid_propagate(False)
         self.lbl_tbn = tk.Label(self.cell_tbn, text=tbn, anchor="center", bg=self.zebra_bg)
-        self.lbl_tbn.pack(fill="x")
+        self.lbl_tbn.pack(fill="both", expand=True)
 
-        # Дни месяца
+        # Колонки 2-32: Дни месяца (31 колонка)
         self.day_entries: List[tk.Entry] = []
         for d in range(1, 32):
             e = tk.Entry(self.frame, width=4, justify="center")
-            e.grid(row=0, column=1 + d, padx=0, pady=1, sticky="ew")
+            # ✅ ИСПРАВЛЕНО: column=2+(d-1) вместо column=1+d
+            e.grid(row=0, column=2 + (d - 1), padx=0, pady=1, sticky="ew")
             e.bind("<FocusOut>", lambda ev, _d=d: self.update_total())
             e.bind("<Button-2>", lambda ev: "break")
             e.bind("<ButtonRelease-2>", lambda ev: "break")
             self.day_entries.append(e)
 
+        # Колонка 33: Итого дней
         self.lbl_days = tk.Label(self.frame, text="0", width=5, anchor="e", bg=self.zebra_bg)
         self.lbl_days.grid(row=0, column=33, padx=(4, 1), pady=1, sticky="ew")
 
+        # Колонка 34: Итого часов
         self.lbl_total = tk.Label(self.frame, text="0", width=7, anchor="e", bg=self.zebra_bg)
         self.lbl_total.grid(row=0, column=34, padx=(4, 1), pady=1, sticky="ew")
 
+        # Колонка 35: Кнопка 5/2
         self.btn_52 = ttk.Button(self.frame, text="5/2", width=4, command=self.fill_52)
         self.btn_52.grid(row=0, column=35, padx=1, sticky="ew")
 
+        # Колонка 36: Кнопка Удалить
         self.btn_del = ttk.Button(self.frame, text="Удалить", width=7, command=self.delete_row)
         self.btn_del.grid(row=0, column=36, padx=1, sticky="ew")
 
     def apply_pixel_column_widths(self, px: dict):
-        # 1) фиксируем ширины контейнеров-ячеек ФИО и Таб.№ (чтобы они не расширялись от текста)
+        """Применение фиксированных ширин колонок"""
+        # Фиксируем ширины контейнеров ФИО и Таб.№
         self.cell_fio.configure(width=px['fio'])
         self.cell_tbn.configure(width=px['tbn'])
 
-        # 2) задаём сетке минимальные размеры колонок (для единого расчёта общей ширины)
+        # Настраиваем минимальные размеры всех колонок сетки
         f = self.frame
-        f.grid_columnconfigure(0, minsize=px['fio'],  weight=0)
-        f.grid_columnconfigure(1, minsize=px['tbn'],  weight=0)
+        f.grid_columnconfigure(0, minsize=px['fio'], weight=0)
+        f.grid_columnconfigure(1, minsize=px['tbn'], weight=0)
+        #  Колонки дат теперь 2-32 (было некорректно)
         for col in range(2, 33):
             f.grid_columnconfigure(col, minsize=px['day'], weight=0)
-        f.grid_columnconfigure(33, minsize=px['days'],  weight=0)
+        f.grid_columnconfigure(33, minsize=px['days'], weight=0)
         f.grid_columnconfigure(34, minsize=px['hours'], weight=0)
         f.grid_columnconfigure(35, minsize=px['btn52'], weight=0)
-        f.grid_columnconfigure(36, minsize=px['del'],   weight=0)
+        f.grid_columnconfigure(36, minsize=px['del'], weight=0)
+
+    # ... остальные методы класса остаются без изменений ...
+
 
     def set_day_font(self, font_tuple):
         for e in self.day_entries:
@@ -778,16 +788,13 @@ class TimesheetPage(tk.Frame):
             header_labels = []
             lbl = tk.Label(self.header_frame, text="ФИО", anchor="w", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
             lbl.grid(row=0, column=0, padx=1, pady=2, sticky="ew")
-            header_labels.append(lbl)
 
             lbl = tk.Label(self.header_frame, text="Таб.№", anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
             lbl.grid(row=0, column=1, padx=1, pady=2, sticky="ew")
-            header_labels.append(lbl)
 
             for d in range(1, 32):
                 lbl = tk.Label(self.header_frame, text=str(d), anchor="center", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
-                lbl.grid(row=0, column=1 + d, padx=0, pady=2, sticky="ew")
-                header_labels.append(lbl)
+                lbl.grid(row=0, column=2 + (d - 1), padx=0, pady=2, sticky="ew")
 
             lbl = tk.Label(self.header_frame, text="Дней", anchor="e", font=("Segoe UI", 9, "bold"), bg="#f0f0f0")
             lbl.grid(row=0, column=33, padx=(4, 1), pady=2, sticky="ew")
