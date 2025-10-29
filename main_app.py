@@ -918,6 +918,31 @@ class TimesheetPage(tk.Frame):
         self.ent_tbn.insert(0, tbn)
         self.pos_var.set(pos)
 
+    def reload_spravochnik(self):
+    """Перезагрузить справочник и обновить списки"""
+      try:
+        # Перезагрузить данные справочника
+        self._load_spr_data()
+        
+        # Обновить список подразделений
+        deps = self.departments if getattr(self, "departments", None) else ["Все"]
+        current_dep = self.cmb_department.get()
+        self.cmb_department['values'] = deps
+        if current_dep in deps:
+            self.cmb_department.set(current_dep)
+        else:
+            self.cmb_department.set(deps[0])
+        
+        # Обновить список адресов
+        self.cmb_address.set_completion_list(self.address_options)
+        
+        # Обновить список ФИО в соответствии с выбранным подразделением
+        self._on_department_select()
+        
+        messagebox.showinfo("Справочник", "Справочник успешно обновлён.")
+      except Exception as e:
+        messagebox.showerror("Обновление справочника", f"Ошибка при обновлении справочника:\n{e}")
+
     def fill_52_all(self):
         for r in self.rows:
             r.fill_52()
