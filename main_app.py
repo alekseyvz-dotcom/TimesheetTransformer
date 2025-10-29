@@ -324,12 +324,21 @@ class RowWidget:
 
         self.frame = tk.Frame(parent, bd=0, bg=self.zebra_bg)
 
-        self.lbl_fio = tk.Label(self.frame, text=fio, anchor="w", bg=self.zebra_bg)
-        self.lbl_fio.grid(row=0, column=0, padx=1, pady=1, sticky="ew")
+        # Фиксированная ячейка для ФИО
+        self.cell_fio = tk.Frame(self.frame, width=200, height=1, bg=self.zebra_bg)  # ширина обновится в apply_pixel_column_widths
+        self.cell_fio.grid(row=0, column=0, padx=1, pady=1, sticky="w")
+        self.cell_fio.grid_propagate(False)  # запретить растягивание по содержимому
+        self.lbl_fio = tk.Label(self.cell_fio, text=fio, anchor="w", bg=self.zebra_bg)
+        self.lbl_fio.pack(fill="x")  # заполняем ширину фиксированной ячейки
 
-        self.lbl_tbn = tk.Label(self.frame, text=tbn, anchor="center", bg=self.zebra_bg)
-        self.lbl_tbn.grid(row=0, column=1, padx=1, pady=1, sticky="ew")
+        # Фиксированная ячейка для Таб.№
+        self.cell_tbn = tk.Frame(self.frame, width=100, height=1, bg=self.zebra_bg)
+        self.cell_tbn.grid(row=0, column=1, padx=1, pady=1, sticky="w")
+        self.cell_tbn.grid_propagate(False)
+        self.lbl_tbn = tk.Label(self.cell_tbn, text=tbn, anchor="center", bg=self.zebra_bg)
+        self.lbl_tbn.pack(fill="x")
 
+        # Дни месяца
         self.day_entries: List[tk.Entry] = []
         for d in range(1, 32):
             e = tk.Entry(self.frame, width=4, justify="center")
@@ -352,15 +361,20 @@ class RowWidget:
         self.btn_del.grid(row=0, column=36, padx=1, sticky="ew")
 
     def apply_pixel_column_widths(self, px: dict):
+        # 1) фиксируем ширины контейнеров-ячеек ФИО и Таб.№ (чтобы они не расширялись от текста)
+        self.cell_fio.configure(width=px['fio'])
+        self.cell_tbn.configure(width=px['tbn'])
+
+        # 2) задаём сетке минимальные размеры колонок (для единого расчёта общей ширины)
         f = self.frame
-        f.grid_columnconfigure(0, minsize=px['fio'], weight=0)
-        f.grid_columnconfigure(1, minsize=px['tbn'], weight=0)
+        f.grid_columnconfigure(0, minsize=px['fio'],  weight=0)
+        f.grid_columnconfigure(1, minsize=px['tbn'],  weight=0)
         for col in range(2, 33):
             f.grid_columnconfigure(col, minsize=px['day'], weight=0)
-        f.grid_columnconfigure(33, minsize=px['days'], weight=0)
+        f.grid_columnconfigure(33, minsize=px['days'],  weight=0)
         f.grid_columnconfigure(34, minsize=px['hours'], weight=0)
         f.grid_columnconfigure(35, minsize=px['btn52'], weight=0)
-        f.grid_columnconfigure(36, minsize=px['del'], weight=0)
+        f.grid_columnconfigure(36, minsize=px['del'],   weight=0)
 
     def set_day_font(self, font_tuple):
         for e in self.day_entries:
@@ -455,6 +469,7 @@ class RowWidget:
 
     def delete_row(self):
         self.on_delete(self)
+
 
 # ------------- Автокомплит -------------
 
