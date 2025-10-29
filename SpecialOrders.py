@@ -23,34 +23,33 @@ APP_TITLE = "Заказ спецтехники"
 
 # Конфиг и файлы
 CONFIG_FILE = "tabel_config.ini"
-CONFIG_SECTION_PATHS = "Paths"
-CONFIG_SECTION_UI = "UI"
-CONFIG_SECTION_INTEGR = "Integrations"
-CONFIG_SECTION_ORDERS = "Orders"          # секция для настроек приёма заявок
-CONFIG_SECTION_REMOTE = "Remote"          # секция удалённого источника справочника (Я.Диск)
+CONFIG_SECTION_PATHS   = "Paths"
+CONFIG_SECTION_UI      = "UI"
+CONFIG_SECTION_INTEGR  = "Integrations"
+CONFIG_SECTION_ORDERS  = "Orders"
+CONFIG_SECTION_REMOTE  = "Remote"   # удалённый справочник (Яндекс Диск — публичная ссылка)
 
-KEY_SPR = "spravochnik_path"
-KEY_SELECTED_DEP = "selected_department"
-KEY_ORDERS_DIR = "orders_dir"             # куда сохранять заявки (папка)
+KEY_SPR                 = "spravochnik_path"
+KEY_SELECTED_DEP        = "selected_department"
 
-KEY_ORDERS_MODE = "orders_mode"                 # none | webhook
-KEY_ORDERS_WEBHOOK_URL = "orders_webhook_url"   # https://script.google.com/macros/s/.../exec
-KEY_ORDERS_WEBHOOK_TOKEN = "orders_webhook_token"
+KEY_ORDERS_MODE         = "orders_mode"               # none | webhook
+KEY_ORDERS_WEBHOOK_URL  = "orders_webhook_url"        # https://script.google.com/macros/s/.../exec
+KEY_ORDERS_WEBHOOK_TOKEN= "orders_webhook_token"
 
 # Настройки отсечки подачи заявок
-KEY_CUTOFF_ENABLED = "cutoff_enabled"  # true|false
-KEY_CUTOFF_HOUR = "cutoff_hour"        # 0..23
+KEY_CUTOFF_ENABLED      = "cutoff_enabled"            # true|false
+KEY_CUTOFF_HOUR         = "cutoff_hour"               # 0..23
 
-# Яндекс.Диск (публичный файл/папка)
-KEY_REMOTE_USE = "use_remote"
-KEY_YA_PUBLIC_LINK = "yadisk_public_link"
-KEY_YA_PUBLIC_PATH = "yadisk_public_path"  # если публичная папка, здесь указываем относительный путь к файлу (например, "Справочник.xlsx")
+# Удалённый справочник (Я.Диск)
+KEY_REMOTE_USE          = "use_remote"                # true|false
+KEY_YA_PUBLIC_LINK      = "yadisk_public_link"        # публичная ссылка (public_key)
+KEY_YA_PUBLIC_PATH      = "yadisk_public_path"        # если опубликована папка — путь к файлу внутри неё
 
 SPRAVOCHNIK_FILE = "Справочник.xlsx"
-ORDERS_DIR_DEFAULT = "Заявки_спецтехники"
+ORDERS_DIR = "Заявки_спецтехники"
 
 
-# ------------------------- Утилиты -------------------------
+# ------------------------- Утилиты конфигурации -------------------------
 
 def exe_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -63,28 +62,24 @@ def config_path() -> Path:
 def ensure_config():
     cp = config_path()
     if cp.exists():
-        # допишем недостающие секции/ключи
         cfg = configparser.ConfigParser()
         cfg.read(cp, encoding="utf-8")
         changed = False
-        # [Paths]
+
         if not cfg.has_section(CONFIG_SECTION_PATHS):
             cfg[CONFIG_SECTION_PATHS] = {}
             changed = True
         if KEY_SPR not in cfg[CONFIG_SECTION_PATHS]:
             cfg[CONFIG_SECTION_PATHS][KEY_SPR] = str(exe_dir() / SPRAVOCHNIK_FILE)
             changed = True
-        if KEY_ORDERS_DIR not in cfg[CONFIG_SECTION_PATHS]:
-            cfg[CONFIG_SECTION_PATHS][KEY_ORDERS_DIR] = str(exe_dir() / ORDERS_DIR_DEFAULT)
-            changed = True
-        # [UI]
+
         if not cfg.has_section(CONFIG_SECTION_UI):
             cfg[CONFIG_SECTION_UI] = {}
             changed = True
         if KEY_SELECTED_DEP not in cfg[CONFIG_SECTION_UI]:
             cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = "Все"
             changed = True
-        # [Integrations]
+
         if not cfg.has_section(CONFIG_SECTION_INTEGR):
             cfg[CONFIG_SECTION_INTEGR] = {}
             changed = True
@@ -97,7 +92,7 @@ def ensure_config():
         if KEY_ORDERS_WEBHOOK_TOKEN not in cfg[CONFIG_SECTION_INTEGR]:
             cfg[CONFIG_SECTION_INTEGR][KEY_ORDERS_WEBHOOK_TOKEN] = ""
             changed = True
-        # [Orders]
+
         if not cfg.has_section(CONFIG_SECTION_ORDERS):
             cfg[CONFIG_SECTION_ORDERS] = {}
             changed = True
@@ -107,7 +102,7 @@ def ensure_config():
         if KEY_CUTOFF_HOUR not in cfg[CONFIG_SECTION_ORDERS]:
             cfg[CONFIG_SECTION_ORDERS][KEY_CUTOFF_HOUR] = "13"
             changed = True
-        # [Remote]
+
         if not cfg.has_section(CONFIG_SECTION_REMOTE):
             cfg[CONFIG_SECTION_REMOTE] = {}
             changed = True
@@ -125,11 +120,11 @@ def ensure_config():
             with open(cp, "w", encoding="utf-8") as f:
                 cfg.write(f)
         return
+
     # создаём с нуля
     cfg = configparser.ConfigParser()
     cfg[CONFIG_SECTION_PATHS] = {
-        KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE),
-        KEY_ORDERS_DIR: str(exe_dir() / ORDERS_DIR_DEFAULT),
+        KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE)
     }
     cfg[CONFIG_SECTION_UI] = {
         KEY_SELECTED_DEP: "Все"
@@ -164,11 +159,6 @@ def write_config(cfg: configparser.ConfigParser):
 def get_spr_path() -> Path:
     cfg = read_config()
     raw = cfg.get(CONFIG_SECTION_PATHS, KEY_SPR, fallback=str(exe_dir() / SPRAVOCHNIK_FILE))
-    return Path(os.path.expandvars(raw))
-
-def get_orders_dir() -> Path:
-    cfg = read_config()
-    raw = cfg.get(CONFIG_SECTION_PATHS, KEY_ORDERS_DIR, fallback=str(exe_dir() / ORDERS_DIR_DEFAULT))
     return Path(os.path.expandvars(raw))
 
 def get_saved_dep() -> str:
@@ -215,18 +205,10 @@ def is_past_cutoff_for_date(req_date: date, cutoff_hour: int) -> bool:
     cutoff = now.replace(hour=cutoff_hour, minute=0, second=0, microsecond=0)
     return now >= cutoff
 
-def month_days(year: int, month: int) -> int:
-    return calendar.monthrange(year, month)[1]
 
-def safe_filename(s: str, maxlen: int = 80) -> str:
-    if not s:
-        return "NOID"
-    s = re.sub(r'[<>:"/\\|?*\n\r\t]+', "_", str(s)).strip()
-    s = re.sub(r"_+", "_", s)
-    return s[:maxlen] if len(s) > maxlen else s
+# ------------------------- Справочник: локально/Я.Диск -------------------------
 
 def ensure_spravochnik(path: Path):
-    # Создаёт локальный базовый справочник (fallback), если отсутствует
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -254,11 +236,9 @@ def ensure_spravochnik(path: Path):
     ws3.append(["Экскаватор", "JCB 3CX", "Е789КУ77", "", ""])
     wb.save(path)
 
-# ------------------------- Справочник: Я.Диск публичный / локальный -------------------------
-
 def fetch_yadisk_public_bytes(public_link: str, public_path: str = "") -> bytes:
     """
-    По публичной ссылке Я.Диска получаем прямую href и скачиваем файл.
+    По публичной ссылке Я.Диска получаем прямой href и скачиваем файл.
     Если public_path задан (для публичной ПАПКИ) — указываем относительный путь внутри ресурса.
     """
     if not public_link:
@@ -268,17 +248,19 @@ def fetch_yadisk_public_bytes(public_link: str, public_path: str = "") -> bytes:
     if public_path:
         params["path"] = public_path
     url = api + "?" + urllib.parse.urlencode(params, safe="/")
-    with urllib.request.urlopen(url, timeout=12) as r:
+    with urllib.request.urlopen(url, timeout=15) as r:
         meta = json.loads(r.read().decode("utf-8", errors="replace"))
     href = meta.get("href")
     if not href:
         raise RuntimeError(f"Я.Диск не вернул href: {meta}")
-    with urllib.request.urlopen(href, timeout=30) as f:
+    with urllib.request.urlopen(href, timeout=60) as f:
         return f.read()
 
-def _s(v):
-    if v is None: return ""
-    if isinstance(v, float) and v.is_integer(): v = int(v)
+def _s(v) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
     return str(v).strip()
 
 def load_spravochnik_from_wb(wb) -> Tuple[
@@ -286,15 +268,9 @@ def load_spravochnik_from_wb(wb) -> Tuple[
     List[Tuple[str,str]],
     List[Tuple[str,str,str,str,str]]
 ]:
-    """
-    Парсинг openpyxl.Workbook -> (employees, objects, tech)
-    employees: [(fio,tbn,pos,dep)]
-    objects: [(id, addr)]
-    tech: [(type,name,plate,dep,note)]
-    """
     employees: List[Tuple[str,str,str,str]] = []
-    objects: List[Tuple[str,str]] = []
-    tech: List[Tuple[str,str,str,str,str]] = []
+    objects:   List[Tuple[str,str]] = []
+    tech:      List[Tuple[str,str,str,str,str]] = []
 
     if "Сотрудники" in wb.sheetnames:
         ws = wb["Сотрудники"]
@@ -325,6 +301,7 @@ def load_spravochnik_from_wb(wb) -> Tuple[
 
     if "Техника" in wb.sheetnames:
         ws = wb["Техника"]
+        hdr = [_s(c).lower() for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
         for r in ws.iter_rows(min_row=2, values_only=True):
             tp  = _s(r[0] if r and len(r)>0 else "")
             nm  = _s(r[1] if r and len(r)>1 else "")
@@ -338,8 +315,8 @@ def load_spravochnik_from_wb(wb) -> Tuple[
 
 def load_spravochnik_remote_or_local(local_path: Path):
     """
-    Если [Remote]use_remote=true и задана ссылка — грузим Справочник.xlsx с Я.Диска, иначе читаем локальный файл.
-    Возвращает (employees, objects, tech) как в load_spravochnik_from_wb.
+    Если [Remote]use_remote=true и задана ссылка — грузим Справочник.xlsx с Я.Диска,
+    иначе — читаем локальный файл. Возвращает (employees, objects, tech).
     """
     cfg = read_config()
     use_remote = cfg.get(CONFIG_SECTION_REMOTE, KEY_REMOTE_USE, fallback="false").strip().lower() in ("1","true","yes","on")
@@ -351,14 +328,14 @@ def load_spravochnik_remote_or_local(local_path: Path):
             wb = load_workbook(BytesIO(raw), read_only=True, data_only=True)
             return load_spravochnik_from_wb(wb)
         except Exception as e:
-            print(f"[Remote YaDisk] ошибка: {e} — используем локальный файл")
+            print(f"[Remote YaDisk] ошибка: {e} — используется локальный файл")
 
-    # fallback локально
     ensure_spravochnik(local_path)
     wb = load_workbook(local_path, read_only=True, data_only=True)
     return load_spravochnik_from_wb(wb)
 
-# ------------------------- Парсинг часов/времени/дат -------------------------
+
+# ------------------------- Парсинг значений -------------------------
 
 def parse_hours_value(v: Any) -> Optional[float]:
     s = str(v or "").strip()
@@ -463,7 +440,7 @@ class PositionRow:
 
         self.ent_time = ttk.Entry(self.frame, width=8, justify="center")
         self.ent_time.grid(row=0, column=2, padx=2)
-        self.ent_time.insert(0, "")  # необязательное
+        self.ent_time.insert(0, "")
 
         self.ent_hours = ttk.Entry(self.frame, width=8, justify="center")
         self.ent_hours.grid(row=0, column=3, padx=2)
@@ -579,37 +556,36 @@ def post_json(url: str, payload: dict, token: str = '') -> Tuple[bool, str]:
 
 # ------------------------- Окно заявок -------------------------
 
-class SpecialOrdersWindow(tk.Toplevel):
-    def __init__(self, master):
-        super().__init__(master)
+class SpecialOrdersApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
         self.title(APP_TITLE)
         self.geometry("1180x720")
         self.resizable(True, True)
 
         self.base_dir = exe_dir()
         self.spr_path = get_spr_path()
-        self.orders_dir = get_orders_dir()
+        self.orders_dir = self.base_dir / ORDERS_DIR
         self.orders_dir.mkdir(parents=True, exist_ok=True)
 
         self._load_spr()
         self._build_ui()
 
     def _load_spr(self):
+        # Загружаем справочник (удалённый/локальный)
         employees, objects, tech = load_spravochnik_remote_or_local(self.spr_path)
 
-        # employees -> список словарей
         self.emps = [{'fio': fio, 'tbn': tbn, 'pos': pos, 'dep': dep} for (fio, tbn, pos, dep) in employees]
-
-        # объекты
         self.objects = objects
 
-        # техника
         self.techs = []
         for tp, nm, pl, dep, note in tech:
             disp = " | ".join(x for x in (tp, nm, pl) if x)
             self.techs.append({'type': tp, 'name': nm, 'plate': pl, 'dep': dep, 'note': note, 'disp': disp})
 
-        # адреса -> id’шники
+        self.deps = ["Все"] + sorted({(r['dep'] or "").strip() for r in self.emps if (r['dep'] or "").strip()})
+        self.emp_names_all = [r['fio'] for r in self.emps]
+
         self.addr_to_ids = {}
         for oid, addr in self.objects:
             if not addr:
@@ -618,9 +594,6 @@ class SpecialOrdersWindow(tk.Toplevel):
             if oid and oid not in self.addr_to_ids[addr]:
                 self.addr_to_ids[addr].append(oid)
         self.addresses = sorted(self.addr_to_ids.keys() | {addr for _, addr in self.objects if addr})
-
-        self.deps = ["Все"] + sorted({(r['dep'] or "").strip() for r in self.emps if (r['dep'] or "").strip()})
-        self.emp_names_all = [r['fio'] for r in self.emps]
         self.tech_values = [t['disp'] for t in self.techs]
 
     def _build_ui(self):
@@ -715,7 +688,8 @@ class SpecialOrdersWindow(tk.Toplevel):
         # Первичная инициализация
         self._update_fio_list()
         self._update_cutoff_hint()
-        self.add_position()  # Стартовая строка
+        # Стартовая строка
+        self.add_position()
 
         # Колонки top — растяжение
         for c in range(8):
@@ -739,7 +713,6 @@ class SpecialOrdersWindow(tk.Toplevel):
         self.cmb_fio.set_completion_list(filtered)
 
     def _update_cutoff_hint(self):
-        # Универсальная подсказка (если включена отсечка)
         if not get_cutoff_enabled():
             self.lbl_cutoff_hint.config(text="", fg="#555")
             return
@@ -830,28 +803,24 @@ class SpecialOrdersWindow(tk.Toplevel):
         if not self._validate_form():
             return
 
-        # Ограничение: прошедшие даты — запрещены
+        # Прошедшие даты — запрещены
         try:
             req_date = parse_date_any(self.ent_date.get()) or date.today()
             if req_date < date.today():
-                messagebox.showwarning(
-                    "Заявка",
-                    "Заявки на прошедшую дату не принимаются.\nВыберите сегодняшнюю или будущую дату."
-                )
+                messagebox.showwarning("Заявка",
+                                       "Заявки на прошедшую дату не принимаются.\nВыберите сегодняшнюю или будущую дату.")
                 return
         except Exception:
             pass
 
-        # Ограничение: на текущую дату — после cutoff_hour запрещено
+        # На текущую дату — после cutoff запрещено
         try:
             req_date = parse_date_any(self.ent_date.get()) or date.today()
             if get_cutoff_enabled() and is_past_cutoff_for_date(req_date, get_cutoff_hour()):
                 ch = get_cutoff_hour()
-                messagebox.showwarning(
-                    "Заявка",
-                    f"Приём заявок на текущую дату закрыт после {ch:02d}:00.\n"
-                    f"Выберите завтрашнюю дату и повторите."
-                )
+                messagebox.showwarning("Заявка",
+                                       f"Приём заявок на текущую дату закрыт после {ch:02d}:00.\n"
+                                       f"Выберите завтрашнюю дату и повторите.")
                 return
         except Exception:
             pass
@@ -863,12 +832,11 @@ class SpecialOrdersWindow(tk.Toplevel):
         id_part = data["object"]["id"] or safe_filename(data["object"]["address"])
         fname = f"Заявка_спецтехники_{data['date']}_{ts}_{id_part or 'NOID'}.xlsx"
         fpath = self.orders_dir / fname
-        
+
         try:
             wb = Workbook()
             ws = wb.active
             ws.title = "Заявка"
-            # Шапка
             ws.append(["Создано", data["created_at"]])
             ws.append(["Дата", data["date"]])
             ws.append(["Подразделение", data["department"]])
@@ -878,19 +846,10 @@ class SpecialOrdersWindow(tk.Toplevel):
             ws.append(["Адрес", data["object"]["address"]])
             ws.append(["Комментарий", data["comment"]])
             ws.append([])
-
-            # Позиции
             hdr = ["#", "Техника", "Кол-во", "Подача (чч:мм)", "Часы", "Примечание"]
             ws.append(hdr)
             for i, p in enumerate(data["positions"], start=1):
-                ws.append([
-                    i,
-                    p["tech"],
-                    p["qty"],
-                    (p["time"] or None),
-                    p["hours"],
-                    p["note"]
-                ])
+                ws.append([i, p["tech"], p["qty"], (p["time"] or None), p["hours"], p["note"]])
             for col, w in enumerate([4, 48, 8, 14, 10, 36], start=1):
                 ws.column_dimensions[get_column_letter(col)].width = w
             ws.freeze_panes = "A12"
@@ -899,7 +858,7 @@ class SpecialOrdersWindow(tk.Toplevel):
             messagebox.showerror("Сохранение", f"Не удалось сохранить XLSX:\n{e}")
             return
 
-        # CSV (свод за месяц) — по 1 строке на позицию
+        # CSV — свод за месяц
         csv_path = self.orders_dir / f"Свод_заявок_{data['date'][:7].replace('-', '_')}.csv"
         try:
             new = not csv_path.exists()
@@ -919,7 +878,7 @@ class SpecialOrdersWindow(tk.Toplevel):
         except Exception as e:
             messagebox.showwarning("Сводный CSV", f"XLSX сохранён, но не удалось добавить в CSV:\n{e}")
 
-        # Попытка онлайн-отправки (webhook)
+        # Онлайн-отправка (webhook)
         try:
             mode = get_orders_mode()
             if mode == 'webhook':
@@ -928,42 +887,36 @@ class SpecialOrdersWindow(tk.Toplevel):
                 if url:
                     ok, info = post_json(url, data, token)
                     if ok:
-                        messagebox.showinfo(
-                            "Сохранение/Отправка",
-                            f"Заявка сохранена локально и отправлена онлайн.\n\n"
-                            f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\nОтвет сервера:\n{info}"
-                        )
+                        messagebox.showinfo("Сохранение/Отправка",
+                                            f"Заявка сохранена и отправлена онлайн.\n\n"
+                                            f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\nОтвет сервера:\n{info}")
                     else:
-                        messagebox.showwarning(
-                            "Сохранение/Отправка",
-                            f"Локально сохранено, но онлайн-отправка не удалась.\n\n"
-                            f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\n{info}"
-                        )
+                        messagebox.showwarning("Сохранение/Отправка",
+                                               f"Локально сохранено, но онлайн-отправка не удалась.\n\n"
+                                               f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\n{info}")
                     return
                 else:
-                    messagebox.showinfo(
-                        "Сохранение",
-                        f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}\n(Онлайн-отправка не настроена)"
-                    )
+                    messagebox.showinfo("Сохранение",
+                                        f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}\n"
+                                        f"(Онлайн-отправка не настроена)")
                     return
             else:
                 messagebox.showinfo("Сохранение", f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}")
                 return
         except Exception as e:
-            messagebox.showwarning(
-                "Сохранение/Отправка",
-                f"Локально сохранено, но онлайн-отправка упала с ошибкой:\n{e}\n\n"
-                f"XLSX:\n{fpath}\nCSV:\n{csv_path}"
-            )
+            messagebox.showwarning("Сохранение/Отправка",
+                                   f"Локально сохранено, но онлайн-отправка упала с ошибкой:\n{e}\n\n"
+                                   f"XLSX:\n{fpath}\nCSV:\n{csv_path}")
             return
 
     def clear_form(self):
-        # не меняем подразделение
         self.fio_var.set("")
         self.ent_phone.delete(0, "end")
-        self.ent_date.delete(0, "end"); self.ent_date.insert(0, date.today().strftime("%Y-%m-%d"))
+        self.ent_date.delete(0, "end")
+        self.ent_date.insert(0, date.today().strftime("%Y-%m-%d"))
         self.cmb_address.set("")
-        self.cmb_object_id.config(values=[]); self.cmb_object_id.set("")
+        self.cmb_object_id.config(values=[])
+        self.cmb_object_id.set("")
         self.txt_comment.delete("1.0", "end")
         for r in self.pos_rows:
             r.destroy()
