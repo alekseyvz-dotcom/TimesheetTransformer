@@ -4,6 +4,8 @@ import sys
 import subprocess
 import calendar
 import configparser
+import timesheet_transformer
+import SpecialOrders
 from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple, Optional, Any
