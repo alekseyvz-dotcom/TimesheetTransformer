@@ -2,7 +2,7 @@ import argparse
 import ctypes
 import re
 import sys
-from datetime import time, datetime, date
+from datetime import time, datetime
 from pathlib import Path
 from typing import List, Optional, Tuple, Any
 
@@ -13,7 +13,7 @@ from openpyxl.utils import column_index_from_string, get_column_letter
 
 # GUI (tkinter)
 import tkinter as tk
-from tkinter import filedialog, ttk, messagebox
+from tkinter import filedialog, ttk
 
 # ===== БРЕНДИНГ (жёстко вшито) =====
 APP_NAME = "Табель‑конвертер"
@@ -67,96 +67,15 @@ def msg_info(title: str, text: str):
     try:
         ctypes.windll.user32.MessageBoxW(0, text, title, 0x40)  # MB_ICONINFORMATION
     except Exception:
-        # если нет WinAPI — fallback на tkinter
-        try:
-            messagebox.showinfo(title, text)
-        except Exception:
-            pass
+        pass
 
 def msg_error(title: str, text: str):
     try:
         ctypes.windll.user32.MessageBoxW(0, text, title, 0x10)  # MB_ICONERROR
     except Exception:
-        try:
-            messagebox.showerror(title, text)
-        except Exception:
-            pass
+        pass
 
-# ===== GUI: Встраиваемый прогресс и автономные окна =====
-class EmbeddedProgressUI:
-    """
-    Встраиваемый прогресс для Toplevel: совместим по интерфейсу с ProgressUI.
-    Методы: set_phase(text,total), set_progress(curr), inc(step), is_cancelled(), close()
-    """
-    def __init__(self, parent: tk.Toplevel, title: str = None):
-        self.parent = parent
-        self.frame = tk.Frame(parent, bd=1, relief="groove")
-        self.frame.pack(fill="x", padx=10, pady=8)
-
-        if title:
-            tk.Label(self.frame, text=title, font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=8, pady=(8, 2))
-
-        self.label = tk.Label(self.frame, text="Подготовка…", font=("Segoe UI", 10))
-        self.label.pack(pady=(8, 6))
-
-        self.progress = ttk.Progressbar(self.frame, mode="determinate")
-        self.progress.pack(fill="x", padx=12, pady=(0, 6))
-
-        self.percent = tk.Label(self.frame, text="0%", font=("Segoe UI", 9))
-        self.percent.pack()
-
-        self.cancelled = False
-        self.btn_cancel = tk.Button(self.frame, text="Отмена", width=12, command=self._cancel)
-        self.btn_cancel.pack(pady=(8, 8))
-
-        self.total = 100
-        self.value = 0
-        self._set_total(100)
-        self._update()
-
-    def _set_total(self, total: int):
-        self.total = max(1, int(total))
-        self.progress.configure(maximum=self.total)
-
-    def set_phase(self, text: str, total: int):
-        self.label.config(text=text)
-        self._set_total(total)
-        self.value = 0
-        self.progress.configure(value=0)
-        self._update()
-
-    def set_progress(self, current: int):
-        self.value = max(0, min(self.total, int(current)))
-        self.progress.configure(value=self.value)
-        pct = int(self.value * 100 / self.total) if self.total else 0
-        self.percent.config(text=f"{pct}%")
-        self._update()
-
-    def inc(self, step: int = 1):
-        self.set_progress(self.value + step)
-
-    def _update(self):
-        try:
-            self.frame.update_idletasks()
-            self.frame.update()
-        except Exception:
-            pass
-
-    def _cancel(self):
-        self.cancelled = True
-        self.label.config(text="Отмена…")
-        self._update()
-
-    def is_cancelled(self) -> bool:
-        return self.cancelled
-
-    def close(self):
-        try:
-            self.frame.destroy()
-        except Exception:
-            pass
-
-
+# ===== GUI: Приветствие и Прогресс =====
 class WelcomeUI:
     def __init__(self):
         self.root = tk.Tk()
@@ -404,7 +323,7 @@ def day_hours_from_values(code_val: Any, hours_val: Any) -> Optional[float]:
     return None
 
 # ===== Поиск конца данных (быстрый, с прогрессом) =====
-def find_last_data_row(ws, start_row: int, ui: Optional[EmbeddedProgressUI]) -> int:
+def find_last_data_row(ws, start_row: int, ui: Optional[ProgressUI]) -> int:
     ao_col = column_index_from_string(AO_COL_LETTER)
     limit = min((ws.max_row or (start_row + MAX_SCAN_ROWS - 1)), start_row + MAX_SCAN_ROWS - 1)
     total = max(1, limit - start_row + 1)
@@ -452,7 +371,7 @@ def find_last_data_row(ws, start_row: int, ui: Optional[EmbeddedProgressUI]) -> 
     return last_good
 
 # ===== Трансформация (быстро, с прогрессом) =====
-def transform_sheet(ws, ui: Optional[EmbeddedProgressUI]) -> Tuple[List[str], List[List[Any]]]:
+def transform_sheet(ws, ui: Optional[ProgressUI]) -> Tuple[List[str], List[List[Any]]]:
     ao_col = column_index_from_string(AO_COL_LETTER)
     day_cols_h1 = [column_index_from_string(x) for x in DAY_COLS_HALF1_LETTERS]
     day_cols_h2 = [column_index_from_string(x) for x in DAY_COLS_HALF2_LETTERS]
@@ -587,7 +506,7 @@ def parse_num_relaxed(v: Any) -> Optional[float]:
             except Exception:
                 pass
 
-    # нормализуем экзотику и срезаем ЛЮБОЙ хвост из запятых/точек/пробелов
+    # нормализуем экзотику и срезаем ЛЮБОЙ хвост из запятых/точек/пробелов (включая fullwidth/low‑9)
     s = (s.replace("\uFF0C", ",").replace("\uFF0E", ".").replace("\u201A", ",")
            .replace("\u00A0", " ").replace("\u202F", " ").replace("\u2009", " ").replace("\u200A", " ")
            .replace("\u200B", "").replace("\u2060", "").replace("\uFEFF", "")
@@ -666,6 +585,7 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     # 2) Ширины
     for col_idx in range(1, 6):
         ws_out.column_dimensions[get_column_letter(col_idx)].width = 16 if col_idx in (2, 3) else 12
+    # Чтобы General показывал "8,25", а не "8,3"
     for col_idx in range(day_start_col, day_start_col + 31):
         ws_out.column_dimensions[get_column_letter(col_idx)].width = 5.6
     ws_out.column_dimensions[get_column_letter(total_days_col)].width = 12
@@ -691,7 +611,7 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     # 6) Границы
     apply_borders(ws_out, 1, last_row, 1, last_col)
 
-    # 7) ФИНАЛЬНАЯ нормализация
+    # 7) ФИНАЛЬНАЯ нормализация (после всех действий, ещё раз)
     fix_numeric_range_py(ws_out, 2, last_row, day_start_col, day_start_col + 31 - 1)
     fix_numeric_range_py(ws_out, 2, last_row, total_days_col, total_hours_col)
 
@@ -706,7 +626,7 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
                     cell.value = None
                     cell.number_format = "General"
                 else:
-                    cell.number_format = "General"
+                    cell.number_format = "General"   # принципиально: без кастомных форматов
 
     # - Отработано часов: General; если 0 → пусто
     for r in range(2, last_row + 1):
@@ -730,6 +650,7 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
             else:
                 cd.number_format = "0"
 
+    # 9) Сохранение
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     wb_out.save(out_path)
 
@@ -767,27 +688,18 @@ def pick_candidate_sheet(wb) -> Optional[Any]:
             return ws
     return wb.worksheets[0] if wb.worksheets else None
 
-# ===== Запуск/ядро =====
-def transform_file(file_path: str, out_path: Optional[str] = None, ui: Optional[Any] = None):
-    """
-    ui: объект со методами set_phase(text,total), set_progress(curr), is_cancelled(), close()
-        Если ui=None — будет создано самостоятельное окно ProgressUI().
-    """
-    own_ui = False
+# ===== Запуск =====
+def transform_file(file_path: str, out_path: Optional[str] = None):
+    ui = None
     try:
-        if ui is None:
-            ui = ProgressUI()
-            own_ui = True
-
         p = Path(file_path)
         ext = p.suffix.lower()
         if ext not in (".xlsx", ".xlsm"):
-            if own_ui:
-                ui.close()
             msg_error(APP_NAME, f"Выбран файл: {p.name}\nПоддерживаются только .xlsx и .xlsm.\nСохраните исходник как .xlsx.")
             return
 
         clog(f"Open workbook: {file_path}")
+        ui = ProgressUI()
         ui.set_phase("Открытие книги…", 100)
         ui.set_progress(10)
 
@@ -796,16 +708,14 @@ def transform_file(file_path: str, out_path: Optional[str] = None, ui: Optional[
 
         ws = pick_candidate_sheet(wb)
         if ws is None:
-            if own_ui:
-                ui.close()
             msg_error(APP_NAME, "Не найден лист для обработки.")
+            ui.close()
             return
         clog(f"Sheet: {ws.title}")
 
         header, rows = transform_sheet(ws, ui)
         if ui.is_cancelled():
-            if own_ui:
-                ui.close()
+            ui.close()
             msg_info(APP_NAME, "Операция отменена пользователем.")
             return
 
@@ -814,139 +724,23 @@ def transform_file(file_path: str, out_path: Optional[str] = None, ui: Optional[
         ui.set_phase("Сохранение результата…", 100)
         saved_to = safe_save_result(header, rows, Path(out_path))
         ui.set_progress(100)
-        if own_ui:
-            ui.close()
+        ui.close()
 
         msg_info(APP_NAME, f"Результат сохранён:\n{saved_to}\n\nЛог: {LOG_PATH}")
         clog("Done.")
 
     except CancelledError:
-        if own_ui and ui:
+        if ui:
             ui.close()
         msg_info(APP_NAME, "Операция отменена пользователем.")
     except Exception as e:
-        if own_ui and ui:
+        if ui:
             ui.close()
         import traceback
         tb = traceback.format_exc()
         log(tb)
         msg_error(APP_NAME, f"{e}\n\nПодробности в логе:\n{LOG_PATH}")
 
-# ===== Встраиваемое окно конвертера =====
-class ConverterWindow(tk.Toplevel):
-    def __init__(self, master=None):
-        super().__init__(master)
-        self.title(APP_NAME)
-        self.geometry("520x300")
-        self.resizable(False, False)
-
-        tk.Label(self, text="Преобразование табеля 1С ЗУП", font=("Segoe UI", 12, "bold")).pack(pady=(12, 2))
-        tk.Label(self, text="Выберите режим: файл или последний в папке. \nНеобязательно укажите путь для сохранения.",
-                 font=("Segoe UI", 9), justify="center").pack(pady=(0, 8))
-
-        body = tk.Frame(self)
-        body.pack(fill="x", padx=12, pady=6)
-
-        # Источник: файл
-        src1 = tk.Frame(body)
-        src1.pack(fill="x", pady=3)
-        tk.Label(src1, text="Файл:").pack(side="left")
-        self.file_var = tk.StringVar()
-        tk.Entry(src1, textvariable=self.file_var, width=48).pack(side="left", padx=(6, 6))
-        tk.Button(src1, text="...", width=4, command=self._pick_file).pack(side="left")
-
-        # Источник: папка (последний файл)
-        src2 = tk.Frame(body)
-        src2.pack(fill="x", pady=3)
-        tk.Label(src2, text="Папка (последний):").pack(side="left")
-        self.folder_var = tk.StringVar()
-        tk.Entry(src2, textvariable=self.folder_var, width=40).pack(side="left", padx=(6, 6))
-        tk.Button(src2, text="...", width=4, command=self._pick_folder).pack(side="left")
-
-        # Выход
-        out = tk.Frame(body)
-        out.pack(fill="x", pady=8)
-        tk.Label(out, text="Сохранить как (xlsx):").pack(side="left")
-        self.out_var = tk.StringVar()
-        tk.Entry(out, textvariable=self.out_var, width=40).pack(side="left", padx=(6, 6))
-        tk.Button(out, text="...", width=4, command=self._pick_out).pack(side="left")
-
-        # Кнопки
-        btns = tk.Frame(self)
-        btns.pack(pady=(8, 10))
-        self.btn_start = tk.Button(btns, text="Старт", width=16, command=self._start)
-        self.btn_start.grid(row=0, column=0, padx=6)
-        tk.Button(btns, text="Закрыть", width=12, command=self.destroy).grid(row=0, column=1, padx=6)
-
-        # Прогресс (встраиваемый появится при старте)
-        self._progress: Optional[EmbeddedProgressUI] = None
-
-    def _pick_file(self):
-        fp = filedialog.askopenfilename(
-            title="Выберите файл табеля",
-            filetypes=[("Excel files", "*.xlsx *.xlsm"), ("All files", "*.*")]
-        )
-        if fp:
-            self.file_var.set(fp)
-
-    def _pick_folder(self):
-        folder = filedialog.askdirectory(title="Выберите папку с табелями")
-        if folder:
-            self.folder_var.set(folder)
-
-    def _pick_out(self):
-        outp = filedialog.asksaveasfilename(
-            title="Сохранить как",
-            defaultextension=".xlsx",
-            filetypes=[("Excel files", "*.xlsx")]
-        )
-        if outp:
-            self.out_var.set(outp)
-
-    def _start(self):
-        file_path = self.file_var.get().strip()
-        folder = self.folder_var.get().strip()
-        out_path = self.out_var.get().strip() or None
-
-        # Выбор источника: приоритет — файл, затем папка
-        src = None
-        if file_path:
-            src = file_path
-        elif folder:
-            lp = latest_file_in_folder(folder)
-            if not lp:
-                messagebox.showerror(APP_NAME, "В папке не найден подходящий файл (*.xlsx, *.xlsm).")
-                return
-            src = lp
-        else:
-            messagebox.showwarning(APP_NAME, "Укажите файл или папку.")
-            return
-
-        # Создаём прогресс в окне
-        self.btn_start.config(state="disabled")
-        self._progress = EmbeddedProgressUI(self, title="Выполняется…")
-        try:
-            transform_file(src, out_path, ui=self._progress)
-        finally:
-            try:
-                if self._progress:
-                    self._progress.close()
-            except Exception:
-                pass
-            self.btn_start.config(state="normal")
-
-
-# ===== Публичное API для главного окна =====
-def open_converter(parent):
-    """
-    Открыть окно конвертера как дочернее (в едином интерфейсе).
-    """
-    win = ConverterWindow(parent)
-    win.focus()
-    return win
-
-
-# ===== CLI/standalone =====
 def main():
     parser = argparse.ArgumentParser(description="Преобразование табеля (1С ЗУП) в читаемую таблицу")
     g = parser.add_mutually_exclusive_group(required=False)
@@ -965,18 +759,18 @@ def main():
             return
         mode, payload = choice
         if mode == "file":
-            transform_file(payload, args.out, ui=None)
+            transform_file(payload, args.out)
         elif mode == "latest":
             fp = latest_file_in_folder(payload)
             if not fp:
                 msg_error(APP_NAME, "В папке не найден подходящий файл (*.xlsx, *.xlsm).")
                 return
-            transform_file(fp, args.out, ui=None)
+            transform_file(fp, args.out)
         return
 
     # CLI‑режимы
     if args.file:
-        transform_file(args.file, args.out, ui=None)
+        transform_file(args.file, args.out)
     elif args.pick:
         fp = filedialog.askopenfilename(
             title="Выберите файл табеля",
@@ -985,13 +779,18 @@ def main():
         if not fp:
             msg_info(APP_NAME, "Файл не выбран.")
             return
-        transform_file(fp, args.out, ui=None)
+        transform_file(fp, args.out)
     elif args.latest:
         fp = latest_file_in_folder(args.latest)
         if not fp:
             msg_error(APP_NAME, "В папке не найден подходящий файл (*.xlsx, *.xlsm).")
             return
-        transform_file(fp, args.out, ui=None)
+        transform_file(fp, args.out)
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
