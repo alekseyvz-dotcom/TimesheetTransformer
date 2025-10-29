@@ -29,6 +29,7 @@ CONFIG_SECTION_ORDERS = "Orders"          # секция для настроек
 
 KEY_SPR = "spravochnik_path"
 KEY_SELECTED_DEP = "selected_department"
+KEY_ORDERS_DIR = "orders_dir"             # новый ключ: куда сохранять заявки (папка)
 
 KEY_ORDERS_MODE = "orders_mode"                 # none | webhook
 KEY_ORDERS_WEBHOOK_URL = "orders_webhook_url"   # https://script.google.com/macros/s/.../exec
@@ -39,7 +40,7 @@ KEY_CUTOFF_ENABLED = "cutoff_enabled"  # true|false
 KEY_CUTOFF_HOUR = "cutoff_hour"        # 0..23
 
 SPRAVOCHNIK_FILE = "Справочник.xlsx"
-ORDERS_DIR = "Заявки_спецтехники"
+ORDERS_DIR_DEFAULT = "Заявки_спецтехники"
 
 
 # ------------------------- Утилиты -------------------------
@@ -64,6 +65,9 @@ def ensure_config():
             changed = True
         if KEY_SPR not in cfg[CONFIG_SECTION_PATHS]:
             cfg[CONFIG_SECTION_PATHS][KEY_SPR] = str(exe_dir() / SPRAVOCHNIK_FILE)
+            changed = True
+        if KEY_ORDERS_DIR not in cfg[CONFIG_SECTION_PATHS]:
+            cfg[CONFIG_SECTION_PATHS][KEY_ORDERS_DIR] = str(exe_dir() / ORDERS_DIR_DEFAULT)
             changed = True
 
         if not cfg.has_section(CONFIG_SECTION_UI):
@@ -104,7 +108,8 @@ def ensure_config():
     # создаём с нуля
     cfg = configparser.ConfigParser()
     cfg[CONFIG_SECTION_PATHS] = {
-        KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE)
+        KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE),
+        KEY_ORDERS_DIR: str(exe_dir() / ORDERS_DIR_DEFAULT),
     }
     cfg[CONFIG_SECTION_UI] = {
         KEY_SELECTED_DEP: "Все"
@@ -134,6 +139,11 @@ def write_config(cfg: configparser.ConfigParser):
 def get_spr_path() -> Path:
     cfg = read_config()
     raw = cfg.get(CONFIG_SECTION_PATHS, KEY_SPR, fallback=str(exe_dir() / SPRAVOCHNIK_FILE))
+    return Path(os.path.expandvars(raw))
+
+def get_orders_dir() -> Path:
+    cfg = read_config()
+    raw = cfg.get(CONFIG_SECTION_PATHS, KEY_ORDERS_DIR, fallback=str(exe_dir() / ORDERS_DIR_DEFAULT))
     return Path(os.path.expandvars(raw))
 
 def get_saved_dep() -> str:
@@ -511,16 +521,16 @@ def post_json(url: str, payload: dict, token: str = '') -> Tuple[bool, str]:
 
 # ------------------------- Окно заявок -------------------------
 
-class SpecialOrdersApp(tk.Tk):
-    def __init__(self):
-        super().__init__()
+class SpecialOrdersWindow(tk.Toplevel):
+    def __init__(self, master):
+        super().__init__(master)
         self.title(APP_TITLE)
         self.geometry("1180x720")
         self.resizable(True, True)
 
         self.base_dir = exe_dir()
         self.spr_path = get_spr_path()
-        self.orders_dir = self.base_dir / ORDERS_DIR
+        self.orders_dir = get_orders_dir()
         self.orders_dir.mkdir(parents=True, exist_ok=True)
 
         self._load_spr()
@@ -581,7 +591,7 @@ class SpecialOrdersApp(tk.Tk):
         self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=20)
         self.cmb_object_id.grid(row=1, column=5, sticky="w", padx=(4, 12), pady=(8, 0))
 
-        # Подсказка под датой (в той же строке, что адрес/ID, но в правой части)
+        # Подсказка под датой
         self.lbl_cutoff_hint = tk.Label(top, text="", fg="#555")
         self.lbl_cutoff_hint.grid(row=1, column=6, columnspan=2, sticky="w", pady=(8, 0))
 
@@ -903,7 +913,22 @@ class SpecialOrdersApp(tk.Tk):
             messagebox.showerror("Папка", f"Не удалось открыть папку:\n{e}")
 
 
-if __name__ == "__main__":
+# ------------------------- API для встраивания и standalone -------------------------
+
+def open_special_orders(parent):
+    """
+    Открыть окно заявок как дочернее (внутри единого интерфейса).
+    """
     ensure_config()
-    app = SpecialOrdersApp()
-    app.mainloop()
+    win = SpecialOrdersWindow(parent)
+    win.focus()
+    return win
+
+if __name__ == "__main__":
+    # Автономный режим
+    ensure_config()
+    root = tk.Tk()
+    root.title(APP_TITLE)
+    # Создаём Toplevel внутри собственного root
+    SpecialOrdersWindow(root)
+    root.mainloop()
