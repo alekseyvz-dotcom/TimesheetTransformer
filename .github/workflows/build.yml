@@ -61,20 +61,20 @@ jobs:
       - name: Build TabelConverter (converter, windowed)
         shell: pwsh
         run: |
-          if (Test-Path "icon.ico") {
-            pyinstaller -F -w --clean --hidden-import=tkinter -i icon.ico -n TabelConverter timesheet_transformer.py
+          if (Test-Path "icon2.ico") {
+            pyinstaller -F -w --clean --hidden-import=tkinter -i icon2.ico -n TabelConverter timesheet_transformer.py
           } else {
-            Write-Host "icon.ico not found: building TabelConverter without custom icon"
+            Write-Host "icon2.ico not found: building TabelConverter without custom icon"
             pyinstaller -F -w --clean --hidden-import=tkinter -n TabelConverter timesheet_transformer.py
           }
 
       - name: Build SpecialOrders (orders module, windowed)
         shell: pwsh
         run: |
-          if (Test-Path "icon.ico") {
-            pyinstaller -F -w --clean --hidden-import=tkinter -i icon.ico -n SpecialOrders SpecialOrders.py
+          if (Test-Path "icon2.ico") {
+            pyinstaller -F -w --clean --hidden-import=tkinter -i icon2.ico -n SpecialOrders SpecialOrders.py
           } else {
-            Write-Host "icon.ico not found: building SpecialOrders without custom icon"
+            Write-Host "icon2.ico not found: building SpecialOrders without custom icon"
             pyinstaller -F -w --clean --hidden-import=tkinter -n SpecialOrders SpecialOrders.py
           }
 
