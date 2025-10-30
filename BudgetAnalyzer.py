@@ -1,4 +1,3 @@
-# python
 import re
 import csv
 from pathlib import Path
