@@ -1,4 +1,8 @@
-# python
+# BudgetAnalyzer.py
+# Анализ смет: поддержка смет Smeta.RU (лист «ЛОКАЛЬНАЯ СМЕТА», 11 колонок),
+# расшифровка строк и диаграмма структуры затрат.
+# Также есть общий режим для XLSX/CSV с ручным сопоставлением колонок.
+
 import re
 import csv
 from pathlib import Path
@@ -96,7 +100,7 @@ class BudgetAnalysisPage(tk.Frame):
 
         # Итоги и расшифровка
         self.stats = {"total": 0.0, "materials": 0.0, "wages": 0.0, "other": 0.0}
-        self.breakdown_rows: List[Dict[str, Any]] = []  # элементы: {"category": str, "name": str, "amount": float}
+        self.breakdown_rows: List[Dict[str, Any]] = []  # {"category": str, "name": str, "amount": float}
 
         # UI: заголовок
         header = tk.Frame(self, bg="#f7f7f7")
@@ -140,9 +144,10 @@ class BudgetAnalysisPage(tk.Frame):
         # Подсказка
         hint = tk.Label(
             self,
-            text=("Поддержка Smeta.RU: выбирается лист с “ЛОКАЛЬНАЯ СМЕТА”, берутся 11-колоночные строки.\n"
+            text=("Поддержка Smeta.RU: выбирается лист с “ЛОКАЛЬНАЯ СМЕТА”, 11-колоночная таблица.\n"
                   "Суммы — из колонок с заголовком «ВСЕГО» (обычно 10-я и/или 11-я). "
-                  "ЗП/в т.ч. ЗПМ → «Заработная плата», «Материалы/МАТ» → «Материалы», остальное → «Прочие»."),
+                  "ЗП/в т.ч. ЗПМ → «Заработная плата», «Материалы/МАТ» → «Материалы», остальное → «Прочие». "
+                  "Если автоопределение не сработало — используйте ручное сопоставление для CSV/XLSX-таблиц."),
             fg="#666", bg="#f7f7f7", justify="left", wraplength=980
         )
         hint.pack(fill="x", padx=12, pady=(0, 10))
@@ -240,7 +245,7 @@ class BudgetAnalysisPage(tk.Frame):
         self.breakdown_rows = []
         self.smeta_sheet_name = None
         self.smeta_name_col = None
-        self.smeta_cost_col = []
+        self.smeta_cost_cols = []
         self.smeta_data_rows = []
         self.lbl_sheet.config(text="")
 
@@ -282,7 +287,6 @@ class BudgetAnalysisPage(tk.Frame):
 
     # ---------- Smeta.RU режим (лист «ЛОКАЛЬНАЯ СМЕТА», 11 колонок) ----------
 
-    # python
     def _parse_xlsx_smeta_ru(self, path: Path) -> bool:
         """
         Ищем лист, где в верхних 30 строках встречается «ЛОКАЛЬНАЯ СМЕТА».
@@ -341,7 +345,6 @@ class BudgetAnalysisPage(tk.Frame):
         txt = txt.replace("\n", " ").replace("\r", " ")
         return re.sub(r"\s+", " ", txt).lower()
 
-    # python
     def _find_table_header(self, ws) -> Tuple[Optional[int], Optional[int], List[int]]:
         """
         Ищем строку заголовков. Нужно:
@@ -362,16 +365,17 @@ class BudgetAnalysisPage(tk.Frame):
             has_name = False
             tmp_cost_cols: List[int] = []
 
-        for idx, v in enumerate(vals):
-            if ("наименование работ" in v and "затрат" in v) or ("наименование работ и затрат" in v):
+            for idx, v in enumerate(vals):
+                if ("наименование работ" in v and "затрат" in v) or ("наименование работ и затрат" in v):
                     has_name = True
-            if name_col is None:
+                    if name_col is None:
                         name_col = idx
-            if "всего" in v:
+                if "всего" in v:
                     tmp_cost_cols.append(idx)
-            if has_name and_cols:
-                    hdr_row_idx = i
-                    cost_cols = tmp_cost_cols
+
+            if has_name and tmp_cost_cols:
+                hdr_row_idx = i
+                cost_cols = tmp_cost_cols
                 break
 
             # Попытка 2: строка 1..11 (цифры)
@@ -379,12 +383,11 @@ class BudgetAnalysisPage(tk.Frame):
             if only_digits and all(x.isdigit() for x in only_digits):
                 hdr_row_idx = i
                 name_col = 2
-                cost_cols = [9, 10]  # 10-я и 11-я колонки (0-based индексы)
+                cost_cols = [9, 10]  # 10-я и 11-я (0-based)
                 break
 
         return hdr_row_idx, name_col, cost_cols
 
-    # python
     def _find_local_total(self, ws, start_row: int, name_col: int, cost_cols: List[int]) -> Optional[float]:
         """
         Находим строку «Итого по локальной смете» и пытаемся считать сумму из любой колонки «ВСЕГО».
@@ -393,13 +396,13 @@ class BudgetAnalysisPage(tk.Frame):
             cells = list(row)
             name = self._str(cells[name_col]) if name_col < len(cells) else ""
             if "итого по локальной смете" in name.lower():
-                # Сначала пробуем ровно заявленные cost_cols
+                # Сначала пробуем заявленные cost_cols
                 for j in cost_cols:
                     if 0 <= j < len(cells):
                         v = self._to_number(cells[j])
                         if isinstance(v, float):
                             return v
-                # Подстраховка: попробовать соседние колонки для каждой cost_col
+                # Подстраховка: соседние колонки
                 for base in cost_cols:
                     for j in (base - 1, base + 1):
                         if 0 <= j < len(cells):
@@ -407,15 +410,6 @@ class BudgetAnalysisPage(tk.Frame):
                             if isinstance(v, float):
                                 return v
         return None
-        
-    def _first_number_from_cols(self, row: List[Any], cols: List[int]) -> Optional[float]:
-        for j in cols:
-            if 0 <= j < len(row):
-                v = self._to_number(row[j])
-                if isinstance(v, float):
-                    return v
-        return None
-
 
     # ---------- Аналитика для Smeta.RU ----------
 
@@ -445,7 +439,14 @@ class BudgetAnalysisPage(tk.Frame):
         except Exception:
             return None
 
-    # python
+    def _first_number_from_cols(self, row: List[Any], cols: List[int]) -> Optional[float]:
+        for j in cols:
+            if 0 <= j < len(row):
+                v = self._to_number(row[j])
+                if isinstance(v, float):
+                    return v
+        return None
+
     def _analyze_smeta(self):
         if self.smeta_name_col is None or not self.smeta_cost_cols:
             raise RuntimeError("Не заданы индексы колонок для сметы.")
@@ -455,6 +456,7 @@ class BudgetAnalysisPage(tk.Frame):
         other_sum_rows = 0.0
         self.breakdown_rows = []
 
+        # Паттерны категорий по 3-й колонке (наименование затрат)
         def is_wages(name: str) -> bool:
             n = name.lower()
             return (n == "зп" or "заработ" in n or "з/п" in n or "зпм" in n or "в т.ч. зпм" in n or "оплата труда" in n)
@@ -491,56 +493,6 @@ class BudgetAnalysisPage(tk.Frame):
         # Корректировка «Прочие» до итога
         diff = total - (mats_sum + wages_sum + other_sum_rows)
         if abs(diff) > 1e-6:
-            self.breakdown_rows.append({"category": "Прочие", "name": "Корректировка до итога", "amount": diff})
-            other_sum_rows += diff
-
-        self.stats = {"total": total, "materials": mats_sum, "wages": wages_sum, "other": other_sum_rows}
-        self._render_stats()
-        self._fill_breakdown_table()
-        self._render_chart()
-
-
-        # Паттерны категорий по 3-й колонке (наименование затрат)
-        def is_wages(name: str) -> bool:
-            n = name.lower()
-            return (
-                n == "зп" or "заработ" in n or "з/п" in n or "зпм" in n or "в т.ч. зпм" in n or "оплата труда" in n
-            )
-
-        def is_materials(name: str) -> bool:
-            n = name.lower()
-            return (n in ("м", "мат", "мат.", "материалы") or "материа" in n or "(м)" in n or "материалы" in n or "мат." in n)
-
-        # Обход строк
-        for row in self.smeta_data_rows:
-            if self.smeta_name_col >= len(row):
-                continue
-            name = self._str(row[self.smeta_name_col])
-            if not name:
-                continue
-            val = self._to_number(row[self.smeta_cost_col]) if self.smeta_cost_col < len(row) else None
-            if not isinstance(val, float):
-                continue
-
-            if is_wages(name):
-                wages_sum += val
-                self.breakdown_rows.append({"category": "Заработная плата", "name": name, "amount": val})
-            elif is_materials(name):
-                mats_sum += val
-                self.breakdown_rows.append({"category": "Материалы", "name": name, "amount": val})
-            else:
-                other_sum_rows += val
-                self.breakdown_rows.append({"category": "Прочие", "name": name, "amount": val})
-
-        # Итог
-        total = float(self.stats.get("total") or 0.0)
-        if total <= 0:
-            total = mats_sum + wages_sum + other_sum_rows
-
-        # Приведём сумму «Прочие» к итогу (корректировка)
-        diff = total - (mats_sum + wages_sum + other_sum_rows)
-        if abs(diff) > 1e-6:
-            # Добавим строку корректировки в «Прочие», чтобы сумма сошлась с итогом
             self.breakdown_rows.append({"category": "Прочие", "name": "Корректировка до итога", "amount": diff})
             other_sum_rows += diff
 
@@ -760,9 +712,11 @@ class BudgetAnalysisPage(tk.Frame):
             # Matplotlib pie
             self._mpl_fig = plt.Figure(figsize=(4.2, 3.0), dpi=100)
             ax = self._mpl_fig.add_subplot(111)
+
             def autopct_fmt(pct):
                 return f"{pct:.1f}%" if pct >= 1.0 else ""
-            wedges, texts, autotexts = ax.pie(
+
+            ax.pie(
                 vals,
                 labels=labels,
                 colors=colors,
