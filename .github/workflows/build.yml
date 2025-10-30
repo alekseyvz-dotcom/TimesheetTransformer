@@ -7,9 +7,10 @@ on:
       - main_app.py
       - timesheet_transformer.py
       - SpecialOrders.py
-      - assets_logo.py
+      - assets_logo.py            # важно: чтобы билд запускался при изменении логотипа
       - requirements.txt
       - icon.ico
+      - icon2.ico
       - .github/workflows/build.yml
 
 concurrency:
@@ -38,6 +39,7 @@ jobs:
           restore-keys: ${{ runner.os }}-pip-
 
       - name: Install dependencies
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -55,27 +57,28 @@ jobs:
           $rawUrl = "https://raw.githubusercontent.com/alekseyvz-dotcom/TimesheetTransformer/main/logo.png"
           if (-not (Test-Path "assets_logo.py")) {
             Write-Host "assets_logo.py not found — generating from RAW URL"
-            python - << 'PY'
-            import base64, urllib.request, pathlib, sys
-            url = "https://raw.githubusercontent.com/alekseyvz-dotcom/TimesheetTransformer/main/logo.png"
-            try:
-            data = urllib.request.urlopen(url, timeout=10).read()
-            b64 = base64.b64encode(data).decode("ascii")
-            pathlib.Path("assets_logo.py").write_text('LOGO_BASE64 = """\\\n' + b64 + '\n"""', encoding="utf-8")
-            print("assets_logo.py generated")
-            except Exception as e:
-            print("WARNING: cannot fetch logo:", e)
-           # записываем tiny PNG, чтобы не упасть
-           tiny = ("LOGO_BASE64 = \"" +
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/w8AAn8B9w3G2kIAAAAASUVORK5CYII="
-            + "\"\n")
-           pathlib.Path("assets_logo.py").write_text(tiny, encoding="utf-8")
-           PY
-           } else {
-            Write-Host "assets_logo.py already exists — keep repository version"
-           }
+            try {
+              $tmp = Join-Path $env:TEMP "logo.png"
+              Invoke-WebRequest -Uri $rawUrl -OutFile $tmp -UseBasicParsing
+              $bytes = [System.IO.File]::ReadAllBytes($tmp)
+              $b64 = [System.Convert]::ToBase64String($bytes)
+              $content = 'LOGO_BASE64 = """' + "`n" + $b64 + "`n" + '"""' + "`n"
+              Set-Content -Path "assets_logo.py" -Value $content -Encoding UTF8
+              Write-Host "assets_logo.py generated"
+            } catch {
+              Write-Warning "Cannot fetch logo: $($_.Exception.Message)"
+              $tiny = 'LOGO_BASE64 = "' + 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/w8AAn8B9w3G2kIAAAAASUVORK5CYII=' + '"' + "`n"
+              Set-Content -Path "assets_logo.py" -Value $tiny -Encoding UTF8
+            }
+          } else {
+            Write-Host "assets_logo.py already exists — keeping repository version"
+          }
 
-      
+      - name: Show assets_logo.py head
+        shell: pwsh
+        run: |
+          Get-Content assets_logo.py -TotalCount 3
+
       - name: Build TabelSuite (main menu, windowed)
         shell: pwsh
         run: |
@@ -85,7 +88,6 @@ jobs:
             Write-Host "icon.ico not found: building TabelSuite without custom icon"
             pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=assets_logo -n TabelSuite main_app.py
           }
-
 
       - name: Build TabelConverter (converter, windowed)
         shell: pwsh
