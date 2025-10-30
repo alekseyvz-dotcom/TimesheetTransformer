@@ -1,7 +1,7 @@
 # BudgetAnalyzer.py
 # Анализ смет: поддержка смет Smeta.RU (лист «ЛОКАЛЬНАЯ СМЕТА», 11 колонок),
 # расшифровка строк и диаграмма структуры затрат.
-# Также есть общий режим для XLSX/CSV с ручным сопоставлением колонок.
+# Исправлено: приоритизация колонки «ВСЕГО ... в текущем уровне цен», строгий отбор ресурсных строк.
 
 import re
 import csv
@@ -95,7 +95,7 @@ class BudgetAnalysisPage(tk.Frame):
         self.mode: str = "generic"  # "smeta" | "generic"
         self.smeta_sheet_name: Optional[str] = None
         self.smeta_name_col: Optional[int] = None      # индекс колонки "Наименование работ и затрат" (0-based)
-        self.smeta_cost_cols: List[int] = []           # индексы колонок "ВСЕГО" (0-based), одна или несколько
+        self.smeta_cost_cols: List[int] = []           # индексы колонок «ВСЕГО», упорядоченные: текущий → базисный
         self.smeta_data_rows: List[List[Any]] = []     # строки данных (после шапки, до итога)
 
         # Итоги и расшифровка
@@ -145,9 +145,8 @@ class BudgetAnalysisPage(tk.Frame):
         hint = tk.Label(
             self,
             text=("Поддержка Smeta.RU: выбирается лист с “ЛОКАЛЬНАЯ СМЕТА”, 11-колоночная таблица.\n"
-                  "Суммы — из колонок с заголовком «ВСЕГО» (обычно 10-я и/или 11-я). "
-                  "ЗП/в т.ч. ЗПМ → «Заработная плата», «Материалы/МАТ» → «Материалы», остальное → «Прочие». "
-                  "Если автоопределение не сработало — используйте ручное сопоставление для CSV/XLSX-таблиц."),
+                  "Суммы — из колонок «ВСЕГО» с приоритетом «в текущем уровне цен» (обычно 11-я). "
+                  "ЗП/в т.ч. ЗПМ → «Заработная плата», «МР/Материалы» → «Материалы», «Прочие» = Итого − Материалы − ЗП."),
             fg="#666", bg="#f7f7f7", justify="left", wraplength=980
         )
         hint.pack(fill="x", padx=12, pady=(0, 10))
@@ -309,16 +308,15 @@ class BudgetAnalysisPage(tk.Frame):
         data_rows = []
         for row in target_ws.iter_rows(min_row=hdr_row_idx + 1, values_only=True):
             cells = list(row)
-            if not any(c is not None and str(c).strip() for c in cells):
-                continue
+            # Останавливаемся на «Итого по локальной смете»
             name_cell = self._str(cells[name_col]) if name_col < len(cells) else ""
-            if "итого по локальной смете" in name_cell.lower():
+            if name_cell and "итого по локальной смете" in name_cell.lower():
                 break
             data_rows.append(cells)
 
         self.smeta_sheet_name = target_ws.title
         self.smeta_name_col = name_col
-        self.smeta_cost_cols = cost_cols
+        self.smeta_cost_cols = cost_cols  # уже упорядочены: текущие → базисные
         self.smeta_data_rows = data_rows
 
         # Итог «Итого по локальной смете»
@@ -350,32 +348,41 @@ class BudgetAnalysisPage(tk.Frame):
         Ищем строку заголовков. Нужно:
         - «Наименование работ и затрат» (name_col)
         - все колонки с текстом, содержащим «всего» (cost_cols)
-        Если явных подписей нет, но встречается строка 1..11 — используем name_col=2 (3-я), cost_cols=[9, 10].
+          причём колонки «в текущем уровне цен» идут первыми.
+        Если явных подписей нет, но встречается строка 1..11 — используем name_col=2 (3-я), cost_cols=[10] (11-я).
         """
         name_col: Optional[int] = None
-        cost_cols: List[int] = []
         hdr_row_idx: Optional[int] = None
+        ordered_cost_cols: List[int] = []
 
         for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
             raw_vals = list(row)
-            vals = [self._normalize_header_text(v) for v in raw_vals]
-            if not any(vals):
+            vals_norm = [self._normalize_header_text(v) for v in raw_vals]
+            if not any(vals_norm):
                 continue
 
+            # Собираем кандидатов
             has_name = False
-            tmp_cost_cols: List[int] = []
+            cost_cols_current: List[int] = []
+            cost_cols_other: List[int] = []
 
-            for idx, v in enumerate(vals):
-                if ("наименование работ" in v and "затрат" in v) or ("наименование работ и затрат" in v):
+            for idx, v in enumerate(vals_norm):
+                if (("наименование работ" in v and "затрат" in v) or ("наименование работ и затрат" in v)):
                     has_name = True
                     if name_col is None:
                         name_col = idx
-                if "всего" in v:
-                    tmp_cost_cols.append(idx)
+                # Условие «всего» без "коэфф"
+                if "всего" in v and "коэфф" not in v:
+                    # приоритет — «текущем уровне цен»
+                    if "текущ" in v:
+                        cost_cols_current.append(idx)
+                    else:
+                        cost_cols_other.append(idx)
 
-            if has_name and tmp_cost_cols:
+            if has_name and (cost_cols_current or cost_cols_other):
                 hdr_row_idx = i
-                cost_cols = tmp_cost_cols
+                # порядок: текущие → прочие (в т.ч. базисные)
+                ordered_cost_cols = cost_cols_current + cost_cols_other
                 break
 
             # Попытка 2: строка 1..11 (цифры)
@@ -383,14 +390,16 @@ class BudgetAnalysisPage(tk.Frame):
             if only_digits and all(x.isdigit() for x in only_digits):
                 hdr_row_idx = i
                 name_col = 2
-                cost_cols = [9, 10]  # 10-я и 11-я (0-based)
+                # Используем только 11-ю колонку (текущий уровень цен)
+                ordered_cost_cols = [10]  # 0-based индекс 11-й колонки
                 break
 
-        return hdr_row_idx, name_col, cost_cols
+        return hdr_row_idx, name_col, ordered_cost_cols
 
     def _find_local_total(self, ws, start_row: int, name_col: int, cost_cols: List[int]) -> Optional[float]:
         """
-        Находим строку «Итого по локальной смете» и пытаемся считать сумму из любой колонки «ВСЕГО».
+        Находим строку «Итого по локальной смете» и пытаемся взять сумму из любой колонки «ВСЕГО»
+        (в приоритетном порядке).
         """
         for row in ws.iter_rows(min_row=start_row + 1, values_only=True):
             cells = list(row)
@@ -447,56 +456,75 @@ class BudgetAnalysisPage(tk.Frame):
                     return v
         return None
 
+    def _is_resource_row_we_care(self, name: str) -> Optional[str]:
+        """
+        Возвращает категорию для ресурсной строки, которую учитываем:
+        - 'wages' для ЗП/в т.ч. ЗПМ/оплата труда
+        - 'materials' для МР/Материалы/Мат.
+        Иначе None (игнорируем).
+        """
+        n = name.strip().lower()
+        # Служебные строки, которые точно игнорируем
+        if not n:
+            return None
+        if n.startswith("всего по позиции"):
+            return None
+        if n.startswith("итого"):
+            return None
+        if n.startswith("раздел:") or n.startswith("локальная смета"):
+            return None
+        if "итого по разделу" in n or "итого по смете" in n:
+            return None
+        if "зтр" in n or n.startswith("эм") or n.startswith("нр ") or "нр от зп" in n or "сп от зп" in n or "нр и сп" in n:
+            return None
+
+        # Категории
+        # Заработная плата
+        if n == "зп" or n == "з/п" or "оплата труда" in n or "заработ" in n or n == "зпм" or "в т.ч. зпм" in n:
+            return "wages"
+        # Материалы
+        if n in ("мр", "мат", "мат.", "материалы") or "материал" in n:
+            return "materials"
+
+        return None
+
     def _analyze_smeta(self):
         if self.smeta_name_col is None or not self.smeta_cost_cols:
             raise RuntimeError("Не заданы индексы колонок для сметы.")
 
         wages_sum = 0.0
         mats_sum = 0.0
-        other_sum_rows = 0.0
         self.breakdown_rows = []
-
-        # Паттерны категорий по 3-й колонке (наименование затрат)
-        def is_wages(name: str) -> bool:
-            n = name.lower()
-            return (n == "зп" or "заработ" in n or "з/п" in n or "зпм" in n or "в т.ч. зпм" in n or "оплата труда" in n)
-
-        def is_materials(name: str) -> bool:
-            n = name.lower()
-            return (n in ("м", "мат", "мат.", "материалы") or "материа" in n or "(м)" in n or "материалы" in n or "мат." in n)
 
         for row in self.smeta_data_rows:
             if self.smeta_name_col >= len(row):
                 continue
             name = self._str(row[self.smeta_name_col])
-            if not name:
+            cat = self._is_resource_row_we_care(name)
+            if not cat:
                 continue
+
             val = self._first_number_from_cols(row, self.smeta_cost_cols)
             if not isinstance(val, float):
                 continue
 
-            if is_wages(name):
+            if cat == "wages":
                 wages_sum += val
                 self.breakdown_rows.append({"category": "Заработная плата", "name": name, "amount": val})
-            elif is_materials(name):
+            elif cat == "materials":
                 mats_sum += val
                 self.breakdown_rows.append({"category": "Материалы", "name": name, "amount": val})
-            else:
-                other_sum_rows += val
-                self.breakdown_rows.append({"category": "Прочие", "name": name, "amount": val})
 
+        # Итого: стараемся взять из строки «Итого по локальной смете», ранее найденной
         total = float(self.stats.get("total") or 0.0)
         if total <= 0:
-            # Если явный «Итого» не нашли — суммируем по строкам
-            total = mats_sum + wages_sum + other_sum_rows
+            # Если явный «Итого» не нашли — суммируем только по учтённым строкам (wages+materials)
+            total = mats_sum + wages_sum
 
-        # Корректировка «Прочие» до итога
-        diff = total - (mats_sum + wages_sum + other_sum_rows)
-        if abs(diff) > 1e-6:
-            self.breakdown_rows.append({"category": "Прочие", "name": "Корректировка до итога", "amount": diff})
-            other_sum_rows += diff
+        # Прочие = разница до итога (без попытки суммировать НР/СП/ЭМ и т.д., чтобы исключить служебные строки)
+        other = max(0.0, total - mats_sum - wages_sum)
 
-        self.stats = {"total": total, "materials": mats_sum, "wages": wages_sum, "other": other_sum_rows}
+        self.stats = {"total": total, "materials": mats_sum, "wages": wages_sum, "other": other}
         self._render_stats()
         self._fill_breakdown_table()
         self._render_chart()
@@ -562,7 +590,7 @@ class BudgetAnalysisPage(tk.Frame):
             return res
 
         cand_total = find_candidates(["итого", "всего", "стоим", "смет", "общая стоимость"])
-        cand_mat   = find_candidates(["матер", "материа"])
+        cand_mat   = find_candidates(["матер", "материа", "мр"])
         cand_wage  = find_candidates(["зараб", "оплата труда", "з/п", "зп", "труд"])
 
         def best_index(candidates: List[int]) -> Optional[int]:
@@ -802,20 +830,7 @@ class BudgetAnalysisPage(tk.Frame):
                 ws.append(["Показатель", "Сумма (руб.)", "Доля"])
                 ws.append(["Строительные затраты (Итого)", self.stats["total"], "100%"])
                 ws.append(["Материалы", self.stats["materials"], self._fmt_pct(self._safe_pct(self.stats['materials']))])
-                ws.append(["Заработная плата", self.stats["wages"], self._fmt_pct(self._safe_pct(self.stats['wages']))])
-                ws.append(["Прочие", self.stats["other"], self._fmt_pct(self._safe_pct(self.stats['other']))])
-                ws.append([])
-                ws.append(["Расшифровка"])
-                ws.append(["Категория", "Наименование", "Сумма, руб."])
-                for row in self.breakdown_rows:
-                    ws.append([row["category"], row["name"], float(row["amount"] or 0.0)])
-                ws.column_dimensions["A"].width = 36
-                ws.column_dimensions["B"].width = 60
-                ws.column_dimensions["C"].width = 18
-                wb.save(out)
-            messagebox.showinfo("Экспорт", f"Свод сохранён:\n{out}")
-        except Exception as e:
-            messagebox.showerror("Экспорт", f"Не удалось сохранить свод:\n{e}")
+                ws.append(["Заработная плата", self.stats f"Не удалось сохранить свод:\n{e}")
 
 
 # --------- API для встраивания/стендалон ---------
