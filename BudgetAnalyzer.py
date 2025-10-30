@@ -1,7 +1,7 @@
 # BudgetAnalyzer.py
 # Анализ смет: поддержка смет Smeta.RU (лист «ЛОКАЛЬНАЯ СМЕТА», 11 колонок),
 # расшифровка строк и диаграмма структуры затрат.
-# Исправлено: приоритизация колонки «ВСЕГО ... в текущем уровне цен», строгий отбор ресурсных строк.
+# Приоритет для «ВСЕГО ... в текущем уровне цен», строгий отбор ресурсных строк.
 
 import re
 import csv
@@ -110,11 +110,12 @@ class BudgetAnalysisPage(tk.Frame):
         # Панель кнопок
         ctrl = tk.Frame(self, bg="#f7f7f7")
         ctrl.pack(fill="x", padx=12, pady=(0, 8))
-        ttk.Button(ctrl, text="Открыть смету (XLSX/CSV)", command=self._open_file).pack(side="left")
-        ttk.Button(ctrl, text="Настроить соответствие колонок", command=self._open_mapping, state="disabled").pack(side="left", padx=(8, 0))
-        ttk.Button(ctrl, text="Сохранить свод", command=self._export_summary, state="disabled").pack(side="left", padx=(8, 0))
-        self.btn_map = ctrl.winfo_children()[1]
-        self.btn_export = ctrl.winfo_children()[2]
+        self.btn_open = ttk.Button(ctrl, text="Открыть смету (XLSX/CSV)", command=self._open_file)
+        self.btn_open.pack(side="left")
+        self.btn_map = ttk.Button(ctrl, text="Настроить соответствие колонок", command=self._open_mapping, state="disabled")
+        self.btn_map.pack(side="left", padx=(8, 0))
+        self.btn_export = ttk.Button(ctrl, text="Сохранить свод", command=self._export_summary, state="disabled")
+        self.btn_export.pack(side="left", padx=(8, 0))
 
         self.lbl_file = tk.Label(self, text="Файл не выбран", fg="#555", bg="#f7f7f7")
         self.lbl_file.pack(anchor="w", padx=12, pady=(0, 2))
@@ -231,7 +232,6 @@ class BudgetAnalysisPage(tk.Frame):
         self.lbl_file.config(text=f"Файл: {self.file_path}")
 
         ok = self._load_file(self.file_path)
-        # Ручное сопоставление — только в generic-режиме
         self.btn_map.config(state=("normal" if (ok and self.mode == "generic") else "disabled"))
         self.btn_export.config(state=("normal" if ok else "disabled"))
         if not ok:
@@ -255,7 +255,6 @@ class BudgetAnalysisPage(tk.Frame):
                     self.mode = "smeta"
                     self._analyze_smeta()
                     return True
-                # не похоже на smeta.ru — общий режим
                 self._parse_xlsx_generic(path)
                 self.mapping = self._detect_mapping(self.headers, self.rows)
                 self._analyze_generic()
@@ -287,11 +286,6 @@ class BudgetAnalysisPage(tk.Frame):
     # ---------- Smeta.RU режим (лист «ЛОКАЛЬНАЯ СМЕТА», 11 колонок) ----------
 
     def _parse_xlsx_smeta_ru(self, path: Path) -> bool:
-        """
-        Ищем лист, где в верхних 30 строках встречается «ЛОКАЛЬНАЯ СМЕТА».
-        На нём ищем шапку таблицы: колонку «Наименование работ и затрат» и все колонки с «ВСЕГО».
-        Считываем строки до «Итого по локальной смете».
-        """
         wb = load_workbook(path, read_only=True, data_only=True)
         target_ws = None
         for ws in wb.worksheets:
@@ -308,7 +302,6 @@ class BudgetAnalysisPage(tk.Frame):
         data_rows = []
         for row in target_ws.iter_rows(min_row=hdr_row_idx + 1, values_only=True):
             cells = list(row)
-            # Останавливаемся на «Итого по локальной смете»
             name_cell = self._str(cells[name_col]) if name_col < len(cells) else ""
             if name_cell and "итого по локальной смете" in name_cell.lower():
                 break
@@ -319,7 +312,6 @@ class BudgetAnalysisPage(tk.Frame):
         self.smeta_cost_cols = cost_cols  # уже упорядочены: текущие → базисные
         self.smeta_data_rows = data_rows
 
-        # Итог «Итого по локальной смете»
         total = self._find_local_total(target_ws, hdr_row_idx, name_col, cost_cols)
         self.stats = {"total": total or 0.0, "materials": 0.0, "wages": 0.0, "other": 0.0}
 
@@ -361,7 +353,6 @@ class BudgetAnalysisPage(tk.Frame):
             if not any(vals_norm):
                 continue
 
-            # Собираем кандидатов
             has_name = False
             cost_cols_current: List[int] = []
             cost_cols_other: List[int] = []
@@ -371,9 +362,7 @@ class BudgetAnalysisPage(tk.Frame):
                     has_name = True
                     if name_col is None:
                         name_col = idx
-                # Условие «всего» без "коэфф"
                 if "всего" in v and "коэфф" not in v:
-                    # приоритет — «текущем уровне цен»
                     if "текущ" in v:
                         cost_cols_current.append(idx)
                     else:
@@ -381,7 +370,6 @@ class BudgetAnalysisPage(tk.Frame):
 
             if has_name and (cost_cols_current or cost_cols_other):
                 hdr_row_idx = i
-                # порядок: текущие → прочие (в т.ч. базисные)
                 ordered_cost_cols = cost_cols_current + cost_cols_other
                 break
 
@@ -390,22 +378,16 @@ class BudgetAnalysisPage(tk.Frame):
             if only_digits and all(x.isdigit() for x in only_digits):
                 hdr_row_idx = i
                 name_col = 2
-                # Используем только 11-ю колонку (текущий уровень цен)
-                ordered_cost_cols = [10]  # 0-based индекс 11-й колонки
+                ordered_cost_cols = [10]  # 11-я колонка (0-based)
                 break
 
         return hdr_row_idx, name_col, ordered_cost_cols
 
     def _find_local_total(self, ws, start_row: int, name_col: int, cost_cols: List[int]) -> Optional[float]:
-        """
-        Находим строку «Итого по локальной смете» и пытаемся взять сумму из любой колонки «ВСЕГО»
-        (в приоритетном порядке).
-        """
         for row in ws.iter_rows(min_row=start_row + 1, values_only=True):
             cells = list(row)
             name = self._str(cells[name_col]) if name_col < len(cells) else ""
             if "итого по локальной смете" in name.lower():
-                # Сначала пробуем заявленные cost_cols
                 for j in cost_cols:
                     if 0 <= j < len(cells):
                         v = self._to_number(cells[j])
@@ -458,15 +440,15 @@ class BudgetAnalysisPage(tk.Frame):
 
     def _is_resource_row_we_care(self, name: str) -> Optional[str]:
         """
-        Возвращает категорию для ресурсной строки, которую учитываем:
+        Возвращает категорию:
         - 'wages' для ЗП/в т.ч. ЗПМ/оплата труда
         - 'materials' для МР/Материалы/Мат.
         Иначе None (игнорируем).
         """
         n = name.strip().lower()
-        # Служебные строки, которые точно игнорируем
         if not n:
             return None
+        # Служебные строки — игнор
         if n.startswith("всего по позиции"):
             return None
         if n.startswith("итого"):
@@ -479,13 +461,10 @@ class BudgetAnalysisPage(tk.Frame):
             return None
 
         # Категории
-        # Заработная плата
         if n == "зп" or n == "з/п" or "оплата труда" in n or "заработ" in n or n == "зпм" or "в т.ч. зпм" in n:
             return "wages"
-        # Материалы
         if n in ("мр", "мат", "мат.", "материалы") or "материал" in n:
             return "materials"
-
         return None
 
     def _analyze_smeta(self):
@@ -515,13 +494,10 @@ class BudgetAnalysisPage(tk.Frame):
                 mats_sum += val
                 self.breakdown_rows.append({"category": "Материалы", "name": name, "amount": val})
 
-        # Итого: стараемся взять из строки «Итого по локальной смете», ранее найденной
         total = float(self.stats.get("total") or 0.0)
         if total <= 0:
-            # Если явный «Итого» не нашли — суммируем только по учтённым строкам (wages+materials)
             total = mats_sum + wages_sum
 
-        # Прочие = разница до итога (без попытки суммировать НР/СП/ЭМ и т.д., чтобы исключить служебные строки)
         other = max(0.0, total - mats_sum - wages_sum)
 
         self.stats = {"total": total, "materials": mats_sum, "wages": wages_sum, "other": other}
@@ -624,7 +600,6 @@ class BudgetAnalysisPage(tk.Frame):
         return s
 
     def _analyze_generic(self):
-        # Расшифровка для generic не формируем (нет категорий), только свод
         total     = self._sum_column(self.mapping.get("total"))
         materials = self._sum_column(self.mapping.get("materials"))
         wages     = self._sum_column(self.mapping.get("wages"))
@@ -634,7 +609,7 @@ class BudgetAnalysisPage(tk.Frame):
 
         other = max(0.0, total - materials - wages)
         self.stats = {"total": total, "materials": materials, "wages": wages, "other": other}
-        self.breakdown_rows = []  # нет точной классификации строк
+        self.breakdown_rows = []
         self._render_stats()
         self._fill_breakdown_table()
         self._render_chart()
@@ -690,11 +665,9 @@ class BudgetAnalysisPage(tk.Frame):
     # ---------- Расшифровка (таблица) ----------
 
     def _fill_breakdown_table(self):
-        # Очистить
         for i in self.tree.get_children():
             self.tree.delete(i)
         if not self.breakdown_rows:
-            # Нечего показывать
             return
         show_mat = self.var_show_mat.get()
         show_wag = self.var_show_wag.get()
@@ -711,7 +684,6 @@ class BudgetAnalysisPage(tk.Frame):
     # ---------- Диаграмма ----------
 
     def _render_chart(self):
-        # Очистка области диаграммы
         for w in self.chart_area.winfo_children():
             try:
                 w.destroy()
@@ -737,7 +709,6 @@ class BudgetAnalysisPage(tk.Frame):
             return
 
         if MPL_AVAILABLE:
-            # Matplotlib pie
             self._mpl_fig = plt.Figure(figsize=(4.2, 3.0), dpi=100)
             ax = self._mpl_fig.add_subplot(111)
 
@@ -758,7 +729,6 @@ class BudgetAnalysisPage(tk.Frame):
             self._mpl_canvas.draw()
             self._mpl_canvas.get_tk_widget().pack(fill="both", expand=True)
         else:
-            # Tk Canvas fallback
             self._tk_canvas = tk.Canvas(self.chart_area, width=420, height=280, bg="#ffffff", highlightthickness=0)
             self._tk_canvas.pack(fill="both", expand=True)
             cx, cy, r = 150, 140, 110
@@ -771,7 +741,6 @@ class BudgetAnalysisPage(tk.Frame):
                 self._tk_canvas.create_arc(cx - r, cy - r, cx + r, cy + r, start=start, extent=extent,
                                            fill=col, outline="#ffffff", width=1)
                 start += extent
-            # Легенда
             lx, ly = 300, 80
             for lbl, col, v in zip(labels, colors, vals):
                 self._tk_canvas.create_rectangle(lx, ly, lx + 14, ly + 14, fill=col, outline=col)
@@ -789,83 +758,79 @@ class BudgetAnalysisPage(tk.Frame):
             self.mapping = dlg.result
             self._analyze_generic()
 
-    # python
-def _export_summary(self):
-    try:
-        from tkinter import filedialog as fd
-    except Exception:
-        messagebox.showerror("Экспорт", "Не удалось открыть диалог сохранения.")
-        return
-    if not self.stats:
-        return
+    def _export_summary(self):
+        try:
+            from tkinter import filedialog as fd
+        except Exception:
+            messagebox.showerror("Экспорт", "Не удалось открыть диалог сохранения.")
+            return
+        if not self.stats:
+            return
 
-    fname = fd.asksaveasfilename(
-        title="Сохранить свод",
-        defaultextension=".xlsx",
-        filetypes=[("Excel", "*.xlsx"), ("CSV", "*.csv")]
-    )
-    if not fname:
-        return
-    out = Path(fname)
+        fname = fd.asksaveasfilename(
+            title="Сохранить свод",
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx"), ("CSV", "*.csv")]
+        )
+        if not fname:
+            return
+        out = Path(fname)
 
-    try:
-        if out.suffix.lower() == ".csv":
-            with open(out, "w", encoding="utf-8-sig", newline="") as f:
-                w = csv.writer(f, delimiter=";")
-                w.writerow(["Показатель", "Сумма (руб.)", "Доля"])
-                w.writerow(["Строительные затраты (Итого)", f"{self._fmt_money(self.stats['total'])}", "100%"])
-                w.writerow(["Материалы", f"{self._fmt_money(self.stats['materials'])}",
-                            self._fmt_pct(self._safe_pct(self.stats['materials']))])
-                w.writerow(["Заработная плата", f"{self._fmt_money(self.stats['wages'])}",
-                            self._fmt_pct(self._safe_pct(self.stats['wages']))])
-                w.writerow(["Прочие", f"{self._fmt_money(self.stats['other'])}",
-                            self._fmt_pct(self._safe_pct(self.stats['other']))])
-                # Расшифровка
-                w.writerow([])
-                w.writerow(["Расшифровка", "", ""])
-                w.writerow(["Категория", "Наименование", "Сумма, руб."])
-                for row in self.breakdown_rows:
-                    w.writerow([row["category"], row["name"], f"{self._fmt_money(row['amount'])}"])
-        else:
-            # XLSX — пишем числа как числа
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Анализ сметы"
-            ws.append(["Показатель", "Сумма (руб.)", "Доля"])
-            ws.append(["Строительные затраты (Итого)", float(self.stats.get("total", 0.0)), "100%"])
-            ws.append([
-                "Материалы",
-                float(self.stats.get("materials", 0.0)),
-                self._fmt_pct(self._safe_pct(self.stats.get("materials", 0.0))),
-            ])
-            ws.append([
-                "Заработная плата",
-                float(self.stats.get("wages", 0.0)),
-                self._fmt_pct(self._safe_pct(self.stats.get("wages", 0.0))),
-            ])
-            ws.append([
-                "Прочие",
-                float(self.stats.get("other", 0.0)),
-                self._fmt_pct(self._safe_pct(self.stats.get("other", 0.0))),
-            ])
-            ws.append([])
-            ws.append(["Расшифровка"])
-            ws.append(["Категория", "Наименование", "Сумма, руб."])
-            for row in self.breakdown_rows:
+        try:
+            if out.suffix.lower() == ".csv":
+                with open(out, "w", encoding="utf-8-sig", newline="") as f:
+                    w = csv.writer(f, delimiter=";")
+                    w.writerow(["Показатель", "Сумма (руб.)", "Доля"])
+                    w.writerow(["Строительные затраты (Итого)", f"{self._fmt_money(self.stats['total'])}", "100%"])
+                    w.writerow(["Материалы", f"{self._fmt_money(self.stats['materials'])}",
+                                self._fmt_pct(self._safe_pct(self.stats['materials']))])
+                    w.writerow(["Заработная плата", f"{self._fmt_money(self.stats['wages'])}",
+                                self._fmt_pct(self._safe_pct(self.stats['wages']))])
+                    w.writerow(["Прочие", f"{self._fmt_money(self.stats['other'])}",
+                                self._fmt_pct(self._safe_pct(self.stats['other']))])
+                    w.writerow([])
+                    w.writerow(["Расшифровка", "", ""])
+                    w.writerow(["Категория", "Наименование", "Сумма, руб."])
+                    for row in self.breakdown_rows:
+                        w.writerow([row["category"], row["name"], f"{self._fmt_money(row['amount'])}"])
+            else:
+                wb = Workbook()
+                ws = wb.active
+                ws.title = "Анализ сметы"
+                ws.append(["Показатель", "Сумма (руб.)", "Доля"])
+                ws.append(["Строительные затраты (Итого)", float(self.stats.get("total", 0.0)), "100%"])
                 ws.append([
-                    row["category"],
-                    row["name"],
-                    float(row.get("amount", 0.0) or 0.0)
+                    "Материалы",
+                    float(self.stats.get("materials", 0.0)),
+                    self._fmt_pct(self._safe_pct(self.stats.get("materials", 0.0))),
                 ])
-            ws.column_dimensions["A"].width = 36
-            ws.column_dimensions["B"].width = 60
-            ws.column_dimensions["C"].width = 18
-            wb.save(out)
+                ws.append([
+                    "Заработная плата",
+                    float(self.stats.get("wages", 0.0)),
+                    self._fmt_pct(self._safe_pct(self.stats.get("wages", 0.0))),
+                ])
+                ws.append([
+                    "Прочие",
+                    float(self.stats.get("other", 0.0)),
+                    self._fmt_pct(self._safe_pct(self.stats.get("other", 0.0))),
+                ])
+                ws.append([])
+                ws.append(["Расшифровка"])
+                ws.append(["Категория", "Наименование", "Сумма, руб."])
+                for row in self.breakdown_rows:
+                    ws.append([
+                        row["category"],
+                        row["name"],
+                        float(row.get("amount", 0.0) or 0.0)
+                    ])
+                ws.column_dimensions["A"].width = 36
+                ws.column_dimensions["B"].width = 60
+                ws.column_dimensions["C"].width = 18
+                wb.save(out)
 
-        messagebox.showinfo("Экспорт", f"Свод сохранён:\n{out}")
-    except Exception as e:
-        messagebox.showerror("Экспорт", f"Не удалось сохранить свод:\n{e}")
-
+            messagebox.showinfo("Экспорт", f"Свод сохранён:\n{out}")
+        except Exception as e:
+            messagebox.showerror("Экспорт", f"Не удалось сохранить свод:\n{e}")
 
 
 # --------- API для встраивания/стендалон ---------
