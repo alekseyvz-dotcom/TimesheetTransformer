@@ -1,3 +1,4 @@
+# python
 import re
 import csv
 from pathlib import Path
@@ -7,6 +8,14 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 
 from openpyxl import Workbook, load_workbook
+
+# matplotlib (опционально). Если нет — используем Tk Canvas
+try:
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    import matplotlib.pyplot as plt
+    MPL_AVAILABLE = True
+except Exception:
+    MPL_AVAILABLE = False
 
 
 # ------------------------- Диалог сопоставления колонок (общий режим) -------------------------
@@ -63,6 +72,12 @@ class ColumnMappingDialog(simpledialog.Dialog):
 # ------------------------- Страница Анализ смет -------------------------
 
 class BudgetAnalysisPage(tk.Frame):
+    COLORS = {
+        "materials": "#42a5f5",  # blue
+        "wages":     "#66bb6a",  # green
+        "other":     "#ffa726",  # orange
+    }
+
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
         self.file_path: Optional[Path] = None
@@ -72,21 +87,23 @@ class BudgetAnalysisPage(tk.Frame):
         self.rows: List[List[Any]] = []
         self.mapping: Dict[str, Optional[int]] = {"total": None, "materials": None, "wages": None}
 
-        # Smeta-режим (специализированный парсер Smeta.RU)
+        # Smeta-режим (спец. парсер Smeta.RU)
         self.mode: str = "generic"  # "smeta" | "generic"
         self.smeta_sheet_name: Optional[str] = None
         self.smeta_name_col: Optional[int] = None   # индекс колонки "Наименование работ и затрат" (0-based)
         self.smeta_cost_col: Optional[int] = None   # индекс колонки "ВСЕГО затрат, руб." (0-based)
-        self.smeta_data_rows: List[List[Any]] = []  # чистые строки данных после заголовка
+        self.smeta_data_rows: List[List[Any]] = []  # строки данных (после шапки, до итога)
 
-        # Итоги
+        # Итоги и расшифровка
         self.stats = {"total": 0.0, "materials": 0.0, "wages": 0.0, "other": 0.0}
+        self.breakdown_rows: List[Dict[str, Any]] = []  # элементы: {"category": str, "name": str, "amount": float}
 
-        # UI
+        # UI: заголовок
         header = tk.Frame(self, bg="#f7f7f7")
         header.pack(fill="x", padx=12, pady=(10, 6))
         tk.Label(header, text="Анализ смет", font=("Segoe UI", 16, "bold"), bg="#f7f7f7").pack(side="left")
 
+        # Панель кнопок
         ctrl = tk.Frame(self, bg="#f7f7f7")
         ctrl.pack(fill="x", padx=12, pady=(0, 8))
         ttk.Button(ctrl, text="Открыть смету (XLSX/CSV)", command=self._open_file).pack(side="left")
@@ -101,6 +118,7 @@ class BudgetAnalysisPage(tk.Frame):
         self.lbl_sheet = tk.Label(self, text="", fg="#777", bg="#f7f7f7")
         self.lbl_sheet.pack(anchor="w", padx=12, pady=(0, 6))
 
+        # Сводные показатели (карточка)
         card = tk.Frame(self, bg="#ffffff", bd=1, relief="solid")
         card.pack(fill="x", padx=12, pady=(0, 10))
 
@@ -119,6 +137,7 @@ class BudgetAnalysisPage(tk.Frame):
         for c in range(3):
             grid.grid_columnconfigure(c, weight=1)
 
+        # Подсказка
         hint = tk.Label(
             self,
             text=("Поддержка Smeta.RU: выбирается лист с “ЛОКАЛЬНАЯ СМЕТА”, берутся 11-колоночные строки.\n"
@@ -126,7 +145,62 @@ class BudgetAnalysisPage(tk.Frame):
                   "остальное — в «Прочие». Если автоопределение не сработало — используйте ручное сопоставление колонок."),
             fg="#666", bg="#f7f7f7", justify="left", wraplength=980
         )
-        hint.pack(fill="x", padx=12, pady=(0, 12))
+        hint.pack(fill="x", padx=12, pady=(0, 10))
+
+        # Расшифровка + Диаграмма (две колонки)
+        main_split = tk.Frame(self, bg="#f7f7f7")
+        main_split.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        # Левая колонка — расшифровка (таблица)
+        left = tk.Frame(main_split, bg="#f7f7f7")
+        left.pack(side="left", fill="both", expand=True, padx=(0, 6))
+
+        tk.Label(left, text="Расшифровка строк", font=("Segoe UI", 11, "bold"), bg="#f7f7f7").pack(anchor="w", pady=(0, 6))
+
+        # Фильтры категорий
+        flt = tk.Frame(left, bg="#f7f7f7")
+        flt.pack(anchor="w", pady=(0, 6))
+        self.var_show_mat = tk.BooleanVar(value=True)
+        self.var_show_wag = tk.BooleanVar(value=True)
+        self.var_show_oth = tk.BooleanVar(value=True)
+        ttk.Checkbutton(flt, text="Материалы", variable=self.var_show_mat, command=self._fill_breakdown_table).pack(side="left", padx=(0, 8))
+        ttk.Checkbutton(flt, text="Заработная плата", variable=self.var_show_wag, command=self._fill_breakdown_table).pack(side="left", padx=(0, 8))
+        ttk.Checkbutton(flt, text="Прочие", variable=self.var_show_oth, command=self._fill_breakdown_table).pack(side="left")
+
+        # Таблица расшифровки
+        tree_wrap = tk.Frame(left)
+        tree_wrap.pack(fill="both", expand=True)
+
+        cols = ("category", "name", "amount")
+        self.tree = ttk.Treeview(tree_wrap, columns=cols, show="headings", height=12)
+        self.tree.heading("category", text="Категория")
+        self.tree.heading("name", text="Наименование")
+        self.tree.heading("amount", text="Сумма, руб.")
+        self.tree.column("category", width=140, anchor="w")
+        self.tree.column("name", width=420, anchor="w")
+        self.tree.column("amount", width=120, anchor="e")
+
+        yscroll = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=yscroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        yscroll.pack(side="right", fill="y")
+
+        # Правая колонка — диаграмма
+        right = tk.Frame(main_split, bg="#f7f7f7")
+        right.pack(side="left", fill="both", expand=False, padx=(6, 0))
+
+        tk.Label(right, text="Диаграмма структуры", font=("Segoe UI", 11, "bold"), bg="#f7f7f7").pack(anchor="w", pady=(0, 6))
+
+        self.chart_area = tk.Frame(right, bg="#ffffff", bd=1, relief="solid")
+        self.chart_area.pack(fill="both", expand=False)
+        self.chart_area.configure(width=420, height=320)
+        self.chart_area.pack_propagate(False)
+
+        # ссылки для графика (чтобы не убило GC)
+        self._mpl_fig = None
+        self._mpl_canvas = None
+        self._tk_canvas = None
+        self._chart_placeholder = None
 
     def _add_metric_row(self, grid, r, title: str):
         tk.Label(grid, text=title, bg="#ffffff").grid(row=r, column=0, sticky="w", pady=3)
@@ -153,15 +227,17 @@ class BudgetAnalysisPage(tk.Frame):
         self.lbl_file.config(text=f"Файл: {self.file_path}")
 
         ok = self._load_file(self.file_path)
+        # Ручное сопоставление — только в generic-режиме
         self.btn_map.config(state=("normal" if (ok and self.mode == "generic") else "disabled"))
         self.btn_export.config(state=("normal" if ok else "disabled"))
         if not ok:
             messagebox.showwarning("Анализ смет", "Не удалось распознать структуру файла. "
-                                                  "Попробуйте настроить соответствие колонок вручную (для CSV/XLSX с таблицей).")
+                                                  "Попробуйте ручное сопоставление (для CSV/XLSX-таблиц).")
 
     def _load_file(self, path: Path) -> bool:
         self.mode = "generic"
         self.headers, self.rows = [], []
+        self.breakdown_rows = []
         self.smeta_sheet_name = None
         self.smeta_name_col = None
         self.smeta_cost_col = None
@@ -175,7 +251,7 @@ class BudgetAnalysisPage(tk.Frame):
                     self.mode = "smeta"
                     self._analyze_smeta()
                     return True
-                # если не похоже на смета.ру — пробуем общий режим
+                # не похоже на smeta.ru — общий режим
                 self._parse_xlsx_generic(path)
                 self.mapping = self._detect_mapping(self.headers, self.rows)
                 self._analyze_generic()
@@ -186,7 +262,6 @@ class BudgetAnalysisPage(tk.Frame):
                 self._analyze_generic()
                 return True
             else:
-                # Попытка xlsx → csv
                 try:
                     if self._parse_xlsx_smeta_ru(path):
                         self.mode = "smeta"
@@ -211,7 +286,7 @@ class BudgetAnalysisPage(tk.Frame):
         """
         Ищем лист, где в верхних 30 строках встречается «ЛОКАЛЬНАЯ СМЕТА».
         На нём ищем шапку 11-колоночной таблицы с «Наименование работ и затрат» и «ВСЕГО затрат».
-        Дальше читаем строки до «Итого по локальной смете».
+        Считываем строки до «Итого по локальной смете».
         """
         wb = load_workbook(path, read_only=True, data_only=True)
         target_ws = None
@@ -222,31 +297,26 @@ class BudgetAnalysisPage(tk.Frame):
         if target_ws is None:
             return False
 
-        # Найти строку заголовков таблицы и индексы нужных колонок
         hdr_row_idx, name_col, cost_col = self._find_table_header(target_ws)
         if hdr_row_idx is None or name_col is None or cost_col is None:
             return False
 
-        # Считать данные до "Итого по локальной смете"
         data_rows = []
         for row in target_ws.iter_rows(min_row=hdr_row_idx + 1, values_only=True):
             cells = list(row)
             if not any(c is not None and str(c).strip() for c in cells):
-                # пустая строка — пропустим, но не завершаем
                 continue
-            # стоп-маркеры итога
             name_cell = self._str(cells[name_col])
             if "итого по локальной смете" in name_cell.lower():
                 break
             data_rows.append(cells)
 
-        # Сохраняем параметры smeta-режима
         self.smeta_sheet_name = target_ws.title
         self.smeta_name_col = name_col
         self.smeta_cost_col = cost_col
         self.smeta_data_rows = data_rows
 
-        # Найдём явный итог «Итого по локальной смете»
+        # Попробуем найти явный итог «Итого по локальной смете»
         total = self._find_local_total(target_ws, hdr_row_idx, name_col, cost_col)
         self.stats = {"total": total or 0.0, "materials": 0.0, "wages": 0.0, "other": 0.0}
 
@@ -256,7 +326,7 @@ class BudgetAnalysisPage(tk.Frame):
     @staticmethod
     def _sheet_has_local_smeta_marker(ws) -> bool:
         try:
-            for r, row in enumerate(ws.iter_rows(min_row=1, max_row=30, values_only=True), start=1):
+            for _r, row in enumerate(ws.iter_rows(min_row=1, max_row=30, values_only=True), start=1):
                 for c in row:
                     if isinstance(c, str) and "локальная смета" in c.lower():
                         return True
@@ -275,7 +345,7 @@ class BudgetAnalysisPage(tk.Frame):
         Ищем строку, где встречаются как минимум:
         - «Наименование работ и затрат»
         - «ВСЕГО затрат» (или «всего затрат, руб.»)
-        Также допускаем строку с нумерацией 1..11.
+        Также допускаем строку с нумерацией 1..11 → name_col=2 (3-я), cost_col=9 (10-я).
         """
         name_col = None
         cost_col = None
@@ -298,10 +368,9 @@ class BudgetAnalysisPage(tk.Frame):
                         cost_col = idx
                 break
 
-            # Попытка 2: строка 1..11 (цифры)
+            # Попытка 2: строка 1..11
             only_digits = [str(v).strip() for v in row if v is not None]
             if only_digits and all(x.isdigit() for x in only_digits):
-                # Часто name_col=2 (3-я), cost_col=9 (10-я) при 1-based
                 hdr_row_idx = i
                 name_col = 2
                 cost_col = 9
@@ -310,17 +379,13 @@ class BudgetAnalysisPage(tk.Frame):
         return hdr_row_idx, name_col, cost_col
 
     def _find_local_total(self, ws, start_row: int, name_col: int, cost_col: int) -> Optional[float]:
-        """
-        Находим строку «Итого по локальной смете» ниже шапки и берём сумму из cost_col.
-        Если нет — вернём None.
-        """
         for row in ws.iter_rows(min_row=start_row + 1, values_only=True):
             cells = list(row)
             name = self._str(cells[name_col]) if name_col < len(cells) else ""
             if "итого по локальной смете" in name.lower():
                 if cost_col < len(cells):
                     return self._to_number(cells[cost_col])
-                # иногда сумма стоит в соседней колонке (сместилась) — проверим ещё +-1
+                # подстраховка: соседние колонки
                 for j in (cost_col - 1, cost_col + 1):
                     if 0 <= j < len(cells):
                         v = self._to_number(cells[j])
@@ -362,68 +427,63 @@ class BudgetAnalysisPage(tk.Frame):
 
         wages_sum = 0.0
         mats_sum = 0.0
+        other_sum_rows = 0.0
+        self.breakdown_rows = []
 
-        # Паттерны распознавания по 3-й колонке (наименование затрат)
+        # Паттерны категорий по 3-й колонке (наименование затрат)
         def is_wages(name: str) -> bool:
             n = name.lower()
             return (
-                n == "зп"
-                or "заработ" in n
-                or "з/п" in n
-                or "зпм" in n
-                or "в т.ч. зпм" in n
-                or "оплата труда" in n
+                n == "зп" or "заработ" in n or "з/п" in n or "зпм" in n or "в т.ч. зпм" in n or "оплата труда" in n
             )
 
         def is_materials(name: str) -> bool:
             n = name.lower()
-            # возможные варианты для материалов
-            return (
-                n in ("м", "мат", "мат.", "материалы")
-                or "материа" in n
-                or "(м)" in n
-            )
+            return (n in ("м", "мат", "мат.", "материалы") or "материа" in n or "(м)" in n or "материалы" in n or "мат." in n)
 
+        # Обход строк
         for row in self.smeta_data_rows:
             if self.smeta_name_col >= len(row):
                 continue
             name = self._str(row[self.smeta_name_col])
             if not name:
                 continue
-            # суммы в 10-й колонке (1-based) → индекс 9; но у нас вычисленный cost_col
             val = self._to_number(row[self.smeta_cost_col]) if self.smeta_cost_col < len(row) else None
             if not isinstance(val, float):
                 continue
 
             if is_wages(name):
                 wages_sum += val
+                self.breakdown_rows.append({"category": "Заработная плата", "name": name, "amount": val})
             elif is_materials(name):
                 mats_sum += val
+                self.breakdown_rows.append({"category": "Материалы", "name": name, "amount": val})
             else:
-                # прочие (ЭМ, НР, СП и т.п.) учтём в "прочие" через разницу
-                pass
+                other_sum_rows += val
+                self.breakdown_rows.append({"category": "Прочие", "name": name, "amount": val})
 
+        # Итог
         total = float(self.stats.get("total") or 0.0)
         if total <= 0:
-            # Если явный «Итого по локальной смете» не найден — подстрахуемся суммой по всем строкам с именем
-            total = 0.0
-            for row in self.smeta_data_rows:
-                if self.smeta_name_col < len(row) and self._str(row[self.smeta_name_col]):
-                    v = self._to_number(row[self.smeta_cost_col]) if self.smeta_cost_col < len(row) else None
-                    if isinstance(v, float):
-                        total += v
+            total = mats_sum + wages_sum + other_sum_rows
 
-        other = max(0.0, total - mats_sum - wages_sum)
+        # Приведём сумму «Прочие» к итогу (корректировка)
+        diff = total - (mats_sum + wages_sum + other_sum_rows)
+        if abs(diff) > 1e-6:
+            # Добавим строку корректировки в «Прочие», чтобы сумма сошлась с итогом
+            self.breakdown_rows.append({"category": "Прочие", "name": "Корректировка до итога", "amount": diff})
+            other_sum_rows += diff
 
-        self.stats = {"total": total, "materials": mats_sum, "wages": wages_sum, "other": other}
+        self.stats = {"total": total, "materials": mats_sum, "wages": wages_sum, "other": other_sum_rows}
         self._render_stats()
+        self._fill_breakdown_table()
+        self._render_chart()
 
     # ---------- Общий режим (XLSX/CSV) ----------
 
     def _parse_xlsx_generic(self, path: Path):
         wb = load_workbook(path, read_only=True, data_only=True)
         ws = wb.active
-        # Первая непустая строка — заголовки
         hdr_row_idx = None
         for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
             cells = [self._str(c) for c in row]
@@ -514,6 +574,7 @@ class BudgetAnalysisPage(tk.Frame):
         return s
 
     def _analyze_generic(self):
+        # Расшифровка для generic не формируем (нет категорий), только свод
         total     = self._sum_column(self.mapping.get("total"))
         materials = self._sum_column(self.mapping.get("materials"))
         wages     = self._sum_column(self.mapping.get("wages"))
@@ -523,7 +584,10 @@ class BudgetAnalysisPage(tk.Frame):
 
         other = max(0.0, total - materials - wages)
         self.stats = {"total": total, "materials": materials, "wages": wages, "other": other}
+        self.breakdown_rows = []  # нет точной классификации строк
         self._render_stats()
+        self._fill_breakdown_table()
+        self._render_chart()
 
     # ---------- Отрисовка результатов ----------
 
@@ -573,7 +637,98 @@ class BudgetAnalysisPage(tk.Frame):
         self._row_other["val"].config(text=self._fmt_money(other))
         self._row_other["pct"].config(text=self._fmt_pct(p_oth))
 
-    # ---------- Действия ----------
+    # ---------- Расшифровка (таблица) ----------
+
+    def _fill_breakdown_table(self):
+        # Очистить
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+        if not self.breakdown_rows:
+            # Нечего показывать
+            return
+        show_mat = self.var_show_mat.get()
+        show_wag = self.var_show_wag.get()
+        show_oth = self.var_show_oth.get()
+
+        for row in self.breakdown_rows:
+            cat = row["category"]
+            if (cat == "Материалы" and not show_mat) or (cat == "Заработная плата" and not show_wag) or (cat == "Прочие" and not show_oth):
+                continue
+            name = str(row["name"])
+            amt = float(row["amount"] or 0.0)
+            self.tree.insert("", "end", values=(cat, name, self._fmt_money(amt)))
+
+    # ---------- Диаграмма ----------
+
+    def _render_chart(self):
+        # Очистка области диаграммы
+        for w in self.chart_area.winfo_children():
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        self._mpl_fig = None
+        self._mpl_canvas = None
+        self._tk_canvas = None
+        self._chart_placeholder = None
+
+        vals = [
+            float(self.stats.get("materials") or 0.0),
+            float(self.stats.get("wages") or 0.0),
+            float(self.stats.get("other") or 0.0),
+        ]
+        labels = ["Материалы", "Заработная плата", "Прочие"]
+        colors = [self.COLORS["materials"], self.COLORS["wages"], self.COLORS["other"]]
+        total = float(self.stats.get("total") or 0.0)
+
+        if total <= 0 or sum(vals) <= 0:
+            self._chart_placeholder = tk.Label(self.chart_area, text="Нет данных для диаграммы", bg="#ffffff", fg="#888")
+            self._chart_placeholder.pack(fill="both", expand=True)
+            return
+
+        if MPL_AVAILABLE:
+            # Matplotlib pie
+            self._mpl_fig = plt.Figure(figsize=(4.2, 3.0), dpi=100)
+            ax = self._mpl_fig.add_subplot(111)
+            def autopct_fmt(pct):
+                return f"{pct:.1f}%" if pct >= 1.0 else ""
+            wedges, texts, autotexts = ax.pie(
+                vals,
+                labels=labels,
+                colors=colors,
+                autopct=autopct_fmt,
+                startangle=90,
+                counterclock=False
+            )
+            ax.axis("equal")
+            ax.set_title("Структура затрат")
+            self._mpl_canvas = FigureCanvasTkAgg(self._mpl_fig, master=self.chart_area)
+            self._mpl_canvas.draw()
+            self._mpl_canvas.get_tk_widget().pack(fill="both", expand=True)
+        else:
+            # Tk Canvas fallback
+            self._tk_canvas = tk.Canvas(self.chart_area, width=420, height=280, bg="#ffffff", highlightthickness=0)
+            self._tk_canvas.pack(fill="both", expand=True)
+            cx, cy, r = 150, 140, 110
+            start = 0.0
+            s = sum(vals)
+            for v, col in zip(vals, colors):
+                if v <= 0:
+                    continue
+                extent = 360.0 * v / s
+                self._tk_canvas.create_arc(cx - r, cy - r, cx + r, cy + r, start=start, extent=extent,
+                                           fill=col, outline="#ffffff", width=1)
+                start += extent
+            # Легенда
+            lx, ly = 300, 80
+            for lbl, col, v in zip(labels, colors, vals):
+                self._tk_canvas.create_rectangle(lx, ly, lx + 14, ly + 14, fill=col, outline=col)
+                pct = (v / s * 100.0) if s > 1e-12 else 0.0
+                self._tk_canvas.create_text(lx + 18 + 2, ly + 7, text=f"{lbl} — {pct:.1f}%", anchor="w", fill="#333", font=("Segoe UI", 9))
+                ly += 22
+
+    # ---------- Действия пользователя ----------
+
     def _open_mapping(self):
         if not self.headers or self.mode != "generic":
             return
@@ -610,6 +765,12 @@ class BudgetAnalysisPage(tk.Frame):
                                 self._fmt_pct(self._safe_pct(self.stats['wages']))])
                     w.writerow(["Прочие", f"{self._fmt_money(self.stats['other'])}",
                                 self._fmt_pct(self._safe_pct(self.stats['other']))])
+                    # Расшифровка
+                    w.writerow([])
+                    w.writerow(["Расшифровка", "", ""])
+                    w.writerow(["Категория", "Наименование", "Сумма, руб."])
+                    for row in self.breakdown_rows:
+                        w.writerow([row["category"], row["name"], f"{self._fmt_money(row['amount'])}"])
             else:
                 wb = Workbook()
                 ws = wb.active
@@ -619,9 +780,14 @@ class BudgetAnalysisPage(tk.Frame):
                 ws.append(["Материалы", self.stats["materials"], self._fmt_pct(self._safe_pct(self.stats['materials']))])
                 ws.append(["Заработная плата", self.stats["wages"], self._fmt_pct(self._safe_pct(self.stats['wages']))])
                 ws.append(["Прочие", self.stats["other"], self._fmt_pct(self._safe_pct(self.stats['other']))])
+                ws.append([])
+                ws.append(["Расшифровка"])
+                ws.append(["Категория", "Наименование", "Сумма, руб."])
+                for row in self.breakdown_rows:
+                    ws.append([row["category"], row["name"], float(row["amount"] or 0.0)])
                 ws.column_dimensions["A"].width = 36
-                ws.column_dimensions["B"].width = 18
-                ws.column_dimensions["C"].width = 10
+                ws.column_dimensions["B"].width = 60
+                ws.column_dimensions["C"].width = 18
                 wb.save(out)
             messagebox.showinfo("Экспорт", f"Свод сохранён:\n{out}")
         except Exception as e:
@@ -639,13 +805,13 @@ def open_budget_analyzer(parent=None):
     if parent is None:
         root = tk.Tk()
         root.title("Анализ смет")
-        root.geometry("1000x700")
+        root.geometry("1100x740")
         BudgetAnalysisPage(root).pack(fill="both", expand=True)
         root.mainloop()
         return root
     win = tk.Toplevel(parent)
     win.title("Анализ смет")
-    win.geometry("1000x700")
+    win.geometry("1100x740")
     BudgetAnalysisPage(win).pack(fill="both", expand=True)
     return win
 
