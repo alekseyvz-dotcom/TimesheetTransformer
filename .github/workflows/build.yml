@@ -7,7 +7,8 @@ on:
       - main_app.py
       - timesheet_transformer.py
       - SpecialOrders.py
-      - assets_logo.py            # важно: чтобы билд запускался при изменении логотипа
+      - assets_logo.py
+      - BudgetAnalyzer.py. 
       - requirements.txt
       - icon.ico
       - icon2.ico
@@ -107,6 +108,16 @@ jobs:
           } else {
             Write-Host "icon2.ico not found: building SpecialOrders without custom icon"
             pyinstaller -F -w --clean --hidden-import=tkinter -n SpecialOrders SpecialOrders.py
+          }
+
+          - name: Build BudgetAnalyzer (windowed)
+          shell: pwsh
+          run: |
+            if (Test-Path "icon2.ico") {
+            pyinstaller -F -w --clean --hidden-import=tkinter -i icon2.ico -n BudgetAnalyzer BudgetAnalyzer.py
+          } else {
+            Write-Host "icon2.ico not found: building BudgetAnalyzer without custom icon"
+            pyinstaller -F -w --clean --hidden-import=tkinter -n BudgetAnalyzer BudgetAnalyzer.py
           }
 
       - name: List dist
