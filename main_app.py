@@ -1484,52 +1484,20 @@ class HomePage(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
 
-        # Контейнер, занимающий всю страницу
         outer = tk.Frame(self, bg="#f7f7f7")
         outer.pack(fill="both", expand=True)
 
-        # Внутренний блок, который ставим ровно по центру
         center = tk.Frame(outer, bg="#f7f7f7")
         center.place(relx=0.5, rely=0.5, anchor="center")
 
-        # Пытаемся загрузить логотип
-        self.logo_img = None
-        logo_path = find_logo_path()
-        if logo_path:
-            try:
-                MAX_W, MAX_H = 360, 160
-                if Image and ImageTk:
-                    # Через Pillow — красиво масштабируем
-                    im = Image.open(logo_path)
-                    im.thumbnail((MAX_W, MAX_H), Image.LANCZOS)
-                    self.logo_img = ImageTk.PhotoImage(im)
-                else:
-                    # Базовый PhotoImage (PNG/GIF). При необходимости уменьшаем через subsample.
-                    img = tk.PhotoImage(file=str(logo_path))
-                    w, h = img.width(), img.height()
-                    factor = max(w / MAX_W, h / MAX_H, 1)
-                    if factor > 1:
-                        k = max(1, int(factor))
-                        img = img.subsample(k, k)
-                    self.logo_img = img
-            except Exception as e:
-                print(f"[HomePage] Ошибка загрузки логотипа: {e}")
-
-        # Логотип (если загрузился)
+        self.logo_img = embedded_logo_image(center, max_w=480, max_h=3600)
         if self.logo_img:
-            tk.Label(center, image=self.logo_img, bg="#f7f7f7").pack(anchor="center", pady=(0, 10))
+            tk.Label(center, image=self.logo_img, bg="#f7f7f7").pack(anchor="center", pady=(0, 12))
 
-        # Текст приветствия
         tk.Label(center, text="Добро пожаловать!", font=("Segoe UI", 18, "bold"), bg="#f7f7f7")\
             .pack(anchor="center", pady=(4, 6))
-        tk.Label(
-            center,
-            text="Выберите раздел в верхнем меню.\nОбъектный табель → Создать — для работы с табелями.",
-            font=("Segoe UI", 10),
-            fg="#444",
-            bg="#f7f7f7",
-            justify="center"
-        ).pack(anchor="center")
+        tk.Label(center, text="Выберите раздел в верхнем меню.\nОбъектный табель → Создать — для работы с табелями.",
+                 font=("Segoe UI", 10), fg="#444", bg="#f7f7f7", justify="center").pack(anchor="center")
 
 
 # ------------- Главное окно (единоe) -------------
