@@ -2,13 +2,15 @@
 import re
 import csv
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 
 from openpyxl import Workbook, load_workbook
 
+
+# ------------------------- Диалог сопоставления колонок (общий режим) -------------------------
 
 class ColumnMappingDialog(simpledialog.Dialog):
     def __init__(self, parent, headers: List[str], cur_map: Dict[str, Optional[int]]):
@@ -59,15 +61,29 @@ class ColumnMappingDialog(simpledialog.Dialog):
         }
 
 
+# ------------------------- Страница Анализ смет -------------------------
+
 class BudgetAnalysisPage(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
         self.file_path: Optional[Path] = None
+
+        # Общий режим
         self.headers: List[str] = []
         self.rows: List[List[Any]] = []
         self.mapping: Dict[str, Optional[int]] = {"total": None, "materials": None, "wages": None}
+
+        # Smeta-режим (специализированный парсер Smeta.RU)
+        self.mode: str = "generic"  # "smeta" | "generic"
+        self.smeta_sheet_name: Optional[str] = None
+        self.smeta_name_col: Optional[int] = None   # индекс колонки "Наименование работ и затрат" (0-based)
+        self.smeta_cost_col: Optional[int] = None   # индекс колонки "ВСЕГО затрат, руб." (0-based)
+        self.smeta_data_rows: List[List[Any]] = []  # чистые строки данных после заголовка
+
+        # Итоги
         self.stats = {"total": 0.0, "materials": 0.0, "wages": 0.0, "other": 0.0}
 
+        # UI
         header = tk.Frame(self, bg="#f7f7f7")
         header.pack(fill="x", padx=12, pady=(10, 6))
         tk.Label(header, text="Анализ смет", font=("Segoe UI", 16, "bold"), bg="#f7f7f7").pack(side="left")
@@ -81,7 +97,10 @@ class BudgetAnalysisPage(tk.Frame):
         self.btn_export = ctrl.winfo_children()[2]
 
         self.lbl_file = tk.Label(self, text="Файл не выбран", fg="#555", bg="#f7f7f7")
-        self.lbl_file.pack(anchor="w", padx=12, pady=(0, 6))
+        self.lbl_file.pack(anchor="w", padx=12, pady=(0, 2))
+
+        self.lbl_sheet = tk.Label(self, text="", fg="#777", bg="#f7f7f7")
+        self.lbl_sheet.pack(anchor="w", padx=12, pady=(0, 6))
 
         card = tk.Frame(self, bg="#ffffff", bd=1, relief="solid")
         card.pack(fill="x", padx=12, pady=(0, 10))
@@ -103,9 +122,9 @@ class BudgetAnalysisPage(tk.Frame):
 
         hint = tk.Label(
             self,
-            text=("Поддерживаются XLSX (первая строка — заголовки) и CSV (автоопределение ; или ,). "
-                  "Колонки распознаются по именам ('Итого','Всего','Материалы','Заработная плата'). "
-                  "При необходимости используйте «Настроить соответствие колонок»."),
+            text=("Поддержка Smeta.RU: выбирается лист с “ЛОКАЛЬНАЯ СМЕТА”, берутся 11-колоночные строки.\n"
+                  "Суммы — из 10-й колонки; ЗП/в т.ч. ЗПМ — в «Заработная плата», «Материалы/МАТ» — в «Материалы», "
+                  "остальное — в «Прочие». Если автоопределение не сработало — используйте ручное сопоставление колонок."),
             fg="#666", bg="#f7f7f7", justify="left", wraplength=980
         )
         hint.pack(fill="x", padx=12, pady=(0, 12))
@@ -133,83 +152,188 @@ class BudgetAnalysisPage(tk.Frame):
             return
         self.file_path = Path(fname)
         self.lbl_file.config(text=f"Файл: {self.file_path}")
+
         ok = self._load_file(self.file_path)
-        self.btn_map.config(state=("normal" if ok else "disabled"))
+        self.btn_map.config(state=("normal" if (ok and self.mode == "generic") else "disabled"))
         self.btn_export.config(state=("normal" if ok else "disabled"))
         if not ok:
             messagebox.showwarning("Анализ смет", "Не удалось распознать структуру файла. "
-                                                  "Попробуйте настроить соответствие колонок вручную.")
+                                                  "Попробуйте настроить соответствие колонок вручную (для CSV/XLSX с таблицей).")
 
     def _load_file(self, path: Path) -> bool:
+        self.mode = "generic"
         self.headers, self.rows = [], []
+        self.smeta_sheet_name = None
+        self.smeta_name_col = None
+        self.smeta_cost_col = None
+        self.smeta_data_rows = []
+        self.lbl_sheet.config(text="")
+
         ext = path.suffix.lower()
         try:
             if ext in (".xlsx", ".xlsm"):
-                self._parse_xlsx(path)
+                if self._parse_xlsx_smeta_ru(path):
+                    self.mode = "smeta"
+                    self._analyze_smeta()
+                    return True
+                # если не похоже на смета.ру — пробуем общий режим
+                self._parse_xlsx_generic(path)
+                self.mapping = self._detect_mapping(self.headers, self.rows)
+                self._analyze_generic()
+                return True
             elif ext == ".csv":
-                self._parse_csv(path)
+                self._parse_csv_generic(path)
+                self.mapping = self._detect_mapping(self.headers, self.rows)
+                self._analyze_generic()
+                return True
             else:
+                # Попытка xlsx → csv
                 try:
-                    self._parse_xlsx(path)
+                    if self._parse_xlsx_smeta_ru(path):
+                        self.mode = "smeta"
+                        self._analyze_smeta()
+                        return True
+                    self._parse_xlsx_generic(path)
+                    self.mapping = self._detect_mapping(self.headers, self.rows)
+                    self._analyze_generic()
+                    return True
                 except Exception:
-                    self._parse_csv(path)
+                    self._parse_csv_generic(path)
+                    self.mapping = self._detect_mapping(self.headers, self.rows)
+                    self._analyze_generic()
+                    return True
         except Exception as e:
             messagebox.showerror("Загрузка сметы", f"Ошибка чтения файла:\n{e}")
             return False
 
-        if not self.headers or not self.rows:
+    # ---------- Smeta.RU режим (лист «ЛОКАЛЬНАЯ СМЕТА», 11 колонок) ----------
+
+    def _parse_xlsx_smeta_ru(self, path: Path) -> bool:
+        """
+        Ищем лист, где в верхних 30 строках встречается «ЛОКАЛЬНАЯ СМЕТА».
+        На нём ищем шапку 11-колоночной таблицы с «Наименование работ и затрат» и «ВСЕГО затрат».
+        Дальше читаем строки до «Итого по локальной смете».
+        """
+        wb = load_workbook(path, read_only=True, data_only=True)
+        target_ws = None
+        for ws in wb.worksheets:
+            if self._sheet_has_local_smeta_marker(ws):
+                target_ws = ws
+                break
+        if target_ws is None:
             return False
 
-        self.mapping = self._detect_mapping(self.headers, self.rows)
-        self._analyze()
+        # Найти строку заголовков таблицы и индексы нужных колонок
+        hdr_row_idx, name_col, cost_col = self._find_table_header(target_ws)
+        if hdr_row_idx is None or name_col is None or cost_col is None:
+            return False
+
+        # Считать данные до "Итого по локальной смете"
+        data_rows = []
+        for row in target_ws.iter_rows(min_row=hdr_row_idx + 1, values_only=True):
+            cells = list(row)
+            if not any(c is not None and str(c).strip() for c in cells):
+                # пустая строка — пропустим, но не завершаем
+                continue
+            # стоп-маркеры итога
+            name_cell = self._str(cells[name_col])
+            if "итого по локальной смете" in name_cell.lower():
+                break
+            data_rows.append(cells)
+
+        # Сохраняем параметры smeta-режима
+        self.smeta_sheet_name = target_ws.title
+        self.smeta_name_col = name_col
+        self.smeta_cost_col = cost_col
+        self.smeta_data_rows = data_rows
+
+        # Найдём явный итог «Итого по локальной смете»
+        total = self._find_local_total(target_ws, hdr_row_idx, name_col, cost_col)
+        self.stats = {"total": total or 0.0, "materials": 0.0, "wages": 0.0, "other": 0.0}
+
+        self.lbl_sheet.config(text=f"Лист: {self.smeta_sheet_name} (режим Smeta.RU)")
         return True
 
-    def _parse_xlsx(self, path: Path):
-        wb = load_workbook(path, read_only=True, data_only=True)
-        ws = wb.active
-        hdr_row_idx = None
-        for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
-            cells = [str(c).strip() if c is not None else "" for c in row]
-            if sum(1 for c in cells if c) >= 2:
-                hdr_row_idx = i
-                self.headers = [self._norm_header(c) for c in cells]
-                break
-        if hdr_row_idx is None:
-            raise RuntimeError("Не найдена строка заголовков")
-        self.rows = []
-        for row in ws.iter_rows(min_row=hdr_row_idx + 1, values_only=True):
-            self.rows.append(list(row))
-
-    def _parse_csv(self, path: Path):
-        with open(path, "r", encoding="utf-8-sig", newline="") as f:
-            sample = f.read(4096)
-            f.seek(0)
-            try:
-                sniffer = csv.Sniffer()
-                dialect = sniffer.sniff(sample, delimiters=";,")
-            except Exception:
-                class D: delimiter = ";"
-                dialect = D()
-            reader = csv.reader(f, dialect=dialect)
-            rows = list(reader)
-        if not rows:
-            raise RuntimeError("CSV пустой")
-        hdr_idx = None
-        for i, row in enumerate(rows):
-            if any((c or "").strip() for c in row):
-                hdr_idx = i
-                break
-        if hdr_idx is None:
-            raise RuntimeError("Не найдена строка заголовков")
-        self.headers = [self._norm_header(c) for c in rows[hdr_idx]]
-        self.rows = rows[hdr_idx + 1:]
-
-    # ---------- Расчет ----------
     @staticmethod
-    def _norm_header(s: Any) -> str:
+    def _sheet_has_local_smeta_marker(ws) -> bool:
+        try:
+            for r, row in enumerate(ws.iter_rows(min_row=1, max_row=30, values_only=True), start=1):
+                for c in row:
+                    if isinstance(c, str) and "локальная смета" in c.lower():
+                        return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def _normalize_header_text(s: Any) -> str:
         txt = str(s or "").strip()
         txt = txt.replace("\n", " ").replace("\r", " ")
-        return re.sub(r"\s+", " ", txt)
+        return re.sub(r"\s+", " ", txt).lower()
+
+    def _find_table_header(self, ws) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+        """
+        Ищем строку, где встречаются как минимум:
+        - «Наименование работ и затрат»
+        - «ВСЕГО затрат» (или «всего затрат, руб.»)
+        Также допускаем строку с нумерацией 1..11.
+        """
+        name_col = None
+        cost_col = None
+        hdr_row_idx = None
+
+        for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
+            vals = [self._normalize_header_text(v) for v in row]
+            if not any(vals):
+                continue
+
+            # Попытка 1: полноценные заголовки
+            if any("наименование работ" in v and "затрат" in v for v in vals) and any(
+                "всего" in v and "затрат" in v for v in vals
+            ):
+                hdr_row_idx = i
+                for idx, v in enumerate(vals):
+                    if "наименование работ" in v and "затрат" in v and name_col is None:
+                        name_col = idx
+                    if "всего" in v and "затрат" in v and cost_col is None:
+                        cost_col = idx
+                break
+
+            # Попытка 2: строка 1..11 (цифры)
+            only_digits = [str(v).strip() for v in row if v is not None]
+            if only_digits and all(x.isdigit() for x in only_digits):
+                # Часто name_col=2 (3-я), cost_col=9 (10-я) при 1-based
+                hdr_row_idx = i
+                name_col = 2
+                cost_col = 9
+                break
+
+        return hdr_row_idx, name_col, cost_col
+
+    def _find_local_total(self, ws, start_row: int, name_col: int, cost_col: int) -> Optional[float]:
+        """
+        Находим строку «Итого по локальной смете» ниже шапки и берём сумму из cost_col.
+        Если нет — вернём None.
+        """
+        for row in ws.iter_rows(min_row=start_row + 1, values_only=True):
+            cells = list(row)
+            name = self._str(cells[name_col]) if name_col < len(cells) else ""
+            if "итого по локальной смете" in name.lower():
+                if cost_col < len(cells):
+                    return self._to_number(cells[cost_col])
+                # иногда сумма стоит в соседней колонке (сместилась) — проверим ещё +-1
+                for j in (cost_col - 1, cost_col + 1):
+                    if 0 <= j < len(cells):
+                        v = self._to_number(cells[j])
+                        if isinstance(v, float):
+                            return v
+        return None
+
+    # ---------- Аналитика для Smeta.RU ----------
+
+    @staticmethod
+    def _str(x: Any) -> str:
+        return str(x or "").strip()
 
     @staticmethod
     def _to_number(x: Any) -> Optional[float]:
@@ -232,6 +356,119 @@ class BudgetAnalysisPage(tk.Frame):
             return float(s)
         except Exception:
             return None
+
+    def _analyze_smeta(self):
+        if self.smeta_name_col is None or self.smeta_cost_col is None:
+            raise RuntimeError("Не заданы индексы колонок для сметы.")
+
+        wages_sum = 0.0
+        mats_sum = 0.0
+
+        # Паттерны распознавания по 3-й колонке (наименование затрат)
+        def is_wages(name: str) -> bool:
+            n = name.lower()
+            return (
+                n == "зп"
+                or "заработ" in n
+                or "з/п" in n
+                or "зпм" in n
+                or "в т.ч. зпм" in n
+                or "оплата труда" in n
+            )
+
+        def is_materials(name: str) -> bool:
+            n = name.lower()
+            # возможные варианты для материалов
+            return (
+                n in ("м", "мат", "мат.", "материалы")
+                or "материа" in n
+                or "(м)" in n
+            )
+
+        for row in self.smeta_data_rows:
+            if self.smeta_name_col >= len(row):
+                continue
+            name = self._str(row[self.smeta_name_col])
+            if not name:
+                continue
+            # суммы в 10-й колонке (1-based) → индекс 9; но у нас вычисленный cost_col
+            val = self._to_number(row[self.smeta_cost_col]) if self.smeta_cost_col < len(row) else None
+            if not isinstance(val, float):
+                continue
+
+            if is_wages(name):
+                wages_sum += val
+            elif is_materials(name):
+                mats_sum += val
+            else:
+                # прочие (ЭМ, НР, СП и т.п.) учтём в "прочие" через разницу
+                pass
+
+        total = float(self.stats.get("total") or 0.0)
+        if total <= 0:
+            # Если явный «Итого по локальной смете» не найден — подстрахуемся суммой по всем строкам с именем
+            total = 0.0
+            for row in self.smeta_data_rows:
+                if self.smeta_name_col < len(row) and self._str(row[self.smeta_name_col]):
+                    v = self._to_number(row[self.smeta_cost_col]) if self.smeta_cost_col < len(row) else None
+                    if isinstance(v, float):
+                        total += v
+
+        other = max(0.0, total - mats_sum - wages_sum)
+
+        self.stats = {"total": total, "materials": mats_sum, "wages": wages_sum, "other": other}
+        self._render_stats()
+
+    # ---------- Общий режим (XLSX/CSV) ----------
+
+    def _parse_xlsx_generic(self, path: Path):
+        wb = load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        # Первая непустая строка — заголовки
+        hdr_row_idx = None
+        for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
+            cells = [self._str(c) for c in row]
+            if sum(1 for c in cells if c) >= 2:
+                hdr_row_idx = i
+                self.headers = [self._norm_header(c) for c in cells]
+                break
+        if hdr_row_idx is None:
+            raise RuntimeError("Не найдена строка заголовков")
+        self.rows = []
+        for row in ws.iter_rows(min_row=hdr_row_idx + 1, values_only=True):
+            self.rows.append(list(row))
+        self.lbl_sheet.config(text=f"Лист: {ws.title} (общий режим)")
+
+    def _parse_csv_generic(self, path: Path):
+        with open(path, "r", encoding="utf-8-sig", newline="") as f:
+            sample = f.read(4096)
+            f.seek(0)
+            try:
+                sniffer = csv.Sniffer()
+                dialect = sniffer.sniff(sample, delimiters=";,")
+            except Exception:
+                class D: delimiter = ";"
+                dialect = D()
+            reader = csv.reader(f, dialect=dialect)
+            rows = list(reader)
+        if not rows:
+            raise RuntimeError("CSV пустой")
+        hdr_idx = None
+        for i, row in enumerate(rows):
+            if any((c or "").strip() for c in row):
+                hdr_idx = i
+                break
+        if hdr_idx is None:
+            raise RuntimeError("Не найдена строка заголовков")
+        self.headers = [self._norm_header(c) for c in rows[hdr_idx]]
+        self.rows = rows[hdr_idx + 1:]
+        self.lbl_sheet.config(text="CSV (общий режим)")
+
+    @staticmethod
+    def _norm_header(s: Any) -> str:
+        txt = str(s or "").strip()
+        txt = txt.replace("\n", " ").replace("\r", " ")
+        return re.sub(r"\s+", " ", txt)
 
     def _detect_mapping(self, headers: List[str], rows: List[List[Any]]) -> Dict[str, Optional[int]]:
         hlow = [h.lower() for h in headers]
@@ -277,6 +514,20 @@ class BudgetAnalysisPage(tk.Frame):
                     s += v
         return s
 
+    def _analyze_generic(self):
+        total     = self._sum_column(self.mapping.get("total"))
+        materials = self._sum_column(self.mapping.get("materials"))
+        wages     = self._sum_column(self.mapping.get("wages"))
+
+        if total <= 0:
+            total = materials + wages
+
+        other = max(0.0, total - materials - wages)
+        self.stats = {"total": total, "materials": materials, "wages": wages, "other": other}
+        self._render_stats()
+
+    # ---------- Отрисовка результатов ----------
+
     @staticmethod
     def _fmt_money(x: Optional[float]) -> str:
         if x is None:
@@ -301,16 +552,11 @@ class BudgetAnalysisPage(tk.Frame):
         t = self.stats.get("total", 0.0)
         return (part / t * 100.0) if t and t > 1e-12 else None
 
-    def _analyze(self):
-        total     = self._sum_column(self.mapping.get("total"))
-        materials = self._sum_column(self.mapping.get("materials"))
-        wages     = self._sum_column(self.mapping.get("wages"))
-
-        if total <= 0:
-            total = materials + wages
-
-        other = max(0.0, total - materials - wages)
-        self.stats = {"total": total, "materials": materials, "wages": wages, "other": other}
+    def _render_stats(self):
+        total     = float(self.stats.get("total") or 0.0)
+        materials = float(self.stats.get("materials") or 0.0)
+        wages     = float(self.stats.get("wages") or 0.0)
+        other     = float(self.stats.get("other") or 0.0)
 
         p_mat = (materials / total * 100.0) if total > 1e-12 else None
         p_wag = (wages     / total * 100.0) if total > 1e-12 else None
@@ -330,12 +576,12 @@ class BudgetAnalysisPage(tk.Frame):
 
     # ---------- Действия ----------
     def _open_mapping(self):
-        if not self.headers:
+        if not self.headers or self.mode != "generic":
             return
         dlg = ColumnMappingDialog(self, headers=self.headers, cur_map=self.mapping)
         if getattr(dlg, "result", None):
             self.mapping = dlg.result
-            self._analyze()
+            self._analyze_generic()
 
     def _export_summary(self):
         try:
