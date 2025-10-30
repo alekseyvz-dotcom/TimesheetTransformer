@@ -21,7 +21,21 @@ try:
 except Exception:
     Image = ImageTk = None
 
-from assets_logo import LOGO_BASE64  # файл assets_logo.py должен лежать рядом с main_app.py
+# мягкий импорт модуля (не падает, если переменной нет)
+try:
+    import assets_logo as _assets_logo
+    _LOGO_BASE64 = getattr(_assets_logo, "LOGO_BASE64", None)
+except Exception:
+    _LOGO_BASE64 = None
+
+# raw-URL на логотип (фолбэк, если _LOGO_BASE64 отсутствует)
+RAW_LOGO_URL = "https://raw.githubusercontent.com/alekseyvz-dotcom/TimesheetTransformer/main/logo.png"
+
+# tiny PNG 1x1 — последний фолбэк, чтобы не падать
+TINY_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+    "/w8AAn8B9w3G2kIAAAAASUVORK5CYII="
+)
 
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
@@ -74,31 +88,41 @@ CONVERTER_EXE = "TabelConverter.exe"  # резервный exe
 # python
 def embedded_logo_image(parent, max_w=360, max_h=160):
     """
-    Возвращает PhotoImage/ImageTk.PhotoImage из встроенного LOGO_BASE64
-    с аккуратным масштабированием до max_w x max_h.
+    Источники по приоритету:
+    1) _LOGO_BASE64 из assets_logo.py (если есть)
+    2) RAW-скачивание из GitHub
+    3) tiny PNG
     """
-    # Пытаемся через Pillow (лучшее качество)
+    b64 = _LOGO_BASE64
+
+    if not b64:
+        try:
+            import urllib.request
+            data = urllib.request.urlopen(RAW_LOGO_URL, timeout=5).read()
+            b64 = base64.b64encode(data).decode("ascii")
+        except Exception:
+            b64 = TINY_PNG_BASE64
+
     if Image and ImageTk:
         try:
-            raw = base64.b64decode(LOGO_BASE64.strip())
+            raw = base64.b64decode(b64.strip())
             im = Image.open(BytesIO(raw))
             im.thumbnail((max_w, max_h), Image.LANCZOS)
             return ImageTk.PhotoImage(im, master=parent)
-        except Exception as e:
-            print(f"[logo PIL] error: {e}")
+        except Exception:
+            pass
 
-    # Фолбэк без Pillow: напрямую в Tk (PNG/GIF)
     try:
-        ph = tk.PhotoImage(data=LOGO_BASE64.strip(), master=parent)
+        ph = tk.PhotoImage(data=b64.strip(), master=parent)
         w, h = ph.width(), ph.height()
         k = max(w / max_w, h / max_h, 1)
         if k > 1:
             k = max(1, int(k))
             ph = ph.subsample(k, k)
         return ph
-    except Exception as e:
-        print(f"[logo Tk] error: {e}")
+    except Exception:
         return None
+
 
 def exe_dir() -> Path:
     if getattr(sys, "frozen", False):
