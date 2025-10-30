@@ -28,7 +28,7 @@ try:
 except Exception:
     _LOGO_BASE64 = None
 
-# raw-URL на логотип (фолбэк, если _LOGO_BASE64 отсутствует)
+# raw-URL на логотип (фолбэк, если _ отсутствует)
 RAW_LOGO_URL = "https://raw.githubusercontent.com/alekseyvz-dotcom/TimesheetTransformer/main/logo.png"
 
 # tiny PNG 1x1 — последний фолбэк, чтобы не падать
@@ -1550,7 +1550,7 @@ class HomePage(tk.Frame):
         center = tk.Frame(outer, bg="#f7f7f7")
         center.place(relx=0.5, rely=0.5, anchor="center")
 
-        self.logo_img = embedded_logo_image(center, max_w=480, max_h=3600)
+        self.logo_img = embedded_logo_image(center, max_w=360, max_h=360)
         if self.logo_img:
             tk.Label(center, image=self.logo_img, bg="#f7f7f7").pack(anchor="center", pady=(0, 12))
 
