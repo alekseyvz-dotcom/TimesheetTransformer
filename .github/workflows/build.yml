@@ -75,15 +75,17 @@ jobs:
             Write-Host "assets_logo.py already exists — keep repository version"
            }
 
+      
       - name: Build TabelSuite (main menu, windowed)
         shell: pwsh
         run: |
           if (Test-Path "icon.ico") {
-            pyinstaller -F -w --clean --hidden-import=tkinter -i icon.ico -n TabelSuite main_app.py
+            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=assets_logo -i icon.ico -n TabelSuite main_app.py
           } else {
             Write-Host "icon.ico not found: building TabelSuite without custom icon"
-            pyinstaller -F -w --clean --hidden-import=tkinter -n TabelSuite main_app.py
+            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=assets_logo -n TabelSuite main_app.py
           }
+
 
       - name: Build TabelConverter (converter, windowed)
         shell: pwsh
