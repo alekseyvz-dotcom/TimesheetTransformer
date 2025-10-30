@@ -7,6 +7,7 @@ on:
       - main_app.py
       - timesheet_transformer.py
       - SpecialOrders.py
+      - assets_logo.py
       - requirements.txt
       - icon.ico
       - .github/workflows/build.yml
