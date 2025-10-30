@@ -1494,10 +1494,10 @@ class MainApp(tk.Tk):
         menubar.add_cascade(label="Объектный табель", menu=m_ts)
 
         m_transport = tk.Menu(menubar, tearoff=0)
-        if SpecialOrders and hasattr(SpecialOrders, "open_special_orders"):
-            m_transport.add_command(label="Заявка на автотранспорт", command=lambda: SpecialOrders.open_special_orders(self))
-        else:
-            m_transport.add_command(label="Заявка на автотранспорт", command=self.run_special_orders_exe)
+        m_transport.add_command(
+            label="Заявка на автотранспорт",
+            command=lambda: self._show_page("transport", lambda parent: SpecialOrders.create_page(parent))
+        )
         menubar.add_cascade(label="Автотранспорт", menu=m_transport)
 
         m_spr = tk.Menu(menubar, tearoff=0)
