@@ -49,6 +49,32 @@ jobs:
           if (Test-Path dist)  { Remove-Item -Recurse -Force dist }
           if (Test-Path build) { Remove-Item -Recurse -Force build }
 
+      - name: Ensure assets_logo.py (generate from RAW logo if missing)
+        shell: pwsh
+        run: |
+          $rawUrl = "https://raw.githubusercontent.com/alekseyvz-dotcom/TimesheetTransformer/main/logo.png"
+          if (-not (Test-Path "assets_logo.py")) {
+            Write-Host "assets_logo.py not found — generating from RAW URL"
+            python - << 'PY'
+            import base64, urllib.request, pathlib, sys
+            url = "https://raw.githubusercontent.com/alekseyvz-dotcom/TimesheetTransformer/main/logo.png"
+            try:
+            data = urllib.request.urlopen(url, timeout=10).read()
+            b64 = base64.b64encode(data).decode("ascii")
+            pathlib.Path("assets_logo.py").write_text('LOGO_BASE64 = """\\\n' + b64 + '\n"""', encoding="utf-8")
+            print("assets_logo.py generated")
+            except Exception as e:
+            print("WARNING: cannot fetch logo:", e)
+           # записываем tiny PNG, чтобы не упасть
+           tiny = ("LOGO_BASE64 = \"" +
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/w8AAn8B9w3G2kIAAAAASUVORK5CYII="
+            + "\"\n")
+           pathlib.Path("assets_logo.py").write_text(tiny, encoding="utf-8")
+           PY
+           } else {
+            Write-Host "assets_logo.py already exists — keep repository version"
+           }
+
       - name: Build TabelSuite (main menu, windowed)
         shell: pwsh
         run: |
