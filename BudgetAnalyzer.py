@@ -362,17 +362,16 @@ class BudgetAnalysisPage(tk.Frame):
             has_name = False
             tmp_cost_cols: List[int] = []
 
-            for idx, v in enumerate(vals):
-                if ("наименование работ" in v and "затрат" in v) or ("наименование работ и затрат" in v):
+        for idx, v in enumerate(vals):
+            if ("наименование работ" in v and "затрат" in v) or ("наименование работ и затрат" in v):
                     has_name = True
-                    if name_col is None:
+            if name_col is None:
                         name_col = idx
-                if "всего" in v:
+            if "всего" in v:
                     tmp_cost_cols.append(idx)
-
             if has_name and_cols:
-                hdr_row_idx = i
-                cost_cols = tmp_cost_cols
+                    hdr_row_idx = i
+                    cost_cols = tmp_cost_cols
                 break
 
             # Попытка 2: строка 1..11 (цифры)
