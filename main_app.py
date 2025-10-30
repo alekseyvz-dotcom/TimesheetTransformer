@@ -14,6 +14,14 @@ from io import BytesIO
 from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple, Optional, Any, Dict
+import base64
+from io import BytesIO
+try:
+    from PIL import Image, ImageTk
+except Exception:
+    Image = ImageTk = None
+
+from assets_logo import LOGO_BASE64  # файл assets_logo.py должен лежать рядом с main_app.py
 
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
@@ -36,15 +44,6 @@ try:
 except Exception:
     Image = ImageTk = None
     
-import base64
-from io import BytesIO
-try:
-    from PIL import Image, ImageTk
-except Exception:
-    Image = ImageTk = None
-
-from assets_logo import LOGO_BASE64  # файл assets_logo.py должен лежать рядом с main_app.py
-
 APP_NAME = "Управление строительством (Главное меню)"
 
 # ------------- Конфиг и файлы -------------
@@ -72,6 +71,34 @@ OUTPUT_DIR_DEFAULT = "Объектные_табели"
 CONVERTER_EXE = "TabelConverter.exe"  # резервный exe
 
 # ------------- Базовые утилиты -------------
+# python
+def embedded_logo_image(parent, max_w=360, max_h=160):
+    """
+    Возвращает PhotoImage/ImageTk.PhotoImage из встроенного LOGO_BASE64
+    с аккуратным масштабированием до max_w x max_h.
+    """
+    # Пытаемся через Pillow (лучшее качество)
+    if Image and ImageTk:
+        try:
+            raw = base64.b64decode(LOGO_BASE64.strip())
+            im = Image.open(BytesIO(raw))
+            im.thumbnail((max_w, max_h), Image.LANCZOS)
+            return ImageTk.PhotoImage(im, master=parent)
+        except Exception as e:
+            print(f"[logo PIL] error: {e}")
+
+    # Фолбэк без Pillow: напрямую в Tk (PNG/GIF)
+    try:
+        ph = tk.PhotoImage(data=LOGO_BASE64.strip(), master=parent)
+        w, h = ph.width(), ph.height()
+        k = max(w / max_w, h / max_h, 1)
+        if k > 1:
+            k = max(1, int(k))
+            ph = ph.subsample(k, k)
+        return ph
+    except Exception as e:
+        print(f"[logo Tk] error: {e}")
+        return None
 
 def exe_dir() -> Path:
     if getattr(sys, "frozen", False):
