@@ -35,6 +35,15 @@ try:
     from PIL import Image, ImageTk
 except Exception:
     Image = ImageTk = None
+    
+import base64
+from io import BytesIO
+try:
+    from PIL import Image, ImageTk
+except Exception:
+    Image = ImageTk = None
+
+from assets_logo import LOGO_BASE64  # файл assets_logo.py должен лежать рядом с main_app.py
 
 APP_NAME = "Управление строительством (Главное меню)"
 
