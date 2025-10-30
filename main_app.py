@@ -20,6 +20,11 @@ try:
     from PIL import Image, ImageTk
 except Exception:
     Image = ImageTk = None
+try:
+    import BudgetAnalyzer  # должен содержать create_page(parent)
+except Exception:
+    BudgetAnalyzer = None
+
 
 # мягкий импорт модуля (не падает, если переменной нет)
 try:
@@ -1603,6 +1608,11 @@ class MainApp(tk.Tk):
             m_tools.add_command(label="Конвертер табеля (1С)", command=lambda: timesheet_transformer.open_converter(self))
         else:
             m_tools.add_command(label="Конвертер табеля (1С)", command=self.run_converter_exe)
+        if BudgetAnalyzer and hasattr(BudgetAnalyzer, "create_page"):
+            m_tools.add_command(label="Анализ смет", command=lambda: self._show_page("budget", lambda parent: BudgetAnalyzer.create_page(parent)))
+        else:
+            m_tools.add_command(label="Анализ смет", command=lambda: messagebox.showwarning("Анализ смет", "Модуль BudgetAnalyzer.py не найден."))
+
         menubar.add_cascade(label="Инструменты", menu=m_tools)
 
         self.config(menu=menubar)
