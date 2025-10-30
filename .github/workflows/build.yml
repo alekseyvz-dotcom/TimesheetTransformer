@@ -110,10 +110,10 @@ jobs:
             pyinstaller -F -w --clean --hidden-import=tkinter -n SpecialOrders SpecialOrders.py
           }
 
-          - name: Build BudgetAnalyzer (windowed)
-          shell: pwsh
-          run: |
-            if (Test-Path "icon2.ico") {
+      - name: Build BudgetAnalyzer (windowed)
+        shell: pwsh
+        run: |
+          if (Test-Path "icon2.ico") {
             pyinstaller -F -w --clean --hidden-import=tkinter -i icon2.ico -n BudgetAnalyzer BudgetAnalyzer.py
           } else {
             Write-Host "icon2.ico not found: building BudgetAnalyzer without custom icon"
