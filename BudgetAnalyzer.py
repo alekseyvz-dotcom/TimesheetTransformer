@@ -789,48 +789,83 @@ class BudgetAnalysisPage(tk.Frame):
             self.mapping = dlg.result
             self._analyze_generic()
 
-    def _export_summary(self):
-        try:
-            from tkinter import filedialog as fd
-        except Exception:
-            messagebox.showerror("Экспорт", "Не удалось открыть диалог сохранения.")
-            return
-        if not self.stats:
-            return
-        fname = fd.asksaveasfilename(
-            title="Сохранить свод",
-            defaultextension=".xlsx",
-            filetypes=[("Excel", "*.xlsx"), ("CSV", "*.csv")]
-        )
-        if not fname:
-            return
-        out = Path(fname)
-        try:
-            if out.suffix.lower() == ".csv":
-                with open(out, "w", encoding="utf-8-sig", newline="") as f:
-                    w = csv.writer(f, delimiter=";")
-                    w.writerow(["Показатель", "Сумма (руб.)", "Доля"])
-                    w.writerow(["Строительные затраты (Итого)", f"{self._fmt_money(self.stats['total'])}", "100%"])
-                    w.writerow(["Материалы", f"{self._fmt_money(self.stats['materials'])}",
-                                self._fmt_pct(self._safe_pct(self.stats['materials']))])
-                    w.writerow(["Заработная плата", f"{self._fmt_money(self.stats['wages'])}",
-                                self._fmt_pct(self._safe_pct(self.stats['wages']))])
-                    w.writerow(["Прочие", f"{self._fmt_money(self.stats['other'])}",
-                                self._fmt_pct(self._safe_pct(self.stats['other']))])
-                    # Расшифровка
-                    w.writerow([])
-                    w.writerow(["Расшифровка", "", ""])
-                    w.writerow(["Категория", "Наименование", "Сумма, руб."])
-                    for row in self.breakdown_rows:
-                        w.writerow([row["category"], row["name"], f"{self._fmt_money(row['amount'])}"])
-            else:
-                wb = Workbook()
-                ws = wb.active
-                ws.title = "Анализ сметы"
-                ws.append(["Показатель", "Сумма (руб.)", "Доля"])
-                ws.append(["Строительные затраты (Итого)", self.stats["total"], "100%"])
-                ws.append(["Материалы", self.stats["materials"], self._fmt_pct(self._safe_pct(self.stats['materials']))])
-                ws.append(["Заработная плата", self.stats f"Не удалось сохранить свод:\n{e}")
+    # python
+def _export_summary(self):
+    try:
+        from tkinter import filedialog as fd
+    except Exception:
+        messagebox.showerror("Экспорт", "Не удалось открыть диалог сохранения.")
+        return
+    if not self.stats:
+        return
+
+    fname = fd.asksaveasfilename(
+        title="Сохранить свод",
+        defaultextension=".xlsx",
+        filetypes=[("Excel", "*.xlsx"), ("CSV", "*.csv")]
+    )
+    if not fname:
+        return
+    out = Path(fname)
+
+    try:
+        if out.suffix.lower() == ".csv":
+            with open(out, "w", encoding="utf-8-sig", newline="") as f:
+                w = csv.writer(f, delimiter=";")
+                w.writerow(["Показатель", "Сумма (руб.)", "Доля"])
+                w.writerow(["Строительные затраты (Итого)", f"{self._fmt_money(self.stats['total'])}", "100%"])
+                w.writerow(["Материалы", f"{self._fmt_money(self.stats['materials'])}",
+                            self._fmt_pct(self._safe_pct(self.stats['materials']))])
+                w.writerow(["Заработная плата", f"{self._fmt_money(self.stats['wages'])}",
+                            self._fmt_pct(self._safe_pct(self.stats['wages']))])
+                w.writerow(["Прочие", f"{self._fmt_money(self.stats['other'])}",
+                            self._fmt_pct(self._safe_pct(self.stats['other']))])
+                # Расшифровка
+                w.writerow([])
+                w.writerow(["Расшифровка", "", ""])
+                w.writerow(["Категория", "Наименование", "Сумма, руб."])
+                for row in self.breakdown_rows:
+                    w.writerow([row["category"], row["name"], f"{self._fmt_money(row['amount'])}"])
+        else:
+            # XLSX — пишем числа как числа
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Анализ сметы"
+            ws.append(["Показатель", "Сумма (руб.)", "Доля"])
+            ws.append(["Строительные затраты (Итого)", float(self.stats.get("total", 0.0)), "100%"])
+            ws.append([
+                "Материалы",
+                float(self.stats.get("materials", 0.0)),
+                self._fmt_pct(self._safe_pct(self.stats.get("materials", 0.0))),
+            ])
+            ws.append([
+                "Заработная плата",
+                float(self.stats.get("wages", 0.0)),
+                self._fmt_pct(self._safe_pct(self.stats.get("wages", 0.0))),
+            ])
+            ws.append([
+                "Прочие",
+                float(self.stats.get("other", 0.0)),
+                self._fmt_pct(self._safe_pct(self.stats.get("other", 0.0))),
+            ])
+            ws.append([])
+            ws.append(["Расшифровка"])
+            ws.append(["Категория", "Наименование", "Сумма, руб."])
+            for row in self.breakdown_rows:
+                ws.append([
+                    row["category"],
+                    row["name"],
+                    float(row.get("amount", 0.0) or 0.0)
+                ])
+            ws.column_dimensions["A"].width = 36
+            ws.column_dimensions["B"].width = 60
+            ws.column_dimensions["C"].width = 18
+            wb.save(out)
+
+        messagebox.showinfo("Экспорт", f"Свод сохранён:\n{out}")
+    except Exception as e:
+        messagebox.showerror("Экспорт", f"Не удалось сохранить свод:\n{e}")
+
 
 
 # --------- API для встраивания/стендалон ---------
