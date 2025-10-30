@@ -1,3 +1,4 @@
+# python
 import os
 import re
 import sys
@@ -237,10 +238,6 @@ def ensure_spravochnik(path: Path):
     wb.save(path)
 
 def fetch_yadisk_public_bytes(public_link: str, public_path: str = "") -> bytes:
-    """
-    По публичной ссылке Я.Диска получаем прямой href и скачиваем файл.
-    Если public_path задан (для публичной ПАПКИ) — указываем относительный путь внутри ресурса.
-    """
     if not public_link:
         raise RuntimeError("Не задана публичная ссылка Я.Диска")
     api = "https://cloud-api.yandex.net/v1/disk/public/resources/download"
@@ -314,10 +311,6 @@ def load_spravochnik_from_wb(wb) -> Tuple[
     return employees, objects, tech
 
 def load_spravochnik_remote_or_local(local_path: Path):
-    """
-    Если [Remote]use_remote=true и задана ссылка — грузим Справочник.xlsx с Я.Диска,
-    иначе — читаем локальный файл. Возвращает (employees, objects, tech).
-    """
     cfg = read_config()
     use_remote = cfg.get(CONFIG_SECTION_REMOTE, KEY_REMOTE_USE, fallback="false").strip().lower() in ("1","true","yes","on")
     if use_remote:
@@ -474,20 +467,17 @@ class PositionRow:
 
     def validate(self) -> bool:
         ok = True
-        # техника
         val = (self.cmb_tech.get() or "").strip()
         if not val:
             self._mark_err(self.cmb_tech); ok = False
         else:
             self._clear_err(self.cmb_tech)
-        # qty
         try:
             qty = int((self.ent_qty.get() or "0").strip())
             if qty <= 0: raise ValueError
             self._clear_err(self.ent_qty)
         except Exception:
             self._mark_err(self.ent_qty); ok = False
-        # time (optional)
         tstr = (self.ent_time.get() or "").strip()
         if tstr:
             if parse_time_str(tstr) is None:
@@ -496,7 +486,6 @@ class PositionRow:
                 self._clear_err(self.ent_time)
         else:
             self._clear_err(self.ent_time)
-        # hours
         hv = parse_hours_value(self.ent_hours.get())
         if hv is None or hv < 0:
             self._mark_err(self.ent_hours); ok = False
@@ -554,15 +543,12 @@ def post_json(url: str, payload: dict, token: str = '') -> Tuple[bool, str]:
         return (False, f"Error: {e}")
 
 
-# ------------------------- Окно заявок -------------------------
+# ------------------------- Встраиваемая страница -------------------------
 
-class SpecialOrdersApp(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title(APP_TITLE)
-        self.geometry("1180x720")
-        self.resizable(True, True)
-
+class SpecialOrdersPage(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master, bg="#f7f7f7")
+        ensure_config()  # на всякий случай
         self.base_dir = exe_dir()
         self.spr_path = get_spr_path()
         self.orders_dir = self.base_dir / ORDERS_DIR
@@ -571,10 +557,9 @@ class SpecialOrdersApp(tk.Tk):
         self._load_spr()
         self._build_ui()
 
+    # Ниже — те же методы, что использует standalone-окно, но работают в рамках Frame
     def _load_spr(self):
-        # Загружаем справочник (удалённый/локальный)
         employees, objects, tech = load_spravochnik_remote_or_local(self.spr_path)
-
         self.emps = [{'fio': fio, 'tbn': tbn, 'pos': pos, 'dep': dep} for (fio, tbn, pos, dep) in employees]
         self.objects = objects
 
@@ -597,35 +582,34 @@ class SpecialOrdersApp(tk.Tk):
         self.tech_values = [t['disp'] for t in self.techs]
 
     def _build_ui(self):
-        top = tk.Frame(self)
+        top = tk.Frame(self, bg="#f7f7f7")
         top.pack(fill="x", padx=10, pady=8)
 
-        # Ряд 1: Подразделение, ФИО, Телефон, Дата
-        tk.Label(top, text="Подразделение:").grid(row=0, column=0, sticky="w")
+        tk.Label(top, text="Подразделение:", bg="#f7f7f7").grid(row=0, column=0, sticky="w")
         self.cmb_dep = ttk.Combobox(top, state="readonly", values=self.deps, width=48)
         saved_dep = get_saved_dep()
         self.cmb_dep.set(saved_dep if saved_dep in self.deps else self.deps[0])
         self.cmb_dep.grid(row=0, column=1, sticky="w", padx=(4, 12))
-        self.cmb_dep.bind("<<ComboboxSelected>>", lambda e: (set_saved_dep(self.cmb_dep.get()), self._update_fio_list(), self._update_cutoff_hint()))
+        self.cmb_dep.bind("<<ComboboxSelected>>",
+                          lambda e: (set_saved_dep(self.cmb_dep.get()), self._update_fio_list(), self._update_cutoff_hint()))
 
-        tk.Label(top, text="ФИО:").grid(row=0, column=2, sticky="w")
+        tk.Label(top, text="ФИО:", bg="#f7f7f7").grid(row=0, column=2, sticky="w")
         self.fio_var = tk.StringVar()
         self.cmb_fio = AutoCompleteCombobox(top, textvariable=self.fio_var, width=36)
         self.cmb_fio.grid(row=0, column=3, sticky="w", padx=(4, 12))
 
-        tk.Label(top, text="Телефон:").grid(row=0, column=4, sticky="w")
+        tk.Label(top, text="Телефон:", bg="#f7f7f7").grid(row=0, column=4, sticky="w")
         self.ent_phone = ttk.Entry(top, width=18)
         self.ent_phone.grid(row=0, column=5, sticky="w", padx=(4, 12))
 
-        tk.Label(top, text="Дата:").grid(row=0, column=6, sticky="w")
+        tk.Label(top, text="Дата:", bg="#f7f7f7").grid(row=0, column=6, sticky="w")
         self.ent_date = ttk.Entry(top, width=12)
         self.ent_date.grid(row=0, column=7, sticky="w", padx=(4, 0))
         self.ent_date.insert(0, date.today().strftime("%Y-%m-%d"))
         self.ent_date.bind("<KeyRelease>", lambda e: self._update_cutoff_hint())
         self.ent_date.bind("<FocusOut>", lambda e: self._update_cutoff_hint())
 
-        # Ряд 2: Объект (Адрес / ID) + подсказка отсечки под датой
-        tk.Label(top, text="Адрес:").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        tk.Label(top, text="Адрес:", bg="#f7f7f7").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.cmb_address = AutoCompleteCombobox(top, width=56)
         self.cmb_address.set_completion_list(self.addresses)
         self.cmb_address.grid(row=1, column=1, columnspan=3, sticky="w", padx=(4, 12), pady=(8, 0))
@@ -633,24 +617,20 @@ class SpecialOrdersApp(tk.Tk):
         self.cmb_address.bind("<FocusOut>", lambda e: self._sync_ids_by_address())
         self.cmb_address.bind("<Return>", lambda e: self._sync_ids_by_address())
 
-        tk.Label(top, text="ID объекта:").grid(row=1, column=4, sticky="w", pady=(8, 0))
+        tk.Label(top, text="ID объекта:", bg="#f7f7f7").grid(row=1, column=4, sticky="w", pady=(8, 0))
         self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=20)
         self.cmb_object_id.grid(row=1, column=5, sticky="w", padx=(4, 12), pady=(8, 0))
 
-        # Подсказка под датой
-        self.lbl_cutoff_hint = tk.Label(top, text="", fg="#555")
+        self.lbl_cutoff_hint = tk.Label(top, text="", fg="#555", bg="#f7f7f7")
         self.lbl_cutoff_hint.grid(row=1, column=6, columnspan=2, sticky="w", pady=(8, 0))
 
-        # Ряд 3: Общий комментарий
-        tk.Label(top, text="Комментарий:").grid(row=2, column=0, sticky="nw", pady=(8, 0))
+        tk.Label(top, text="Комментарий:", bg="#f7f7f7").grid(row=2, column=0, sticky="nw", pady=(8, 0))
         self.txt_comment = tk.Text(top, height=3, width=96)
         self.txt_comment.grid(row=2, column=1, columnspan=7, sticky="we", padx=(4, 0), pady=(8, 0))
 
-        # Рамка позиций
         pos_wrap = tk.LabelFrame(self, text="Позиции")
         pos_wrap.pack(fill="both", expand=True, padx=10, pady=(6, 8))
 
-        # Шапка позиций
         hdr = tk.Frame(pos_wrap)
         hdr.pack(fill="x")
         tk.Label(hdr, text="Техника", width=52, anchor="w").grid(row=0, column=0, padx=2)
@@ -660,7 +640,6 @@ class SpecialOrdersApp(tk.Tk):
         tk.Label(hdr, text="Примечание", width=38, anchor="w").grid(row=0, column=4, padx=2)
         tk.Label(hdr, text="Действие", width=10, anchor="center").grid(row=0, column=5, padx=2)
 
-        # Позиции — холдер со скроллом
         wrap = tk.Frame(pos_wrap)
         wrap.pack(fill="both", expand=True)
         self.cv = tk.Canvas(wrap, borderwidth=0, highlightthickness=0)
@@ -678,25 +657,22 @@ class SpecialOrdersApp(tk.Tk):
         btns.pack(fill="x")
         ttk.Button(btns, text="Добавить позицию", command=self.add_position).pack(side="left", padx=2, pady=4)
 
-        # Нижние кнопки
         bottom = tk.Frame(self)
         bottom.pack(fill="x", padx=10, pady=(0, 10))
         ttk.Button(bottom, text="Сохранить заявку", command=self.save_order).pack(side="left", padx=4)
         ttk.Button(bottom, text="Очистить форму", command=self.clear_form).pack(side="left", padx=4)
         ttk.Button(bottom, text="Открыть папку заявок", command=self.open_orders_dir).pack(side="left", padx=4)
 
-        # Первичная инициализация
         self._update_fio_list()
         self._update_cutoff_hint()
-        # Стартовая строка
         self.add_position()
 
-        # Колонки top — растяжение
         for c in range(8):
             top.grid_columnconfigure(c, weight=0)
         top.grid_columnconfigure(1, weight=1)
         top.grid_columnconfigure(5, weight=0)
 
+    # Методы логики/валидации/сохранения — те же, что и в standalone
     def _update_fio_list(self):
         dep = (self.cmb_dep.get() or "Все").strip()
         if dep == "Все":
@@ -803,7 +779,6 @@ class SpecialOrdersApp(tk.Tk):
         if not self._validate_form():
             return
 
-        # Прошедшие даты — запрещены
         try:
             req_date = parse_date_any(self.ent_date.get()) or date.today()
             if req_date < date.today():
@@ -813,7 +788,6 @@ class SpecialOrdersApp(tk.Tk):
         except Exception:
             pass
 
-        # На текущую дату — после cutoff запрещено
         try:
             req_date = parse_date_any(self.ent_date.get()) or date.today()
             if get_cutoff_enabled() and is_past_cutoff_for_date(req_date, get_cutoff_hour()):
@@ -827,7 +801,6 @@ class SpecialOrdersApp(tk.Tk):
 
         data = self._build_order_dict()
 
-        # XLSX
         ts = datetime.now().strftime("%H%M%S")
         id_part = data["object"]["id"] or safe_filename(data["object"]["address"])
         fname = f"Заявка_спецтехники_{data['date']}_{ts}_{id_part or 'NOID'}.xlsx"
@@ -858,7 +831,6 @@ class SpecialOrdersApp(tk.Tk):
             messagebox.showerror("Сохранение", f"Не удалось сохранить XLSX:\n{e}")
             return
 
-        # CSV — свод за месяц
         csv_path = self.orders_dir / f"Свод_заявок_{data['date'][:7].replace('-', '_')}.csv"
         try:
             new = not csv_path.exists()
@@ -878,7 +850,6 @@ class SpecialOrdersApp(tk.Tk):
         except Exception as e:
             messagebox.showwarning("Сводный CSV", f"XLSX сохранён, но не удалось добавить в CSV:\n{e}")
 
-        # Онлайн-отправка (webhook)
         try:
             mode = get_orders_mode()
             if mode == 'webhook':
@@ -929,6 +900,59 @@ class SpecialOrdersApp(tk.Tk):
             os.startfile(self.orders_dir)
         except Exception as e:
             messagebox.showerror("Папка", f"Не удалось открыть папку:\n{e}")
+
+
+# ------------------------- Вариант standalone-окна -------------------------
+
+class SpecialOrdersApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title(APP_TITLE)
+        self.geometry("1180x720")
+        self.resizable(True, True)
+        # Встроенная страница как корневой виджет
+        page = SpecialOrdersPage(self)
+        page.pack(fill="both", expand=True)
+
+
+# ------------------------- API для встраивания -------------------------
+
+def create_page(parent) -> tk.Frame:
+    """
+    Создаёт страницу "Заявка на автотранспорт" внутри переданного родителя.
+    Возвращает tk.Frame (уже со построенным UI). Родитель сам решает, как паковать/гридить.
+    """
+    ensure_config()
+    page = SpecialOrdersPage(parent)
+    page.pack(fill="both", expand=True)
+    return page
+
+def open_special_orders(parent=None):
+    """
+    Совместимость: если parent задан — открываем Toplevel с встраиваемой страницей.
+    Если не задан — отдельное окно как раньше.
+    """
+    if parent is None:
+        app = SpecialOrdersApp()
+        app.mainloop()
+        return app
+    # Toplevel, но UI — тот же встраиваемый
+    win = tk.Toplevel(parent)
+    win.title(APP_TITLE)
+    win.geometry("1180x720")
+    page = SpecialOrdersPage(win)
+    page.pack(fill="both", expand=True)
+    return win
+
+
+# ------------------------- Утилиты -------------------------
+
+def safe_filename(s: str, maxlen: int = 60) -> str:
+    if not s:
+        return "NOID"
+    s = re.sub(r'[<>:"/\\|?*\n\r\t]+', "_", str(s)).strip()
+    s = re.sub(r"_+", "_", s)
+    return s[:maxlen] if len(s) > maxlen else s
 
 
 if __name__ == "__main__":
