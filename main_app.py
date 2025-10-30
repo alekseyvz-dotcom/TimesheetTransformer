@@ -31,6 +31,10 @@ try:
     import timesheet_transformer  # должен содержать open_converter(parent)
 except Exception:
     timesheet_transformer = None
+try:
+    from PIL import Image, ImageTk
+except Exception:
+    Image = ImageTk = None
 
 APP_NAME = "Управление строительством (Главное меню)"
 
@@ -302,6 +306,20 @@ def safe_filename(s: str, maxlen: int = 60) -> str:
     s = re.sub(r'[<>:"/\\|?*\n\r\t]+', "_", str(s)).strip()
     s = re.sub(r"_+", "_", s)
     return s[:maxlen] if len(s) > maxlen else s
+    
+def find_logo_path() -> Optional[Path]:
+    candidates = [
+        exe_dir() / "assets" / "logo.png",
+        exe_dir() / "assets" / "logo.gif",
+        exe_dir() / "assets" / "logo.jpg",
+        exe_dir() / "logo.png",
+        exe_dir() / "logo.gif",
+        exe_dir() / "logo.jpg",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
 
 # ------------- Ряд реестра (в едином grid) -------------
 
@@ -1461,15 +1479,58 @@ class ExportMonthDialog(simpledialog.Dialog):
 
 # ------------- Домашняя страница -------------
 
+# python
 class HomePage(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
-        wrap = tk.Frame(self, bg="#f7f7f7")
-        wrap.pack(pady=30)
-        tk.Label(wrap, text="Добро пожаловать!", font=("Segoe UI", 16, "bold"), bg="#f7f7f7").pack(anchor="center", pady=(0, 6))
-        tk.Label(wrap, text="Выберите раздел в верхнем меню.\n"
-                            "Объектный табель → Создать — для работы с табелями.",
-                 font=("Segoe UI", 10), fg="#444", bg="#f7f7f7", justify="center").pack(anchor="center")
+
+        # Контейнер, занимающий всю страницу
+        outer = tk.Frame(self, bg="#f7f7f7")
+        outer.pack(fill="both", expand=True)
+
+        # Внутренний блок, который ставим ровно по центру
+        center = tk.Frame(outer, bg="#f7f7f7")
+        center.place(relx=0.5, rely=0.5, anchor="center")
+
+        # Пытаемся загрузить логотип
+        self.logo_img = None
+        logo_path = find_logo_path()
+        if logo_path:
+            try:
+                MAX_W, MAX_H = 360, 160
+                if Image and ImageTk:
+                    # Через Pillow — красиво масштабируем
+                    im = Image.open(logo_path)
+                    im.thumbnail((MAX_W, MAX_H), Image.LANCZOS)
+                    self.logo_img = ImageTk.PhotoImage(im)
+                else:
+                    # Базовый PhotoImage (PNG/GIF). При необходимости уменьшаем через subsample.
+                    img = tk.PhotoImage(file=str(logo_path))
+                    w, h = img.width(), img.height()
+                    factor = max(w / MAX_W, h / MAX_H, 1)
+                    if factor > 1:
+                        k = max(1, int(factor))
+                        img = img.subsample(k, k)
+                    self.logo_img = img
+            except Exception as e:
+                print(f"[HomePage] Ошибка загрузки логотипа: {e}")
+
+        # Логотип (если загрузился)
+        if self.logo_img:
+            tk.Label(center, image=self.logo_img, bg="#f7f7f7").pack(anchor="center", pady=(0, 10))
+
+        # Текст приветствия
+        tk.Label(center, text="Добро пожаловать!", font=("Segoe UI", 18, "bold"), bg="#f7f7f7")\
+            .pack(anchor="center", pady=(4, 6))
+        tk.Label(
+            center,
+            text="Выберите раздел в верхнем меню.\nОбъектный табель → Создать — для работы с табелями.",
+            font=("Segoe UI", 10),
+            fg="#444",
+            bg="#f7f7f7",
+            justify="center"
+        ).pack(anchor="center")
+
 
 # ------------- Главное окно (единоe) -------------
 
