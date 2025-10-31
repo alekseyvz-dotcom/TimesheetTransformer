@@ -7,10 +7,11 @@
 # - Итог («Итого по локальной смете») ищется по всей строке и берётся из 11/10 колонки.
 # - Категории:
 #     • Заработная плата: строки 3-й колонки с «ЗП», «в т.ч. ЗПМ», «оплата труда», «заработ…».
-#     • Материалы: ТОЛЬКО по inline-правилу — если строка с наименованием (3-я колонка) имеет ненулевую
-#       стоимость в 11/10 кол., и при этом ед. изм. не проценты (%) и не трудочасы (чел-ч).
+#     • Материалы: ТОЛЬКО по inline-правилу — если строка позиции (в 1-й колонке номер) с наименованием (3-я колонка)
+#       имеет ненулевую стоимость в 11/10 кол., и при этом ед. изм. не проценты (%) и не трудочасы (чел-ч).
 #       Поиск ключевых слов «МР/материалы/мат.» отключён.
 #     • Прочие = Итого − Материалы − Заработная плата.
+# - Из данных исключаем сводные/итоговые блоки в конце сметы (распознаются по текстам).
 # - Общий режим (generic) для простых CSV/XLSX с ручным сопоставлением колонок — без специальной логики Smeta.RU.
 
 import re
@@ -157,7 +158,8 @@ class BudgetAnalysisPage(tk.Frame):
             self,
             text=("Smeta.RU: лист «ЛОКАЛЬНАЯ СМЕТА», 11 колонок.\n"
                   "Суммы — из 11-й (приоритет) или 10-й «ВСЕГО». "
-                  "Материалы считаются ТОЛЬКО по inline-правилу (стоимость в строке наименования; ед. изм. не %/не чел-ч). "
+                  "Материалы считаются ТОЛЬКО по inline-правилу (стоимость в строке наименования; ед. изм. не %/не чел-ч) "
+                  "и только для строк с номером позиции в 1-й колонке. "
                   "ЗП — по строкам «ЗП/в т.ч. ЗПМ/оплата труда/заработ…». Прочие = Итого − Материалы − ЗП."),
             fg="#666", bg="#f7f7f7", justify="left", wraplength=980
         )
@@ -181,7 +183,7 @@ class BudgetAnalysisPage(tk.Frame):
         self.var_show_oth = tk.BooleanVar(value=True)
         ttk.Checkbutton(flt, text="Материалы", variable=self.var_show_mat, command=self._fill_breakdown_table).pack(side="left", padx=(0, 8))
         ttk.Checkbutton(flt, text="Заработная плата", variable=self.var_show_wag, command=self._fill_breakdown_table).pack(side="left", padx=(0, 8))
-        ttk.Checkbutton(flt, text="Прочие", variable=self.var_show_oth, command=self._fill_breakdown_table).pack(side="left")
+        ttk.Checkbutton(flt, text="Прочие", variable=self.var_show_oth, command=self._fill_breakdown_table).pack(side="left"))
 
         # Таблица расшифровки
         tree_wrap = tk.Frame(left)
@@ -313,15 +315,21 @@ class BudgetAnalysisPage(tk.Frame):
         if target_ws is None:
             return False
 
+    # ------------------ НАЙТИ ШАПКУ ------------------
         hdr_row_idx, name_col, cost_cols = self._find_table_header(target_ws)
         if hdr_row_idx is None or name_col is None or not cost_cols:
             return False
 
+    # ------------------ СЧИТАТЬ ДАННЫЕ ДО СВОДА/ИТОГА ------------------
         data_rows = []
         for row in target_ws.iter_rows(min_row=hdr_row_idx + 1, values_only=True):
             cells = list(row)
             # стоп по «Итого по локальной смете» — ищем фразу в любой ячейке
             if any(isinstance(c, str) and "итого по локальной смете" in c.lower() for c in cells):
+                break
+            # или по сводным маркерам в 3-й колонке
+            name_cell = self._str(cells[name_col]) if name_col < len(cells) else ""
+            if self._is_summary_name(name_cell):
                 break
             # пропускаем полностью пустые
             if not any(c is not None and str(c).strip() for c in cells):
@@ -333,7 +341,7 @@ class BudgetAnalysisPage(tk.Frame):
         self.smeta_cost_cols = cost_cols  # упорядочены: 11-я, затем 10-я
         self.smeta_data_rows = data_rows
 
-        # Итог «Итого по локальной смете»
+    # ------------------ НАЙТИ ИТОГ ------------------
         total = self._find_local_total(target_ws, hdr_row_idx, name_col, cost_cols)
         self.stats = {"total": total or 0.0, "materials": 0.0, "wages": 0.0, "other": 0.0}
 
@@ -489,26 +497,49 @@ class BudgetAnalysisPage(tk.Frame):
             return True
         return False
 
+    def _has_numeric_position(self, cell: Any) -> bool:
+        s = str(cell or "").strip()
+        return bool(s) and s[0].isdigit()
+
+    def _is_summary_name(self, name: Any) -> bool:
+        """Распознаём начало сводного блока (итоги), чтобы прервать сбор строк данных."""
+        s = re.sub(r"\s+", " ", str(name or "")).strip().lower()
+        if not s:
+            return False
+        # Не считаем «Всего по позиции» сводом (внутрипозиционная строка)
+        if "по позиции" in s:
+            return False
+        # Маркеры сводных разделов/итогов/справок
+        patterns = [
+            "итого по локальной смете",
+            "итоги по смете", "итоги по разделу", "итоги по", "итог по",
+            "итого прямые затраты", "итого прямые", "итого по смете",
+            "всего по смете", "всего по разделу", "всего по",
+            "справочно", "ндс", "итого с ндс", "всего с ндс",
+        ]
+        return any(p in s for p in patterns)
+
     def _classify_row(self, row: List[Any]) -> Optional[str]:
         """
         Возвращает категорию строки:
           - 'wages'     — ЗП, в т.ч. ЗПМ, оплата труда
-          - 'materials' — ТОЛЬКО inline-материал: строка позиции с прямой стоимостью в 11/10 кол. (ед. изм. не %/не чел-ч)
-          - None        — игнорировать (ЭМ, НР, СП, ЗТР, служебные строки и т.п.)
+          - 'materials' — ТОЛЬКО inline-материал: строка позиции (1-я колонка начинается с цифры)
+                          с прямой стоимостью в 11/10 кол. (ед. изм. не %/не чел-ч)
+          - None        — игнорировать (ЭМ, НР, СП, ЗТР, служебные и сводные строки)
         """
         name = self._str(row[self.smeta_name_col]) if (self.smeta_name_col is not None and self.smeta_name_col < len(row)) else ""
         n = name.lower()
 
-        # Служебные/неучитываемые строки
+        # Служебные/сводные/неучитываемые строки
         if not n:
+            return None
+        if self._is_summary_name(n):
             return None
         if n.startswith("всего по позиции"):
             return None
         if n.startswith("итого"):
             return None
-        if n.startswith("раздел:") or n.startswith("локальная смета"):
-            return None
-        if "итого по разделу" in n or "итого по смете" in n:
+        if n.startswith("раздел:") or n.startswith("локальная смета") or "итого по разделу" in n or "итого по смете" in n:
             return None
         if "зтр" in n or n.startswith("эм") or n.startswith("нр ") or "нр от зп" in n or "сп от зп" in n or "нр и сп" in n:
             return None
@@ -517,13 +548,14 @@ class BudgetAnalysisPage(tk.Frame):
         if n == "зп" or n == "з/п" or "оплата труда" in n or "заработ" in n or n == "зпм" or "в т.ч. зпм" in n:
             return "wages"
 
-        # Материалы — только inline-правило
+        # Материалы — только inline-правило для строк позиций (есть номер в 1-й колонке)
         if self.smeta_cost_cols:
-            val = self._first_number_from_cols(row, self.smeta_cost_cols)
-            if isinstance(val, float) and val > 0:
-                unit = row[3] if len(row) > 3 else ""
-                if not self._is_labor_or_percent_unit(unit):
-                    return "materials"
+            if self._has_numeric_position(row[0] if len(row) > 0 else None):
+                val = self._first_number_from_cols(row, self.smeta_cost_cols)
+                if isinstance(val, float) and val > 0:
+                    unit = row[3] if len(row) > 3 else ""
+                    if not self._is_labor_or_percent_unit(unit):
+                        return "materials"
 
         return None
 
@@ -631,7 +663,6 @@ class BudgetAnalysisPage(tk.Frame):
 
         return {
             "total":     best_index(find_candidates(["итого", "всего", "стоим", "смет", "общая стоимость"])),
-            # В generic-режиме оставляем автоопределение материалов по названию колонок
             "materials": best_index(find_candidates(["матер", "материа", "мр"])),
             "wages":     best_index(find_candidates(["зараб", "оплата труда", "з/п", "зп", "труд"])),
         }
