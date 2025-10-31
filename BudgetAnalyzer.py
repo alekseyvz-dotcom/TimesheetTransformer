@@ -183,7 +183,7 @@ class BudgetAnalysisPage(tk.Frame):
         self.var_show_oth = tk.BooleanVar(value=True)
         ttk.Checkbutton(flt, text="Материалы", variable=self.var_show_mat, command=self._fill_breakdown_table).pack(side="left", padx=(0, 8))
         ttk.Checkbutton(flt, text="Заработная плата", variable=self.var_show_wag, command=self._fill_breakdown_table).pack(side="left", padx=(0, 8))
-        ttk.Checkbutton(flt, text="Прочие", variable=self.var_show_oth, command=self._fill_breakdown_table).pack(side="left"))
+        ttk.Checkbutton(flt, text="Прочие", variable=self.var_show_oth, command=self._fill_breakdown_table).pack(side="left")
 
         # Таблица расшифровки
         tree_wrap = tk.Frame(left)
