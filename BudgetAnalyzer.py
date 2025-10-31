@@ -823,7 +823,7 @@ class BudgetAnalysisPage(tk.Frame):
                 pass
         self._mpl_fig = None
         self._mpl_canvas = None
-               self._tk_canvas = None
+        self._tk_canvas = None
         self._chart_placeholder = None
 
         vals = [
