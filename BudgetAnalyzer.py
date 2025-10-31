@@ -15,7 +15,6 @@
 #     • строку нумерации столбцов (1..11) после заголовков и, если встречается дальше;
 #     • все сводные/итоговые/НДС/справочные блоки (распознаём по текстам и условию: первые 2 колонки пусты, 3-я содержит текст).
 # - Общий режим (generic) для простых CSV/XLSX с ручным сопоставлением колонок — без специальной логики Smeta.RU.
-
 import re
 import csv
 from pathlib import Path
@@ -26,7 +25,7 @@ from tkinter import ttk, messagebox, simpledialog
 
 from openpyxl import Workbook, load_workbook
 
-# matplotlib (опционально). Если не установлена — рисуем диаграмму на Tk Canvas
+# matplotlib (опционально)
 try:
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     import matplotlib.pyplot as plt
@@ -35,7 +34,7 @@ except Exception:
     MPL_AVAILABLE = False
 
 
-# ------------------------- Диалог сопоставления колонок (общий режим) -------------------------
+# ------------------------- Диалог сопоставления колонок -------------------------
 
 class ColumnMappingDialog(simpledialog.Dialog):
     def __init__(self, parent, headers: List[str], cur_map: Dict[str, Optional[int]]):
@@ -90,9 +89,9 @@ class ColumnMappingDialog(simpledialog.Dialog):
 
 class BudgetAnalysisPage(tk.Frame):
     COLORS = {
-        "materials": "#42a5f5",  # blue
-        "wages":     "#66bb6a",  # green
-        "other":     "#ffa726",  # orange
+        "materials": "#42a5f5",
+        "wages":     "#66bb6a",
+        "other":     "#ffa726",
     }
 
     def __init__(self, master):
@@ -104,16 +103,21 @@ class BudgetAnalysisPage(tk.Frame):
         self.rows: List[List[Any]] = []
         self.mapping: Dict[str, Optional[int]] = {"total": None, "materials": None, "wages": None}
 
-        # Smeta-режим (специальный парсер Smeta.RU)
-        self.mode: str = "generic"  # "smeta" | "generic"
+        # Smeta-режим
+        self.mode: str = "generic"
         self.smeta_sheet_name: Optional[str] = None
-        self.smeta_name_col: Optional[int] = None      # индекс колонки "Наименование работ и затрат" (0-based, обычно 2)
-        self.smeta_cost_cols: List[int] = []           # индексы колонок «ВСЕГО » (приоритет: текущий уровень → базис)
-        self.smeta_data_rows: List[List[Any]] = []     # строки данных (после шапки, с пропусками сводных блоков)
+        self.smeta_name_col: Optional[int] = None
+        self.smeta_cost_cols: List[int] = []
+        self.smeta_data_rows: List[List[Any]] = []
 
-        # Итоги и расшифровка
+        # Итоги (БЕЗ НДС - базовые значения)
+        self.stats_base = {"total": 0.0, "materials": 0.0, "wages": 0.0, "other": 0.0}
+        # Текущие значения (с учетом НДС, если включен)
         self.stats = {"total": 0.0, "materials": 0.0, "wages": 0.0, "other": 0.0}
-        self.breakdown_rows: List[Dict[str, Any]] = []  # {"category": str, "name": str, "amount": float}
+        self.breakdown_rows: List[Dict[str, Any]] = []
+        
+        # **НОВОЕ: флаг НДС**
+        self.vat_enabled = tk.BooleanVar(value=False)
 
         # UI: заголовок
         header = tk.Frame(self, bg="#f7f7f7")
@@ -129,6 +133,15 @@ class BudgetAnalysisPage(tk.Frame):
         self.btn_map.pack(side="left", padx=(8, 0))
         self.btn_export = ttk.Button(ctrl, text="Сохранить свод", command=self._export_summary, state="disabled")
         self.btn_export.pack(side="left", padx=(8, 0))
+        
+        # **НОВОЕ: Чекбокс НДС**
+        self.chk_vat = ttk.Checkbutton(
+            ctrl, 
+            text="Начислить НДС 20%", 
+            variable=self.vat_enabled,
+            command=self._on_vat_toggle
+        )
+        self.chk_vat.pack(side="left", padx=(16, 0))
 
         self.lbl_file = tk.Label(self, text="Файл не выбран", fg="#555", bg="#f7f7f7")
         self.lbl_file.pack(anchor="w", padx=12, pady=(0, 2))
@@ -151,6 +164,23 @@ class BudgetAnalysisPage(tk.Frame):
         self._row_materials = self._add_metric_row(grid, 2, "Материалы")
         self._row_wages     = self._add_metric_row(grid, 3, "Заработная плата")
         self._row_other     = self._add_metric_row(grid, 4, "Прочие")
+        
+        # **НОВОЕ: Строка НДС (скрыта по умолчанию)**
+        self._row_vat = self._add_metric_row(grid, 5, "НДС 20%")
+        self._row_vat["label"] = tk.Label(grid, text="НДС 20%", bg="#ffffff", fg="#d32f2f")
+        self._row_vat["label"].grid(row=5, column=0, sticky="w", pady=3)
+        self._row_vat["label"].grid_remove()  # Скрываем
+        self._row_vat["val"].grid_remove()
+        self._row_vat["pct"].grid_remove()
+        
+        # **НОВОЕ: Строка "Всего с НДС"**
+        self._row_total_vat = self._add_metric_row(grid, 6, "Всего с НДС")
+        self._row_total_vat["label"] = tk.Label(grid, text="Всего с НДС", bg="#ffffff", 
+                                                 font=("Segoe UI", 10, "bold"), fg="#1976d2")
+        self._row_total_vat["label"].grid(row=6, column=0, sticky="w", pady=3)
+        self._row_total_vat["label"].grid_remove()
+        self._row_total_vat["val"].grid_remove()
+        self._row_total_vat["pct"].grid_remove()
 
         for c in range(3):
             grid.grid_columnconfigure(c, weight=1)
@@ -159,20 +189,18 @@ class BudgetAnalysisPage(tk.Frame):
         hint = tk.Label(
             self,
             text=("Smeta.RU: лист «ЛОКАЛЬНАЯ СМЕТА», 11 колонок.\n"
-                  "Суммы — из 11-й (приоритет) или 10-й «ВСЕГО». "
-                  "Материалы считаются ТОЛЬКО по inline-правилу (стоимость в строке наименования; ед. изм. не %/не чел-ч) "
-                  "и только для строк с номером позиции в 1-й колонке. "
-                  "ЗП — по строкам «ЗП/в т.ч. ЗПМ/оплата труда/заработ…». Прочие = Итого − Материалы − ЗП.\n"
-                  "Сводные блоки в конце (Итоги/НДС/Справочно) автоматически исключаются; поддержаны несколько частей сметы."),
+                  "Материалы — по inline-правилу (ед. изм. не %/не чел-ч). "
+                  "ЗП — по строкам «ЗП/ЗПМ/оплата труда». Прочие = Итого − Материалы − ЗП.\n"
+                  "Чекбокс «Начислить НДС 20%» увеличивает все суммы на 20%."),
             fg="#666", bg="#f7f7f7", justify="left", wraplength=980
         )
         hint.pack(fill="x", padx=12, pady=(0, 10))
 
-        # Расшифровка + Диаграмма (две колонки)
+        # Расшифровка + Диаграмма
         main_split = tk.Frame(self, bg="#f7f7f7")
         main_split.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
-        # Левая колонка — расшифровка (таблица)
+        # Левая колонка — расшифровка
         left = tk.Frame(main_split, bg="#f7f7f7")
         left.pack(side="left", fill="both", expand=True, padx=(0, 6))
 
@@ -217,7 +245,6 @@ class BudgetAnalysisPage(tk.Frame):
         self.chart_area.configure(width=420, height=320)
         self.chart_area.pack_propagate(False)
 
-        # ссылки для графика (чтобы не убило GC)
         self._mpl_fig = None
         self._mpl_canvas = None
         self._tk_canvas = None
@@ -230,6 +257,33 @@ class BudgetAnalysisPage(tk.Frame):
         pct_lbl = tk.Label(grid, text="-", bg="#ffffff", anchor="e")
         pct_lbl.grid(row=r, column=2, sticky="e", pady=3)
         return {"val": val_lbl, "pct": pct_lbl}
+
+    # **НОВОЕ: Обработчик переключения НДС**
+    def _on_vat_toggle(self):
+        """Пересчитывает все суммы при включении/выключении НДС"""
+        if not self.stats_base:
+            return
+        
+        self._apply_vat()
+        self._render_stats()
+        self._fill_breakdown_table()
+        self._render_chart()
+
+    def _apply_vat(self):
+        """Применяет или снимает НДС 20% ко всем суммам"""
+        multiplier = 1.2 if self.vat_enabled.get() else 1.0
+        
+        self.stats = {
+            "total": self.stats_base["total"] * multiplier,
+            "materials": self.stats_base["materials"] * multiplier,
+            "wages": self.stats_base["wages"] * multiplier,
+            "other": self.stats_base["other"] * multiplier,
+        }
+        
+        # Обновляем расшифровку
+        for row in self.breakdown_rows:
+            if "amount_base" in row:
+                row["amount"] = row["amount_base"] * multiplier
 
     # ---------- Файл ----------
     def _open_file(self):
@@ -248,12 +302,10 @@ class BudgetAnalysisPage(tk.Frame):
         self.lbl_file.config(text=f"Файл: {self.file_path}")
 
         ok = self._load_file(self.file_path)
-        # Ручное сопоставление — только в generic-режиме
         self.btn_map.config(state=("normal" if (ok and self.mode == "generic") else "disabled"))
         self.btn_export.config(state=("normal" if ok else "disabled"))
         if not ok:
-            messagebox.showwarning("Анализ смет", "Не удалось распознать структуру файла. "
-                                                  "Попробуйте ручное сопоставление (для CSV/XLSX-таблиц).")
+            messagebox.showwarning("Анализ смет", "Не удалось распознать структуру файла.")
 
     def _load_file(self, path: Path) -> bool:
         self.mode = "generic"
@@ -272,7 +324,6 @@ class BudgetAnalysisPage(tk.Frame):
                     self.mode = "smeta"
                     self._analyze_smeta()
                     return True
-                # не похоже на smeta.ru — общий режим
                 self._parse_xlsx_generic(path)
                 self.mapping = self._detect_mapping(self.headers, self.rows)
                 self._analyze_generic()
@@ -304,11 +355,6 @@ class BudgetAnalysisPage(tk.Frame):
     # ---------- Smeta.RU режим ----------
 
     def _parse_xlsx_smeta_ru(self, path: Path) -> bool:
-        """
-        Ищем лист, где в верхних строках встречается «ЛОКАЛЬНАЯ СМЕТА».
-        На нём ищем шапку таблицы: колонку «Наименование работ и затрат» и колонки «ВСЕГО».
-        Считываем строки, пропуская сводные блоки; поддержаны несколько частей сметы.
-        """
         wb = load_workbook(path, read_only=True, data_only=True)
         target_ws = None
         for ws in wb.worksheets:
@@ -318,34 +364,26 @@ class BudgetAnalysisPage(tk.Frame):
         if target_ws is None:
             return False
 
-        # Найти шапку
         hdr_row_idx, name_col, cost_cols = self._find_table_header(target_ws)
         if hdr_row_idx is None or name_col is None or not cost_cols:
             return False
 
         data_rows: List[List[Any]] = []
-        # Для итогов (берём последние встреченные)
         last_local_total: Optional[float] = None
         last_grand_total: Optional[float] = None
 
-        # Чтение всех строк после шапки (без остановки на первом «итого»)
         for row in target_ws.iter_rows(min_row=hdr_row_idx + 1, values_only=True):
             cells = list(row)
 
-            # Пропустить полностью пустые
             if not any(c is not None and str(c).strip() for c in cells):
                 continue
 
-            # Определить текст в колонке наименования
             name_cell = self._str(cells[name_col]) if name_col < len(cells) else ""
 
-            # Пропустить строку нумерации 1..11 (часто идёт сразу после заголовков или внутри второй части)
             if self._is_numbering_row(cells):
                 continue
 
-            # Если это сводная строка (итоги/НДС/справочно) — сохранить итог (если есть) и пропустить её
             if self._is_summary_row(cells, name_col):
-                # Считать сумму: сначала из приоритетных cost_cols, потом соседние
                 val = self._first_number_from_cols(cells, cost_cols)
                 if not isinstance(val, float):
                     for base in cost_cols:
@@ -365,20 +403,17 @@ class BudgetAnalysisPage(tk.Frame):
                 if "итого по локальной смете" in low:
                     if isinstance(val, float):
                         last_local_total = val
-                # Пропускаем
                 continue
 
-            # Обычная (данная) строка
             data_rows.append(cells)
 
         self.smeta_sheet_name = target_ws.title
         self.smeta_name_col = name_col
-        self.smeta_cost_cols = cost_cols  # упорядочены: 11-я, затем 10-я
+        self.smeta_cost_cols = cost_cols
         self.smeta_data_rows = data_rows
 
-        # Выбрать итог: сначала «Итого по смете», иначе «Итого по локальной смете»
         total = last_grand_total if isinstance(last_grand_total, float) else last_local_total
-        self.stats = {"total": float(total or 0.0), "materials": 0.0, "wages": 0.0, "other": 0.0}
+        self.stats_base = {"total": float(total or 0.0), "materials": 0.0, "wages": 0.0, "other": 0.0}
 
         self.lbl_sheet.config(text=f"Лист: {self.smeta_sheet_name} (режим Smeta.RU)")
         return True
@@ -401,13 +436,6 @@ class BudgetAnalysisPage(tk.Frame):
         return re.sub(r"\s+", " ", txt).lower()
 
     def _find_table_header(self, ws) -> Tuple[Optional[int], Optional[int], List[int]]:
-        """
-        Ищем строку заголовков. Нужно:
-        - «Наименование работ и затрат» (name_col)
-        - все колонки с текстом, содержащим «всего» (cost_cols),
-          при этом приоритет у «в текущем уровне цен».
-        Если явных подписей нет, но встречается строка 1..11 — используем name_col=2 (3-я), cost_cols=[10, 9].
-        """
         name_col: Optional[int] = None
         hdr_row_idx: Optional[int] = None
         ordered_cost_cols: List[int] = []
@@ -416,12 +444,11 @@ class BudgetAnalysisPage(tk.Frame):
             raw_vals = list(row)
             vals_norm = [self._normalize_header_text(v) for v in raw_vals]
 
-            # Попытка: строка нумерации 1..11
             only_digits = [str(v).strip() for v in raw_vals if v is not None]
             if only_digits and self._is_sequential_digits_list(only_digits):
                 hdr_row_idx = i
                 name_col = 2
-                ordered_cost_cols = [10, 9]  # 11-я, затем 10-я (0-based)
+                ordered_cost_cols = [10, 9]
                 break
 
             if not any(vals_norm):
@@ -431,26 +458,21 @@ class BudgetAnalysisPage(tk.Frame):
                 ("наименование работ" in v and "затрат" in v) or ("наименование работ и затрат" in v)
                 for v in vals_norm
             )
-            # собираем «всего» без колонок коэффициентов
             idx_current = [idx for idx, v in enumerate(vals_norm) if ("всего" in v and "коэфф" not in v and "текущ" in v)]
             idx_other   = [idx for idx, v in enumerate(vals_norm) if ("всего" in v and "коэфф" not in v and "текущ" not in v)]
 
             if has_name and (idx_current or idx_other):
                 hdr_row_idx = i
-                # индекс колонки наименования
                 if name_col is None:
                     try:
                         name_col = vals_norm.index(next(v for v in vals_norm if ("наименование работ" in v and "затрат" in v) or ("наименование работ и затрат" in v)))
                     except StopIteration:
                         name_col = 2
-                # приоритет: текущие → прочие
                 ordered_cost_cols = idx_current + idx_other
-                # подстраховка
                 if not ordered_cost_cols:
                     ordered_cost_cols = [10, 9]
                 break
 
-        # Фолбэк: поиск строки нумерации, если не нашли заголовки
         if hdr_row_idx is None:
             for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
                 only_digits = [str(v).strip() for v in row if v is not None]
@@ -463,7 +485,6 @@ class BudgetAnalysisPage(tk.Frame):
         return hdr_row_idx, name_col, ordered_cost_cols
 
     def _is_numbering_row(self, cells: List[Any]) -> bool:
-        """Строка нумерации столбцов, вида 1..11 (встречается после заголовков и между частями)."""
         vals = [str(v).strip() for v in cells if v is not None and str(v).strip() != ""]
         if not vals:
             return False
@@ -477,16 +498,9 @@ class BudgetAnalysisPage(tk.Frame):
             return False
         if not nums:
             return False
-        # допускаем последовательность от 1 до N (обычно до 11), без пропусков
         return nums == list(range(1, len(nums) + 1)) and len(nums) >= 5
 
     def _is_summary_row(self, cells: List[Any], name_col: int) -> bool:
-        """
-        Свод/итоги/НДС/справочно — исключаем из данных.
-        Условие:
-        - первые две колонки (0 и 1) пустые И
-        - 3-я колонка (name_col) содержит текст с маркерами итогов/сводов.
-        """
         col0_empty = (len(cells) < 1) or (self._str(cells[0]) == "")
         col1_empty = (len(cells) < 2) or (self._str(cells[1]) == "")
         name = self._str(cells[name_col]) if name_col < len(cells) else ""
@@ -496,11 +510,9 @@ class BudgetAnalysisPage(tk.Frame):
 
     @staticmethod
     def _is_summary_name(name: Any) -> bool:
-        """Распознаём свод/итоги/НДС/справочно по тексту."""
         s = re.sub(r"\s+", " ", str(name or "")).strip().lower()
         if not s:
             return False
-        # Не считаем «Всего по позиции» сводом (внутрипозиционная строка)
         if "по позиции" in s:
             return False
         patterns = [
@@ -511,8 +523,6 @@ class BudgetAnalysisPage(tk.Frame):
             "справочно", "ндс", "итого с ндс", "всего с ндс",
         ]
         return any(p in s for p in patterns)
-
-    # ---------- Вспомогательные ----------
 
     @staticmethod
     def _str(x: Any) -> str:
@@ -547,9 +557,6 @@ class BudgetAnalysisPage(tk.Frame):
         return None
 
     def _is_labor_or_percent_unit(self, unit: Any) -> bool:
-        """
-        Возвращает True, если ед. изм. похоже на проценты (%) или трудочасы (чел-ч).
-        """
         if unit is None:
             return False
         u = str(unit).strip().lower()
@@ -557,7 +564,7 @@ class BudgetAnalysisPage(tk.Frame):
             return False
         if "%" in u:
             return True
-        if "чел" in u:  # чел-ч, чел.-ч. и т.п.
+        if "чел" in u:
             return True
         return False
 
@@ -565,24 +572,13 @@ class BudgetAnalysisPage(tk.Frame):
         s = str(cell or "").strip()
         return bool(s) and s[0].isdigit()
 
-    # ---------- Классификация строк ----------
-
     def _classify_row(self, row: List[Any]) -> Optional[str]:
-        """
-        Возвращает категорию строки:
-          - 'wages'     — ЗП, в т.ч. ЗПМ, оплата труда
-          - 'materials' — ТОЛЬКО inline-материал: строка позиции (1-я колонка начинается с цифры)
-                          с прямой стоимостью в 11/10 кол. (ед. изм. не %/не чел-ч)
-          - None        — игнорировать (ЭМ, НР, СП, ЗТР, служебные и сводные строки)
-        """
-        # Сводные — сразу мимо
         if self._is_summary_row(row, self.smeta_name_col or 2):
             return None
 
         name = self._str(row[self.smeta_name_col]) if (self.smeta_name_col is not None and self.smeta_name_col < len(row)) else ""
         n = name.lower()
 
-        # Служебные/неучитываемые строки
         if not n:
             return None
         if n.startswith("всего по позиции"):
@@ -594,11 +590,9 @@ class BudgetAnalysisPage(tk.Frame):
         if "зтр" in n or n.startswith("эм") or n.startswith("нр ") or "нр от зп" in n or "сп от зп" in n or "нр и сп" in n:
             return None
 
-        # Явная ЗП
         if n == "зп" or n == "з/п" or "оплата труда" in n or "заработ" in n or n == "зпм" or "в т.ч. зпм" in n:
             return "wages"
 
-        # Материалы — только inline-правило для строк позиций (есть номер в 1-й колонке)
         if self.smeta_cost_cols:
             if self._has_numeric_position(row[0] if len(row) > 0 else None):
                 val = self._first_number_from_cols(row, self.smeta_cost_cols)
@@ -609,9 +603,7 @@ class BudgetAnalysisPage(tk.Frame):
 
         return None
 
-    # ---------- Аналитика (Smeta.RU) ----------
-
-    def _analyze_smeta(self):
+        def _analyze_smeta(self):
         if self.smeta_name_col is None or not self.smeta_cost_cols:
             raise RuntimeError("Не заданы индексы колонок для сметы.")
 
@@ -630,19 +622,33 @@ class BudgetAnalysisPage(tk.Frame):
 
             name = self._str(row[self.smeta_name_col]) if self.smeta_name_col < len(row) else ""
             if cat == "wages":
-                wages_sum += val
-                self.breakdown_rows.append({"category": "Заработная плата", "name": name, "amount": val})
+                wages__rows.append({
+                    "category": "Заработная плата", 
+                    "name": name, 
+                    "amount": val,
+                    "amount_base": val
+                })
             elif cat == "materials":
                 mats_sum += val
-                self.breakdown_rows.append({"category": "Материалы", "name": name, "amount": val})
+                self.breakdown_rows.append({
+                    "category": "Материалы", 
+                    "name": name, 
+                    "amount": val,
+                    "amount_base": val
+                })
 
-        total = float(self.stats.get("total") or 0.0)
+        total = float(self.stats_base.get("total") or 0.0)
         if total <= 0:
             total = mats_sum + wages_sum
 
         other = max(0.0, total - mats_sum - wages_sum)
 
-        self.stats = {"total": total, "materials": mats_sum, "wages": wages_sum, "other": other}
+        # Сохраняем базовые значения (без НДС)
+        self.stats_base = {"total": total, "materials": mats_sum, "wages": wages_sum, "other": other}
+        
+        # Применяем НДС, если включен
+        self._apply_vat()
+        
         self._render_stats()
         self._fill_breakdown_table()
         self._render_chart()
@@ -737,8 +743,14 @@ class BudgetAnalysisPage(tk.Frame):
             total = materials + wages
 
         other = max(0.0, total - materials - wages)
-        self.stats = {"total": total, "materials": materials, "wages": wages, "other": other}
+        
+        # Сохраняем базовые значения
+        self.stats_base = {"total": total, "materials": materials, "wages": wages, "other": other}
         self.breakdown_rows = []
+        
+        # Применяем НДС, если включен
+        self._apply_vat()
+        
         self._render_stats()
         self._fill_breakdown_table()
         self._render_chart()
@@ -779,6 +791,7 @@ class BudgetAnalysisPage(tk.Frame):
         p_wag = (wages     / total * 100.0) if total > 1e-12 else None
         p_oth = (other     / total * 100.0) if total > 1e-12 else None
 
+        # Основные строки
         self._row_total["val"].config(text=self._fmt_money(total))
         self._row_total["pct"].config(text="100%")
 
@@ -791,22 +804,55 @@ class BudgetAnalysisPage(tk.Frame):
         self._row_other["val"].config(text=self._fmt_money(other))
         self._row_other["pct"].config(text=self._fmt_pct(p_oth))
 
+        # **НОВОЕ: Показываем/скрываем строки НДС**
+        if self.vat_enabled.get():
+            # Расчет НДС
+            total_base = self.stats_base.get("total", 0.0)
+            vat_amount = total_base * 0.2  # 20% от базовой суммы
+            total_with_vat = total_base * 1.2
+            
+            # Показываем строки
+            self._row_vat["label"].grid()
+            self._row_vat["val"].grid()
+            self._row_vat["pct"].grid()
+            
+            self._row_total_vat["label"].grid()
+            self._row_total_vat["val"].grid()
+            self._row_total_vat["pct"].grid()
+            
+            # Заполняем значения
+            self._row_vat["val"].config(text=self._fmt_money(vat_amount))
+            self._row_vat["pct"].config(text="20%")
+            
+            self._row_total_vat["val"].config(text=self._fmt_money(total_with_vat))
+            self._row_total_vat["pct"].config(text="120%")
+        else:
+            # Скрываем строки НДС
+            self._row_vat["label"].grid_remove()
+            self._row_vat["val"].grid_remove()
+            self._row_vat["pct"].grid_remove()
+            
+            self._row_total_vat["label"].grid_remove()
+            self._row_total_vat["val"].grid_remove()
+            self._row_total_vat["pct"].grid_remove()
+
     # ---------- Расшифровка (таблица) ----------
 
     def _fill_breakdown_table(self):
-        # Очистить
         for i in self.tree.get_children():
             self.tree.delete(i)
         if not self.breakdown_rows:
-            # Нечего показывать
             return
+        
         show_mat = self.var_show_mat.get()
         show_wag = self.var_show_wag.get()
         show_oth = self.var_show_oth.get()
 
         for row in self.breakdown_rows:
             cat = row["category"]
-            if (cat == "Материалы" and not show_mat) or (cat == "Заработная плата" and not show_wag) or (cat == "Прочие" and not show_oth):
+            if (cat == "Материалы" and not show_mat) or \
+               (cat == "Заработная плата" and not show_wag) or \
+               (cat == "Прочие" and not show_oth):
                 continue
             name = str(row["name"])
             amt = float(row["amount"] or 0.0)
@@ -815,7 +861,6 @@ class BudgetAnalysisPage(tk.Frame):
     # ---------- Диаграмма ----------
 
     def _render_chart(self):
-        # Очистка области диаграммы
         for w in self.chart_area.winfo_children():
             try:
                 w.destroy()
@@ -836,12 +881,12 @@ class BudgetAnalysisPage(tk.Frame):
         total = float(self.stats.get("total") or 0.0)
 
         if total <= 0 or sum(vals) <= 0:
-            self._chart_placeholder = tk.Label(self.chart_area, text="Нет данных для диаграммы", bg="#ffffff", fg="#888")
+            self._chart_placeholder = tk.Label(self.chart_area, text="Нет данных для диаграммы", 
+                                               bg="#ffffff", fg="#888")
             self._chart_placeholder.pack(fill="both", expand=True)
             return
 
         if MPL_AVAILABLE:
-            # Matplotlib pie
             self._mpl_fig = plt.Figure(figsize=(4.2, 3.0), dpi=100)
             ax = self._mpl_fig.add_subplot(111)
 
@@ -857,12 +902,12 @@ class BudgetAnalysisPage(tk.Frame):
                 counterclock=False
             )
             ax.axis("equal")
-            ax.set_title("Структура затрат")
+            title = "Структура затрат" + (" (с НДС 20%)" if self.vat_enabled.get() else "")
+            ax.set_title(title)
             self._mpl_canvas = FigureCanvasTkAgg(self._mpl_fig, master=self.chart_area)
             self._mpl_canvas.draw()
             self._mpl_canvas.get_tk_widget().pack(fill="both", expand=True)
         else:
-            # Tk Canvas fallback
             c = tk.Canvas(self.chart_area, width=420, height=280, bg="#ffffff", highlightthickness=0)
             c.pack(fill="both", expand=True)
             cx, cy, r = 150, 140, 110
@@ -875,12 +920,12 @@ class BudgetAnalysisPage(tk.Frame):
                 c.create_arc(cx - r, cy - r, cx + r, cy + r, start=start, extent=extent,
                              fill=col, outline="#ffffff", width=1)
                 start += extent
-            # Легенда
             lx, ly = 300, 80
             for lbl, col, v in zip(labels, colors, vals):
                 c.create_rectangle(lx, ly, lx + 14, ly + 14, fill=col, outline=col)
                 pct = (v / s * 100.0) if s > 1e-12 else 0.0
-                c.create_text(lx + 20, ly + 7, text=f"{lbl} — {pct:.1f}%", anchor="w", fill="#333", font=("Segoe UI", 9))
+                c.create_text(lx + 20, ly + 7, text=f"{lbl} — {pct:.1f}%", 
+                             anchor="w", fill="#333", font=("Segoe UI", 9))
                 ly += 22
 
     # ---------- Действия пользователя ----------
@@ -916,26 +961,35 @@ class BudgetAnalysisPage(tk.Frame):
                 with open(out, "w", encoding="utf-8-sig", newline="") as f:
                     w = csv.writer(f, delimiter=";")
                     w.writerow(["Показатель", "Сумма (руб.)", "Доля"])
-                    w.writerow(["Строительные затраты (Итого)", f"{self._fmt_money(self.stats['total'])}", "100%"])
+                    w.writerow(["Строительные затраты (Итого)", 
+                               f"{self._fmt_money(self.stats['total'])}", "100%"])
                     w.writerow(["Материалы", f"{self._fmt_money(self.stats['materials'])}",
                                 self._fmt_pct(self._safe_pct(self.stats['materials']))])
                     w.writerow(["Заработная плата", f"{self._fmt_money(self.stats['wages'])}",
                                 self._fmt_pct(self._safe_pct(self.stats['wages']))])
                     w.writerow(["Прочие", f"{self._fmt_money(self.stats['other'])}",
                                 self._fmt_pct(self._safe_pct(self.stats['other']))])
-                    # Расшифровка
+                    
+                    # **НОВОЕ: Добавляем НДС в экспорт**
+                    if self.vat_enabled.get():
+                        vat_amount = self.stats_base.get("total", 0.0) * 0.2
+                        total_with_vat = self.stats_base.get("total", 0.0) * 1.2
+                        w.writerow(["НДС 20%", f"{self._fmt_money(vat_amount)}", "20%"])
+                        w.writerow(["Всего с НДС", f"{self._fmt_money(total_with_vat)}", "120%"])
+                    
                     w.writerow([])
                     w.writerow(["Расшифровка", "", ""])
                     w.writerow(["Категория", "Наименование", "Сумма, руб."])
                     for row in self.breakdown_rows:
-                        w.writerow([row["category"], row["name"], f"{self._fmt_money(row['amount'])}"])
+                        w.writerow([row["category"], row["name"], 
+                                   f"{self._fmt_money(row['amount'])}"])
             else:
-                # XLSX — числа пишем как числа
                 wb = Workbook()
                 ws = wb.active
                 ws.title = "Анализ сметы"
                 ws.append(["Показатель", "Сумма (руб.)", "Доля"])
-                ws.append(["Строительные затраты (Итого)", float(self.stats.get("total", 0.0)), "100%"])
+                ws.append(["Строительные затраты (Итого)", 
+                          float(self.stats.get("total", 0.0)), "100%"])
                 ws.append([
                     "Материалы",
                     float(self.stats.get("materials", 0.0)),
@@ -951,6 +1005,14 @@ class BudgetAnalysisPage(tk.Frame):
                     float(self.stats.get("other", 0.0)),
                     self._fmt_pct(self._safe_pct(self.stats.get("other", 0.0))),
                 ])
+                
+                # **НОВОЕ: Добавляем НДС в экспорт XLSX**
+                if self.vat_enabled.get():
+                    vat_amount = self.stats_base.get("total", 0.0) * 0.2
+                    total_with_vat = self.stats_base.get("total", 0.0) * 1.2
+                    ws.append(["НДС 20%", float(vat_amount), "20%"])
+                    ws.append(["Всего с НДС", float(total_with_vat), "120%"])
+                
                 ws.append([])
                 ws.append(["Расшифровка"])
                 ws.append(["Категория", "Наименование", "Сумма, руб."])
@@ -993,3 +1055,5 @@ def open_budget_analyzer(parent=None):
 
 if __name__ == "__main__":
     open_budget_analyzer()
+
+        
