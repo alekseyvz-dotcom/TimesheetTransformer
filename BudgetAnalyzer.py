@@ -603,7 +603,7 @@ class BudgetAnalysisPage(tk.Frame):
 
         return None
 
-        def _analyze_smeta(self):
+    def _analyze_smeta(self):
         if self.smeta_name_col is None or not self.smeta_cost_cols:
             raise RuntimeError("Не заданы индексы колонок для сметы.")
 
