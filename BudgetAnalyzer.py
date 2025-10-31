@@ -4,14 +4,16 @@
 # - Ищем лист с надписью «ЛОКАЛЬНАЯ СМЕТА».
 # - Находим строку заголовков: либо явные заголовки, либо строка нумерации 1..11.
 # - Колонка наименований — 3-я (0-based индекс 2). Колонки «ВСЕГО» — приоритетно 11-я, затем 10-я.
-# - Итог («Итого по локальной смете») ищется по всей строке и берётся из 11/10 колонки.
+# - Итоги ищем по всей строке (без остановки на первом): берём последний «Итого по смете», иначе последний «Итого по локальной смете».
 # - Категории:
 #     • Заработная плата: строки 3-й колонки с «ЗП», «в т.ч. ЗПМ», «оплата труда», «заработ…».
 #     • Материалы: ТОЛЬКО по inline-правилу — если строка позиции (в 1-й колонке номер) с наименованием (3-я колонка)
 #       имеет ненулевую стоимость в 11/10 кол., и при этом ед. изм. не проценты (%) и не трудочасы (чел-ч).
 #       Поиск ключевых слов «МР/материалы/мат.» отключён.
-#     • Прочие = Итого − Материалы − Заработная плата.
-# - Из данных исключаем сводные/итоговые блоки в конце сметы (распознаются по текстам).
+#     • Прочие = Итог − Материалы − Заработная плата.
+# - Из данных исключаем:
+#     • строку нумерации столбцов (1..11) после заголовков и, если встречается дальше;
+#     • все сводные/итоговые/НДС/справочные блоки (распознаём по текстам и условию: первые 2 колонки пусты, 3-я содержит текст).
 # - Общий режим (generic) для простых CSV/XLSX с ручным сопоставлением колонок — без специальной логики Smeta.RU.
 
 import re
@@ -107,7 +109,7 @@ class BudgetAnalysisPage(tk.Frame):
         self.smeta_sheet_name: Optional[str] = None
         self.smeta_name_col: Optional[int] = None      # индекс колонки "Наименование работ и затрат" (0-based, обычно 2)
         self.smeta_cost_cols: List[int] = []           # индексы колонок «ВСЕГО » (приоритет: текущий уровень → базис)
-        self.smeta_data_rows: List[List[Any]] = []     # строки данных (после шапки, до итога)
+        self.smeta_data_rows: List[List[Any]] = []     # строки данных (после шапки, с пропусками сводных блоков)
 
         # Итоги и расшифровка
         self.stats = {"total": 0.0, "materials": 0.0, "wages": 0.0, "other": 0.0}
@@ -160,7 +162,8 @@ class BudgetAnalysisPage(tk.Frame):
                   "Суммы — из 11-й (приоритет) или 10-й «ВСЕГО». "
                   "Материалы считаются ТОЛЬКО по inline-правилу (стоимость в строке наименования; ед. изм. не %/не чел-ч) "
                   "и только для строк с номером позиции в 1-й колонке. "
-                  "ЗП — по строкам «ЗП/в т.ч. ЗПМ/оплата труда/заработ…». Прочие = Итого − Материалы − ЗП."),
+                  "ЗП — по строкам «ЗП/в т.ч. ЗПМ/оплата труда/заработ…». Прочие = Итого − Материалы − ЗП.\n"
+                  "Сводные блоки в конце (Итоги/НДС/Справочно) автоматически исключаются; поддержаны несколько частей сметы."),
             fg="#666", bg="#f7f7f7", justify="left", wraplength=980
         )
         hint.pack(fill="x", padx=12, pady=(0, 10))
@@ -304,7 +307,7 @@ class BudgetAnalysisPage(tk.Frame):
         """
         Ищем лист, где в верхних строках встречается «ЛОКАЛЬНАЯ СМЕТА».
         На нём ищем шапку таблицы: колонку «Наименование работ и затрат» и колонки «ВСЕГО».
-        Считываем строки до «Итого по локальной смете».
+        Считываем строки, пропуская сводные блоки; поддержаны несколько частей сметы.
         """
         wb = load_workbook(path, read_only=True, data_only=True)
         target_ws = None
@@ -315,25 +318,57 @@ class BudgetAnalysisPage(tk.Frame):
         if target_ws is None:
             return False
 
-    # ------------------ НАЙТИ ШАПКУ ------------------
+        # Найти шапку
         hdr_row_idx, name_col, cost_cols = self._find_table_header(target_ws)
         if hdr_row_idx is None or name_col is None or not cost_cols:
             return False
 
-    # ------------------ СЧИТАТЬ ДАННЫЕ ДО СВОДА/ИТОГА ------------------
-        data_rows = []
+        data_rows: List[List[Any]] = []
+        # Для итогов (берём последние встреченные)
+        last_local_total: Optional[float] = None
+        last_grand_total: Optional[float] = None
+
+        # Чтение всех строк после шапки (без остановки на первом «итого»)
         for row in target_ws.iter_rows(min_row=hdr_row_idx + 1, values_only=True):
             cells = list(row)
-            # стоп по «Итого по локальной смете» — ищем фразу в любой ячейке
-            if any(isinstance(c, str) and "итого по локальной смете" in c.lower() for c in cells):
-                break
-            # или по сводным маркерам в 3-й колонке
-            name_cell = self._str(cells[name_col]) if name_col < len(cells) else ""
-            if self._is_summary_name(name_cell):
-                break
-            # пропускаем полностью пустые
+
+            # Пропустить полностью пустые
             if not any(c is not None and str(c).strip() for c in cells):
                 continue
+
+            # Определить текст в колонке наименования
+            name_cell = self._str(cells[name_col]) if name_col < len(cells) else ""
+
+            # Пропустить строку нумерации 1..11 (часто идёт сразу после заголовков или внутри второй части)
+            if self._is_numbering_row(cells):
+                continue
+
+            # Если это сводная строка (итоги/НДС/справочно) — сохранить итог (если есть) и пропустить её
+            if self._is_summary_row(cells, name_col):
+                # Считать сумму: сначала из приоритетных cost_cols, потом соседние
+                val = self._first_number_from_cols(cells, cost_cols)
+                if not isinstance(val, float):
+                    for base in cost_cols:
+                        for j in (base - 1, base + 1):
+                            if 0 <= j < len(cells):
+                                v2 = self._to_number(cells[j])
+                                if isinstance(v2, float):
+                                    val = v2
+                                    break
+                        if isinstance(val, float):
+                            break
+
+                low = name_cell.lower()
+                if "итого по смете" in low or ("итого" in low and "смете" in low):
+                    if isinstance(val, float):
+                        last_grand_total = val
+                if "итого по локальной смете" in low:
+                    if isinstance(val, float):
+                        last_local_total = val
+                # Пропускаем
+                continue
+
+            # Обычная (данная) строка
             data_rows.append(cells)
 
         self.smeta_sheet_name = target_ws.title
@@ -341,9 +376,9 @@ class BudgetAnalysisPage(tk.Frame):
         self.smeta_cost_cols = cost_cols  # упорядочены: 11-я, затем 10-я
         self.smeta_data_rows = data_rows
 
-    # ------------------ НАЙТИ ИТОГ ------------------
-        total = self._find_local_total(target_ws, hdr_row_idx, name_col, cost_cols)
-        self.stats = {"total": total or 0.0, "materials": 0.0, "wages": 0.0, "other": 0.0}
+        # Выбрать итог: сначала «Итого по смете», иначе «Итого по локальной смете»
+        total = last_grand_total if isinstance(last_grand_total, float) else last_local_total
+        self.stats = {"total": float(total or 0.0), "materials": 0.0, "wages": 0.0, "other": 0.0}
 
         self.lbl_sheet.config(text=f"Лист: {self.smeta_sheet_name} (режим Smeta.RU)")
         return True
@@ -383,7 +418,7 @@ class BudgetAnalysisPage(tk.Frame):
 
             # Попытка: строка нумерации 1..11
             only_digits = [str(v).strip() for v in raw_vals if v is not None]
-            if only_digits and all(x.isdigit() for x in only_digits):
+            if only_digits and self._is_sequential_digits_list(only_digits):
                 hdr_row_idx = i
                 name_col = 2
                 ordered_cost_cols = [10, 9]  # 11-я, затем 10-я (0-based)
@@ -419,7 +454,7 @@ class BudgetAnalysisPage(tk.Frame):
         if hdr_row_idx is None:
             for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
                 only_digits = [str(v).strip() for v in row if v is not None]
-                if only_digits and all(x.isdigit() for x in only_digits):
+                if only_digits and self._is_sequential_digits_list(only_digits):
                     hdr_row_idx = i
                     name_col = 2
                     ordered_cost_cols = [10, 9]
@@ -427,26 +462,55 @@ class BudgetAnalysisPage(tk.Frame):
 
         return hdr_row_idx, name_col, ordered_cost_cols
 
-    def _find_local_total(self, ws, start_row: int, name_col: int, cost_cols: List[int]) -> Optional[float]:
+    def _is_numbering_row(self, cells: List[Any]) -> bool:
+        """Строка нумерации столбцов, вида 1..11 (встречается после заголовков и между частями)."""
+        vals = [str(v).strip() for v in cells if v is not None and str(v).strip() != ""]
+        if not vals:
+            return False
+        return self._is_sequential_digits_list(vals)
+
+    @staticmethod
+    def _is_sequential_digits_list(vals: List[str]) -> bool:
+        try:
+            nums = [int(v) for v in vals if v.isdigit()]
+        except Exception:
+            return False
+        if not nums:
+            return False
+        # допускаем последовательность от 1 до N (обычно до 11), без пропусков
+        return nums == list(range(1, len(nums) + 1)) and len(nums) >= 5
+
+    def _is_summary_row(self, cells: List[Any], name_col: int) -> bool:
         """
-        Находим строку «Итого по локальной смете» и берём сумму из любой приоритетной «ВСЕГО»-колонки.
+        Свод/итоги/НДС/справочно — исключаем из данных.
+        Условие:
+        - первые две колонки (0 и 1) пустые И
+        - 3-я колонка (name_col) содержит текст с маркерами итогов/сводов.
         """
-        for row in ws.iter_rows(min_row=start_row + 1, values_only=True):
-            cells = list(row)
-            if any(isinstance(c, str) and "итого по локальной смете" in c.lower() for c in cells):
-                for j in cost_cols:
-                    if 0 <= j < len(cells):
-                        v = self._to_number(cells[j])
-                        if isinstance(v, float):
-                            return v
-                # подстраховка: соседние колонки для каждого кандидата
-                for base in cost_cols:
-                    for j in (base - 1, base + 1):
-                        if 0 <= j < len(cells):
-                            v = self._to_number(cells[j])
-                            if isinstance(v, float):
-                                return v
-        return None
+        col0_empty = (len(cells) < 1) or (self._str(cells[0]) == "")
+        col1_empty = (len(cells) < 2) or (self._str(cells[1]) == "")
+        name = self._str(cells[name_col]) if name_col < len(cells) else ""
+        if not (col0_empty and col1_empty and name):
+            return False
+        return self._is_summary_name(name)
+
+    @staticmethod
+    def _is_summary_name(name: Any) -> bool:
+        """Распознаём свод/итоги/НДС/справочно по тексту."""
+        s = re.sub(r"\s+", " ", str(name or "")).strip().lower()
+        if not s:
+            return False
+        # Не считаем «Всего по позиции» сводом (внутрипозиционная строка)
+        if "по позиции" in s:
+            return False
+        patterns = [
+            "итого по локальной смете",
+            "итоги по смете", "итоги по разделу", "итоги по", "итог по",
+            "итого прямые затраты", "итого прямые", "итого по смете",
+            "всего по смете", "всего по разделу", "всего по",
+            "справочно", "ндс", "итого с ндс", "всего с ндс",
+        ]
+        return any(p in s for p in patterns)
 
     # ---------- Вспомогательные ----------
 
@@ -501,23 +565,7 @@ class BudgetAnalysisPage(tk.Frame):
         s = str(cell or "").strip()
         return bool(s) and s[0].isdigit()
 
-    def _is_summary_name(self, name: Any) -> bool:
-        """Распознаём начало сводного блока (итоги), чтобы прервать сбор строк данных."""
-        s = re.sub(r"\s+", " ", str(name or "")).strip().lower()
-        if not s:
-            return False
-        # Не считаем «Всего по позиции» сводом (внутрипозиционная строка)
-        if "по позиции" in s:
-            return False
-        # Маркеры сводных разделов/итогов/справок
-        patterns = [
-            "итого по локальной смете",
-            "итоги по смете", "итоги по разделу", "итоги по", "итог по",
-            "итого прямые затраты", "итого прямые", "итого по смете",
-            "всего по смете", "всего по разделу", "всего по",
-            "справочно", "ндс", "итого с ндс", "всего с ндс",
-        ]
-        return any(p in s for p in patterns)
+    # ---------- Классификация строк ----------
 
     def _classify_row(self, row: List[Any]) -> Optional[str]:
         """
@@ -527,13 +575,15 @@ class BudgetAnalysisPage(tk.Frame):
                           с прямой стоимостью в 11/10 кол. (ед. изм. не %/не чел-ч)
           - None        — игнорировать (ЭМ, НР, СП, ЗТР, служебные и сводные строки)
         """
+        # Сводные — сразу мимо
+        if self._is_summary_row(row, self.smeta_name_col or 2):
+            return None
+
         name = self._str(row[self.smeta_name_col]) if (self.smeta_name_col is not None and self.smeta_name_col < len(row)) else ""
         n = name.lower()
 
-        # Служебные/сводные/неучитываемые строки
+        # Служебные/неучитываемые строки
         if not n:
-            return None
-        if self._is_summary_name(n):
             return None
         if n.startswith("всего по позиции"):
             return None
@@ -773,7 +823,7 @@ class BudgetAnalysisPage(tk.Frame):
                 pass
         self._mpl_fig = None
         self._mpl_canvas = None
-        self._tk_canvas = None
+               self._tk_canvas = None
         self._chart_placeholder = None
 
         vals = [
