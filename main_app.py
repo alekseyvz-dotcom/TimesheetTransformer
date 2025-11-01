@@ -143,6 +143,8 @@ def ensure_config():
         cfg = configparser.ConfigParser()
         cfg.read(cp, encoding="utf-8")
         changed = False
+        
+        # Paths
         if not cfg.has_section(CONFIG_SECTION_PATHS):
             cfg[CONFIG_SECTION_PATHS] = {}
             changed = True
@@ -153,6 +155,7 @@ def ensure_config():
             cfg[CONFIG_SECTION_PATHS][KEY_OUTPUT_DIR] = str(exe_dir() / OUTPUT_DIR_DEFAULT)
             changed = True
 
+        # UI
         if not cfg.has_section(CONFIG_SECTION_UI):
             cfg[CONFIG_SECTION_UI] = {}
             changed = True
@@ -160,13 +163,16 @@ def ensure_config():
             cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = "Все"
             changed = True
 
+        # Integrations
         if not cfg.has_section(CONFIG_SECTION_INTEGR):
             cfg[CONFIG_SECTION_INTEGR] = {}
             changed = True
         if KEY_EXPORT_PWD not in cfg[CONFIG_SECTION_INTEGR]:
             cfg[CONFIG_SECTION_INTEGR][KEY_EXPORT_PWD] = "2025"
             changed = True
+        # НЕ трогаем orders_mode, orders_webhook_url, orders_webhook_token!
 
+        # Remote
         if not cfg.has_section(CONFIG_SECTION_REMOTE):
             cfg[CONFIG_SECTION_REMOTE] = {}
             changed = True
@@ -180,12 +186,23 @@ def ensure_config():
             cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_PATH] = ""
             changed = True
 
+        # Секция [Orders] — добавляем, если нет (но не трогаем существующие значения)
+        if not cfg.has_section("Orders"):
+            cfg["Orders"] = {}
+            changed = True
+        if "cutoff_enabled" not in cfg["Orders"]:
+            cfg["Orders"]["cutoff_enabled"] = "false"
+            changed = True
+        if "cutoff_hour" not in cfg["Orders"]:
+            cfg["Orders"]["cutoff_hour"] = "13"
+            changed = True
+
         if changed:
             with open(cp, "w", encoding="utf-8") as f:
                 cfg.write(f)
         return
 
-    # новый файл
+    # Новый файл (первый запуск)
     cfg = configparser.ConfigParser()
     cfg[CONFIG_SECTION_PATHS] = {
         KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE_DEFAULT),
@@ -198,8 +215,13 @@ def ensure_config():
         KEY_YA_PUBLIC_LINK: "",
         KEY_YA_PUBLIC_PATH: "",
     }
+    cfg["Orders"] = {
+        "cutoff_enabled": "false",
+        "cutoff_hour": "13",
+    }
     with open(cp, "w", encoding="utf-8") as f:
         cfg.write(f)
+
 
 def read_config() -> configparser.ConfigParser:
     ensure_config()
