@@ -1,4 +1,3 @@
-# python
 import os
 import re
 import sys
@@ -143,7 +142,6 @@ def ensure_config():
         cfg = configparser.ConfigParser()
         cfg.read(cp, encoding="utf-8")
         changed = False
-        
         # Paths
         if not cfg.has_section(CONFIG_SECTION_PATHS):
             cfg[CONFIG_SECTION_PATHS] = {}
@@ -170,7 +168,7 @@ def ensure_config():
         if KEY_EXPORT_PWD not in cfg[CONFIG_SECTION_INTEGR]:
             cfg[CONFIG_SECTION_INTEGR][KEY_EXPORT_PWD] = "2025"
             changed = True
-        # НЕ трогаем orders_mode, orders_webhook_url, orders_webhook_token!
+        # Важно: не трогаем другие ключи Integrations (orders_mode, orders_webhook_url и т.п.)
 
         # Remote
         if not cfg.has_section(CONFIG_SECTION_REMOTE):
@@ -186,7 +184,7 @@ def ensure_config():
             cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_PATH] = ""
             changed = True
 
-        # Секция [Orders] — добавляем, если нет (но не трогаем существующие значения)
+        # Orders — добавляем секцию и дефолты, если их нет (существующие значения не трогаем)
         if not cfg.has_section("Orders"):
             cfg["Orders"] = {}
             changed = True
@@ -202,7 +200,7 @@ def ensure_config():
                 cfg.write(f)
         return
 
-    # Новый файл (первый запуск)
+    # новый файл
     cfg = configparser.ConfigParser()
     cfg[CONFIG_SECTION_PATHS] = {
         KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE_DEFAULT),
@@ -221,7 +219,6 @@ def ensure_config():
     }
     with open(cp, "w", encoding="utf-8") as f:
         cfg.write(f)
-
 
 def read_config() -> configparser.ConfigParser:
     ensure_config()
@@ -841,12 +838,13 @@ class TimesheetPage(tk.Frame):
         btns = tk.Frame(top)
         btns.grid(row=3, column=0, columnspan=8, sticky="w", pady=(8, 0))
         ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
-        ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=1, padx=4)
-        ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=2, padx=4)
-        ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=3, padx=4)
-        ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=4, padx=4)
-        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=5, padx=4)
-        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=6, padx=4)
+        ttk.Button(btns, text="Добавить подразделение", command=self.add_department_all).grid(row=0, column=1, padx=4)
+        ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=2, padx=4)
+        ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=3, padx=4)
+        ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=4, padx=4)
+        ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=5, padx=4)
+        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=6, padx=4)
+        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=7, padx=4)
 
         # Основной контейнер с прокруткой
         main_frame = tk.Frame(self)
@@ -1023,6 +1021,41 @@ class TimesheetPage(tk.Frame):
         w.update_days_enabled(y, m)
         self.rows.append(w)
         self._regrid_rows()
+
+    def add_department_all(self):
+        dep_sel = (self.cmb_department.get() or "Все").strip()
+        # Подбор списка сотрудников по подразделению
+        if dep_sel == "Все":
+            candidates = self.employees[:]  # все сотрудники
+            if not candidates:
+                messagebox.showinfo("Объектный табель", "Справочник сотрудников пуст.")
+                return
+            if not messagebox.askyesno("Добавить всех", f"Добавить в реестр всех сотрудников ({len(candidates)})?"):
+                return
+        else:
+            candidates = [e for e in self.employees if len(e) > 3 and (e[3] or "").strip() == dep_sel]
+            if not candidates:
+                messagebox.showinfo("Объектный табель", f"В подразделении «{dep_sel}» нет сотрудников.")
+                return
+
+        # Уникальность по (fio.lower, tbn)
+        existing = {(r.fio().strip().lower(), r.tbn().strip()) for r in self.rows}
+        added = 0
+        y, m = self.get_year_month()
+        for fio, tbn, pos, dep in candidates:
+            key = (fio.strip().lower(), (tbn or "").strip())
+            if key in existing:
+                continue  # пропускаем дубликаты без вопросов
+            row_index = len(self.rows) + 1
+            w = RowWidget(self.table, row_index, fio, tbn, self.get_year_month, self.delete_row)
+            w.set_day_font(self.DAY_ENTRY_FONT)
+            w.update_days_enabled(y, m)
+            self.rows.append(w)
+            existing.add(key)
+            added += 1
+
+        self._regrid_rows()
+        messagebox.showinfo("Объектный табель", f"Добавлено сотрудников: {added}")
 
     def _on_department_select(self):
         dep_sel = (self.cmb_department.get() or "Все").strip()
