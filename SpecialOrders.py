@@ -670,7 +670,10 @@ class SpecialOrdersPage(tk.Frame):
         tech_types = set()  # Собираем уникальные типы
     
         for tp, nm, pl, dep, note in tech:
-            tech_types.add(tp)
+            if tp:  # Добавляем только если тип указан
+                tech_types.add(tp)
+        
+            # ВАЖНО: сохраняем полную информацию для справки
             self.techs.append({
                 'type': tp, 
                 'name': nm, 
@@ -679,7 +682,7 @@ class SpecialOrdersPage(tk.Frame):
                 'note': note
             })
     
-        # Для выпадающего списка - только типы (отсортированные)
+        # Для выпадающего списка в заявке - только типы (отсортированные)
         self.tech_values = sorted(list(tech_types))
         # ================================================================
 
@@ -1326,49 +1329,79 @@ class TransportPlanningPage(tk.Frame):
         """Диалог назначения транспорта и водителя"""
         dialog = tk.Toplevel(self)
         dialog.title("Назначение транспорта")
-        dialog.geometry("600x550")
-        dialog.resizable(False, False)
+        dialog.geometry("640x700")  # ← УВЕЛИЧИЛИ с 550 до 700
+        dialog.resizable(True, True)  # ← РАЗРЕШИЛИ ИЗМЕНЕНИЕ РАЗМЕРА
         dialog.transient(self)
         dialog.grab_set()
     
         # Центрируем
         dialog.update_idletasks()
-        x = (dialog.winfo_screenwidth() // 2) - (600 // 2)
-        y = (dialog.winfo_screenheight() // 2) - (550 // 2)
-        dialog.geometry(f"600x550+{x}+{y}")
+        x = (dialog.winfo_screenwidth() // 2) - (640 // 2)
+        y = (dialog.winfo_screenheight() // 2) - (700 // 2)
+        dialog.geometry(f"640x700+{x}+{y}")
+    
+        # ========== СОЗДАЕМ КОНТЕЙНЕР СО СКРОЛЛОМ ==========
+        main_container = tk.Frame(dialog)
+        main_container.pack(fill="both", expand=True)
+    
+        # Canvas для скролла
+        canvas = tk.Canvas(main_container, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas)
+    
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+    
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+    
+        # Прокрутка колесиком мыши
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+    
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+    
+        # Паковка canvas и scrollbar
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        # ==================================================
+    
+        # Теперь всё содержимое добавляем в scrollable_frame вместо dialog
     
         # Информация о заявке
-        info_frame = tk.LabelFrame(dialog, text="Информация о заявке", padx=10, pady=10)
+        info_frame = tk.LabelFrame(scrollable_frame, text="Информация о заявке", padx=10, pady=10)
         info_frame.pack(fill="x", padx=15, pady=10)
     
-        tk.Label(info_frame, text=f"Дата: {values[2]}", font=("Arial", 9)).pack(anchor="w")
-        tk.Label(info_frame, text=f"Время подачи: {values[8] or 'не указано'}", font=("Arial", 9)).pack(anchor="w")
-        tk.Label(info_frame, text=f"Заявитель: {values[4]}", font=("Arial", 9)).pack(anchor="w")
-        tk.Label(info_frame, text=f"Объект: {values[5]}", font=("Arial", 9)).pack(anchor="w")
-        tk.Label(info_frame, text=f"Техника: {values[6]} x {values[7]} ({values[9]} ч.)", 
-                 font=("Arial", 10, "bold")).pack(anchor="w", pady=5)
+        tk.Label(info_frame, text=f"📅 Дата: {values[2]}", font=("Arial", 9)).pack(anchor="w", pady=2)
+        tk.Label(info_frame, text=f"🕐 Время подачи: {values[8] or 'не указано'}", font=("Arial", 9)).pack(anchor="w", pady=2)
+        tk.Label(info_frame, text=f"👤 Заявитель: {values[4]}", font=("Arial", 9)).pack(anchor="w", pady=2)
+        tk.Label(info_frame, text=f"📍 Объект: {values[5]}", font=("Arial", 9)).pack(anchor="w", pady=2)
+        tk.Label(info_frame, text=f"🚛 Техника: {values[6]} x {values[7]} ({values[9]} ч.)", 
+                 font=("Arial", 10, "bold"), fg="#0066cc").pack(anchor="w", pady=5)
     
         # Предупреждение о конфликтах
-        warning_frame = tk.Frame(dialog, bg="#fff3cd", relief="solid", borderwidth=1)
+        warning_frame = tk.Frame(scrollable_frame, bg="#fff3cd", relief="solid", borderwidth=1)
         warning_label = tk.Label(
             warning_frame, 
             text="", 
             font=("Arial", 9), 
             bg="#fff3cd",
             fg="#856404",
-            wraplength=550,
+            wraplength=580,
             justify="left"
         )
         warning_label.pack(padx=10, pady=8)
     
         # Назначение
-        assign_frame = tk.LabelFrame(dialog, text="Назначение транспорта", padx=15, pady=15)
+        assign_frame = tk.LabelFrame(scrollable_frame, text="Назначение транспорта", padx=15, pady=15)
         assign_frame.pack(fill="both", expand=True, padx=15, pady=5)
     
         # ========== КАСКАДНЫЕ ВЫПАДАЮЩИЕ СПИСКИ ==========
     
-        # Парсим текущее назначение (если есть)
-        current_assignment = values[10]  # Например: "Автокран | КС-45717 | А123ВС77"
+        # Парсим текущее назначение
+        current_assignment = values[10]
         current_type = ""
         current_name = ""
         current_plate = ""
@@ -1382,7 +1415,7 @@ class TransportPlanningPage(tk.Frame):
             current_type = current_assignment
     
         # 1. ТИП ТЕХНИКИ
-        tk.Label(assign_frame, text="1. Тип техники:", font=("Arial", 9, "bold")).grid(
+        tk.Label(assign_frame, text="1️⃣ Тип техники:", font=("Arial", 9, "bold")).grid(
             row=0, column=0, sticky="w", pady=(5, 2)
         )
         vehicle_type_var = tk.StringVar(value=current_type)
@@ -1391,13 +1424,13 @@ class TransportPlanningPage(tk.Frame):
             textvariable=vehicle_type_var,
             values=self.vehicle_types,
             state="readonly",
-            width=50,
+            width=55,
             font=("Arial", 9)
         )
-        cmb_vehicle_type.grid(row=1, column=0, pady=(0, 15), sticky="we")
+        cmb_vehicle_type.grid(row=1, column=0, pady=(0, 12), sticky="we")
     
-        # 2. НАИМЕНОВАНИЕ (зависит от типа)
-        tk.Label(assign_frame, text="2. Наименование:", font=("Arial", 9, "bold")).grid(
+        # 2. НАИМЕНОВАНИЕ
+        tk.Label(assign_frame, text="2️⃣ Наименование:", font=("Arial", 9, "bold")).grid(
             row=2, column=0, sticky="w", pady=(5, 2)
         )
         vehicle_name_var = tk.StringVar(value=current_name)
@@ -1406,13 +1439,13 @@ class TransportPlanningPage(tk.Frame):
             textvariable=vehicle_name_var,
             values=[],
             state="readonly",
-            width=50,
+            width=55,
             font=("Arial", 9)
         )
-        cmb_vehicle_name.grid(row=3, column=0, pady=(0, 15), sticky="we")
+        cmb_vehicle_name.grid(row=3, column=0, pady=(0, 12), sticky="we")
     
-        # 3. ГОС. НОМЕР (зависит от типа и наименования)
-        tk.Label(assign_frame, text="3. Гос. номер:", font=("Arial", 9, "bold")).grid(
+        # 3. ГОС. НОМЕР
+        tk.Label(assign_frame, text="3️⃣ Гос. номер:", font=("Arial", 9, "bold")).grid(
             row=4, column=0, sticky="w", pady=(5, 2)
         )
         vehicle_plate_var = tk.StringVar(value=current_plate)
@@ -1421,10 +1454,19 @@ class TransportPlanningPage(tk.Frame):
             textvariable=vehicle_plate_var,
             values=[],
             state="readonly",
-            width=50,
+            width=55,
             font=("Arial", 9)
         )
-        cmb_vehicle_plate.grid(row=5, column=0, pady=(0, 15), sticky="we")
+        cmb_vehicle_plate.grid(row=5, column=0, pady=(0, 12), sticky="we")
+    
+        # Информация о выборе
+        selection_info = tk.Label(
+            assign_frame,
+            text="💡 Выберите сначала тип, затем наименование и гос. номер",
+            font=("Arial", 8),
+            fg="#666"
+        )
+        selection_info.grid(row=6, column=0, sticky="w", pady=(0, 10))
     
         # ========== ЛОГИКА КАСКАДНЫХ СПИСКОВ ==========
     
@@ -1432,7 +1474,6 @@ class TransportPlanningPage(tk.Frame):
             """Обновляет список наименований при выборе типа"""
             selected_type = vehicle_type_var.get()
         
-            # Сбрасываем зависимые поля
             vehicle_name_var.set("")
             vehicle_plate_var.set("")
         
@@ -1441,9 +1482,9 @@ class TransportPlanningPage(tk.Frame):
                 cmb_vehicle_plate['values'] = []
                 cmb_vehicle_name.state(['disabled'])
                 cmb_vehicle_plate.state(['disabled'])
+                selection_info.config(text="💡 Выберите тип техники", fg="#666")
                 return
         
-            #     Фильтруем наименования по типу
             names = sorted(set(
                 v['name'] for v in self.vehicles 
                 if v['type'] == selected_type and v['name']
@@ -1454,17 +1495,20 @@ class TransportPlanningPage(tk.Frame):
             cmb_vehicle_plate['values'] = []
             cmb_vehicle_plate.state(['disabled'])
         
-            # Если только одно наименование - выбираем автоматически
-            if len(names) == 1:
+            if len(names) == 0:
+                selection_info.config(text="⚠️ Нет доступных наименований для этого типа", fg="#dc3545")
+            elif len(names) == 1:
                 vehicle_name_var.set(names[0])
                 update_plates()
+                selection_info.config(text=f"✓ Автоматически выбрано: {names[0]}", fg="#28a745")
+            else:
+                selection_info.config(text=f"💡 Доступно наименований: {len(names)}", fg="#666")
     
         def update_plates(*args):
             """Обновляет список гос. номеров при выборе наименования"""
             selected_type = vehicle_type_var.get()
             selected_name = vehicle_name_var.get()
         
-            # Сбрасываем номер
             vehicle_plate_var.set("")
         
             if not selected_type or not selected_name:
@@ -1472,7 +1516,6 @@ class TransportPlanningPage(tk.Frame):
                 cmb_vehicle_plate.state(['disabled'])
                 return
         
-            # Фильтруем номера по типу и наименованию
             plates = sorted(set(
                 v['plate'] for v in self.vehicles 
                 if v['type'] == selected_type 
@@ -1483,10 +1526,14 @@ class TransportPlanningPage(tk.Frame):
             cmb_vehicle_plate['values'] = plates
             cmb_vehicle_plate.state(['!disabled'])
         
-            # Если только один номер - выбираем автоматически
-            if len(plates) == 1:
+            if len(plates) == 0:
+                selection_info.config(text="⚠️ Нет доступных гос. номеров", fg="#dc3545")
+            elif len(plates) == 1:
                 vehicle_plate_var.set(plates[0])
                 check_conflicts()
+                selection_info.config(text=f"✓ Назначен: {get_full_vehicle_string()}", fg="#28a745")
+            else:
+                selection_info.config(text=f"💡 Доступно гос. номеров: {len(plates)}", fg="#666")
     
         def get_full_vehicle_string() -> str:
             """Формирует полную строку назначения"""
@@ -1499,12 +1546,11 @@ class TransportPlanningPage(tk.Frame):
                 parts.append(vehicle_plate_var.get())
             return " | ".join(parts) if parts else ""
     
-        # Привязываем события
         vehicle_type_var.trace_add("write", update_names)
         vehicle_name_var.trace_add("write", update_plates)
         vehicle_plate_var.trace_add("write", lambda *args: check_conflicts())
     
-        # Инициализируем списки при открытии
+        # Инициализация
         if current_type:
             update_names()
             if current_name:
@@ -1513,16 +1559,14 @@ class TransportPlanningPage(tk.Frame):
                 if current_plate:
                     vehicle_plate_var.set(current_plate)
     
-        # ==============================================
-    
         # Разделитель
         ttk.Separator(assign_frame, orient='horizontal').grid(
-            row=6, column=0, sticky='ew', pady=15
+            row=7, column=0, sticky='ew', pady=15
         )
     
-        # Выбор водителя
-        tk.Label(assign_frame, text="Водитель:", font=("Arial", 9, "bold")).grid(
-            row=7, column=0, sticky="w", pady=(5, 2)
+        # Водитель
+        tk.Label(assign_frame, text="👨‍✈️ Водитель:", font=("Arial", 9, "bold")).grid(
+            row=8, column=0, sticky="w", pady=(5, 2)
         )
     
         driver_count_label = tk.Label(
@@ -1531,7 +1575,7 @@ class TransportPlanningPage(tk.Frame):
             font=("Arial", 8),
             fg="#666"
         )
-        driver_count_label.grid(row=7, column=0, sticky="e", pady=(5, 2))
+        driver_count_label.grid(row=8, column=0, sticky="e", pady=(5, 2))
     
         driver_var = tk.StringVar(value=values[11])
     
@@ -1546,14 +1590,14 @@ class TransportPlanningPage(tk.Frame):
             assign_frame,
             textvariable=driver_var,
             values=driver_display_list,
-            width=50,
+            width=55,
             font=("Arial", 9)
         )
-        cmb_driver.grid(row=8, column=0, pady=(0, 15), sticky="we")
+        cmb_driver.grid(row=9, column=0, pady=(0, 12), sticky="we")
     
         # Статус
-        tk.Label(assign_frame, text="Статус:", font=("Arial", 9, "bold")).grid(
-            row=9, column=0, sticky="w", pady=(5, 2)
+        tk.Label(assign_frame, text="📊 Статус:", font=("Arial", 9, "bold")).grid(
+            row=10, column=0, sticky="w", pady=(5, 2)
         )
         status_var = tk.StringVar(value=values[12])
         cmb_status = ttk.Combobox(
@@ -1561,10 +1605,10 @@ class TransportPlanningPage(tk.Frame):
             textvariable=status_var,
             values=["Новая", "Назначена", "В работе", "Выполнена"],
             state="readonly",
-            width=50,
+            width=55,
             font=("Arial", 9)
         )
-        cmb_status.grid(row=10, column=0, pady=(0, 10), sticky="we")
+        cmb_status.grid(row=11, column=0, pady=(0, 15), sticky="we")
     
         # ========== ПРОВЕРКА КОНФЛИКТОВ ==========
         def check_conflicts(*args):
@@ -1601,11 +1645,15 @@ class TransportPlanningPage(tk.Frame):
     
         assign_frame.grid_columnconfigure(0, weight=1)
     
-        # ========== КНОПКИ (ТОЛЬКО СЛЕВА, БЕЗ ДУБЛИКАТОВ) ==========
-        btn_frame = tk.Frame(assign_frame)
-        btn_frame.grid(row=11, column=0, sticky="w", pady=(10, 0))
+        # ========== КНОПКИ ==========
+        btn_frame = tk.Frame(assign_frame, bg="#f0f0f0", relief="raised", borderwidth=1)
+        btn_frame.grid(row=12, column=0, sticky="ew", pady=(15, 0))
     
         def save_and_close():
+            if not get_full_vehicle_string():
+                messagebox.showwarning("Назначение", "Выберите транспорт!", parent=dialog)
+                return
+        
             driver_name = driver_var.get()
             if " (" in driver_name:
                 driver_name = driver_name.split(" (")[0].strip()
@@ -1615,29 +1663,38 @@ class TransportPlanningPage(tk.Frame):
             new_values[11] = driver_name
             new_values[12] = status_var.get()
             self.tree.item(item_id, values=new_values, tags=(new_values[12],))
+        
+            # Отключаем прокрутку мыши перед закрытием
+            canvas.unbind_all("<MouseWheel>")
+            dialog.destroy()
+    
+        def cancel_and_close():
+            canvas.unbind_all("<MouseWheel>")
             dialog.destroy()
     
         ttk.Button(
             btn_frame, 
             text="✓ Сохранить", 
             command=save_and_close, 
-            width=18
-        ).pack(side="left", padx=(0, 5))
+            width=20
+        ).pack(side="left", padx=10, pady=10)
     
         ttk.Button(
             btn_frame, 
             text="✗ Отмена", 
-            command=dialog.destroy, 
-            width=18
-        ).pack(side="left", padx=5)
-        # ==========================================================
+            command=cancel_and_close, 
+            width=20
+        ).pack(side="left", padx=5, pady=10)
     
         cmb_vehicle_type.focus_set()
         dialog.bind("<Return>", lambda e: save_and_close())
-        dialog.bind("<Escape>", lambda e: dialog.destroy())
+        dialog.bind("<Escape>", lambda e: cancel_and_close())
     
         # Проверяем конфликты при открытии
         check_conflicts()
+    
+        # Прокручиваем в начало
+        canvas.yview_moveto(0)
         
         def save_and_close():
             # Обновляем значения в таблице
