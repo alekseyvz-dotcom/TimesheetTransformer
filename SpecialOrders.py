@@ -1332,11 +1332,21 @@ class SpecialOrdersApp(tk.Tk):
 def create_page(parent) -> tk.Frame:
     """
     Создаёт страницу "Заявка на автотранспорт" внутри переданного родителя.
-    Возвращает tk.Frame (уже со построенным UI). Родитель сам решает, как паковать/гридить.
+    Возвращает tk.Frame (уже со построенным UI).
     """
     ensure_config()
     page = SpecialOrdersPage(parent)
-    page.pack(fill="both", expand=True)
+    # Не пакуем здесь - родитель сам запакует
+    return page
+
+def create_planning_page(parent) -> tk.Frame:
+    """
+    Создаёт страницу "Планирование транспорта" внутри переданного родителя.
+    Возвращает tk.Frame (уже со построенным UI).
+    """
+    ensure_config()
+    page = TransportPlanningPage(parent)
+    # Не пакуем здесь - родитель сам запакует
     return page
 
 def open_special_orders(parent=None):
@@ -1355,7 +1365,6 @@ def open_special_orders(parent=None):
     page = SpecialOrdersPage(win)
     page.pack(fill="both", expand=True)
     return win
-
 
 # ------------------------- Утилиты -------------------------
 
