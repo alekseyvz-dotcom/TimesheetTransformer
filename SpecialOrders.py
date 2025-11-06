@@ -431,9 +431,14 @@ class PositionRow:
         self.ent_qty.grid(row=0, column=1, padx=2)
         self.ent_qty.insert(0, "1")
 
-        self.ent_time = ttk.Entry(self.frame, width=8, justify="center")
+        # ===== ИЗМЕНЕНИЯ ДЛЯ АВТОФОРМАТИРОВАНИЯ ВРЕМЕНИ =====
+        self.time_var = tk.StringVar()
+        self.time_var.trace_add("write", self._on_time_changed)
+        self._formatting_time = False  # Флаг для предотвращения рекурсии
+        
+        self.ent_time = ttk.Entry(self.frame, width=8, justify="center", textvariable=self.time_var)
         self.ent_time.grid(row=0, column=2, padx=2)
-        self.ent_time.insert(0, "")
+        # ====================================================
 
         self.ent_hours = ttk.Entry(self.frame, width=8, justify="center")
         self.ent_hours.grid(row=0, column=3, padx=2)
@@ -447,6 +452,63 @@ class PositionRow:
 
         for i in range(6):
             self.frame.grid_columnconfigure(i, minsize=[380, 50, 70, 70, 280, 80][i])
+
+    # ===== НОВЫЕ МЕТОДЫ ДЛЯ АВТОФОРМАТИРОВАНИЯ =====
+    def _on_time_changed(self, *args):
+        """Вызывается при каждом изменении текста в поле времени"""
+        if self._formatting_time:
+            return
+        
+        current = self.time_var.get()
+        formatted = self._auto_format_time_input(current)
+        
+        if formatted != current:
+            self._formatting_time = True
+            try:
+                self.time_var.set(formatted)
+                self.ent_time.icursor(tk.END)  # Курсор в конец
+            finally:
+                self._formatting_time = False
+    
+    def _auto_format_time_input(self, raw: str) -> str:
+        """
+        Автоматически форматирует ввод времени в формат ЧЧ:ММ
+        Примеры:
+        - '8' → '8'
+        - '13' → '13:'
+        - '130' → '01:30'
+        - '1300' → '13:00'
+        - '13.00' → '13:00'
+        - '9.45' → '09:45'
+        """
+        if not raw:
+            return ""
+        
+        # Удаляем все кроме цифр
+        digits = ''.join(c for c in raw if c.isdigit())
+        
+        if not digits:
+            return ""
+        
+        # Форматируем в зависимости от количества цифр
+        if len(digits) == 1:
+            # '8' → '8' (оставляем как есть, пока вводится)
+            return digits
+        elif len(digits) == 2:
+            # '13' → '13:' (автоматически добавляем двоеточие)
+            hh = min(int(digits), 23)
+            return f"{hh:02d}:"
+        elif len(digits) == 3:
+            # '130' → '01:30' (интерпретируем как Ч:ММ)
+            hh = int(digits[0])
+            mm = min(int(digits[1:3]), 59)
+            return f"{hh:02d}:{mm:02d}"
+        else:  # 4 или больше цифр
+            # '1300' → '13:00' (интерпретируем как ЧЧММ)
+            hh = min(int(digits[:2]), 23)
+            mm = min(int(digits[2:4]), 59)
+            return f"{hh:02d}:{mm:02d}"
+    # ===============================================
 
     def grid(self, row: int):
         self.frame.grid(row=row, column=0, sticky="w")
