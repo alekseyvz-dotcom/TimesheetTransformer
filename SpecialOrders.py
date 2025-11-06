@@ -36,6 +36,7 @@ KEY_SELECTED_DEP        = "selected_department"
 KEY_ORDERS_MODE         = "orders_mode"               # none | webhook
 KEY_ORDERS_WEBHOOK_URL  = "orders_webhook_url"        # https://script.google.com/macros/s/.../exec
 KEY_ORDERS_WEBHOOK_TOKEN= "orders_webhook_token"
+KEY_PLANNING_ENABLED = "planning_enabled"             # true|false
 
 # Настройки отсечки подачи заявок
 KEY_CUTOFF_ENABLED      = "cutoff_enabled"            # true|false
@@ -116,6 +117,9 @@ def ensure_config():
         if KEY_YA_PUBLIC_PATH not in cfg[CONFIG_SECTION_REMOTE]:
             cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_PATH] = ""
             changed = True
+        if KEY_PLANNING_ENABLED not in cfg[CONFIG_SECTION_INTEGR]:
+           cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_ENABLED] = "false"
+           changed = True
 
         if changed:
             with open(cp, "w", encoding="utf-8") as f:
@@ -146,6 +150,11 @@ def ensure_config():
     }
     with open(cp, "w", encoding="utf-8") as f:
         cfg.write(f)
+        
+def get_planning_enabled() -> bool:
+    cfg = read_config()
+    v = cfg.get(CONFIG_SECTION_INTEGR, KEY_PLANNING_ENABLED, fallback="false").strip().lower()
+    return v in ("1", "true", "yes", "on")
 
 def read_config() -> configparser.ConfigParser:
     ensure_config()
@@ -990,6 +999,320 @@ class SpecialOrdersPage(tk.Frame):
         except Exception as e:
             messagebox.showerror("Папка", f"Не удалось открыть папку:\n{e}")
 
+# ------------------------- Планирование транспорта -------------------------
+
+class TransportPlanningPage(tk.Frame):
+    """Вкладка планирования транспорта"""
+    
+    def __init__(self, master):
+        super().__init__(master, bg="#f7f7f7")
+        self.spr_path = get_spr_path()
+        self._load_spr()
+        self._build_ui()
+        
+    def _load_spr(self):
+        """Загрузка справочника"""
+        employees, objects, tech = load_spravochnik_remote_or_local(self.spr_path)
+        
+        # Список транспорта для назначения
+        self.vehicles = []
+        for tp, nm, pl, dep, note in tech:
+            disp = " | ".join(x for x in (tp, nm, pl) if x)
+            self.vehicles.append({
+                'type': tp, 'name': nm, 'plate': pl, 
+                'dep': dep, 'note': note, 'disp': disp
+            })
+        
+        # Все сотрудники (можно фильтровать по должности "водитель")
+        self.drivers = [
+            {'fio': fio, 'tbn': tbn, 'pos': pos} 
+            for fio, tbn, pos, dep in employees
+        ]
+        
+        # Получаем список подразделений
+        self.departments = ["Все"] + sorted({dep for _, _, _, dep in employees if dep})
+        
+    def _build_ui(self):
+        """Построение интерфейса"""
+        # Верхняя панель с фильтрами
+        top = tk.Frame(self, bg="#f7f7f7")
+        top.pack(fill="x", padx=10, pady=8)
+        
+        tk.Label(top, text="Дата:", bg="#f7f7f7").grid(row=0, column=0, sticky="w")
+        self.ent_filter_date = ttk.Entry(top, width=12)
+        self.ent_filter_date.grid(row=0, column=1, padx=4)
+        self.ent_filter_date.insert(0, date.today().strftime("%Y-%m-%d"))
+        
+        tk.Label(top, text="Подразделение:", bg="#f7f7f7").grid(row=0, column=2, sticky="w", padx=(12,0))
+        self.cmb_filter_dep = ttk.Combobox(top, state="readonly", values=self.departments, width=20)
+        self.cmb_filter_dep.set("Все")
+        self.cmb_filter_dep.grid(row=0, column=3, padx=4)
+        
+        tk.Label(top, text="Статус:", bg="#f7f7f7").grid(row=0, column=4, sticky="w", padx=(12,0))
+        self.cmb_filter_status = ttk.Combobox(
+            top, state="readonly", 
+            values=["Все", "Новая", "Назначена", "В работе", "Выполнена"], 
+            width=15
+        )
+        self.cmb_filter_status.set("Все")
+        self.cmb_filter_status.grid(row=0, column=5, padx=4)
+        
+        ttk.Button(top, text="🔄 Обновить", command=self.load_orders).grid(row=0, column=6, padx=12)
+        ttk.Button(top, text="💾 Сохранить назначения", command=self.save_assignments).grid(row=0, column=7, padx=4)
+        
+        # Таблица заявок
+        table_frame = tk.Frame(self)
+        table_frame.pack(fill="both", expand=True, padx=10, pady=8)
+        
+        # Создаем Treeview с колонками
+        columns = (
+            "id", "created", "date", "dept", "requester", 
+            "object", "tech", "qty", "time", "hours", 
+            "assigned_vehicle", "driver", "status"
+        )
+        
+        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=20)
+        
+        # Заголовки
+        headers = {
+            "id": "ID", "created": "Создано", "date": "Дата", 
+            "dept": "Подразделение", "requester": "Заявитель",
+            "object": "Объект/Адрес", "tech": "Техника", "qty": "Кол-во",
+            "time": "Подача", "hours": "Часы", 
+            "assigned_vehicle": "Назначен авто", "driver": "Водитель", 
+            "status": "Статус"
+        }
+        
+        widths = {
+            "id": 80, "created": 130, "date": 90, "dept": 120, 
+            "requester": 150, "object": 200, "tech": 180, 
+            "qty": 50, "time": 60, "hours": 50, 
+            "assigned_vehicle": 180, "driver": 150, "status": 100
+        }
+        
+        for col in columns:
+            self.tree.heading(col, text=headers.get(col, col))
+            self.tree.column(col, width=widths.get(col, 100))
+        
+        # Скроллбары
+        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
+        
+        # Двойной клик для редактирования
+        self.tree.bind("<Double-1>", self.on_row_double_click)
+        
+        # Цветовое выделение по статусам
+        self.tree.tag_configure('Новая', background='#fff3cd')
+        self.tree.tag_configure('Назначена', background='#d1ecf1')
+        self.tree.tag_configure('В работе', background='#d4edda')
+        self.tree.tag_configure('Выполнена', background='#e2e3e5')
+        
+    def load_orders(self):
+        """Загрузка заявок из Google Таблиц"""
+        try:
+            url = get_orders_webhook_url()
+            
+            if not url:
+                messagebox.showwarning("Загрузка", "Не настроен webhook URL в конфигурации")
+                return
+            
+            token = get_orders_webhook_token()
+            filter_date = self.ent_filter_date.get().strip()
+            filter_dept = self.cmb_filter_dep.get()
+            filter_status = self.cmb_filter_status.get()
+            
+            # GET запрос
+            params = {}
+            if filter_date:
+                params['date'] = filter_date
+            if filter_dept and filter_dept != "Все":
+                params['department'] = filter_dept
+            if filter_status and filter_status != "Все":
+                params['status'] = filter_status
+            if token:
+                params['token'] = token
+                
+            query = urllib.parse.urlencode(params)
+            full_url = f"{url}?{query}" if query else url
+            
+            with urllib.request.urlopen(full_url, timeout=15) as resp:
+                result = json.loads(resp.read().decode('utf-8'))
+            
+            if not result.get('ok'):
+                messagebox.showerror("Ошибка", f"Сервер вернул ошибку:\n{result.get('error', 'Unknown')}")
+                return
+            
+            orders = result.get('orders', [])
+            self._populate_tree(orders)
+            messagebox.showinfo("Загрузка", f"Загружено заявок: {len(orders)}")
+            
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось загрузить заявки:\n{e}")
+    
+    def _populate_tree(self, orders: List[Dict]):
+        """Заполнение таблицы заявками"""
+        # Очищаем таблицу
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        
+        for order in orders:
+            obj_display = order.get('object_address', '') or order.get('object_id', '')
+            status = order.get('status', 'Новая')
+            
+            item_id = self.tree.insert("", "end", values=(
+                order.get('id', ''),
+                order.get('created_at', ''),
+                order.get('date', ''),
+                order.get('department', ''),
+                order.get('requester_fio', ''),
+                obj_display,
+                order.get('tech', ''),
+                order.get('qty', ''),
+                order.get('time', ''),
+                order.get('hours', ''),
+                order.get('assigned_vehicle', ''),
+                order.get('driver', ''),
+                status
+            ), tags=(status,))
+    
+    def on_row_double_click(self, event):
+        """Открытие окна редактирования назначения"""
+        selection = self.tree.selection()
+        if not selection:
+            return
+        
+        item = self.tree.item(selection[0])
+        values = item['values']
+        
+        # Открываем диалог для назначения транспорта
+        self._show_assignment_dialog(selection[0], values)
+    
+    def _show_assignment_dialog(self, item_id, values):
+        """Диалог назначения транспорта и водителя"""
+        dialog = tk.Toplevel(self)
+        dialog.title("Назначение транспорта")
+        dialog.geometry("550x350")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+        
+        # Информация о заявке
+        info_frame = tk.LabelFrame(dialog, text="Информация о заявке", padx=10, pady=10)
+        info_frame.pack(fill="x", padx=15, pady=10)
+        
+        tk.Label(info_frame, text=f"Дата: {values[2]}", font=("Arial", 9)).pack(anchor="w")
+        tk.Label(info_frame, text=f"Заявитель: {values[4]}", font=("Arial", 9)).pack(anchor="w")
+        tk.Label(info_frame, text=f"Объект: {values[5]}", font=("Arial", 9)).pack(anchor="w")
+        tk.Label(info_frame, text=f"Техника: {values[6]} x {values[7]} ({values[9]} ч.)", 
+                 font=("Arial", 10, "bold")).pack(anchor="w", pady=5)
+        
+        # Назначение
+        assign_frame = tk.LabelFrame(dialog, text="Назначение", padx=10, pady=10)
+        assign_frame.pack(fill="both", expand=True, padx=15, pady=5)
+        
+        # Выбор транспорта
+        tk.Label(assign_frame, text="Автомобиль:").grid(row=0, column=0, sticky="w", pady=8)
+        vehicle_var = tk.StringVar(value=values[10])
+        cmb_vehicle = ttk.Combobox(
+            assign_frame, 
+            textvariable=vehicle_var,
+            values=[v['disp'] for v in self.vehicles],
+            width=45
+        )
+        cmb_vehicle.grid(row=0, column=1, pady=8, padx=5, sticky="we")
+        
+        # Выбор водителя
+        tk.Label(assign_frame, text="Водитель:").grid(row=1, column=0, sticky="w", pady=8)
+        driver_var = tk.StringVar(value=values[11])
+        cmb_driver = ttk.Combobox(
+            assign_frame,
+            textvariable=driver_var,
+            values=[d['fio'] for d in self.drivers],
+            width=45
+        )
+        cmb_driver.grid(row=1, column=1, pady=8, padx=5, sticky="we")
+        
+        # Статус
+        tk.Label(assign_frame, text="Статус:").grid(row=2, column=0, sticky="w", pady=8)
+        status_var = tk.StringVar(value=values[12])
+        cmb_status = ttk.Combobox(
+            assign_frame,
+            textvariable=status_var,
+            values=["Новая", "Назначена", "В работе", "Выполнена"],
+            state="readonly",
+            width=45
+        )
+        cmb_status.grid(row=2, column=1, pady=8, padx=5, sticky="we")
+        
+        assign_frame.grid_columnconfigure(1, weight=1)
+        
+        def save_and_close():
+            # Обновляем значения в таблице
+            new_values = list(values)
+            new_values[10] = vehicle_var.get()
+            new_values[11] = driver_var.get()
+            new_values[12] = status_var.get()
+            self.tree.item(item_id, values=new_values, tags=(new_values[12],))
+            dialog.destroy()
+        
+        btn_frame = tk.Frame(dialog)
+        btn_frame.pack(pady=15)
+        ttk.Button(btn_frame, text="✓ Сохранить", command=save_and_close, width=15).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="✗ Отмена", command=dialog.destroy, width=15).pack(side="left", padx=5)
+    
+    def save_assignments(self):
+        """Сохранение назначений в Google Таблицы"""
+        try:
+            # Собираем все назначения
+            assignments = []
+            for item in self.tree.get_children():
+                values = self.tree.item(item)['values']
+                assignments.append({
+                    'id': values[0],
+                    'assigned_vehicle': values[10],
+                    'driver': values[11],
+                    'status': values[12]
+                })
+            
+            if not assignments:
+                messagebox.showwarning("Сохранение", "Нет данных для сохранения")
+                return
+            
+            # Отправляем на сервер
+            url = get_orders_webhook_url()
+            token = get_orders_webhook_token()
+            
+            payload = {
+                'action': 'update_assignments',
+                'assignments': assignments
+            }
+            
+            ok, info = post_json(url, payload, token)
+            
+            if ok:
+                messagebox.showinfo("Сохранение", f"Назначения успешно сохранены!\n\nОбновлено записей: {len(assignments)}")
+            else:
+                messagebox.showerror("Ошибка", f"Не удалось сохранить:\n{info}")
+                
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Ошибка сохранения:\n{e}")
+
+
+# Функция для создания страницы планирования
+def create_planning_page(parent) -> tk.Frame:
+    """Создаёт страницу планирования транспорта"""
+    ensure_config()
+    page = TransportPlanningPage(parent)
+    page.pack(fill="both", expand=True)
+    return page
 
 # ------------------------- Вариант standalone-окна -------------------------
 
