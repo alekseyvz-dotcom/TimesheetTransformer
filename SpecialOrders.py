@@ -41,6 +41,7 @@ KEY_PLANNING_ENABLED = "planning_enabled"             # true|false
 # Настройки отсечки подачи заявок
 KEY_CUTOFF_ENABLED      = "cutoff_enabled"            # true|false
 KEY_CUTOFF_HOUR         = "cutoff_hour"               # 0..23
+KEY_DRIVER_DEPARTMENTS = "driver_departments"
 
 # Удалённый справочник (Я.Диск)
 KEY_REMOTE_USE          = "use_remote"                # true|false
@@ -118,8 +119,11 @@ def ensure_config():
             cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_PATH] = ""
             changed = True
         if KEY_PLANNING_ENABLED not in cfg[CONFIG_SECTION_INTEGR]:
-           cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_ENABLED] = "false"
-           changed = True
+            cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_ENABLED] = "false"
+            changed = True
+        if KEY_DRIVER_DEPARTMENTS not in cfg[CONFIG_SECTION_INTEGR]:
+            cfg[CONFIG_SECTION_INTEGR][KEY_DRIVER_DEPARTMENTS] = "Служба гаража, Автопарк, Транспортный цех"
+            changed = True
 
         if changed:
             with open(cp, "w", encoding="utf-8") as f:
@@ -678,6 +682,41 @@ class SpecialOrdersPage(tk.Frame):
                 self.addr_to_ids[addr].append(oid)
         self.addresses = sorted(self.addr_to_ids.keys() | {addr for _, addr in self.objects if addr})
         self.tech_values = [t['disp'] for t in self.techs]
+        # Список транспорта
+        self.vehicles = []
+        for tp, nm, pl, dep, note in tech:
+            disp = " | ".join(x for x in (tp, nm, pl) if x)
+            self.vehicles.append({
+                'type': tp, 'name': nm, 'plate': pl, 
+                'dep': dep, 'note': note, 'disp': disp
+            })
+    
+        # ========== ПОЛУЧАЕМ ПОДРАЗДЕЛЕНИЯ ИЗ КОНФИГА ==========
+        cfg = read_config()
+        driver_depts_str = cfg.get(
+            CONFIG_SECTION_INTEGR, 
+            KEY_DRIVER_DEPARTMENTS, 
+            fallback="Служба гаража"
+        )
+        DRIVER_DEPARTMENTS = [d.strip() for d in driver_depts_str.split(",") if d.strip()]
+        # ======================================================
+    
+        self.drivers = []
+        for fio, tbn, pos, dep in employees:
+            is_driver_dept = dep in DRIVER_DEPARTMENTS
+            is_driver_pos = 'водитель' in pos.lower()
+        
+            if is_driver_dept or is_driver_pos:
+                self.drivers.append({
+                    'fio': fio, 
+                    'tbn': tbn, 
+                    'pos': pos,
+                    'dep': dep
+                })
+    
+        self.drivers.sort(key=lambda x: x['fio'])
+    
+        self.departments = ["Все"] + sorted({dep for _, _, _, dep in employees if dep})
 
     def _build_ui(self):
         top = tk.Frame(self, bg="#f7f7f7")
@@ -1013,7 +1052,7 @@ class TransportPlanningPage(tk.Frame):
     def _load_spr(self):
         """Загрузка справочника"""
         employees, objects, tech = load_spravochnik_remote_or_local(self.spr_path)
-        
+    
         # Список транспорта для назначения
         self.vehicles = []
         for tp, nm, pl, dep, note in tech:
@@ -1022,13 +1061,29 @@ class TransportPlanningPage(tk.Frame):
                 'type': tp, 'name': nm, 'plate': pl, 
                 'dep': dep, 'note': note, 'disp': disp
             })
+    
+        # ========== ФИЛЬТРАЦИЯ ВОДИТЕЛЕЙ ПО ПОДРАЗДЕЛЕНИЮ ==========
+        # Можно указать несколько подразделений через список
+        DRIVER_DEPARTMENTS = ["Служба гаража", "Автопарк", "Транспортный цех"]
+    
+        self.drivers = []
+        for fio, tbn, pos, dep in employees:
+            # Проверяем: подразделение совпадает ИЛИ в должности есть "водитель"
+            is_driver_dept = dep in DRIVER_DEPARTMENTS
+            is_driver_pos = 'водитель' in pos.lower()
         
-        # Все сотрудники (можно фильтровать по должности "водитель")
-        self.drivers = [
-            {'fio': fio, 'tbn': tbn, 'pos': pos} 
-            for fio, tbn, pos, dep in employees
-        ]
-        
+            if is_driver_dept or is_driver_pos:
+                self.drivers.append({
+                    'fio': fio, 
+                    'tbn': tbn, 
+                    'pos': pos,
+                    'dep': dep
+                })
+    
+        # Сортируем по ФИО
+        self.drivers.sort(key=lambda x: x['fio'])
+        # ===========================================================
+    
         # Получаем список подразделений
         self.departments = ["Все"] + sorted({dep for _, _, _, dep in employees if dep})
         
@@ -1199,60 +1254,145 @@ class TransportPlanningPage(tk.Frame):
         """Диалог назначения транспорта и водителя"""
         dialog = tk.Toplevel(self)
         dialog.title("Назначение транспорта")
-        dialog.geometry("550x350")
+        dialog.geometry("600x480")  # ← УВЕЛИЧИЛИ ВЫСОТУ с 350 до 480
         dialog.resizable(False, False)
         dialog.transient(self)
         dialog.grab_set()
-        
-        # Информация о заявке
+    
+        # Центрируем окно
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (600 // 2)
+        y = (dialog.winfo_screenheight() // 2) - (480 // 2)
+        dialog.geometry(f"600x480+{x}+{y}")
+    
+        # ========== ИНФОРМАЦИЯ О ЗАЯВКЕ ==========
         info_frame = tk.LabelFrame(dialog, text="Информация о заявке", padx=10, pady=10)
         info_frame.pack(fill="x", padx=15, pady=10)
-        
+    
         tk.Label(info_frame, text=f"Дата: {values[2]}", font=("Arial", 9)).pack(anchor="w")
         tk.Label(info_frame, text=f"Заявитель: {values[4]}", font=("Arial", 9)).pack(anchor="w")
         tk.Label(info_frame, text=f"Объект: {values[5]}", font=("Arial", 9)).pack(anchor="w")
         tk.Label(info_frame, text=f"Техника: {values[6]} x {values[7]} ({values[9]} ч.)", 
                  font=("Arial", 10, "bold")).pack(anchor="w", pady=5)
-        
-        # Назначение
-        assign_frame = tk.LabelFrame(dialog, text="Назначение", padx=10, pady=10)
+    
+        # ========== НАЗНАЧЕНИЕ ==========
+        assign_frame = tk.LabelFrame(dialog, text="Назначение", padx=15, pady=15)
         assign_frame.pack(fill="both", expand=True, padx=15, pady=5)
-        
+    
         # Выбор транспорта
-        tk.Label(assign_frame, text="Автомобиль:").grid(row=0, column=0, sticky="w", pady=8)
+        tk.Label(assign_frame, text="Автомобиль:", font=("Arial", 9, "bold")).grid(
+            row=0, column=0, sticky="w", pady=(5, 2)
+        )
         vehicle_var = tk.StringVar(value=values[10])
         cmb_vehicle = ttk.Combobox(
             assign_frame, 
             textvariable=vehicle_var,
             values=[v['disp'] for v in self.vehicles],
-            width=45
+            width=50,
+            font=("Arial", 9)
         )
-        cmb_vehicle.grid(row=0, column=1, pady=8, padx=5, sticky="we")
-        
+        cmb_vehicle.grid(row=1, column=0, pady=(0, 15), sticky="we")
+    
         # Выбор водителя
-        tk.Label(assign_frame, text="Водитель:").grid(row=1, column=0, sticky="w", pady=8)
+        tk.Label(assign_frame, text="Водитель:", font=("Arial", 9, "bold")).grid(
+            row=2, column=0, sticky="w", pady=(5, 2)
+        )
+    
+        # ========== ПОКАЗЫВАЕМ КОЛИЧЕСТВО ВОДИТЕЛЕЙ ==========
+        driver_count_label = tk.Label(
+            assign_frame, 
+            text=f"(доступно: {len(self.drivers)} чел.)",
+            font=("Arial", 8),
+            fg="#666"
+        )
+        driver_count_label.grid(row=2, column=0, sticky="e", pady=(5, 2))
+        # ====================================================
+    
         driver_var = tk.StringVar(value=values[11])
+    
+        # ========== УЛУЧШЕННЫЙ КОМБОБОКС С АВТОДОПОЛНЕНИЕМ ==========
+        # Создаем список с подразделениями для удобства
+        driver_display_list = []
+        for d in self.drivers:
+            display = f"{d['fio']}"
+            if d.get('dep'):
+                display += f" ({d['dep']})"
+            driver_display_list.append(display)
+    
         cmb_driver = ttk.Combobox(
             assign_frame,
             textvariable=driver_var,
-            values=[d['fio'] for d in self.drivers],
-            width=45
+            values=driver_display_list,
+            width=50,
+            font=("Arial", 9)
         )
-        cmb_driver.grid(row=1, column=1, pady=8, padx=5, sticky="we")
-        
+        cmb_driver.grid(row=3, column=0, pady=(0, 15), sticky="we")
+        # ==========================================================
+    
         # Статус
-        tk.Label(assign_frame, text="Статус:").grid(row=2, column=0, sticky="w", pady=8)
+        tk.Label(assign_frame, text="Статус:", font=("Arial", 9, "bold")).grid(
+            row=4, column=0, sticky="w", pady=(5, 2)
+        )
         status_var = tk.StringVar(value=values[12])
         cmb_status = ttk.Combobox(
             assign_frame,
             textvariable=status_var,
             values=["Новая", "Назначена", "В работе", "Выполнена"],
             state="readonly",
-            width=45
+            width=50,
+            font=("Arial", 9)
         )
-        cmb_status.grid(row=2, column=1, pady=8, padx=5, sticky="we")
+        cmb_status.grid(row=5, column=0, pady=(0, 15), sticky="we")
+    
+        # Автоматическое изменение статуса при назначении
+        def on_vehicle_or_driver_change(*args):
+            if vehicle_var.get() and driver_var.get():
+                if status_var.get() == "Новая":
+                    status_var.set("Назначена")
+    
+        vehicle_var.trace_add("write", on_vehicle_or_driver_change)
+        driver_var.trace_add("write", on_vehicle_or_driver_change)
+    
+        assign_frame.grid_columnconfigure(0, weight=1)
+    
+        # ========== КНОПКИ ==========
+        def save_and_close():
+            # Убираем подразделение из строки водителя (если добавили)
+            driver_name = driver_var.get()
+            if " (" in driver_name:
+                driver_name = driver_name.split(" (")[0].strip()
         
-        assign_frame.grid_columnconfigure(1, weight=1)
+            # Обновляем значения в таблице
+            new_values = list(values)
+            new_values[10] = vehicle_var.get()
+            new_values[11] = driver_name
+            new_values[12] = status_var.get()
+            self.tree.item(item_id, values=new_values, tags=(new_values[12],))
+            dialog.destroy()
+    
+        btn_frame = tk.Frame(dialog, bg="#f0f0f0")
+        btn_frame.pack(fill="x", pady=15, padx=15)
+    
+        ttk.Button(
+            btn_frame, 
+            text="✓ Сохранить", 
+            command=save_and_close, 
+            width=18
+        ).pack(side="left", padx=5)
+    
+        ttk.Button(
+            btn_frame, 
+            text="✗ Отмена", 
+            command=dialog.destroy, 
+            width=18
+        ).pack(side="left", padx=5)
+    
+        # Фокус на первое поле
+        cmb_vehicle.focus_set()
+    
+        # Обработка Enter и Escape
+        dialog.bind("<Return>", lambda e: save_and_close())
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
         
         def save_and_close():
             # Обновляем значения в таблице
