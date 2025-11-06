@@ -689,7 +689,7 @@ class SpecialOrdersPage(tk.Frame):
         self.addr_to_ids = {}
         for oid, addr in self.objects:
             if not addr:
-            c    ontinue
+                continue
             self.addr_to_ids.setdefault(addr, [])
             if oid and oid not in self.addr_to_ids[addr]:
                 self.addr_to_ids[addr].append(oid)
