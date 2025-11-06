@@ -1329,8 +1329,8 @@ class TimesheetPage(tk.Frame):
         if "Табель" in wb.sheetnames:
             ws = wb["Табель"]
             hdr_first = str(ws.cell(1, 1).value or "")
-            # Проверяем наличие новых столбцов
-            if hdr_first == "ID объекта" and ws.max_column >= (6 + 31 + 4):  # +4 для переработок
+            # Проверяем наличие новых столбцов (включая Подразделение)
+            if hdr_first == "ID объекта" and ws.max_column >= (7 + 31 + 4):  # +1 для подразделения, +4 для итогов и переработок
                 return ws
             base = "Табель_OLD"
             new_name = base
@@ -1341,23 +1341,28 @@ class TimesheetPage(tk.Frame):
             ws.title = new_name
     
         ws2 = wb.create_sheet("Табель")
-        hdr = ["ID объекта", "Адрес", "Месяц", "Год", "ФИО", "Табельный №"] + \
+        hdr = ["ID объекта", "Адрес", "Месяц", "Год", "ФИО", "Табельный №", "Подразделение"] + \
               [str(i) for i in range(1, 32)] + \
-              ["Итого дней", "Итого часов", "Переработка день", "Переработка ночь"]
+              ["Итого дней", "Итого часов по табелю", "Переработка день", "Переработка ночь"]
         ws2.append(hdr)
     
-        ws2.column_dimensions["A"].width = 14
-        ws2.column_dimensions["B"].width = 40
-        ws2.column_dimensions["C"].width = 10
-        ws2.column_dimensions["D"].width = 8
-        ws2.column_dimensions["E"].width = 28
-        ws2.column_dimensions["F"].width = 14
-        for i in range(7, 7 + 31):
+        ws2.column_dimensions["A"].width = 14  # ID объекта
+        ws2.column_dimensions["B"].width = 40  # Адрес
+        ws2.column_dimensions["C"].width = 10  # Месяц
+        ws2.column_dimensions["D"].width = 8   # Год
+        ws2.column_dimensions["E"].width = 28  # ФИО
+        ws2.column_dimensions["F"].width = 14  # Табельный №
+        ws2.column_dimensions["G"].width = 20  # Подразделение
+    
+        # Дни месяца (1-31)
+        for i in range(8, 8 + 31):
             ws2.column_dimensions[get_column_letter(i)].width = 6
-        ws2.column_dimensions[get_column_letter(38)].width = 10  # Итого дней
-        ws2.column_dimensions[get_column_letter(39)].width = 12  # Итого часов
-        ws2.column_dimensions[get_column_letter(40)].width = 14  # Переработка день
-        ws2.column_dimensions[get_column_letter(41)].width = 14  # Переработка ночь
+    
+        ws2.column_dimensions[get_column_letter(39)].width = 10  # Итого дней
+        ws2.column_dimensions[get_column_letter(40)].width = 18  # Итого часов по табелю
+        ws2.column_dimensions[get_column_letter(41)].width = 14  # Переработка день
+        ws2.column_dimensions[get_column_letter(42)].width = 14  # Переработка ночь
+    
         ws2.freeze_panes = "A2"
         return ws2
 
@@ -1385,6 +1390,7 @@ class TimesheetPage(tk.Frame):
                 row_y = int(ws.cell(r, 4).value or 0)
                 fio = (ws.cell(r, 5).value or "")
                 tbn = (ws.cell(r, 6).value or "")
+                # department = (ws.cell(r, 7).value or "")  # Подразделение (если нужно использовать)
             
                 if row_m != m or row_y != y:
                     continue
@@ -1395,9 +1401,9 @@ class TimesheetPage(tk.Frame):
                     if row_addr != addr:
                         continue
             
-                # Загружаем ячейки КАК ЕСТЬ (с переработкой)
+                # Загружаем ячейки КАК ЕСТЬ (с переработкой) - теперь с колонки 8
                 hours_raw: List[Optional[str]] = []
-                for c in range(7, 7 + 31):
+                for c in range(8, 8 + 31):  # Изменено с 7 на 8 из-за нового столбца
                     v = ws.cell(r, c).value
                     hours_raw.append(str(v) if v else None)
             
@@ -1410,7 +1416,6 @@ class TimesheetPage(tk.Frame):
             self._regrid_rows()
         except Exception as e:
             messagebox.showerror("Загрузка", f"Не удалось загрузить существующие строки:\n{e}")
-
 
     def save_all(self):
         fpath = self._current_file_path()
@@ -1473,7 +1478,15 @@ class TimesheetPage(tk.Frame):
                     
                         day_values.append(cell_str)
             
-                row_values = [oid, addr, m, y, roww.fio(), roww.tbn()] + day_values + [
+                # Получаем подразделение сотрудника
+                fio = roww.fio()
+                department = ""
+                for emp_fio, emp_tbn, emp_pos, emp_dep in self.employees:
+                    if emp_fio == fio:
+                        department = emp_dep or ""
+                        break
+            
+                row_values = [oid, addr, m, y, fio, roww.tbn(), department] + day_values + [
                     total_days if total_days else None,
                     None if abs(total_hours) < 1e-12 else total_hours,
                     None if abs(total_ot_day) < 1e-12 else total_ot_day,
@@ -1639,28 +1652,36 @@ def perform_summary_export(year: int, month: int, fmt: str) -> Tuple[int, List[P
             continue
         ws = wb["Табель"]
         for r in range(2, ws.max_row + 1):
-            row_m = int(ws.cell(r, 3).value or 0)
-            row_y = int(ws.cell(r, 4).value or 0)
-            if row_m != month or row_y != year:
-                continue
             row_oid = (ws.cell(r, 1).value or "")
             row_addr = (ws.cell(r, 2).value or "")
+            row_m = int(ws.cell(r, 3).value or 0)
+            row_y = int(ws.cell(r, 4).value or 0)
+            
+            if row_m != month or row_y != year:
+                continue
+                
             fio = (ws.cell(r, 5).value or "")
             tbn = (ws.cell(r, 6).value or "")
-            hours: List[Optional[float]] = []
-            for c in range(7, 7 + 31):
+            department = (ws.cell(r, 7).value or "")
+            
+            hours: List[Optional[str]] = []
+            for c in range(8, 8 + 31):
                 v = ws.cell(r, c).value
-                try:
-                    n = float(v) if isinstance(v, (int, float)) else parse_hours_value(v)
-                except Exception:
-                    n = None
-                hours.append(n)
-            total_days = sum(1 for h in hours if isinstance(h, (int, float)) and h > 1e-12)
-            total_hours = sum(h for h in hours if isinstance(h, (int, float)))
-            row_values = [row_oid, row_addr, month, year, fio, tbn] + [
-                (None if (h is None or abs(float(h)) < 1e-12) else float(h)) for h in hours
-            ] + [total_days if total_days else None,
-                 None if (not isinstance(total_hours, (int, float)) or abs(total_hours) < 1e-12) else float(total_hours)]
+                hours.append(str(v) if v else None)
+            
+            total_days_val = ws.cell(r, 39).value
+            total_hours_val = ws.cell(r, 40).value
+            overtime_day_val = ws.cell(r, 41).value
+            overtime_night_val = ws.cell(r, 42).value
+            
+            total_days = int(total_days_val) if total_days_val else None
+            total_hours = float(total_hours_val) if total_hours_val else None
+            overtime_day = float(overtime_day_val) if overtime_day_val else None
+            overtime_night = float(overtime_night_val) if overtime_night_val else None
+            
+            row_values = [row_oid, row_addr, month, year, fio, tbn, department] + hours + [
+                total_days, total_hours, overtime_day, overtime_night
+            ]
             rows.append(row_values)
 
     if not rows:
@@ -1670,9 +1691,9 @@ def perform_summary_export(year: int, month: int, fmt: str) -> Tuple[int, List[P
     sum_dir.mkdir(parents=True, exist_ok=True)
     paths: List[Path] = []
 
-    hdr = ["ID объекта", "Адрес", "Месяц", "Год", "ФИО", "Табельный №"] + [str(i) for i in range(1, 32)] + [
-        "Итого дней", "Итого часов"
-    ]
+    hdr = ["ID объекта", "Адрес", "Месяц", "Год", "ФИО", "Табельный №", "Подразделение"] + \
+          [str(i) for i in range(1, 32)] + \
+          ["Итого дней", "Итого часов по табелю", "Переработка день", "Переработка ночь"]
 
     if fmt in ("xlsx", "both"):
         wb_out = Workbook()
@@ -1688,10 +1709,13 @@ def perform_summary_export(year: int, month: int, fmt: str) -> Tuple[int, List[P
         ws_out.column_dimensions["D"].width = 8
         ws_out.column_dimensions["E"].width = 28
         ws_out.column_dimensions["F"].width = 14
-        for i in range(7, 7 + 31):
+        ws_out.column_dimensions["G"].width = 20
+        for i in range(8, 8 + 31):
             ws_out.column_dimensions[get_column_letter(i)].width = 6
-        ws_out.column_dimensions[get_column_letter(7 + 31)].width = 10
-        ws_out.column_dimensions[get_column_letter(7 + 31 + 1)].width = 12
+        ws_out.column_dimensions[get_column_letter(39)].width = 10
+        ws_out.column_dimensions[get_column_letter(40)].width = 18
+        ws_out.column_dimensions[get_column_letter(41)].width = 14
+        ws_out.column_dimensions[get_column_letter(42)].width = 14
         p = sum_dir / f"Сводный_{year}_{month:02d}.xlsx"
         wb_out.save(p)
         paths.append(p)
