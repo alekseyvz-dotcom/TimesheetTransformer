@@ -434,10 +434,15 @@ class PositionRow:
         # ===== ИЗМЕНЕНИЯ ДЛЯ АВТОФОРМАТИРОВАНИЯ ВРЕМЕНИ =====
         self.time_var = tk.StringVar()
         self.time_var.trace_add("write", self._on_time_changed)
-        self._formatting_time = False  # Флаг для предотвращения рекурсии
+        self._formatting_time = False
+        self._format_timer = None  # Таймер для отложенного форматирования
         
         self.ent_time = ttk.Entry(self.frame, width=8, justify="center", textvariable=self.time_var)
         self.ent_time.grid(row=0, column=2, padx=2)
+        
+        # Форматирование при потере фокуса (мгновенно)
+        self.ent_time.bind("<FocusOut>", self._format_immediately)
+        self.ent_time.bind("<Return>", self._format_immediately)
         # ====================================================
 
         self.ent_hours = ttk.Entry(self.frame, width=8, justify="center")
@@ -455,7 +460,27 @@ class PositionRow:
 
     # ===== НОВЫЕ МЕТОДЫ ДЛЯ АВТОФОРМАТИРОВАНИЯ =====
     def _on_time_changed(self, *args):
-        """Вызывается при каждом изменении текста в поле времени"""
+        """Вызывается при каждом изменении - запускает отложенное форматирование"""
+        if self._formatting_time:
+            return
+        
+        # Отменяем предыдущий таймер
+        if self._format_timer:
+            self.ent_time.after_cancel(self._format_timer)
+        
+        # Запускаем новый таймер на 500мс
+        self._format_timer = self.ent_time.after(500, self._do_format)
+    
+    def _format_immediately(self, event=None):
+        """Форматирует немедленно (при FocusOut или Enter)"""
+        if self._format_timer:
+            self.ent_time.after_cancel(self._format_timer)
+            self._format_timer = None
+        self._do_format()
+        return None
+    
+    def _do_format(self):
+        """Выполняет форматирование"""
         if self._formatting_time:
             return
         
@@ -465,8 +490,10 @@ class PositionRow:
         if formatted != current:
             self._formatting_time = True
             try:
+                cursor_pos = self.ent_time.index(tk.INSERT)
                 self.time_var.set(formatted)
-                self.ent_time.icursor(tk.END)  # Курсор в конец
+                # Ставим курсор в конец
+                self.ent_time.icursor(tk.END)
             finally:
                 self._formatting_time = False
     
@@ -474,8 +501,8 @@ class PositionRow:
         """
         Автоматически форматирует ввод времени в формат ЧЧ:ММ
         Примеры:
-        - '8' → '8'
-        - '13' → '13:'
+        - '8' → '08:00'
+        - '13' → '13:00'
         - '130' → '01:30'
         - '1300' → '13:00'
         - '13.00' → '13:00'
@@ -492,12 +519,13 @@ class PositionRow:
         
         # Форматируем в зависимости от количества цифр
         if len(digits) == 1:
-            # '8' → '8' (оставляем как есть, пока вводится)
-            return digits
+            # '8' → '08:00'
+            hh = int(digits)
+            return f"{hh:02d}:00"
         elif len(digits) == 2:
-            # '13' → '13:' (автоматически добавляем двоеточие)
+            # '13' → '13:00'
             hh = min(int(digits), 23)
-            return f"{hh:02d}:"
+            return f"{hh:02d}:00"
         elif len(digits) == 3:
             # '130' → '01:30' (интерпретируем как Ч:ММ)
             hh = int(digits[0])
@@ -575,8 +603,7 @@ class PositionRow:
             "hours": float(parse_hours_value(self.ent_hours.get()) or 0.0),
             "note": (self.ent_note.get() or "").strip(),
         }
-
-
+        
 # ------------------------- HTTP -------------------------
 
 def post_json(url: str, payload: dict, token: str = '') -> Tuple[bool, str]:
