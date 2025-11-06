@@ -981,31 +981,31 @@ class TimesheetPage(tk.Frame):
         self._on_department_select()
 
     def _build_header_row(self):
-    hb = self.HEADER_BG
-    tk.Label(self.table, text="ФИО", bg=hb, anchor="w", font=("Segoe UI", 9, "bold")).grid(
-        row=0, column=0, padx=0, pady=(0, 2), sticky="nsew")
-    tk.Label(self.table, text="Таб.№", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
-        row=0, column=1, padx=0, pady=(0, 2), sticky="nsew")
+        hb = self.HEADER_BG
+        tk.Label(self.table, text="ФИО", bg=hb, anchor="w", font=("Segoe UI", 9, "bold")).grid(
+            row=0, column=0, padx=0, pady=(0, 2), sticky="nsew")
+        tk.Label(self.table, text="Таб.№", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
+            row=0, column=1, padx=0, pady=(0, 2), sticky="nsew")
     
-    for d in range(1, 32):
-        tk.Label(self.table, text=str(d), bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
-            row=0, column=1 + d, padx=0, pady=(0, 2), sticky="nsew")
+        for d in range(1, 32):
+            tk.Label(self.table, text=str(d), bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
+                row=0, column=1 + d, padx=0, pady=(0, 2), sticky="nsew")
     
-    tk.Label(self.table, text="Дней", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
-        row=0, column=33, padx=(4, 1), pady=(0, 2), sticky="nsew")
-    tk.Label(self.table, text="Часы", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
-        row=0, column=34, padx=(4, 1), pady=(0, 2), sticky="nsew")
+        tk.Label(self.table, text="Дней", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
+            row=0, column=33, padx=(4, 1), pady=(0, 2), sticky="nsew")
+        tk.Label(self.table, text="Часы", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
+            row=0, column=34, padx=(4, 1), pady=(0, 2), sticky="nsew")
     
-    # НОВЫЕ ЗАГОЛОВКИ
-    tk.Label(self.table, text="Пер.день", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
-        row=0, column=35, padx=(4, 1), pady=(0, 2), sticky="nsew")
-    tk.Label(self.table, text="Пер.ночь", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
-        row=0, column=36, padx=(4, 1), pady=(0, 2), sticky="nsew")
+        # НОВЫЕ ЗАГОЛОВКИ
+        tk.Label(self.table, text="Пер.день", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
+            row=0, column=35, padx=(4, 1), pady=(0, 2), sticky="nsew")
+        tk.Label(self.table, text="Пер.ночь", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
+            row=0, column=36, padx=(4, 1), pady=(0, 2), sticky="nsew")
     
-    tk.Label(self.table, text="5/2", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
-        row=0, column=37, padx=1, pady=(0, 2), sticky="nsew")
-    tk.Label(self.table, text="Удалить", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
-        row=0, column=38, padx=1, pady=(0, 2), sticky="nsew")
+        tk.Label(self.table, text="5/2", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
+            row=0, column=37, padx=1, pady=(0, 2), sticky="nsew")
+        tk.Label(self.table, text="Удалить", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
+            row=0, column=38, padx=1, pady=(0, 2), sticky="nsew")
 
     def _on_scroll_frame_configure(self, _=None):
         self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
