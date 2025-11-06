@@ -697,42 +697,6 @@ class SpecialOrdersPage(tk.Frame):
             if oid and oid not in self.addr_to_ids[addr]:
                 self.addr_to_ids[addr].append(oid)
         self.addresses = sorted(self.addr_to_ids.keys() | {addr for _, addr in self.objects if addr})
-        self.tech_values = [t['disp'] for t in self.techs]
-        # Список транспорта
-        self.vehicles = []
-        for tp, nm, pl, dep, note in tech:
-            disp = " | ".join(x for x in (tp, nm, pl) if x)
-            self.vehicles.append({
-                'type': tp, 'name': nm, 'plate': pl, 
-                'dep': dep, 'note': note, 'disp': disp
-            })
-    
-        # ========== ПОЛУЧАЕМ ПОДРАЗДЕЛЕНИЯ ИЗ КОНФИГА ==========
-        cfg = read_config()
-        driver_depts_str = cfg.get(
-            CONFIG_SECTION_INTEGR, 
-            KEY_DRIVER_DEPARTMENTS, 
-            fallback="Служба гаража"
-        )
-        DRIVER_DEPARTMENTS = [d.strip() for d in driver_depts_str.split(",") if d.strip()]
-        # ======================================================
-    
-        self.drivers = []
-        for fio, tbn, pos, dep in employees:
-            is_driver_dept = dep in DRIVER_DEPARTMENTS
-            is_driver_pos = 'водитель' in pos.lower()
-        
-            if is_driver_dept or is_driver_pos:
-                self.drivers.append({
-                    'fio': fio, 
-                    'tbn': tbn, 
-                    'pos': pos,
-                    'dep': dep
-                })
-    
-        self.drivers.sort(key=lambda x: x['fio'])
-    
-        self.departments = ["Все"] + sorted({dep for _, _, _, dep in employees if dep})
 
     def _build_ui(self):
         top = tk.Frame(self, bg="#f7f7f7")
