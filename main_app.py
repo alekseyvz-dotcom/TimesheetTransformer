@@ -1821,12 +1821,25 @@ class MainApp(tk.Tk):
         m_ts.add_command(label="Создать", command=lambda: self._show_page("timesheet", lambda parent: TimesheetPage(parent)))
         menubar.add_cascade(label="Объектный табель", menu=m_ts)
 
+        # ========== ОБНОВЛЕННОЕ МЕНЮ АВТОТРАНСПОРТ ==========
         m_transport = tk.Menu(menubar, tearoff=0)
         m_transport.add_command(
-            label="Заявка на автотранспорт",
+            label="📝 Создать заявку",
             command=lambda: self._show_page("transport", lambda parent: SpecialOrders.create_page(parent))
         )
+        # Добавляем планирование (если включено в конфиге)
+        if SpecialOrders and hasattr(SpecialOrders, "create_planning_page"):
+            m_transport.add_command(
+                label="🚛 Планирование транспорта",
+                command=lambda: self._show_page("planning", lambda parent: SpecialOrders.create_planning_page(parent))
+            )
+        m_transport.add_separator()
+        m_transport.add_command(
+            label="📂 Открыть папку заявок",
+            command=self.open_orders_folder
+        )
         menubar.add_cascade(label="Автотранспорт", menu=m_transport)
+        # ===================================================
 
         m_spr = tk.Menu(menubar, tearoff=0)
         m_spr.add_command(label="Открыть справочник", command=self.open_spravochnik)
@@ -1916,6 +1929,18 @@ class MainApp(tk.Tk):
             f"Публичная ссылка: {link or '(не задана)'}\n\n"
             "В окнах используйте «Обновить справочник» для перечтения."
         )
+
+    # ========== НОВЫЙ МЕТОД: Открыть папку заявок ==========
+    def open_orders_folder(self):
+        """Открывает папку с заявками на автотранспорт"""
+        try:
+            from pathlib import Path
+            orders_dir = exe_dir() / "Заявки_спецтехники"
+            orders_dir.mkdir(parents=True, exist_ok=True)
+            os.startfile(orders_dir)
+        except Exception as e:
+            messagebox.showerror("Папка заявок", f"Не удалось открыть папку:\n{e}")
+    # ======================================================
 
     # --- Аналитика ---
     def summary_export(self):
