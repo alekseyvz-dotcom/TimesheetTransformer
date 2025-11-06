@@ -358,31 +358,70 @@ def month_name_ru(month: int) -> str:
     return names[month-1]
 
 def parse_hours_value(v: Any) -> Optional[float]:
+    """
+    Парсит часы БЕЗ переработки.
+    Форматы: 8 | 8,25 | 8:30 | 1/7 | 8,25(6/2) <- из последнего берёт только 8,25
+    """
     s = str(v or "").strip()
     if not s:
         return None
+    
+    # Убираем переработку в скобках для базового парсинга
+    if "(" in s:
+        s = s.split("(")[0].strip()
+    
     if "/" in s:
         total = 0.0
         any_part = False
         for part in s.split("/"):
             n = parse_hours_value(part)
             if isinstance(n, (int, float)):
-                total += float(n); any_part = True
+                total += float(n)
+                any_part = True
         return total if any_part else None
+    
     if ":" in s:
         p = s.split(":")
         try:
             hh = float(p[0].replace(",", "."))
-            mm = float((p[1] if len(p)>1 else "0").replace(",", "."))
-            ss = float((p[2] if len(p)>2 else "0").replace(",", "."))
-            return hh + mm/60.0 + ss/3600.0
+            mm = float((p[1] if len(p) > 1 else "0").replace(",", "."))
+            ss = float((p[2] if len(p) > 2 else "0").replace(",", "."))
+            return hh + mm / 60.0 + ss / 3600.0
         except:
             pass
+    
     s = s.replace(",", ".")
     try:
         return float(s)
     except:
         return None
+        
+def parse_overtime(v: Any) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Извлекает переработку из формата: 8,25(6/2)
+    Возвращает: (дневная_переработка, ночная_переработка)
+    """
+    s = str(v or "").strip()
+    if "(" not in s or ")" not in s:
+        return None, None
+    
+    try:
+        # Извлекаем содержимое скобок
+        start = s.index("(")
+        end = s.index(")")
+        overtime_str = s[start + 1:end].strip()
+        
+        if "/" in overtime_str:
+            parts = overtime_str.split("/")
+            day_ot = float(parts[0].replace(",", ".")) if parts[0].strip() else 0.0
+            night_ot = float(parts[1].replace(",", ".")) if len(parts) > 1 and parts[1].strip() else 0.0
+            return day_ot, night_ot
+        else:
+            # Если нет дроби — считаем дневной переработкой
+            ot = float(overtime_str.replace(",", "."))
+            return ot, 0.0
+    except:
+        return None, None
 
 def safe_filename(s: str, maxlen: int = 60) -> str:
     if not s:
@@ -411,28 +450,26 @@ class RowWidget:
     WEEK_BG_SAT = "#fff8e1"
     WEEK_BG_SUN = "#ffebee"
     ZEBRA_EVEN = "#ffffff"
-    ZEBRA_ODD  = "#f6f8fa"
-    ERR_BG     = "#ffccbc"
-    DISABLED_BG= "#f0f0f0"
+    ZEBRA_ODD = "#f6f8fa"
+    ERR_BG = "#ffccbc"
+    DISABLED_BG = "#f0f0f0"
 
     def __init__(self, table: tk.Frame, row_index: int, fio: str, tbn: str,
                  get_year_month_callable, on_delete_callable):
-        # table — общий фрейм-таблица (общий grid с заголовком)
         self.table = table
         self.row = row_index
         self.get_year_month = get_year_month_callable
         self.on_delete = on_delete_callable
 
         zebra_bg = self.ZEBRA_EVEN if (row_index % 2 == 0) else self.ZEBRA_ODD
-
         self.widgets: List[tk.Widget] = []
 
-        # ФИО (col 0)
+        # ФИО
         self.lbl_fio = tk.Label(self.table, text=fio, anchor="w", bg=zebra_bg)
         self.lbl_fio.grid(row=self.row, column=0, padx=0, pady=1, sticky="nsew")
         self.widgets.append(self.lbl_fio)
 
-        # Таб.№ (col 1)
+        # Таб.№
         self.lbl_tbn = tk.Label(self.table, text=tbn, anchor="center", bg=zebra_bg)
         self.lbl_tbn.grid(row=self.row, column=1, padx=0, pady=1, sticky="nsew")
         self.widgets.append(self.lbl_tbn)
@@ -448,7 +485,7 @@ class RowWidget:
             self.day_entries.append(e)
             self.widgets.append(e)
 
-        # Итоги (col 33, 34)
+        # Итоги
         self.lbl_days = tk.Label(self.table, text="0", anchor="e", bg=zebra_bg)
         self.lbl_days.grid(row=self.row, column=33, padx=(4, 1), pady=1, sticky="nsew")
         self.widgets.append(self.lbl_days)
@@ -457,17 +494,25 @@ class RowWidget:
         self.lbl_total.grid(row=self.row, column=34, padx=(4, 1), pady=1, sticky="nsew")
         self.widgets.append(self.lbl_total)
 
-        # 5/2 (col 35)
+        # НОВЫЕ МЕТКИ ДЛЯ ПЕРЕРАБОТКИ
+        self.lbl_overtime_day = tk.Label(self.table, text="0", anchor="e", bg=zebra_bg)
+        self.lbl_overtime_day.grid(row=self.row, column=35, padx=(4, 1), pady=1, sticky="nsew")
+        self.widgets.append(self.lbl_overtime_day)
+
+        self.lbl_overtime_night = tk.Label(self.table, text="0", anchor="e", bg=zebra_bg)
+        self.lbl_overtime_night.grid(row=self.row, column=36, padx=(4, 1), pady=1, sticky="nsew")
+        self.widgets.append(self.lbl_overtime_night)
+
+        # 5/2
         self.btn_52 = ttk.Button(self.table, text="5/2", width=4, command=self.fill_52)
-        self.btn_52.grid(row=self.row, column=35, padx=1, pady=0, sticky="nsew")
+        self.btn_52.grid(row=self.row, column=37, padx=1, pady=0, sticky="nsew")
         self.widgets.append(self.btn_52)
 
-        # Удалить (col 36)
+        # Удалить
         self.btn_del = ttk.Button(self.table, text="Удалить", width=7, command=self.delete_row)
-        self.btn_del.grid(row=self.row, column=36, padx=1, pady=0, sticky="nsew")
+        self.btn_del.grid(row=self.row, column=38, padx=1, pady=0, sticky="nsew")
         self.widgets.append(self.btn_del)
 
-    # Совместимость с прежними вызовами — настройка ширин делается на таблице (общем контейнере)
     def apply_pixel_column_widths(self, _px: dict):
         return
 
@@ -477,16 +522,16 @@ class RowWidget:
 
     def regrid_to(self, new_row: int):
         self.row = new_row
-        # Переставляем все ячейки в новую строку
-        col = 0
-        self.lbl_fio.grid_configure(row=new_row, column=col); col+=1
-        self.lbl_tbn.grid_configure(row=new_row, column=col); col+=1
+        self.lbl_fio.grid_configure(row=new_row, column=0)
+        self.lbl_tbn.grid_configure(row=new_row, column=1)
         for i, e in enumerate(self.day_entries, start=2):
             e.grid_configure(row=new_row, column=i)
         self.lbl_days.grid_configure(row=new_row, column=33)
         self.lbl_total.grid_configure(row=new_row, column=34)
-        self.btn_52.grid_configure(row=new_row, column=35)
-        self.btn_del.grid_configure(row=new_row, column=36)
+        self.lbl_overtime_day.grid_configure(row=new_row, column=35)
+        self.lbl_overtime_night.grid_configure(row=new_row, column=36)
+        self.btn_52.grid_configure(row=new_row, column=37)
+        self.btn_del.grid_configure(row=new_row, column=38)
 
     def destroy(self):
         for w in self.widgets:
@@ -502,17 +547,30 @@ class RowWidget:
     def tbn(self) -> str:
         return self.lbl_tbn.cget("text")
 
-    def set_hours(self, arr: List[Optional[float]]):
+    def set_hours(self, arr: List[Optional[str]]):
+        """Принимает массив строк вида '8,25(6/2)' или просто '8'"""
         days = len(arr)
         for i in range(31):
             self.day_entries[i].delete(0, "end")
-            if i < days and isinstance(arr[i], (int, float)) and abs(arr[i]) > 1e-12:
-                s = f"{float(arr[i]):.2f}".rstrip("0").rstrip(".")
-                self.day_entries[i].insert(0, s)
+            if i < days and arr[i]:
+                self.day_entries[i].insert(0, str(arr[i]))
         self.update_total()
 
     def get_hours(self) -> List[Optional[float]]:
+        """Возвращает только базовые часы (без переработки)"""
         return [parse_hours_value(e.get().strip()) for e in self.day_entries]
+
+    def get_hours_with_overtime(self) -> List[Tuple[Optional[float], Optional[float], Optional[float]]]:
+        """
+        Возвращает: [(часы, переработка_день, переработка_ночь), ...]
+        """
+        result = []
+        for e in self.day_entries:
+            raw = e.get().strip()
+            hours = parse_hours_value(raw) if raw else None
+            day_ot, night_ot = parse_overtime(raw) if raw else (None, None)
+            result.append((hours, day_ot, night_ot))
+        return result
 
     def _bg_for_day(self, year: int, month: int, day: int) -> str:
         wd = datetime(year, month, day).weekday()
@@ -526,16 +584,28 @@ class RowWidget:
         day = i0 + 1
         e = self.day_entries[i0]
         days = month_days(year, month)
+        
         if day > days:
             e.configure(state="disabled", disabledbackground=self.DISABLED_BG)
             e.delete(0, "end")
             return
+        
         e.configure(state="normal")
         raw = e.get().strip()
-        val = parse_hours_value(raw) if raw else None
+        
+        # Проверка корректности формата
         invalid = False
-        if raw and (val is None or val < 0 or val > 24):
-            invalid = True
+        if raw:
+            val = parse_hours_value(raw)
+            if val is None or val < 0 or val > 24:
+                invalid = True
+            
+            # Проверка переработки
+            if "(" in raw:
+                day_ot, night_ot = parse_overtime(raw)
+                if day_ot is None and night_ot is None:
+                    invalid = True
+        
         if invalid:
             e.configure(bg=self.ERR_BG)
         else:
@@ -549,18 +619,39 @@ class RowWidget:
     def update_total(self):
         total_hours = 0.0
         total_days = 0
+        total_overtime_day = 0.0
+        total_overtime_night = 0.0
+        
         y, m = self.get_year_month()
         days_in_m = month_days(y, m)
+        
         for i, e in enumerate(self.day_entries, start=1):
             raw = e.get().strip()
-            n = parse_hours_value(raw) if raw else None
             self._repaint_day_cell(i - 1, y, m)
-            if i <= days_in_m and isinstance(n, (int, float)) and n > 1e-12:
-                total_hours += float(n)
-                total_days += 1
+            
+            if i <= days_in_m and raw:
+                hours = parse_hours_value(raw)
+                day_ot, night_ot = parse_overtime(raw)
+                
+                if isinstance(hours, (int, float)) and hours > 1e-12:
+                    total_hours += float(hours)
+                    total_days += 1
+                
+                if isinstance(day_ot, (int, float)):
+                    total_overtime_day += float(day_ot)
+                if isinstance(night_ot, (int, float)):
+                    total_overtime_night += float(night_ot)
+        
         self.lbl_days.config(text=str(total_days))
+        
         sh = f"{total_hours:.2f}".rstrip("0").rstrip(".")
         self.lbl_total.config(text=sh)
+        
+        sod = f"{total_overtime_day:.2f}".rstrip("0").rstrip(".")
+        self.lbl_overtime_day.config(text=sod)
+        
+        son = f"{total_overtime_night:.2f}".rstrip("0").rstrip(".")
+        self.lbl_overtime_night.config(text=son)
 
     def fill_52(self):
         y, m = self.get_year_month()
@@ -890,41 +981,48 @@ class TimesheetPage(tk.Frame):
         self._on_department_select()
 
     def _build_header_row(self):
-        hb = self.HEADER_BG
-        # ФИО
-        tk.Label(self.table, text="ФИО", bg=hb, anchor="w", font=("Segoe UI", 9, "bold")).grid(
-            row=0, column=0, padx=0, pady=(0, 2), sticky="nsew")
-        # Таб.№
-        tk.Label(self.table, text="Таб.№", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
-            row=0, column=1, padx=0, pady=(0, 2), sticky="nsew")
-        # Дни 1..31
-        for d in range(1, 32):
-            tk.Label(self.table, text=str(d), bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
-                row=0, column=1 + d, padx=0, pady=(0, 2), sticky="nsew")
-        # Дней / Часы / 5/2 / Удалить
-        tk.Label(self.table, text="Дней", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
-            row=0, column=33, padx=(4, 1), pady=(0, 2), sticky="nsew")
-        tk.Label(self.table, text="Часы", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
-            row=0, column=34, padx=(4, 1), pady=(0, 2), sticky="nsew")
-        tk.Label(self.table, text="5/2", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
-            row=0, column=35, padx=1, pady=(0, 2), sticky="nsew")
-        tk.Label(self.table, text="Удалить", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
-            row=0, column=36, padx=1, pady=(0, 2), sticky="nsew")
+    hb = self.HEADER_BG
+    tk.Label(self.table, text="ФИО", bg=hb, anchor="w", font=("Segoe UI", 9, "bold")).grid(
+        row=0, column=0, padx=0, pady=(0, 2), sticky="nsew")
+    tk.Label(self.table, text="Таб.№", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
+        row=0, column=1, padx=0, pady=(0, 2), sticky="nsew")
+    
+    for d in range(1, 32):
+        tk.Label(self.table, text=str(d), bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
+            row=0, column=1 + d, padx=0, pady=(0, 2), sticky="nsew")
+    
+    tk.Label(self.table, text="Дней", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
+        row=0, column=33, padx=(4, 1), pady=(0, 2), sticky="nsew")
+    tk.Label(self.table, text="Часы", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
+        row=0, column=34, padx=(4, 1), pady=(0, 2), sticky="nsew")
+    
+    # НОВЫЕ ЗАГОЛОВКИ
+    tk.Label(self.table, text="Пер.день", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
+        row=0, column=35, padx=(4, 1), pady=(0, 2), sticky="nsew")
+    tk.Label(self.table, text="Пер.ночь", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
+        row=0, column=36, padx=(4, 1), pady=(0, 2), sticky="nsew")
+    
+    tk.Label(self.table, text="5/2", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
+        row=0, column=37, padx=1, pady=(0, 2), sticky="nsew")
+    tk.Label(self.table, text="Удалить", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
+        row=0, column=38, padx=1, pady=(0, 2), sticky="nsew")
 
     def _on_scroll_frame_configure(self, _=None):
         self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
 
     def _configure_table_columns(self):
         px = self.COLPX
-        # ВАЖНО: ширины колонок задаются ТОЛЬКО на общем контейнере self.table
         self.table.grid_columnconfigure(0, minsize=px['fio'], weight=0)
         self.table.grid_columnconfigure(1, minsize=px['tbn'], weight=0)
         for col in range(2, 33):
             self.table.grid_columnconfigure(col, minsize=px['day'], weight=0)
         self.table.grid_columnconfigure(33, minsize=px['days'], weight=0)
         self.table.grid_columnconfigure(34, minsize=px['hours'], weight=0)
-        self.table.grid_columnconfigure(35, minsize=px['btn52'], weight=0)
-        self.table.grid_columnconfigure(36, minsize=px['del'], weight=0)
+        # НОВЫЕ КОЛОНКИ ДЛЯ ПЕРЕРАБОТКИ
+        self.table.grid_columnconfigure(35, minsize=px['hours'], weight=0)  # Пер.день
+        self.table.grid_columnconfigure(36, minsize=px['hours'], weight=0)  # Пер.ночь
+        self.table.grid_columnconfigure(37, minsize=px['btn52'], weight=0)
+        self.table.grid_columnconfigure(38, minsize=px['del'], weight=0)
 
     def _on_wheel(self, event):
         if self.main_canvas.winfo_exists():
@@ -986,6 +1084,9 @@ class TimesheetPage(tk.Frame):
     def _recalc_object_total(self):
         tot_h = 0.0
         tot_d = 0
+        tot_ot_day = 0.0
+        tot_ot_night = 0.0
+    
         for r in self.rows:
             try:
                 h = float(r.lbl_total.cget("text").replace(",", ".") or 0)
@@ -995,11 +1096,28 @@ class TimesheetPage(tk.Frame):
                 d = int(r.lbl_days.cget("text") or 0)
             except Exception:
                 d = 0
+            try:
+                od = float(r.lbl_overtime_day.cget("text").replace(",", ".") or 0)
+            except Exception:
+                od = 0.0
+            try:
+                on = float(r.lbl_overtime_night.cget("text").replace(",", ".") or 0)
+            except Exception:
+                on = 0.0
+        
             tot_h += h
             tot_d += d
+            tot_ot_day += od
+            tot_ot_night += on
+    
         sh = f"{tot_h:.2f}".rstrip("0").rstrip(".")
+        sod = f"{tot_ot_day:.2f}".rstrip("0").rstrip(".")
+        son = f"{tot_ot_night:.2f}".rstrip("0").rstrip(".")
         cnt = len(self.rows)
-        self.lbl_object_total.config(text=f"Сумма: сотрудников {cnt} | дней {tot_d} | часов {sh}")
+    
+        self.lbl_object_total.config(
+            text=f"Сумма: сотрудников {cnt} | дней {tot_d} | часов {sh} | пер.день {sod} | пер.ночь {son}"
+        )
 
     def add_row(self):
         fio = self.fio_var.get().strip()
@@ -1211,7 +1329,8 @@ class TimesheetPage(tk.Frame):
         if "Табель" in wb.sheetnames:
             ws = wb["Табель"]
             hdr_first = str(ws.cell(1, 1).value or "")
-            if hdr_first == "ID объекта" and ws.max_column >= (6 + 31 + 2):
+            # Проверяем наличие новых столбцов
+            if hdr_first == "ID объекта" and ws.max_column >= (6 + 31 + 4):  # +4 для переработок
                 return ws
             base = "Табель_OLD"
             new_name = base
@@ -1220,11 +1339,13 @@ class TimesheetPage(tk.Frame):
                 i += 1
                 new_name = f"{base}{i}"
             ws.title = new_name
+    
         ws2 = wb.create_sheet("Табель")
-        hdr = ["ID объекта", "Адрес", "Месяц", "Год", "ФИО", "Табельный №"] + [str(i) for i in range(1, 32)] + [
-            "Итого дней", "Итого часов"
-        ]
+        hdr = ["ID объекта", "Адрес", "Месяц", "Год", "ФИО", "Табельный №"] + \
+              [str(i) for i in range(1, 32)] + \
+              ["Итого дней", "Итого часов", "Переработка день", "Переработка ночь"]
         ws2.append(hdr)
+    
         ws2.column_dimensions["A"].width = 14
         ws2.column_dimensions["B"].width = 40
         ws2.column_dimensions["C"].width = 10
@@ -1233,8 +1354,10 @@ class TimesheetPage(tk.Frame):
         ws2.column_dimensions["F"].width = 14
         for i in range(7, 7 + 31):
             ws2.column_dimensions[get_column_letter(i)].width = 6
-        ws2.column_dimensions[get_column_letter(7 + 31)].width = 10
-        ws2.column_dimensions[get_column_letter(7 + 31 + 1)].width = 12
+        ws2.column_dimensions[get_column_letter(38)].width = 10  # Итого дней
+        ws2.column_dimensions[get_column_letter(39)].width = 12  # Итого часов
+        ws2.column_dimensions[get_column_letter(40)].width = 14  # Переработка день
+        ws2.column_dimensions[get_column_letter(41)].width = 14  # Переработка ночь
         ws2.freeze_panes = "A2"
         return ws2
 
@@ -1247,12 +1370,14 @@ class TimesheetPage(tk.Frame):
         fpath = self._current_file_path()
         if not fpath or not fpath.exists():
             return
+    
         try:
             wb = load_workbook(fpath)
             ws = self._ensure_sheet(wb)
             y, m = self.get_year_month()
             addr = self.cmb_address.get().strip()
             oid = self.cmb_object_id.get().strip()
+        
             for r in range(2, ws.max_row + 1):
                 row_oid = (ws.cell(r, 1).value or "")
                 row_addr = (ws.cell(r, 2).value or "")
@@ -1260,6 +1385,7 @@ class TimesheetPage(tk.Frame):
                 row_y = int(ws.cell(r, 4).value or 0)
                 fio = (ws.cell(r, 5).value or "")
                 tbn = (ws.cell(r, 6).value or "")
+            
                 if row_m != m or row_y != y:
                     continue
                 if oid:
@@ -1268,22 +1394,23 @@ class TimesheetPage(tk.Frame):
                 else:
                     if row_addr != addr:
                         continue
-                hours: List[Optional[float]] = []
+            
+                # Загружаем ячейки КАК ЕСТЬ (с переработкой)
+                hours_raw: List[Optional[str]] = []
                 for c in range(7, 7 + 31):
                     v = ws.cell(r, c).value
-                    try:
-                        n = float(v) if isinstance(v, (int, float)) else parse_hours_value(v)
-                    except Exception:
-                        n = None
-                    hours.append(n)
+                    hours_raw.append(str(v) if v else None)
+            
                 roww = RowWidget(self.table, len(self.rows) + 1, fio, tbn, self.get_year_month, self.delete_row)
                 roww.set_day_font(self.DAY_ENTRY_FONT)
                 roww.update_days_enabled(y, m)
-                roww.set_hours(hours)
+                roww.set_hours(hours_raw)
                 self.rows.append(roww)
+        
             self._regrid_rows()
         except Exception as e:
             messagebox.showerror("Загрузка", f"Не удалось загрузить существующие строки:\n{e}")
+
 
     def save_all(self):
         fpath = self._current_file_path()
@@ -1303,8 +1430,10 @@ class TimesheetPage(tk.Frame):
                 wb = Workbook()
                 if wb.active:
                     wb.remove(wb.active)
+        
             ws = self._ensure_sheet(wb)
 
+            # Удаляем старые записи
             to_del = []
             for r in range(2, ws.max_row + 1):
                 row_oid = (ws.cell(r, 1).value or "")
@@ -1316,14 +1445,40 @@ class TimesheetPage(tk.Frame):
             for r in reversed(to_del):
                 ws.delete_rows(r, 1)
 
+            # Записываем новые
             for roww in self.rows:
-                hours = roww.get_hours()
-                total_hours = sum(h for h in hours if isinstance(h, (int, float))) if hours else 0.0
-                total_days = sum(1 for h in hours if isinstance(h, (int, float)) and h > 1e-12)
-                row_values = [oid, addr, m, y, roww.fio(), roww.tbn()] + [
-                    (None if hours[i] is None or abs(float(hours[i])) < 1e-12 else float(hours[i]))
-                    for i in range(31)
-                ] + [total_days if total_days else None, None if abs(total_hours) < 1e-12 else float(total_hours)]
+                data_with_ot = roww.get_hours_with_overtime()
+            
+                total_hours = 0.0
+                total_days = 0
+                total_ot_day = 0.0
+                total_ot_night = 0.0
+            
+                day_values = []
+                for hrs, d_ot, n_ot in data_with_ot:
+                    # Сохраняем в исходном формате
+                    if hrs is None or abs(hrs) < 1e-12:
+                        day_values.append(None)
+                    else:
+                        total_hours += hrs
+                        total_days += 1
+                    
+                        cell_str = f"{hrs:.2f}".rstrip("0").rstrip(".")
+                        if d_ot or n_ot:
+                            d_ot_val = d_ot if d_ot else 0
+                            n_ot_val = n_ot if n_ot else 0
+                            cell_str += f"({d_ot_val:.0f}/{n_ot_val:.0f})"
+                            total_ot_day += d_ot_val
+                            total_ot_night += n_ot_val
+                    
+                        day_values.append(cell_str)
+            
+                row_values = [oid, addr, m, y, roww.fio(), roww.tbn()] + day_values + [
+                    total_days if total_days else None,
+                    None if abs(total_hours) < 1e-12 else total_hours,
+                    None if abs(total_ot_day) < 1e-12 else total_ot_day,
+                    None if abs(total_ot_night) < 1e-12 else total_ot_night
+                ]
                 ws.append(row_values)
 
             wb.save(fpath)
