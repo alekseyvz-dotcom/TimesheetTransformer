@@ -10,7 +10,6 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from io import BytesIO
-from datetime import datetime, date
 from pathlib import Path
 from typing import List, Tuple, Optional, Any, Dict
 
@@ -928,8 +927,8 @@ class SpecialOrdersPage(tk.Frame):
     def save_order(self):
         if not self._validate_form():
             return
-
-            req_date = parse_date_any(self.ent_date.get()) or (date.today() + timedelta(days=1))
+            
+        req_date = parse_date_any(self.ent_date.get()) or (date.today() + timedelta(days=1))
         tomorrow = date.today() + timedelta(days=1)
         if req_date != tomorrow:
             messagebox.showwarning("Заявка", f"Заявка возможна только на {tomorrow.strftime('%Y-%m-%d')}.")
@@ -1065,7 +1064,7 @@ class TransportPlanningPage(tk.Frame):
             return True
         
         # Запрос пароля через стандартный диалог
-        pwd = tk.simpledialog.askstring(
+        pwd = simpledialog.askstring(
             "Планирование транспорта", 
             "Введите пароль для доступа:", 
             show="*", 
@@ -1388,7 +1387,7 @@ class TransportPlanningPage(tk.Frame):
         def update_scroll_region(event=None):
             canvas.configure(scrollregion=canvas.bbox("all"))
 
-            scrollable_frame.bind("<Configure>", update_scroll_region)
+        scrollable_frame.bind("<Configure>", update_scroll_region)
 
         canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
