@@ -1288,7 +1288,7 @@ class TransportPlanningPage(tk.Frame):
         
         # Открываем диалог для назначения транспорта
         self._show_assignment_dialog(selection[0], values)
-    
+
     def _show_assignment_dialog(self, item_id, values):
         """Диалог назначения транспорта и водителя"""
         dialog = tk.Toplevel(self)
@@ -1315,7 +1315,7 @@ class TransportPlanningPage(tk.Frame):
         def update_scroll_region(event=None):
             canvas.configure(scrollregion=canvas.bbox("all"))
 
-        scrollable_frame.bind("<Configure>", update_scroll_region)
+            scrollable_frame.bind("<Configure>", update_scroll_region)
 
         canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
@@ -1423,7 +1423,7 @@ class TransportPlanningPage(tk.Frame):
         tk.Label(assign_frame, text="2️⃣ Наименование:", font=("Arial", 9, "bold")).grid(
             row=2, column=0, sticky="w", pady=(5, 2)
         )
-        vehicle_name_var = tk.StringVar(value=current_name)
+        vehicle_name_var = tk.StringVar(value="")
         cmb_vehicle_name = ttk.Combobox(
             assign_frame, 
             textvariable=vehicle_name_var,
@@ -1438,7 +1438,7 @@ class TransportPlanningPage(tk.Frame):
         tk.Label(assign_frame, text="3️⃣ Гос. номер:", font=("Arial", 9, "bold")).grid(
             row=4, column=0, sticky="w", pady=(5, 2)
         )
-        vehicle_plate_var = tk.StringVar(value=current_plate)
+        vehicle_plate_var = tk.StringVar(value="")
         cmb_vehicle_plate = ttk.Combobox(
             assign_frame, 
             textvariable=vehicle_plate_var,
@@ -1487,7 +1487,7 @@ class TransportPlanningPage(tk.Frame):
                 selection_info.config(text="⚠️ Нет доступных наименований для этого типа", fg="#dc3545")
             elif len(names) == 1:
                 vehicle_name_var.set(names[0])
-                update_plates()
+                # Не вызываем update_plates() здесь, он сработает по trace
             else:
                 selection_info.config(text=f"💡 Доступно наименований: {len(names)}", fg="#666")
 
@@ -1515,7 +1515,7 @@ class TransportPlanningPage(tk.Frame):
                 selection_info.config(text="⚠️ Нет доступных гос. номеров", fg="#dc3545")
             elif len(plates) == 1:
                 vehicle_plate_var.set(plates[0])
-                check_conflicts()
+                # check_conflicts() вызовется по trace
                 selection_info.config(text=f"✓ Назначен: {get_full_vehicle_string()}", fg="#28a745")
             else:
                 selection_info.config(text=f"💡 Доступно гос. номеров: {len(plates)}", fg="#666")
@@ -1530,18 +1530,10 @@ class TransportPlanningPage(tk.Frame):
                 parts.append(vehicle_plate_var.get())
             return " | ".join(parts) if parts else ""
 
+        # Привязываем обработчики
         vehicle_type_var.trace_add("write", update_names)
         vehicle_name_var.trace_add("write", update_plates)
         vehicle_plate_var.trace_add("write", lambda *args: check_conflicts())
-
-        # Инициализация при открытии
-        if current_type:
-            update_names()
-            if current_name:
-                vehicle_name_var.set(current_name)
-                update_plates()
-                if current_plate:
-                    vehicle_plate_var.set(current_plate)
 
         # Разделитель
         ttk.Separator(assign_frame, orient='horizontal').grid(
@@ -1669,17 +1661,39 @@ class TransportPlanningPage(tk.Frame):
             width=20
         ).pack(side="left", padx=5, pady=12)
 
+        # ========== КРИТИЧЕСКИ ВАЖНО: ПРИНУДИТЕЛЬНОЕ ОБНОВЛЕНИЕ ==========
+        # Обновляем геометрию ДО инициализации значений
+        dialog.update_idletasks()
+        scrollable_frame.update_idletasks()
+        canvas.update_idletasks()
+    
+        # Теперь инициализируем значения (это должно вызвать trace и отрисовать виджеты)
+        if current_type:
+            vehicle_type_var.set(current_type)
+            dialog.update_idletasks()  # Даём время на обработку
+        
+            if current_name:
+                vehicle_name_var.set(current_name)
+                dialog.update_idletasks()
+            
+                if current_plate:
+                    vehicle_plate_var.set(current_plate)
+                    dialog.update_idletasks()
+
+        # Финальное обновление области прокрутки
+        canvas.configure(scrollregion=canvas.bbox("all"))
+        canvas.yview_moveto(0)
+    
+        # Ещё одно обновление для гарантии
+        dialog.update()
+        # ================================================================
+
         cmb_vehicle_type.focus_set()
         dialog.bind("<Return>", lambda e: save_and_close())
         dialog.bind("<Escape>", lambda e: cancel_and_close())
 
         # Проверяем конфликты при открытии
         check_conflicts()
-
-        # Прокручиваем в начало
-        canvas.yview_moveto(0)
-
-        
 
     def save_assignments(self):
         """Сохранение назначений в Google Таблицы"""
