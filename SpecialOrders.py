@@ -19,6 +19,7 @@ from tkinter import ttk, messagebox, simpledialog
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
+from datetime import datetime, date, timedelta
 
 APP_TITLE = "Заказ спецтехники"
 
@@ -587,22 +588,24 @@ class PositionRow:
             self._mark_err(self.cmb_tech); ok = False
         else:
             self._clear_err(self.cmb_tech)
+
         try:
             qty = int((self.ent_qty.get() or "0").strip())
-            if qty <= 0: raise ValueError
+            if qty <= 0:
+                raise ValueError
             self._clear_err(self.ent_qty)
         except Exception:
             self._mark_err(self.ent_qty); ok = False
+
+        # время ПОДАЧИ — теперь ОБЯЗАТЕЛЬНО
         tstr = (self.ent_time.get() or "").strip()
-        if tstr:
-            if parse_time_str(tstr) is None:
-                self._mark_err(self.ent_time); ok = False
-            else:
-                self._clear_err(self.ent_time)
+        if not tstr or parse_time_str(tstr) is None:
+            self._mark_err(self.ent_time); ok = False
         else:
             self._clear_err(self.ent_time)
+
         hv = parse_hours_value(self.ent_hours.get())
-        if hv is None or hv < 0:
+        if hv is None or hv <= 0:
             self._mark_err(self.ent_hours); ok = False
         else:
             self._clear_err(self.ent_hours)
@@ -714,31 +717,33 @@ class SpecialOrdersPage(tk.Frame):
         top = tk.Frame(self, bg="#f7f7f7")
         top.pack(fill="x", padx=10, pady=8)
 
-        tk.Label(top, text="Подразделение:", bg="#f7f7f7").grid(row=0, column=0, sticky="w")
+        tk.Label(top, text="Подразделение*:", bg="#f7f7f7").grid(row=0, column=0, sticky="w")
         self.cmb_dep = ttk.Combobox(top, state="readonly", values=self.deps, width=48)
         saved_dep = get_saved_dep()
         self.cmb_dep.set(saved_dep if saved_dep in self.deps else self.deps[0])
         self.cmb_dep.grid(row=0, column=1, sticky="w", padx=(4, 12))
         self.cmb_dep.bind("<<ComboboxSelected>>",
-                          lambda e: (set_saved_dep(self.cmb_dep.get()), self._update_fio_list(), self._update_cutoff_hint()))
+                          lambda e: (set_saved_dep(self.cmb_dep.get()), self._update_fio_list()))
 
-        tk.Label(top, text="ФИО:", bg="#f7f7f7").grid(row=0, column=2, sticky="w")
+        tk.Label(top, text="ФИО*:", bg="#f7f7f7").grid(row=0, column=2, sticky="w")
         self.fio_var = tk.StringVar()
         self.cmb_fio = AutoCompleteCombobox(top, textvariable=self.fio_var, width=36)
         self.cmb_fio.grid(row=0, column=3, sticky="w", padx=(4, 12))
 
-        tk.Label(top, text="Телефон:", bg="#f7f7f7").grid(row=0, column=4, sticky="w")
+        tk.Label(top, text="Телефон*:", bg="#f7f7f7").grid(row=0, column=4, sticky="w")
         self.ent_phone = ttk.Entry(top, width=18)
         self.ent_phone.grid(row=0, column=5, sticky="w", padx=(4, 12))
 
-        tk.Label(top, text="Дата:", bg="#f7f7f7").grid(row=0, column=6, sticky="w")
+        tk.Label(top, text="Дата*:", bg="#f7f7f7").grid(row=0, column=6, sticky="w")
         self.ent_date = ttk.Entry(top, width=12)
         self.ent_date.grid(row=0, column=7, sticky="w", padx=(4, 0))
-        self.ent_date.insert(0, date.today().strftime("%Y-%m-%d"))
-        self.ent_date.bind("<KeyRelease>", lambda e: self._update_cutoff_hint())
-        self.ent_date.bind("<FocusOut>", lambda e: self._update_cutoff_hint())
+        # по умолчанию — завтра
+        self.ent_date.delete(0, "end")
+        self.ent_date.insert(0, (date.today() + timedelta(days=1)).strftime("%Y-%m-%d"))
+        self.ent_date.bind("<KeyRelease>", lambda e: self._update_tomorrow_hint())
+        self.ent_date.bind("<FocusOut>", lambda e: self._update_tomorrow_hint())
 
-        tk.Label(top, text="Адрес:", bg="#f7f7f7").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        tk.Label(top, text="Адрес*:", bg="#f7f7f7").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.cmb_address = AutoCompleteCombobox(top, width=56)
         self.cmb_address.set_completion_list(self.addresses)
         self.cmb_address.grid(row=1, column=1, columnspan=3, sticky="w", padx=(4, 12), pady=(8, 0))
@@ -750,10 +755,11 @@ class SpecialOrdersPage(tk.Frame):
         self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=20)
         self.cmb_object_id.grid(row=1, column=5, sticky="w", padx=(4, 12), pady=(8, 0))
 
-        self.lbl_cutoff_hint = tk.Label(top, text="", fg="#555", bg="#f7f7f7")
-        self.lbl_cutoff_hint.grid(row=1, column=6, columnspan=2, sticky="w", pady=(8, 0))
+        # новая подсказка по дате (вместо отсечки)
+        self.lbl_date_hint = tk.Label(top, text="", fg="#555", bg="#f7f7f7")
+        self.lbl_date_hint.grid(row=1, column=6, columnspan=2, sticky="w", pady=(8, 0))
 
-        tk.Label(top, text="Комментарий:", bg="#f7f7f7").grid(row=2, column=0, sticky="nw", pady=(8, 0))
+        tk.Label(top, text="Комментарий*:", bg="#f7f7f7").grid(row=2, column=0, sticky="nw", pady=(8, 0))
         self.txt_comment = tk.Text(top, height=3, width=96)
         self.txt_comment.grid(row=2, column=1, columnspan=7, sticky="we", padx=(4, 0), pady=(8, 0))
 
@@ -762,10 +768,10 @@ class SpecialOrdersPage(tk.Frame):
 
         hdr = tk.Frame(pos_wrap)
         hdr.pack(fill="x")
-        tk.Label(hdr, text="Техника", width=52, anchor="w").grid(row=0, column=0, padx=2)
-        tk.Label(hdr, text="Кол-во", width=6, anchor="center").grid(row=0, column=1, padx=2)
-        tk.Label(hdr, text="Подача (чч:мм)", width=12, anchor="center").grid(row=0, column=2, padx=2)
-        tk.Label(hdr, text="Часы", width=10, anchor="center").grid(row=0, column=3, padx=2)
+        tk.Label(hdr, text="Техника*", width=52, anchor="w").grid(row=0, column=0, padx=2)
+        tk.Label(hdr, text="Кол-во*", width=6, anchor="center").grid(row=0, column=1, padx=2)
+        tk.Label(hdr, text="Подача (чч:мм)*", width=12, anchor="center").grid(row=0, column=2, padx=2)
+        tk.Label(hdr, text="Часы*", width=10, anchor="center").grid(row=0, column=3, padx=2)
         tk.Label(hdr, text="Примечание", width=38, anchor="w").grid(row=0, column=4, padx=2)
         tk.Label(hdr, text="Действие", width=10, anchor="center").grid(row=0, column=5, padx=2)
 
@@ -793,7 +799,7 @@ class SpecialOrdersPage(tk.Frame):
         ttk.Button(bottom, text="Открыть папку заявок", command=self.open_orders_dir).pack(side="left", padx=4)
 
         self._update_fio_list()
-        self._update_cutoff_hint()
+        self._update_tomorrow_hint()
         self.add_position()
 
         for c in range(8):
@@ -817,23 +823,19 @@ class SpecialOrdersPage(tk.Frame):
             filtered = [r['fio'] for r in self.emps]
         self.cmb_fio.set_completion_list(filtered)
 
-    def _update_cutoff_hint(self):
-        if not get_cutoff_enabled():
-            self.lbl_cutoff_hint.config(text="", fg="#555")
-            return
-        ch = get_cutoff_hour()
-        hint_base = f"Приём заявок до {ch:02d}:00 (на текущую дату)"
-        req = parse_date_any(self.ent_date.get())
-        today = date.today()
-        if req is None:
-            self.lbl_cutoff_hint.config(text=hint_base, fg="#555")
-            return
-        if req < today:
-            self.lbl_cutoff_hint.config(text="Выбрана прошедшая дата — заявки недоступны", fg="#b00020")
-        elif req == today and is_past_cutoff_for_date(today, ch):
-            self.lbl_cutoff_hint.config(text=f"Сегодня приём закрыт после {ch:02d}:00", fg="#b00020")
-        else:
-            self.lbl_cutoff_hint.config(text=hint_base, fg="#555")
+    def _update_tomorrow_hint(self):
+        """Подсказка: заявки принимаются только на завтрашнюю дату"""
+        try:
+            req = parse_date_any(self.ent_date.get())
+            tomorrow = date.today() + timedelta(days=1)
+            if req is None:
+                self.lbl_date_hint.config(text="Укажите дату в формате YYYY-MM-DD или DD.MM.YYYY", fg="#b00020")
+            elif req != tomorrow:
+                self.lbl_date_hint.config(text=f"Заявка возможна только на {tomorrow.strftime('%Y-%m-%d')}", fg="#b00020")
+            else:
+                self.lbl_date_hint.config(text="Ок: заявка на завтрашнюю дату", fg="#2e7d32")
+        except Exception:
+            self.lbl_date_hint.config(text="", fg="#555")
 
     def _sync_ids_by_address(self):
         addr = (self.cmb_address.get() or "").strip()
@@ -863,28 +865,47 @@ class SpecialOrdersPage(tk.Frame):
             r.apply_zebra(i)
 
     def _validate_form(self) -> bool:
-        ok = True
+        # Подразделение
         if not (self.cmb_dep.get() or "").strip():
-            ok = False
+            messagebox.showwarning("Заявка", "Выберите Подразделение.")
+            return False
+        # ФИО
         if not (self.cmb_fio.get() or "").strip():
-            ok = False
-        d = parse_date_any(self.ent_date.get())
-        if d is None:
-            messagebox.showwarning("Заявка", "Введите корректную дату (YYYY-MM-DD или DD.MM.YYYY).")
+            messagebox.showwarning("Заявка", "Укажите ФИО.")
             return False
+        # Телефон (хотя бы 5 цифр)
+        phone = (self.ent_phone.get() or "").strip()
+        digits = re.sub(r"\D+", "", phone)
+        if not phone or len(digits) < 5:
+            messagebox.showwarning("Заявка", "Укажите номер телефона (минимум 5 цифр).")
+            return False
+        # Дата — строго завтра
+        req = parse_date_any(self.ent_date.get())
+        tomorrow = date.today() + timedelta(days=1)
+        if req is None or req != tomorrow:
+            messagebox.showwarning("Заявка", f"Заявка возможна только на дату: {tomorrow.strftime('%Y-%m-%d')}.")
+            return False
+        # Адрес (теперь обязателен)
         addr = (self.cmb_address.get() or "").strip()
-        oid = (self.cmb_object_id.get() or "").strip()
-        if not addr and not oid:
-            messagebox.showwarning("Заявка", "Укажите Адрес и/или ID объекта.")
+        if not addr:
+            messagebox.showwarning("Заявка", "Укажите Адрес.")
             return False
+        # Комментарий
+        comment = self.txt_comment.get("1.0", "end").strip()
+        if not comment:
+            messagebox.showwarning("Заявка", "Добавьте комментарий к заявке.")
+            return False
+        # Позиции
         if not self.pos_rows:
             messagebox.showwarning("Заявка", "Добавьте хотя бы одну позицию.")
             return False
+        all_ok = True
         for r in self.pos_rows:
-            ok = r.validate() and ok
-        if not ok:
-            messagebox.showwarning("Заявка", "Исправьте подсвеченные поля в позициях.")
-        return ok
+            all_ok = r.validate() and all_ok
+        if not all_ok:
+            messagebox.showwarning("Заявка", "Исправьте подсвеченные поля в позициях (Техника, Кол-во, Подача, Часы).")
+            return False
+        return True
 
     def _build_order_dict(self) -> Dict:
         created_at = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
@@ -908,26 +929,12 @@ class SpecialOrdersPage(tk.Frame):
         if not self._validate_form():
             return
 
-        try:
-            req_date = parse_date_any(self.ent_date.get()) or date.today()
-            if req_date < date.today():
-                messagebox.showwarning("Заявка",
-                                       "Заявки на прошедшую дату не принимаются.\nВыберите сегодняшнюю или будущую дату.")
-                return
-        except Exception:
-            pass
-
-        try:
-            req_date = parse_date_any(self.ent_date.get()) or date.today()
-            if get_cutoff_enabled() and is_past_cutoff_for_date(req_date, get_cutoff_hour()):
-                ch = get_cutoff_hour()
-                messagebox.showwarning("Заявка",
-                                       f"Приём заявок на текущую дату закрыт после {ch:02d}:00.\n"
-                                       f"Выберите завтрашнюю дату и повторите.")
-                return
-        except Exception:
-            pass
-
+            req_date = parse_date_any(self.ent_date.get()) or (date.today() + timedelta(days=1))
+        tomorrow = date.today() + timedelta(days=1)
+        if req_date != tomorrow:
+            messagebox.showwarning("Заявка", f"Заявка возможна только на {tomorrow.strftime('%Y-%m-%d')}.")
+            return
+        
         data = self._build_order_dict()
 
         ts = datetime.now().strftime("%H%M%S")
@@ -1013,7 +1020,7 @@ class SpecialOrdersPage(tk.Frame):
         self.fio_var.set("")
         self.ent_phone.delete(0, "end")
         self.ent_date.delete(0, "end")
-        self.ent_date.insert(0, date.today().strftime("%Y-%m-%d"))
+        self.ent_date.insert(0, (date.today() + timedelta(days=1)).strftime("%Y-%m-%d"))
         self.cmb_address.set("")
         self.cmb_object_id.config(values=[])
         self.cmb_object_id.set("")
@@ -1022,7 +1029,7 @@ class SpecialOrdersPage(tk.Frame):
             r.destroy()
         self.pos_rows.clear()
         self.add_position()
-        self._update_cutoff_hint()
+        self._update_tomorrow_hint()
 
     def open_orders_dir(self):
         try:
