@@ -710,7 +710,9 @@ class SpecialOrdersPage(tk.Frame):
             self.addr_to_ids.setdefault(addr, [])
             if oid and oid not in self.addr_to_ids[addr]:
                 self.addr_to_ids[addr].append(oid)
-        self.addresses = sorted(self.addr_to_ids.keys() | {addr for _, addr in self.objects if addr})
+        addresses_set = set(self.addr_to_ids.keys())
+        addresses_set.update(addr for _, addr in self.objects if addr)
+        self.addresses = sorted(addresses_set)
 
     def _build_ui(self):
         top = tk.Frame(self, bg="#f7f7f7")
