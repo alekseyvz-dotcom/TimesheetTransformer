@@ -66,7 +66,7 @@ def config_path() -> Path:
 def get_planning_password() -> str:
     """Получить пароль для доступа к планированию"""
     cfg = read_config()
-    return cfg.get(CONFIG_SECTION_INTEGR, KEY_PLANNING_PASSWORD, fallback="admin").strip()
+    return cfg.get(CONFIG_SECTION_INTEGR, KEY_PLANNING_PASSWORD, fallback="2025").strip()
 
 def ensure_config():
     cp = config_path()
@@ -1349,12 +1349,12 @@ class TransportPlanningPage(tk.Frame):
                 order.get('driver', ''),
                 status
             ), tags=(status,))
-            
-        # Сохраняем скрытые поля (разные возможные ключи на всякий случай)
-        self.row_meta[item_id] = {
-            "comment": order.get("comment") or order.get("order_comment") or "",
-            "note": order.get("note") or order.get("position_note") or "",
-        }
+
+            # Сохраняем скрытые поля для каждой строки
+            self.row_meta[item_id] = {
+                "comment": order.get("comment") or order.get("order_comment") or "",
+                "note": order.get("note") or order.get("position_note") or "",
+            }
     
     def on_row_double_click(self, event):
         """Открытие окна редактирования назначения"""
@@ -1839,7 +1839,7 @@ def create_planning_page(parent) -> tk.Frame:
     """Создаёт страницу планирования транспорта"""
     ensure_config()
     page = TransportPlanningPage(parent)
-    page.pack(fill="both", expand=True)
+    # page.pack(fill="both", expand=True)
     return page
 
 # ------------------------- Вариант standalone-окна -------------------------
