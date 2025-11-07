@@ -61,6 +61,11 @@ def exe_dir() -> Path:
 
 def config_path() -> Path:
     return exe_dir() / CONFIG_FILE
+    
+def get_planning_password() -> str:
+    """Получить пароль для доступа к планированию"""
+    cfg = read_config()
+    return cfg.get(CONFIG_SECTION_INTEGR, KEY_PLANNING_PASSWORD, fallback="admin").strip()
 
 def ensure_config():
     cp = config_path()
@@ -1026,8 +1031,62 @@ class TransportPlanningPage(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
         self.spr_path = get_spr_path()
+        self.authenticated = False
+
+        # ПРОВЕРКА ПАРОЛЯ (КАК В АНАЛИТИКЕ)
+        if not self._check_password():
+            self._show_access_denied()
+            return
+
+        self.authenticated = True
         self._load_spr()
         self._build_ui()
+
+    def _check_password(self) -> bool:
+        """Проверка пароля (аналогично summary_export)"""
+        required_password = get_planning_password()
+        
+        # Если пароль пустой - доступ без авторизации
+        if not required_password:
+            return True
+        
+        # Запрос пароля через стандартный диалог
+        pwd = tk.simpledialog.askstring(
+            "Планирование транспорта", 
+            "Введите пароль для доступа:", 
+            show="*", 
+            parent=self
+        )
+        
+        if pwd is None:
+            return False
+        
+        if pwd != required_password:
+            messagebox.showerror("Доступ запрещён", "Неверный пароль.", parent=self)
+            return False
+        
+        return True
+
+    def _show_access_denied(self):
+        """Экран отказа в доступе"""
+        container = tk.Frame(self, bg="#f7f7f7")
+        container.place(relx=0.5, rely=0.5, anchor="center")
+        
+        tk.Label(
+            container,
+            text="Доступ запрещён",
+            font=("Segoe UI", 18, "bold"),
+            bg="#f7f7f7",
+            fg="#666"
+        ).pack(pady=(0, 10))
+        
+        tk.Label(
+            container,
+            text="Для просмотра этого раздела требуется пароль",
+            font=("Segoe UI", 10),
+            bg="#f7f7f7",
+            fg="#888"
+        ).pack()
         
     def _load_spr(self):
         """Загрузка справочника"""
