@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Any, Dict
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
@@ -36,7 +36,8 @@ KEY_SELECTED_DEP        = "selected_department"
 KEY_ORDERS_MODE         = "orders_mode"               # none | webhook
 KEY_ORDERS_WEBHOOK_URL  = "orders_webhook_url"        # https://script.google.com/macros/s/.../exec
 KEY_ORDERS_WEBHOOK_TOKEN= "orders_webhook_token"
-KEY_PLANNING_ENABLED = "planning_enabled"             # true|false
+KEY_PLANNING_ENABLED = "planning_enabled"
+KEY_PLANNING_PASSWORD   = "planning_password"# true|false
 
 # Настройки отсечки подачи заявок
 KEY_CUTOFF_ENABLED      = "cutoff_enabled"            # true|false
@@ -129,6 +130,9 @@ def ensure_config():
         if KEY_DRIVER_DEPARTMENTS not in cfg[CONFIG_SECTION_INTEGR]:
             cfg[CONFIG_SECTION_INTEGR][KEY_DRIVER_DEPARTMENTS] = "Служба гаража, Автопарк, Транспортный цех"
             changed = True
+        if KEY_PLANNING_PASSWORD not in cfg[CONFIG_SECTION_INTEGR]:
+        cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_PASSWORD] = "admin"
+        changed = True
 
         if changed:
             with open(cp, "w", encoding="utf-8") as f:
@@ -146,7 +150,10 @@ def ensure_config():
     cfg[CONFIG_SECTION_INTEGR] = {
         KEY_ORDERS_MODE: "none",
         KEY_ORDERS_WEBHOOK_URL: "",
-        KEY_ORDERS_WEBHOOK_TOKEN: ""
+        KEY_ORDERS_WEBHOOK_TOKEN: "",
+        KEY_PLANNING_ENABLED: "false",
+        KEY_DRIVER_DEPARTMENTS: "Служба гаража, Автопарк, Транспортный цех",
+        KEY_PLANNING_PASSWORD: "2025" 
     }
     cfg[CONFIG_SECTION_ORDERS] = {
         KEY_CUTOFF_ENABLED: "true",
