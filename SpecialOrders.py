@@ -1045,6 +1045,7 @@ class TransportPlanningPage(tk.Frame):
         super().__init__(master, bg="#f7f7f7")
         self.spr_path = get_spr_path()
         self.authenticated = False
+        self.row_meta: Dict[str, Dict[str, str]] = {} 
 
         # ПРОВЕРКА ПАРОЛЯ (КАК В АНАЛИТИКЕ)
         if not self._check_password():
@@ -1324,15 +1325,15 @@ class TransportPlanningPage(tk.Frame):
         return conflicts
     
     def _populate_tree(self, orders: List[Dict]):
-        """Заполнение таблицы заявками"""
-        # Очищаем таблицу
+        # Очищаем таблицу и мета
         for item in self.tree.get_children():
             self.tree.delete(item)
-        
+        self.row_meta = {}
+
         for order in orders:
             obj_display = order.get('object_address', '') or order.get('object_id', '')
             status = order.get('status', 'Новая')
-            
+
             item_id = self.tree.insert("", "end", values=(
                 order.get('id', ''),
                 order.get('created_at', ''),
@@ -1348,6 +1349,12 @@ class TransportPlanningPage(tk.Frame):
                 order.get('driver', ''),
                 status
             ), tags=(status,))
+            
+        # Сохраняем скрытые поля (разные возможные ключи на всякий случай)
+        self.row_meta[item_id] = {
+            "comment": order.get("comment") or order.get("order_comment") or "",
+            "note": order.get("note") or order.get("position_note") or "",
+        }
     
     def on_row_double_click(self, event):
         """Открытие окна редактирования назначения"""
@@ -1444,6 +1451,28 @@ class TransportPlanningPage(tk.Frame):
             padx=8,
             pady=8
         ).pack(anchor="w")
+
+        # === БЛОК: Комментарий и Примечание ===
+        meta = self.row_meta.get(item_id, {})
+        order_comment = (meta.get("comment") or "").strip()
+        position_note = (meta.get("note") or "").strip()
+
+        texts_frame = tk.LabelFrame(scrollable_frame, text="🗒 Тексты заявки", padx=12, pady=10)
+        texts_frame.pack(fill="x", padx=15, pady=(0, 8))
+
+        # Комментарий заявки
+        row_c = tk.Frame(texts_frame)
+        row_c.pack(fill="x", pady=2)
+        tk.Label(row_c, text="Комментарий:", font=("Arial", 9), width=15, anchor="w").pack(side="left")
+        tk.Label(row_c, text=(order_comment or "—"), font=("Arial", 9),
+                 anchor="w", justify="left", wraplength=560).pack(side="left", fill="x", expand=True)
+
+        # Примечание позиции
+        row_n = tk.Frame(texts_frame)
+        row_n.pack(fill="x", pady=2)
+        tk.Label(row_n, text="Примечание:", font=("Arial", 9), width=15, anchor="w").pack(side="left")
+        tk.Label(row_n, text=(position_note or "—"), font=("Arial", 9),
+                 anchor="w", justify="left", wraplength=560).pack(side="left", fill="x", expand=True)
 
         # Предупреждение о конфликтах
         warning_frame = tk.Frame(scrollable_frame, bg="#fff3cd", relief="solid", borderwidth=1)
