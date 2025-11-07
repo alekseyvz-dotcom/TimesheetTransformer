@@ -1835,15 +1835,6 @@ class TransportPlanningPage(tk.Frame):
         except Exception as e:
             messagebox.showerror("Ошибка", f"Ошибка сохранения:\n{e}")
 
-
-# Функция для создания страницы планирования
-def create_planning_page(parent) -> tk.Frame:
-    """Создаёт страницу планирования транспорта"""
-    ensure_config()
-    page = TransportPlanningPage(parent)
-    # page.pack(fill="both", expand=True)
-    return page
-
 # ------------------------- Вариант standalone-окна -------------------------
 
 class SpecialOrdersApp(tk.Tk):
