@@ -1851,24 +1851,22 @@ class SpecialOrdersApp(tk.Tk):
 # ------------------------- API для встраивания -------------------------
 
 def create_page(parent) -> tk.Frame:
-    """
-    Создаёт страницу "Заявка на автотранспорт" внутри переданного родителя.
-    Возвращает tk.Frame (уже со построенным UI).
-    """
     ensure_config()
-    page = SpecialOrdersPage(parent)
-    # Не пакуем здесь - родитель сам запакует
-    return page
+    try:
+        return SpecialOrdersPage(parent)
+    except Exception:
+        import traceback
+        messagebox.showerror("Заявка — ошибка", traceback.format_exc(), parent=parent)
+        return tk.Frame(parent)
 
 def create_planning_page(parent) -> tk.Frame:
-    """
-    Создаёт страницу "Планирование транспорта" внутри переданного родителя.
-    Возвращает tk.Frame (уже со построенным UI).
-    """
     ensure_config()
-    page = TransportPlanningPage(parent)
-    # Не пакуем здесь - родитель сам запакует
-    return page
+    try:
+        return TransportPlanningPage(parent)
+    except Exception:
+        import traceback
+        messagebox.showerror("Планирование — ошибка", traceback.format_exc(), parent=parent)
+        return tk.Frame(parent)
 
 def open_special_orders(parent=None):
     """
