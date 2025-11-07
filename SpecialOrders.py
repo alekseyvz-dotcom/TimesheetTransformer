@@ -1304,7 +1304,7 @@ class TransportPlanningPage(tk.Frame):
         y = (dialog.winfo_screenheight() // 2) - (700 // 2)
         dialog.geometry(f"640x700+{x}+{y}")
     
-        # ========== КОНТЕЙНЕР СО СКРОЛЛОМ (только для содержимого) ==========
+        # ========== КОНТЕЙНЕР СО СКРОЛЛОМ ==========
         scroll_container = tk.Frame(dialog)
         scroll_container.pack(fill="both", expand=True, padx=0, pady=0)
     
@@ -1312,20 +1312,20 @@ class TransportPlanningPage(tk.Frame):
         scrollbar = ttk.Scrollbar(scroll_container, orient="vertical", command=canvas.yview)
         scrollable_frame = tk.Frame(canvas)
     
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
+        def update_scroll_region(event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+    
+        scrollable_frame.bind("<Configure>", update_scroll_region)
     
         canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
     
-        # Адаптация ширины содержимого к ширине canvas
+        # Адаптация ширины
         def on_canvas_configure(event):
             canvas.itemconfig(canvas_window, width=event.width)
         canvas.bind("<Configure>", on_canvas_configure)
     
-        # Прокрутка колесиком мыши
+        # Прокрутка колесиком
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1*(event.delta/120)), "units")
     
@@ -1340,19 +1340,18 @@ class TransportPlanningPage(tk.Frame):
     
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-    # ===================================================================
     
-    # ========== СОДЕРЖИМОЕ (внутри scrollable_frame) ==========
+        # ========== СОДЕРЖИМОЕ ==========
     
-    # Информация о заявке
+        # Информация о заявке
         info_frame = tk.LabelFrame(scrollable_frame, text="📋 Информация о заявке", padx=12, pady=10)
         info_frame.pack(fill="x", padx=15, pady=10)
     
         info_data = [
-            ("📅 Дата:", values[2]),
-            ("🕐 Время подачи:", values[8] or 'не указано'),
-            ("👤 Заявитель:", values[4]),
-            ("📍 Объект:", values[5]),
+            ("Дата:", values[2]),
+            ("Время подачи:", values[8] or 'не указано'),
+            ("Заявитель:", values[4]),
+            ("Объект:", values[5]),
         ]
     
         for label, value in info_data:
@@ -1361,7 +1360,7 @@ class TransportPlanningPage(tk.Frame):
             tk.Label(row, text=label, font=("Arial", 9), width=15, anchor="w").pack(side="left")
             tk.Label(row, text=value, font=("Arial", 9), anchor="w").pack(side="left", fill="x", expand=True)
     
-        # Техника - выделенная строка
+        # Техника
         tech_frame = tk.Frame(info_frame, bg="#e3f2fd", relief="solid", borderwidth=1)
         tech_frame.pack(fill="x", pady=(8, 2), padx=5)
         tk.Label(
@@ -1391,7 +1390,7 @@ class TransportPlanningPage(tk.Frame):
         assign_frame = tk.LabelFrame(scrollable_frame, text="🚗 Назначение транспорта", padx=15, pady=15)
         assign_frame.pack(fill="both", expand=True, padx=15, pady=5)
     
-        # Парсим текущее назначение
+        # ========== ПАРСИМ ТЕКУЩЕЕ НАЗНАЧЕНИЕ ==========
         current_assignment = values[10]
         current_type = ""
         current_name = ""
@@ -1403,9 +1402,13 @@ class TransportPlanningPage(tk.Frame):
             current_name = parts[1].strip() if len(parts) > 1 else ""
             current_plate = parts[2].strip() if len(parts) > 2 else ""
         elif current_assignment:
-            current_type = current_assignment
+            current_type = current_assignment.strip()
     
-        # 1. ТИП ТЕХНИКИ
+        # Отладка
+        print(f"[DEBUG] Текущее назначение: '{current_assignment}'")
+        print(f"[DEBUG] Парсинг: type='{current_type}', name='{current_name}', plate='{current_plate}'")
+    
+        # ========== 1. ТИП ТЕХНИКИ ==========
         tk.Label(assign_frame, text="1️⃣ Тип техники:", font=("Arial", 9, "bold")).grid(
             row=0, column=0, sticky="w", pady=(5, 2)
         )
@@ -1415,6 +1418,36 @@ class TransportPlanningPage(tk.Frame):
             textvariable=vehicle_type_var,
             values=self.vehicle_types,
             state="readonly",
+            width=55,
+            font=("Arial", 9)
+        )
+        cmb_vehicle_type.grid(row=1, column=0, pady=(0, 12), sticky="we")
+    
+        # ========== 2. НАИМЕНОВАНИЕ ==========
+        tk.Label(assign_frame, text="2️⃣ Наименование:", font=("Arial", 9, "bold")).grid(
+            row=2, column=0, sticky="w", pady=(5, 2)
+        )
+        vehicle_name_var = tk.StringVar(value="")
+        cmb_vehicle_name = ttk.Combobox(
+            assign_frame, 
+            textvariable=vehicle_name_var,
+            values=[],
+            state="disabled",
+            width=55,
+            font=("Arial", 9)
+        )
+        cmb_vehicle_name.grid(row=3, column=0, pady=(0, 12), sticky="we")
+    
+        # ========== 3. ГОС. НОМЕР ==========
+        tk.Label(assign_frame, text="3️⃣ Гос. номер:", font=("Arial", 9, "bold")).grid(
+            row=4, column=0, sticky="w", pady=(5, 2)
+        )
+        vehicle_plate_var = tk.StringVar(value="")
+        cmb_vehicle_plate = ttk.Combobox(
+            assign_frame, 
+            textvariable=vehicle_plate_var,
+            values=[],
+            state="disabled",
             width=55,
             font=("Arial", 9)
         )
