@@ -131,8 +131,8 @@ def ensure_config():
             cfg[CONFIG_SECTION_INTEGR][KEY_DRIVER_DEPARTMENTS] = "Служба гаража, Автопарк, Транспортный цех"
             changed = True
         if KEY_PLANNING_PASSWORD not in cfg[CONFIG_SECTION_INTEGR]:
-        cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_PASSWORD] = "admin"
-        changed = True
+            cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_PASSWORD] = "2025"
+            changed = True
 
         if changed:
             with open(cp, "w", encoding="utf-8") as f:
