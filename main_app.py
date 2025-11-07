@@ -76,6 +76,7 @@ KEY_SPR = "spravochnik_path"
 KEY_OUTPUT_DIR = "output_dir"
 
 KEY_EXPORT_PWD = "export_password"
+KEY_PLANNING_PASSWORD = "planning_password"
 
 KEY_SELECTED_DEP = "selected_department"
 
@@ -168,7 +169,9 @@ def ensure_config():
         if KEY_EXPORT_PWD not in cfg[CONFIG_SECTION_INTEGR]:
             cfg[CONFIG_SECTION_INTEGR][KEY_EXPORT_PWD] = "2025"
             changed = True
-        # Важно: не трогаем другие ключи Integrations (orders_mode, orders_webhook_url и т.п.)
+        if KEY_PLANNING_PASSWORD not in cfg[CONFIG_SECTION_INTEGR]:
+            cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_PASSWORD] = "2025" 
+            changed = True
 
         # Remote
         if not cfg.has_section(CONFIG_SECTION_REMOTE):
