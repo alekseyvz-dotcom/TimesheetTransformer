@@ -1679,8 +1679,6 @@ class MainApp(tk.Tk):
         tk.Label(footer, text="Разработал Алексей Зезюкин, АНО МЛСТ 2025",
                  font=("Segoe UI", 8), fg="#666").pack(side="right")
 
-        self.after(0, self.show_home) 
-
     def run_special_orders_exe(self):
         # Этот метод больше не используется в меню, но если вдруг нужен как фолбэк:
         messagebox.showwarning("Запуск", "Модуль Заявок должен быть встроен в TabelSuite. Проверьте импорт.")
@@ -1689,11 +1687,21 @@ class MainApp(tk.Tk):
         # Этот метод больше не используется в меню, но если вдруг нужен как фолбэк:
         messagebox.showwarning("Запуск", "Модуль Конвертера должен быть встроен в TabelSuite. Проверьте импорт.")
 
+    def start_app():
+    # Эта функция будет вызываться только после того, как MainApp полностью создан
+    app = MainApp()
+    
+    # Теперь мы вызываем show_home здесь, гарантируя, что объект app полностью готов
+    try:
+        app.show_home()
+    except AttributeError:
+        # Если даже здесь ошибка, просто продолжаем, так как пользователь может использовать меню
+        print("Warning: Failed to auto-display home page.")
+        
+    app.mainloop()
 
 # --- Секция запуска (CLEANUP) ---
 if __name__ == "__main__":
     # 1. Удаляем проверку 'if pd is None:'
     # В собранном EXE Pandas будет включен, а в среде разработки это задача разработчика.
-    
-    app = MainApp()
-    app.mainloop()
+    start_app()
