@@ -4,15 +4,18 @@ on:
   workflow_dispatch:
   push:
     paths:
+      # Включите все файлы, которые должны запускать сборку
       - main_app.py
       - timesheet_transformer.py
       - SpecialOrders.py
       - assets_logo.py
-      - BudgetAnalyzer.py. 
+      - BudgetAnalyzer.py
       - requirements.txt
       - icon.ico
       - icon2.ico
       - .github/workflows/build.yml
+      # Добавим изменения в директории src, если они есть
+      - src/**
 
 concurrency:
   group: build-${{ github.ref }}
@@ -30,7 +33,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          # Python 3.11 - отлично. Убедитесь, что Pandas/Numpy хорошо работает на этой версии.
+          python-version: '3.11' 
 
       - name: Cache pip
         uses: actions/cache@v4
@@ -43,8 +47,9 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+          # Установка Pandas, Openpyxl и Pillow (из requirements.txt)
+          pip install -r requirements.txt 
+          pip install pyinstaller # Убедимся, что PyInstaller установлен
 
       - name: Clean previous build folders
         shell: pwsh
@@ -52,6 +57,7 @@ jobs:
           if (Test-Path dist)  { Remove-Item -Recurse -Force dist }
           if (Test-Path build) { Remove-Item -Recurse -Force build }
 
+      # --- Шаг генерации assets_logo.py оставлен без изменений ---
       - name: Ensure assets_logo.py (generate from RAW logo if missing)
         shell: pwsh
         run: |
@@ -79,45 +85,68 @@ jobs:
         shell: pwsh
         run: |
           Get-Content assets_logo.py -TotalCount 3
+      # -----------------------------------------------------------------
 
       - name: Build TabelSuite (main menu, windowed)
         shell: pwsh
         run: |
+          # --- КОРРЕКЦИЯ ДЛЯ PANDAS ---
+          # 1. Добавляем hidden-import для Pandas (используется в сводном экспорте)
+          # 2. Добавляем hidden-import для Openpyxl (используется для трансформации табелей)
+          # 3. Добавляем hidden-import для BudgetAnalyzer, SpecialOrders, timesheet_transformer, 
+          #    чтобы они были видны, даже если они не импортированы напрямую в main_app.py
+          
           if (Test-Path "icon.ico") {
-            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=assets_logo -i icon.ico -n TabelSuite main_app.py
+            pyinstaller -F -w --clean \
+              --hidden-import=pandas \
+              --hidden-import=openpyxl \
+              --hidden-import=BudgetAnalyzer \
+              --hidden-import=SpecialOrders \
+              --hidden-import=timesheet_transformer \
+              -i icon.ico \
+              -n TabelSuite main_app.py
           } else {
             Write-Host "icon.ico not found: building TabelSuite without custom icon"
-            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=assets_logo -n TabelSuite main_app.py
+            pyinstaller -F -w --clean \
+              --hidden-import=pandas \
+              --hidden-import=openpyxl \
+              --hidden-import=BudgetAnalyzer \
+              --hidden-import=SpecialOrders \
+              --hidden-import=timesheet_transformer \
+              -n TabelSuite main_app.py
           }
           
       - name: Build TabelConverter (converter, windowed)
         shell: pwsh
         run: |
+          # В этом модуле Pandas не нужен, но Openpyxl, возможно, да.
           if (Test-Path "icon2.ico") {
-            pyinstaller -F -w --clean --hidden-import=tkinter -i icon2.ico -n TabelConverter timesheet_transformer.py
+            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=openpyxl -i icon2.ico -n TabelConverter timesheet_transformer.py
           } else {
             Write-Host "icon2.ico not found: building TabelConverter without custom icon"
-            pyinstaller -F -w --clean --hidden-import=tkinter -n TabelConverter timesheet_transformer.py
+            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=openpyxl -n TabelConverter timesheet_transformer.py
           }
 
       - name: Build SpecialOrders (orders module, windowed)
         shell: pwsh
         run: |
+          # Openpyxl, возможно, используется для I/O в этом модуле.
           if (Test-Path "icon2.ico") {
-            pyinstaller -F -w --clean --hidden-import=tkinter -i icon2.ico -n SpecialOrders SpecialOrders.py
+            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=openpyxl -i icon2.ico -n SpecialOrders SpecialOrders.py
           } else {
             Write-Host "icon2.ico not found: building SpecialOrders without custom icon"
-            pyinstaller -F -w --clean --hidden-import=tkinter -n SpecialOrders SpecialOrders.py
+            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=openpyxl -n SpecialOrders SpecialOrders.py
           }
 
       - name: Build BudgetAnalyzer (windowed)
         shell: pwsh
         run: |
+          # Pandas, вероятно, используется в BudgetAnalyzer.
           if (Test-Path "icon2.ico") {
-            pyinstaller -F -w --clean --hidden-import=tkinter -i icon2.ico -n BudgetAnalyzer BudgetAnalyzer.py
+            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=pandas -i icon2.ico -n BudgetAnalyzer BudgetAnalyzer.py
           } else {
             Write-Host "icon2.ico not found: building BudgetAnalyzer without custom icon"
-            pyinstaller -F -w --clean --hidden-import=tkinter -n BudgetAnalyzer BudgetAnalyzer.py
+            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=pandas -n BudgetAnalyzer BudgetAnalyzer.py
           }
 
       - name: List dist
