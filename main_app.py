@@ -78,6 +78,17 @@ TINY_PNG_BASE64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
     "/w8AAn8B9w3G2kIAAAAASUVORK5CYII="
 )
+# В верхней части файла, где определены утилиты
+LOG_PATH = exe_dir() / "app_start.log"
+
+def log_message(msg):
+    # Используем 'a' для добавления в конец, чтобы не стирать старые логи
+    try:
+        with open(LOG_PATH, 'a', encoding='utf-8') as f:
+            f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
+    except Exception:
+        # Если лог не пишется, это не должно блокировать программу
+        pass
 
 # ------------- СХЕМА ТАБЕЛЯ (Критично для сопровождения) -------------
 # Индексы колонок в листе "Табель" (начиная с 1)
@@ -1553,9 +1564,10 @@ class ExportMonthDialog(simpledialog.Dialog):
 
 # (Класс HomePage - без изменений)
 class HomePage(tk.Frame):
-    # ... (неизмененный код) ...
     def __init__(self, master):
+        log_message("HOMEPAGE: Starting __init__")
         super().__init__(master, bg="#f7f7f7")
+        log_message("HOMEPAGE: Super init done.")
 
         outer = tk.Frame(self, bg="#f7f7f7")
         outer.pack(fill="both", expand=True)
@@ -1563,9 +1575,15 @@ class HomePage(tk.Frame):
         center = tk.Frame(outer, bg="#f7f7f7")
         center.place(relx=0.5, rely=0.5, anchor="center")
 
-        self.logo_img = embedded_logo_image(center, max_w=360, max_h=360)
+        log_message("HOMEPAGE: Calling embedded_logo_image.")
+        self.logo_img = embedded_logo_image(center, max_w=360, max_h=360) # <--- ВОЗМОЖНЫЙ СБОЙ ЗДЕСЬ
+        log_message(f"HOMEPAGE: Logo loaded. Success: {self.logo_img is not None}")
+        
         if self.logo_img:
             tk.Label(center, image=self.logo_img, bg="#f7f7f7").pack(anchor="center", pady=(0, 12))
+        
+        # ... (Остальной текст) ...
+        log_message("HOMEPAGE: UI constructed successfully.")
 
         tk.Label(center, text="Добро пожаловать!", font=("Segoe UI", 18, "bold"), bg="#f7f7f7")\
             .pack(anchor="center", pady=(4, 6))
@@ -1577,8 +1595,14 @@ class HomePage(tk.Frame):
 # ... (Весь код до MainApp)
 
 class MainApp(tk.Tk):
-    # --- ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ (ПЕРЕМЕЩЕНЫ В НАЧАЛО) ---
+    def __init__(self):
+        log_message("INIT: Starting MainApp.__init__")
+        super().__init__()
+        log_message("INIT: Tkinter base initialized.")
 
+        ensure_config()
+        log_message("INIT: Config ensured.")
+    # --- ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ---
     def _show_page(self, key: str, builder):
         # ... (Ваш код _show_page) ...
         for w in self.content.winfo_children():
@@ -1764,3 +1788,11 @@ class MainApp(tk.Tk):
         
         # Запускаем show_home отложенно
         self.after(100, self.show_home) 
+        log_message("INIT: after(100, show_home) scheduled.")
+
+
+    def show_home(self):
+        log_message("SHOW: Calling _show_page for HomePage.")
+        self._show_page("home", lambda parent: HomePage(parent))
+        log_message("SHOW: HomePage displayed.")
+
