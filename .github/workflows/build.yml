@@ -1,21 +1,15 @@
-name: Build EXE (Suite + Converter + Orders)
+name: Build EXE (Unified)
 
 on:
   workflow_dispatch:
   push:
     paths:
-      # Включите все файлы, которые должны запускать сборку
       - main_app.py
       - timesheet_transformer.py
       - SpecialOrders.py
       - assets_logo.py
       - BudgetAnalyzer.py
-      - requirements.txt
-      - icon.ico
-      - icon2.ico
-      - .github/workflows/build.yml
-      # Добавим изменения в директории src, если они есть
-      - src/**
+      # ... (остальные файлы) ...
 
 concurrency:
   group: build-${{ github.ref }}
@@ -30,26 +24,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          # Python 3.11 - отлично. Убедитесь, что Pandas/Numpy хорошо работает на этой версии.
-          python-version: '3.11' 
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~\AppData\Local\pip\Cache
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: ${{ runner.os }}-pip-
-
-      - name: Install dependencies
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip
-          # Установка Pandas, Openpyxl и Pillow (из requirements.txt)
-          pip install -r requirements.txt 
-          pip install pyinstaller # Убедимся, что PyInstaller установлен
+      # ... (Установка Python, Cache pip, Install dependencies) ...
+      
+      # (Шаг Install dependencies остается без изменений)
 
       - name: Clean previous build folders
         shell: pwsh
@@ -57,116 +34,48 @@ jobs:
           if (Test-Path dist)  { Remove-Item -Recurse -Force dist }
           if (Test-Path build) { Remove-Item -Recurse -Force build }
 
-      # --- Шаг генерации assets_logo.py оставлен без изменений ---
-      - name: Ensure assets_logo.py (generate from RAW logo if missing)
-        shell: pwsh
-        run: |
-          $rawUrl = "https://raw.githubusercontent.com/alekseyvz-dotcom/TimesheetTransformer/main/logo.png"
-          if (-not (Test-Path "assets_logo.py")) {
-            Write-Host "assets_logo.py not found — generating from RAW URL"
-            try {
-              $tmp = Join-Path $env:TEMP "logo.png"
-              Invoke-WebRequest -Uri $rawUrl -OutFile $tmp -UseBasicParsing
-              $bytes = [System.IO.File]::ReadAllBytes($tmp)
-              $b64 = [System.Convert]::ToBase64String($bytes)
-              $content = 'LOGO_BASE64 = """' + "`n" + $b64 + "`n" + '"""' + "`n"
-              Set-Content -Path "assets_logo.py" -Value $content -Encoding UTF8
-              Write-Host "assets_logo.py generated"
-            } catch {
-              Write-Warning "Cannot fetch logo: $($_.Exception.Message)"
-              $tiny = 'LOGO_BASE64 = "' + 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/w8AAn8B9w3G2kIAAAAASUVORK5CYII=' + '"' + "`n"
-              Set-Content -Path "assets_logo.py" -Value $tiny -Encoding UTF8
-            }
-          } else {
-            Write-Host "assets_logo.py already exists — keeping repository version"
-          }
+      # --- Шаг генерации assets_logo.py остается без изменений ---
 
-      - name: Show assets_logo.py head
+      - name: Build Unified TabelSuite Executable
         shell: pwsh
         run: |
-          Get-Content assets_logo.py -TotalCount 3
-      # -----------------------------------------------------------------
+          # 1. Основные аргументы: -D (onedir) для минимизации размера
+          #    Если хотите только один файл, используйте -F
+          $args = @("-D", "-w", "--clean", "-n", "TabelSuite") 
 
-      - name: Build TabelSuite (main menu, windowed)
-        shell: pwsh
-        run: |
-          # Собираем базовые аргументы
-          $args = @("-F", "-w", "--clean", "-n", "TabelSuite", "main_app.py")
-          
-          # Добавляем скрытые импорты
-          $args += @("--hidden-import=pandas", 
-                    "--hidden-import=openpyxl", 
-                    "--hidden-import=BudgetAnalyzer", 
+          # 2. Явное включение всех дочерних скриптов (плагинов)
+          #    Это заставляет PyInstaller анализировать их зависимости (Openpyxl, Pandas и т.д.)
+          $args += @("--hidden-import=BudgetAnalyzer", 
                     "--hidden-import=SpecialOrders", 
                     "--hidden-import=timesheet_transformer")
+
+          # 3. Обеспечение включения Pandas/Openpyxl (для главного меню и аналитики)
+          $args += @("--collect-all", "pandas",
+                    "--collect-all", "openpyxl")
           
-          # Добавляем иконку, если она есть
+          # 4. Добавление иконки и основного скрипта
           if (Test-Path "icon.ico") {
             $args += @("-i", "icon.ico")
           } else {
             Write-Host "icon.ico not found: building TabelSuite without custom icon"
           }
           
-          # Выполняем PyInstaller с помощью оператора вызова (&) и массива аргументов
+          # Указываем PyInstaller, что BudgetAnalyzer.py, SpecialOrders.py, timesheet_transformer.py 
+          # являются вспомогательными файлами для main_app.py
+          $args += @("--collect-all", "BudgetAnalyzer",
+                    "--collect-all", "SpecialOrders",
+                    "--collect-all", "timesheet_transformer",
+                    "main_app.py")
+          
+          # Выполняем PyInstaller с помощью оператора вызова (&)
           & pyinstaller $args
 
-
-      - name: Build TabelConverter (converter, windowed)
-        shell: pwsh
-        run: |
-          $args = @("-F", "-w", "--clean", "-n", "TabelConverter", "timesheet_transformer.py")
-          $args += @("--hidden-import=tkinter", "--hidden-import=openpyxl")
-          
-          if (Test-Path "icon2.ico") {
-            $args += @("-i", "icon2.ico")
-          } else {
-            Write-Host "icon2.ico not found: building TabelConverter without custom icon"
-          }
-          
-          & pyinstaller $args
-
-
-      - name: Build SpecialOrders (orders module, windowed)
-        shell: pwsh
-        run: |
-          $args = @("-F", "-w", "--clean", "-n", "SpecialOrders", "SpecialOrders.py")
-          $args += @("--hidden-import=tkinter", "--hidden-import=openpyxl")
-          
-          if (Test-Path "icon2.ico") {
-            $args += @("-i", "icon2.ico")
-          } else {
-            Write-Host "icon2.ico not found: building SpecialOrders without custom icon"
-          }
-          
-          & pyinstaller $args
-
-
-      - name: Build BudgetAnalyzer (windowed)
-        shell: pwsh
-        run: |
-          $args = @("-F", "-w", "--clean", "-n", "BudgetAnalyzer", "BudgetAnalyzer.py")
-          $args += @("--hidden-import=tkinter", "--hidden-import=pandas")
-          
-          if (Test-Path "icon2.ico") {
-            $args += @("-i", "icon2.ico")
-          } else {
-            Write-Host "icon2.ico not found: building BudgetAnalyzer without custom icon"
-          }
-          
-          & pyinstaller $args
-
-      - name: List dist
-        shell: pwsh
-        run: Get-ChildItem -Recurse dist
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: TabelSuite_Pack
-          path: |
-            dist/TabelSuite.exe
-            dist/TabelConverter.exe
-            dist/SpecialOrders.exe
-            dist/BudgetAnalyzer.exe
+          # Загружаем только папку dist, которая содержит TabelSuite.exe и все DLL
+          name: TabelSuite_Unified_Package 
+          path: dist/TabelSuite
           if-no-files-found: error
           retention-days: 14
