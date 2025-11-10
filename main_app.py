@@ -914,6 +914,13 @@ class TimesheetPage(tk.Frame):
         top = tk.Frame(self)
         top.pack(fill="x", padx=8, pady=8)
 
+        for col in range(8):
+            # Колонка 5 (Адрес) и, возможно, 1 (Подразделение) должны быть растягиваемыми
+            weight = 0
+            if col == 1 or col == 5:
+                weight = 1
+            top.grid_columnconfigure(col, weight=weight)
+
         tk.Label(top, text="Подразделение:").grid(row=0, column=0, sticky="w")
         deps = self.departments or ["Все"]
         self.cmb_department = ttk.Combobox(top, state="readonly", values=deps, width=48)
@@ -972,6 +979,9 @@ class TimesheetPage(tk.Frame):
         # Row 3 (Кнопки действий)
         btns = tk.Frame(top)
         btns.grid(row=3, column=0, columnspan=8, sticky="w", pady=(8, 0))
+
+        for col in range(8):
+            btns.grid_columnconfigure(col, weight=1) # Даем равный вес всем 8 колонкам кнопок
         
         # ВОССТАНОВЛЕННЫЙ БЛОК КНОПОК
         ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
