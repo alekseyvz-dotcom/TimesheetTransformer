@@ -1614,7 +1614,6 @@ class MainApp(tk.Tk):
                 command=lambda: self._show_page("transport", lambda parent: SpecialOrders.create_page(parent))
             )
         else:
-            # Fallback для случая, если импорт все-таки не удался (например, отсутствует BudgetAnalyzer.py)
             m_transport.add_command(label="📝 Создать заявку", 
                                     command=lambda: messagebox.showwarning("Автотранспорт", "Модуль SpecialOrders.py не найден."))
              
@@ -1678,28 +1677,39 @@ class MainApp(tk.Tk):
         footer.pack(fill="x", padx=12, pady=(0, 10))
         tk.Label(footer, text="Разработал Алексей Зезюкин, АНО МЛСТ 2025",
                  font=("Segoe UI", 8), fg="#666").pack(side="right")
+        
+        # -----------------------------------------------------------------
+        # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Отложенный вызов show_home.
+        # Это должно решить проблему синхронизации Tkinter.
+        self.after(100, self.show_home) 
+        # -----------------------------------------------------------------
+
 
     def run_special_orders_exe(self):
-        # Этот метод больше не используется в меню, но если вдруг нужен как фолбэк:
+        # Оставляем заглушку, чтобы не нарушать структуру, хотя в меню она не используется
         messagebox.showwarning("Запуск", "Модуль Заявок должен быть встроен в TabelSuite. Проверьте импорт.")
 
     def run_converter_exe(self):
-        # Этот метод больше не используется в меню, но если вдруг нужен как фолбэк:
+        # Оставляем заглушку
         messagebox.showwarning("Запуск", "Модуль Конвертера должен быть встроен в TabelSuite. Проверьте импорт.")
-
-def start_app():
-    # Эта функция будет вызываться только после того, как MainApp полностью создан
-        app = MainApp()
-    
-    # Теперь мы вызываем show_home здесь, гарантируя, что объект app полностью готов
-        try:
-            app.show_home()
-        except AttributeError:
-        # Если даже здесь ошибка, просто продолжаем, так как пользователь может использовать меню
-            print("Warning: Failed to auto-display home page.")
         
-        app.mainloop()
+    def _show_page(self, key: str, builder):
+        # ... (Ваш код _show_page) ...
+        for w in self.content.winfo_children():
+            try: w.destroy()
+            except Exception: pass
+        page = builder(self.content)
+        if isinstance(page, tk.Widget) and page.master is self.content:
+            try: page.pack_forget()
+            except Exception: pass
+        try: page.pack(fill="both", expand=True)
+        except Exception: pass
+        self._pages[key] = page
 
+    def show_home(self):
+        self._show_page("home", lambda parent: HomePage(parent))
+        
 # --- Секция запуска (CLEANUP) ---
 if __name__ == "__main__":
-    start_app()
+    app = MainApp()
+    app.mainloop()
