@@ -90,64 +90,68 @@ jobs:
       - name: Build TabelSuite (main menu, windowed)
         shell: pwsh
         run: |
-          # --- КОРРЕКЦИЯ ДЛЯ PANDAS ---
-          # 1. Добавляем hidden-import для Pandas (используется в сводном экспорте)
-          # 2. Добавляем hidden-import для Openpyxl (используется для трансформации табелей)
-          # 3. Добавляем hidden-import для BudgetAnalyzer, SpecialOrders, timesheet_transformer, 
-          #    чтобы они были видны, даже если они не импортированы напрямую в main_app.py
-          
+          $cmd = "pyinstaller -F -w --clean "
           if (Test-Path "icon.ico") {
-            pyinstaller -F -w --clean \
-              --hidden-import=pandas \
-              --hidden-import=openpyxl \
-              --hidden-import=BudgetAnalyzer \
-              --hidden-import=SpecialOrders \
-              --hidden-import=timesheet_transformer \
-              -i icon.ico \
-              -n TabelSuite main_app.py
+            $cmd += "-i icon.ico "
           } else {
             Write-Host "icon.ico not found: building TabelSuite without custom icon"
-            pyinstaller -F -w --clean \
-              --hidden-import=pandas \
-              --hidden-import=openpyxl \
-              --hidden-import=BudgetAnalyzer \
-              --hidden-import=SpecialOrders \
-              --hidden-import=timesheet_transformer \
-              -n TabelSuite main_app.py
           }
           
+          # Сборка основной команды PyInstaller с использованием корректных переносов
+          $cmd += "--hidden-import=pandas `
+                  --hidden-import=openpyxl `
+                  --hidden-import=BudgetAnalyzer `
+                  --hidden-import=SpecialOrders `
+                  --hidden-import=timesheet_transformer `
+                  -n TabelSuite main_app.py"
+          
+          # Запуск команды
+          Invoke-Expression $cmd
+
+
       - name: Build TabelConverter (converter, windowed)
         shell: pwsh
         run: |
-          # В этом модуле Pandas не нужен, но Openpyxl, возможно, да.
+          $cmd = "pyinstaller -F -w --clean "
           if (Test-Path "icon2.ico") {
-            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=openpyxl -i icon2.ico -n TabelConverter timesheet_transformer.py
+            $cmd += "-i icon2.ico "
           } else {
             Write-Host "icon2.ico not found: building TabelConverter without custom icon"
-            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=openpyxl -n TabelConverter timesheet_transformer.py
           }
+          $cmd += "--hidden-import=tkinter `
+                  --hidden-import=openpyxl `
+                  -n TabelConverter timesheet_transformer.py"
+          Invoke-Expression $cmd
+
 
       - name: Build SpecialOrders (orders module, windowed)
         shell: pwsh
         run: |
-          # Openpyxl, возможно, используется для I/O в этом модуле.
+          $cmd = "pyinstaller -F -w --clean "
           if (Test-Path "icon2.ico") {
-            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=openpyxl -i icon2.ico -n SpecialOrders SpecialOrders.py
+            $cmd += "-i icon2.ico "
           } else {
             Write-Host "icon2.ico not found: building SpecialOrders without custom icon"
-            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=openpyxl -n SpecialOrders SpecialOrders.py
           }
+          $cmd += "--hidden-import=tkinter `
+                  --hidden-import=openpyxl `
+                  -n SpecialOrders SpecialOrders.py"
+          Invoke-Expression $cmd
+
 
       - name: Build BudgetAnalyzer (windowed)
         shell: pwsh
         run: |
-          # Pandas, вероятно, используется в BudgetAnalyzer.
+          $cmd = "pyinstaller -F -w --clean "
           if (Test-Path "icon2.ico") {
-            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=pandas -i icon2.ico -n BudgetAnalyzer BudgetAnalyzer.py
+            $cmd += "-i icon2.ico "
           } else {
             Write-Host "icon2.ico not found: building BudgetAnalyzer without custom icon"
-            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=pandas -n BudgetAnalyzer BudgetAnalyzer.py
           }
+          $cmd += "--hidden-import=tkinter `
+                  --hidden-import=pandas `
+                  -n BudgetAnalyzer BudgetAnalyzer.py"
+          Invoke-Expression $cmd
 
       - name: List dist
         shell: pwsh
