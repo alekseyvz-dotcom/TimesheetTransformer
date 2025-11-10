@@ -20,8 +20,6 @@ import base64
 try:
     import pandas as pd
 except ImportError:
-    # Заглушка, если pandas не установлен.
-    # Для сводного экспорта он критически важен.
     pd = None
 
 try:
@@ -29,7 +27,7 @@ try:
 except Exception:
     Image = ImageTk = None
 
-# Мягкий импорт модулей
+# Мягкий импорт модулей (для PyInstaller)
 try:
     import BudgetAnalyzer  # должен содержать create_page(parent)
 except Exception:
@@ -56,7 +54,7 @@ from openpyxl.utils import get_column_letter
 
 APP_NAME = "Управление строительством (Главное меню)"
 
-# ------------- Конфиг и файлы -------------
+# ------------- КОНФИГ, СХЕМЫ И КОНСТАНТЫ -------------
 CONFIG_FILE = "tabel_config.ini"
 CONFIG_SECTION_PATHS = "Paths"
 CONFIG_SECTION_UI = "UI"
@@ -72,26 +70,12 @@ KEY_YA_PUBLIC_LINK = "yadisk_public_link"
 KEY_YA_PUBLIC_PATH = "yadisk_public_path"
 SPRAVOCHNIK_FILE_DEFAULT = "Справочник.xlsx"
 OUTPUT_DIR_DEFAULT = "Объектные_табели"
-CONVERTER_EXE = "TabelConverter.exe"
 RAW_LOGO_URL = "https://raw.githubusercontent.com/alekseyvz-dotcom/TimesheetTransformer/main/logo.png"
 TINY_PNG_BASE64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
     "/w8AAn8B9w3G2kIAAAAASUVORK5CYII="
 )
-# В верхней части файла, где определены утилиты
-LOG_PATH = exe_dir() / "app_start.log"
 
-def log_message(msg):
-    # Используем 'a' для добавления в конец, чтобы не стирать старые логи
-    try:
-        with open(LOG_PATH, 'a', encoding='utf-8') as f:
-            f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
-    except Exception:
-        # Если лог не пишется, это не должно блокировать программу
-        pass
-
-# ------------- СХЕМА ТАБЕЛЯ (Критично для сопровождения) -------------
-# Индексы колонок в листе "Табель" (начиная с 1)
 class TimesheetSchema(NamedTuple):
     ID_OBJECT: int = 1
     ADDRESS: int = 2
@@ -100,53 +84,41 @@ class TimesheetSchema(NamedTuple):
     FIO: int = 5
     TBN: int = 6
     DEPARTMENT: int = 7
-    DAILY_HOURS_START: int = 8 # Начало колонок для 1-го дня месяца
+    DAILY_HOURS_START: int = 8
     TOTAL_DAYS: int = 39
     TOTAL_HOURS: int = 40
     OVERTIME_DAY: int = 41
     OVERTIME_NIGHT: int = 42
     
 TS_SCHEMA = TimesheetSchema()
-# Общее количество колонок для данных + итогов
 TOTAL_DATA_COLUMNS = TS_SCHEMA.OVERTIME_NIGHT
 
-# ------------- Базовые утилиты (без изменений) -------------
-def embedded_logo_image(parent, max_w=360, max_h=160):
-    b64 = _LOGO_BASE64
-
-    if not b64:
-        b64 = TINY_PNG_BASE64
-
-    if Image and ImageTk:
-        try:
-            raw = base64.b64decode(b64.strip())
-            im = Image.open(BytesIO(raw))
-            im.thumbnail((max_w, max_h), Image.LANCZOS)
-            return ImageTk.PhotoImage(im, master=parent)
-        except Exception:
-            pass
-
-    try:
-        ph = tk.PhotoImage(data=b64.strip(), master=parent)
-        w, h = ph.width(), ph.height()
-        k = max(w / max_w, h / max_h, 1)
-        if k > 1:
-            k = max(1, int(k))
-            ph = ph.subsample(k, k)
-        return ph
-    except Exception:
-        return None
+# ------------- БАЗОВЫЕ УТИЛИТЫ И ЛОГИРОВАНИЕ (ПЕРЕМЕЩЕНЫ ВВЕРХ) -------------
 
 def exe_dir() -> Path:
+    """Определяет корневую директорию EXE или скрипта."""
     if getattr(sys, "frozen", False):
+        # В случае PyInstaller, возвращает директорию, где находится EXE
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
 def config_path() -> Path:
     return exe_dir() / CONFIG_FILE
 
+# --- Логирование для отладки ---
+# LOG_PATH теперь корректно использует exe_dir()
+LOG_PATH = exe_dir() / "app_start.log"
+
+def log_message(msg):
+    try:
+        with open(LOG_PATH, 'a', encoding='utf-8') as f:
+            f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
+
+# ------------- ФУНКЦИИ КОНФИГУРАЦИИ -------------
+
 def ensure_config():
-    # (Логика configparser, не изменена)
     cp = config_path()
     if cp.exists():
         cfg = configparser.ConfigParser()
@@ -233,7 +205,34 @@ def set_selected_department_in_config(dep: str):
     cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = dep or "Все"
     write_config(cfg)
 
-# ------------- Удалённый справочник: Я.Диск (без изменений) -------------
+# ------------- ГРАФИКА И ЗАГРУЗКА ДАННЫХ -------------
+
+def embedded_logo_image(parent, max_w=360, max_h=160):
+    b64 = _LOGO_BASE64
+
+    # Исключена блокирующая загрузка URL
+    if not b64:
+        b64 = TINY_PNG_BASE64
+
+    if Image and ImageTk:
+        try:
+            raw = base64.b64decode(b64.strip())
+            im = Image.open(BytesIO(raw))
+            im.thumbnail((max_w, max_h), Image.LANCZOS)
+            return ImageTk.PhotoImage(im, master=parent)
+        except Exception:
+            pass
+
+    try:
+        ph = tk.PhotoImage(data=b64.strip(), master=parent)
+        w, h = ph.width(), ph.height()
+        k = max(w / max_w, h / max_h, 1)
+        if k > 1:
+            k = max(1, int(k))
+            ph = ph.subsample(k, k)
+        return ph
+    except Exception:
+        return None
 
 def fetch_yadisk_public_bytes(public_link: str, public_path: str = "") -> bytes:
     if not public_link:
@@ -259,7 +258,6 @@ def _s(v) -> str:
     return str(v).strip()
 
 def load_spravochnik_from_wb(wb) -> Tuple[List[Tuple[str,str,str,str]], List[Tuple[str,str]]]:
-    # (Логика загрузки справочника, не изменена)
     employees: List[Tuple[str,str,str,str]] = []
     objects:   List[Tuple[str,str]] = []
 
@@ -293,7 +291,6 @@ def load_spravochnik_from_wb(wb) -> Tuple[List[Tuple[str,str,str,str]], List[Tup
     return employees, objects
 
 def ensure_spravochnik_local(path: Path):
-    # (Логика создания дефолтного справочника, не изменена)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -312,7 +309,6 @@ def ensure_spravochnik_local(path: Path):
     wb.save(path)
 
 def load_spravochnik_remote_or_local(local_path: Path) -> Tuple[List[Tuple[str,str,str,str]], List[Tuple[str,str]]]:
-    # (Логика загрузки, не изменена)
     cfg = read_config()
     use_remote = cfg.get(CONFIG_SECTION_REMOTE, KEY_REMOTE_USE, fallback="false").strip().lower() in ("1","true","yes","on")
     if use_remote:
@@ -323,7 +319,7 @@ def load_spravochnik_remote_or_local(local_path: Path) -> Tuple[List[Tuple[str,s
             wb = load_workbook(BytesIO(raw), read_only=True, data_only=True)
             return load_spravochnik_from_wb(wb)
         except Exception as e:
-            print(f"[Remote YaDisk] ошибка: {e} — используем локальный файл")
+            log_message(f"[Remote YaDisk] ошибка: {e} — используем локальный файл")
 
     ensure_spravochnik_local(local_path)
     wb = load_workbook(local_path, read_only=True, data_only=True)
@@ -339,7 +335,6 @@ class ParsedHours(NamedTuple):
     is_valid: bool = False
 
 def parse_time_string(s: str) -> float:
-    """Парсит 'HH:MM:SS' или 'HH,MM' в часы (float)."""
     s = s.strip()
     if not s: return 0.0
     
@@ -353,25 +348,20 @@ def parse_time_string(s: str) -> float:
         except:
             return 0.0
     
-    # Прямое число с запятой или точкой
     try:
         return float(s.replace(",", "."))
     except:
         return 0.0
 
 def parse_day_entry(v: Any) -> ParsedHours:
-    """
-    Унифицированный парсер: 8 | 8,25 | 8:30 | 1/7 | 8,25(6/2)
-    """
     s = str(v or "").strip()
     if not s:
-        return ParsedHours(is_valid=True) # Пустая ячейка считается валидной
+        return ParsedHours(is_valid=True)
     
     base_hours_str = s
     ot_day = 0.0
     ot_night = 0.0
     
-    # 1. Извлечение переработки в скобках
     if "(" in s and ")" in s:
         try:
             start = s.index("(")
@@ -387,28 +377,23 @@ def parse_day_entry(v: Any) -> ParsedHours:
                 ot_day = parse_time_string(ot_str)
                 ot_night = 0.0
         except Exception:
-            # Неправильный формат переработки, считаем строку невалидной
             return ParsedHours(raw_input=s)
 
-    # 2. Извлечение базовых часов (до скобок)
     total_base_hours = 0.0
     
     if "/" in base_hours_str:
-        # Формат 1/7
         any_part = False
         for part in base_hours_str.split("/"):
             h = parse_time_string(part)
             total_base_hours += h
             if h > 1e-12: any_part = True
-        if not any_part and base_hours_str.strip(): # Если были символы, но не распарсилось
+        if not any_part and base_hours_str.strip():
              return ParsedHours(raw_input=s)
     else:
-        # Формат 8 или 8:30
         total_base_hours = parse_time_string(base_hours_str)
         if total_base_hours == 0.0 and base_hours_str.strip():
              return ParsedHours(raw_input=s)
 
-    # 3. Валидация итогов
     if total_base_hours < 0 or total_base_hours > 24 or ot_day < 0 or ot_night < 0:
         return ParsedHours(raw_input=s)
 
@@ -434,7 +419,6 @@ def safe_filename(s: str, maxlen: int = 60) -> str:
     s = re.sub(r"_+", "_", s)
     return s[:maxlen] if len(s) > maxlen else s
     
-# (find_logo_path не используется в коде MainApp, но оставим)
 def find_logo_path() -> Optional[Path]:
     candidates = [
         exe_dir() / "assets" / "logo.png",
@@ -449,7 +433,7 @@ def find_logo_path() -> Optional[Path]:
             return p
     return None
 
-# ------------- Ряд реестра (RowWidget) - Улучшенный UX -------------
+# ------------- Ряд реестра (RowWidget) -------------
 
 class RowWidget:
     WEEK_BG_SAT = "#fff8e1"
@@ -469,8 +453,6 @@ class RowWidget:
         zebra_bg = self.ZEBRA_EVEN if (row_index % 2 == 0) else self.ZEBRA_ODD
         self.widgets: List[tk.Widget] = []
         
-        # --- КЭШ ПАРСИНГА ДАННЫХ ДЛЯ ПРОИЗВОДИТЕЛЬНОСТИ ---
-        # Хранит результаты ParsedHours для каждого дня
         self.parsed_hours_cache: List[ParsedHours] = [ParsedHours() for _ in range(31)]
 
         # ФИО
@@ -490,7 +472,6 @@ class RowWidget:
             e.grid(row=self.row, column=1 + d, padx=0, pady=1, sticky="nsew")
             e.bind("<FocusOut>", lambda ev, _d=d: self._on_entry_change(_d - 1))
             e.bind("<Return>", lambda ev, _d=d: self._on_entry_change(_d - 1))
-            # Улучшенный UX: Добавление поддержки Paste
             e.bind("<<Paste>>", self._on_paste_in_entry, add='+')
             self.day_entries.append(e)
             self.widgets.append(e)
@@ -530,32 +511,25 @@ class RowWidget:
             if not pasted_data:
                 return
             
-            # Проверяем, откуда пришел Paste
             col = self.table.grid_info(event.widget)['column']
             
-            # Если вставлено в одну из ячеек дней (индекс 2-32)
             if TS_SCHEMA.DAILY_HOURS_START <= col <= TS_SCHEMA.DAILY_HOURS_START + 30:
                 col_index = col - TS_SCHEMA.DAILY_HOURS_START
                 
-                # Парсим данные, разделенные табами или переводами строк (типично для Excel)
                 values = re.split(r'[\t\n\r]+', pasted_data.strip())
                 
-                # Заполняем ячейки, начиная с текущей
                 for i, val in enumerate(values):
                     if col_index + i < 31:
                         e = self.day_entries[col_index + i]
                         e.delete(0, tk.END)
                         e.insert(0, val)
                 
-                # Обновляем итоги
                 self.update_total()
-                return "break" # Предотвращаем стандартный Paste
+                return "break"
                 
-        except Exception as e:
-            # print(f"Paste error: {e}")
+        except Exception:
             pass
         
-        # Если не смогли обработать как массовую вставку, даем Tkinter продолжить
         return None
 
     def _on_entry_change(self, index: int):
@@ -574,7 +548,6 @@ class RowWidget:
         self.row = new_row
         zebra_bg = self.ZEBRA_EVEN if (new_row % 2 == 0) else self.ZEBRA_ODD
         
-        # Перенастраиваем фон и grid
         self.lbl_fio.grid_configure(row=new_row); self.lbl_fio.config(bg=zebra_bg)
         self.lbl_tbn.grid_configure(row=new_row); self.lbl_tbn.config(bg=zebra_bg)
         
@@ -611,13 +584,11 @@ class RowWidget:
             if raw_input:
                 self.day_entries[i].insert(0, raw_input)
             
-            # Обновляем кэш при загрузке
             self.parsed_hours_cache[i] = parse_day_entry(raw_input)
             
         self.update_total()
 
     def get_hours_with_overtime(self) -> List[ParsedHours]:
-        """Возвращает кэшированные результаты парсинга для всех 31 дня."""
         return self.parsed_hours_cache
 
     def _bg_for_day(self, year: int, month: int, day: int) -> str:
@@ -647,7 +618,6 @@ class RowWidget:
 
     def update_days_enabled(self, year: int, month: int):
         for i in range(31):
-            # Обновляем кэш, если ячейка была заполнена, но фокус не терялся
             if not self.parsed_hours_cache[i].raw_input and self.day_entries[i].get():
                 self._update_parsed_cache(i)
             self._repaint_day_cell(i, year, month)
@@ -666,7 +636,6 @@ class RowWidget:
             if i >= days_in_m:
                 continue
             
-            # Перепроверяем, если ячейка была изменена, но кэш не обновлен (редко, но возможно)
             if parsed.raw_input != self.day_entries[i].get().strip():
                 self._update_parsed_cache(i)
                 parsed = self.parsed_hours_cache[i]
@@ -678,7 +647,6 @@ class RowWidget:
                 total_overtime_day += parsed.ot_day
                 total_overtime_night += parsed.ot_night
         
-        # Обновление меток
         self.lbl_days.config(text=str(total_days))
         sh = f"{total_hours:.2f}".rstrip("0").rstrip(".")
         self.lbl_total.config(text=sh)
@@ -687,7 +655,6 @@ class RowWidget:
         son = f"{total_overtime_night:.2f}".rstrip("0").rstrip(".")
         self.lbl_overtime_night.config(text=son)
         
-        # Запрос на пересчет общих итогов объекта
         if hasattr(self.table.master.master, '_recalc_object_total'):
             self.table.master.master._recalc_object_total()
 
@@ -718,10 +685,8 @@ class RowWidget:
         self.on_delete(self)
 
 # ------------- Диалоги -------------
-# (Оставлены без изменений, так как они достаточно изолированы)
 
 class CopyFromDialog(simpledialog.Dialog):
-    # ... (неизмененный код) ...
     def __init__(self, parent, init_year: int, init_month: int):
         self.init_year = init_year
         self.init_month = init_month
@@ -776,7 +741,6 @@ class CopyFromDialog(simpledialog.Dialog):
         }
 
 class HoursFillDialog(simpledialog.Dialog):
-    # ... (неизмененный код) ...
     def __init__(self, parent, max_day: int):
         self.max_day = max_day
         self.result = None
@@ -842,11 +806,9 @@ class HoursFillDialog(simpledialog.Dialog):
             "clear": self._clear,
         }
 
-# ------------- Страница Объектного табеля (Frame) - Обновлена схема -------------
+# ------------- Страница Объектного табеля (Frame) -------------
 
 class TimesheetPage(tk.Frame):
-    # Используем TS_SCHEMA для определения колонок
-    
     COLPX = {"fio": 200, "tbn": 100, "day": 36, "days": 46, "hours": 56, "btn52": 40, "del": 66}
     MIN_FIO_PX = 140
     MAX_FIO_PX = 260
@@ -870,7 +832,6 @@ class TimesheetPage(tk.Frame):
         self.after(120, self._auto_fit_columns)
 
     def _load_spr_data(self):
-        # (Логика загрузки справочника, не изменена)
         try:
             employees, objects = load_spravochnik_remote_or_local(self.spr_path)
         except Exception as e:
@@ -881,10 +842,7 @@ class TimesheetPage(tk.Frame):
         self.objects = objects
 
         self.emp_names = [fio for (fio, _, _, _) in self.employees]
-        # Используем FIO + TBN как более надежный ключ, но храним только FIO в UI
         self.emp_info = {fio: (tbn, pos) for (fio, tbn, pos, _) in self.employees} 
-        
-        # Индекс для быстрого поиска департамента по FIO
         self.emp_dep_map = {fio: dep for (fio, _, _, dep) in self.employees}
 
         deps = sorted({(dep or "").strip() for (_, _, _, dep) in self.employees if (dep or "").strip()})
@@ -902,8 +860,6 @@ class TimesheetPage(tk.Frame):
 
 
     def _build_ui(self):
-        # (UI построение, не изменено)
-        # ... (Код UI) ...
         top = tk.Frame(self)
         top.pack(fill="x", padx=8, pady=8)
 
@@ -975,7 +931,6 @@ class TimesheetPage(tk.Frame):
         ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=5, padx=4)
         ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=6, padx=4)
         
-        # Кнопка сохранения вынесена отдельно для большей заметности (UX)
         self.btn_save = ttk.Button(btns, text="Сохранить", command=self.save_all, style="Accent.TButton")
         self.btn_save.grid(row=0, column=7, padx=8)
         
@@ -1021,12 +976,11 @@ class TimesheetPage(tk.Frame):
         self.lbl_object_total.pack(side="left")
 
         self._on_department_select()
-        # ... (Конец кода UI) ...
+
 
     def _build_header_row(self):
         hb = self.HEADER_BG
         
-        # Используем TS_SCHEMA для колонок
         tk.Label(self.table, text="ФИО", bg=hb, anchor="w", font=("Segoe UI", 9, "bold")).grid(
             row=0, column=TS_SCHEMA.FIO - 1, padx=0, pady=(0, 2), sticky="nsew")
         tk.Label(self.table, text="Таб.№", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
@@ -1051,38 +1005,86 @@ class TimesheetPage(tk.Frame):
         tk.Label(self.table, text="Удалить", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
             row=0, column=TS_SCHEMA.OVERTIME_NIGHT + 1, padx=1, pady=(0, 2), sticky="nsew")
 
+    def _on_scroll_frame_configure(self, _=None):
+        self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
+
     def _configure_table_columns(self):
-        # Используем TS_SCHEMA для конфигурации, FIO и TBN - это колонки 0 и 1
         px = self.COLPX
-        self.table.grid_columnconfigure(0, minsize=px['fio'], weight=0) # FIO (col 0, schema 5)
-        self.table.grid_columnconfigure(1, minsize=px['tbn'], weight=0) # TBN (col 1, schema 6)
-        
-        # Дни
-        for col in range(2, 2 + 31):
+        self.table.grid_columnconfigure(0, minsize=px['fio'], weight=0)
+        self.table.grid_columnconfigure(1, minsize=px['tbn'], weight=0)
+        for col in range(2, 33):
             self.table.grid_columnconfigure(col, minsize=px['day'], weight=0)
             
-        # Итоги
         self.table.grid_columnconfigure(TS_SCHEMA.TOTAL_DAYS - 1, minsize=px['days'], weight=0)
         self.table.grid_columnconfigure(TS_SCHEMA.TOTAL_HOURS - 1, minsize=px['hours'], weight=0)
         self.table.grid_columnconfigure(TS_SCHEMA.OVERTIME_DAY - 1, minsize=px['hours'], weight=0)
         self.table.grid_columnconfigure(TS_SCHEMA.OVERTIME_NIGHT - 1, minsize=px['hours'], weight=0)
         
-        # Кнопки
         self.table.grid_columnconfigure(TS_SCHEMA.OVERTIME_NIGHT, minsize=px['btn52'], weight=0)
         self.table.grid_columnconfigure(TS_SCHEMA.OVERTIME_NIGHT + 1, minsize=px['del'], weight=0)
 
-    # (Остальные методы TimesheetPage: _on_wheel, _on_period_change, _on_address_change,
-    #  get_year_month, _update_rows_days_enabled, _regrid_rows - без изменений)
-    
+    def _on_wheel(self, event):
+        if self.main_canvas.winfo_exists():
+            self.main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        return "break"
+
+    def _on_wheel_anywhere(self, event):
+        try:
+            widget = event.widget
+            while widget:
+                if widget == self.main_canvas or widget == self.table:
+                    return self._on_wheel(event)
+                widget = widget.master
+        except:
+            pass
+        return None
+
+    def _on_shift_wheel(self, event):
+        if self.main_canvas.winfo_exists():
+            self.main_canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+        return "break"
+
+    def _on_period_change(self):
+        self._update_rows_days_enabled()
+        self._load_existing_rows()
+
+    def _on_address_change(self, *_):
+        addr = self.cmb_address.get().strip()
+        ids = sorted(self.addr_to_ids.get(addr, []))
+        if ids:
+            self.cmb_object_id.config(state="readonly", values=ids)
+            if self.cmb_object_id.get() not in ids:
+                self.cmb_object_id.set(ids[0])
+        else:
+            self.cmb_object_id.config(state="normal", values=[])
+            self.cmb_object_id.set("")
+
+    def _on_address_select(self, *_):
+        self._on_address_change()
+        self._load_existing_rows()
+
+    def get_year_month(self) -> Tuple[int, int]:
+        return int(self.spn_year.get()), self.cmb_month.current() + 1
+
+    def _update_rows_days_enabled(self):
+        y, m = self.get_year_month()
+        for r in self.rows:
+            r.set_day_font(self.DAY_ENTRY_FONT)
+            r.update_days_enabled(y, m)
+
+    def _regrid_rows(self):
+        for idx, r in enumerate(self.rows, start=1):
+            r.regrid_to(idx)
+        self.after(30, self._on_scroll_frame_configure)
+        self._recalc_object_total()
+
     def _recalc_object_total(self):
-        # Запускается RowWidget.update_total() после изменения ячейки
         tot_h = 0.0
         tot_d = 0
         tot_ot_day = 0.0
         tot_ot_night = 0.0
     
         for r in self.rows:
-            # Читаем данные напрямую из виджетов, поскольку они обновляются в RowWidget.update_total
             try:
                 h = float(r.lbl_total.cget("text").replace(",", ".") or 0)
             except Exception:
@@ -1114,8 +1116,141 @@ class TimesheetPage(tk.Frame):
             text=f"Сумма: сотрудников {cnt} | дней {tot_d} | часов {sh} | пер.день {sod} | пер.ночь {son}"
         )
 
+    def add_row(self):
+        fio = self.fio_var.get().strip()
+        tbn = self.ent_tbn.get().strip()
+        if not fio:
+            messagebox.showwarning("Объектный табель", "Выберите ФИО.")
+            return
+
+        key = (fio.strip().lower(), tbn.strip())
+        if any((r.fio().strip().lower(), r.tbn().strip()) == key for r in self.rows):
+            if not messagebox.askyesno("Дублирование",
+                                       f"Сотрудник уже есть в реестре:\n{fio} (Таб.№ {tbn}).\nДобавить ещё одну строку?"):
+                return
+
+        row_index = len(self.rows) + 1
+        w = RowWidget(self.table, row_index, fio, tbn, self.get_year_month, self.delete_row)
+        w.set_day_font(self.DAY_ENTRY_FONT)
+        y, m = self.get_year_month()
+        w.update_days_enabled(y, m)
+        self.rows.append(w)
+        self._regrid_rows()
+
+    def add_department_all(self):
+        dep_sel = (self.cmb_department.get() or "Все").strip()
+        if dep_sel == "Все":
+            candidates = self.employees[:]
+            if not candidates:
+                messagebox.showinfo("Объектный табель", "Справочник сотрудников пуст.")
+                return
+            if not messagebox.askyesno("Добавить всех", f"Добавить в реестр всех сотрудников ({len(candidates)})?"):
+                return
+        else:
+            candidates = [e for e in self.employees if len(e) > 3 and (e[3] or "").strip() == dep_sel]
+            if not candidates:
+                messagebox.showinfo("Объектный табель", f"В подразделении «{dep_sel}» нет сотрудников.")
+                return
+
+        existing = {(r.fio().strip().lower(), r.tbn().strip()) for r in self.rows}
+        added = 0
+        y, m = self.get_year_month()
+        for fio, tbn, pos, dep in candidates:
+            key = (fio.strip().lower(), (tbn or "").strip())
+            if key in existing:
+                continue
+            row_index = len(self.rows) + 1
+            w = RowWidget(self.table, row_index, fio, tbn, self.get_year_month, self.delete_row)
+            w.set_day_font(self.DAY_ENTRY_FONT)
+            w.update_days_enabled(y, m)
+            self.rows.append(w)
+            existing.add(key)
+            added += 1
+
+        self._regrid_rows()
+        messagebox.showinfo("Объектный табель", f"Добавлено сотрудников: {added}")
+
+    def _on_department_select(self):
+        dep_sel = (self.cmb_department.get() or "Все").strip()
+        set_selected_department_in_config(dep_sel)
+        if dep_sel == "Все":
+            names = [e[0] for e in self.employees]
+        else:
+            names = [e[0] for e in self.employees if len(e) > 3 and (e[3] or "").strip() == dep_sel]
+        seen = set()
+        filtered = []
+        for n in names:
+            if n not in seen:
+                seen.add(n)
+                filtered.append(n)
+        self.cmb_fio.set_completion_list(filtered)
+        cur = self.fio_var.get().strip()
+        if cur and cur not in filtered:
+            self.fio_var.set("")
+            self.ent_tbn.delete(0, "end")
+            self.pos_var.set("")
+
+    def _on_fio_select(self, *_):
+        fio = self.fio_var.get().strip()
+        tbn, pos = self.emp_info.get(fio, ("", ""))
+        self.ent_tbn.delete(0, "end")
+        self.ent_tbn.insert(0, tbn)
+        self.pos_var.set(pos)
+
+    def reload_spravochnik(self):
+        try:
+            cur_dep = (self.cmb_department.get() or "Все").strip()
+            cur_addr = (self.cmb_address.get() or "").strip()
+            cur_id = (self.cmb_object_id.get() or "").strip()
+            cur_fio = (self.fio_var.get() or "").strip()
+
+            self._load_spr_data()
+
+            self.cmb_department.config(values=self.departments)
+            if cur_dep in self.departments:
+                self.cmb_department.set(cur_dep)
+            else:
+                try:
+                    saved_dep = get_selected_department_from_config()
+                    self.cmb_department.set(saved_dep if saved_dep in self.departments else self.departments[0])
+                except Exception:
+                    self.cmb_department.set(self.departments[0] if self.departments else "Все")
+
+            self.cmb_address.set_completion_list(self.address_options)
+            if cur_addr in self.address_options:
+                self.cmb_address.set(cur_addr)
+            else:
+                self.cmb_address.set("")
+            self._on_address_change()
+            if cur_id and cur_id in (self.cmb_object_id.cget("values") or []):
+                self.cmb_object_id.set(cur_id)
+
+            self._on_department_select()
+            dep_sel = (self.cmb_department.get() or "Все").strip()
+            if dep_sel == "Все":
+                allowed = [e[0] for e in self.employees]
+            else:
+                allowed = [e[0] for e in self.employees if len(e) > 3 and (e[3] or "").strip() == dep_sel]
+            seen = set()
+            allowed = [n for n in allowed if (n not in seen and not seen.add(n))]
+            if cur_fio and cur_fio in allowed:
+                self.fio_var.set(cur_fio)
+                self._on_fio_select()
+            else:
+                self.fio_var.set("")
+                self.ent_tbn.delete(0, "end")
+                self.pos_var.set("")
+
+            messagebox.showinfo("Справочник", "Справочник обновлён.")
+        except Exception as e:
+            messagebox.showerror("Справочник", f"Ошибка перечтения справочника:\n{e}")
+
+    def fill_52_all(self):
+        for r in self.rows:
+            r.fill_52()
+        self._recalc_object_total()
+
     def fill_hours_all(self):
-        # Логика изменена для поддержки строкового формата с переработкой
         if not self.rows:
             messagebox.showinfo("Проставить часы", "Список сотрудников пуст.")
             return
@@ -1146,28 +1281,56 @@ class TimesheetPage(tk.Frame):
                 e.insert(0, hours_str)
                 r.parsed_hours_cache[i] = parsed_val
                 
-            r.update_total() # Запускает _repaint_day_cell и пересчет
+            r.update_total()
             
         self._recalc_object_total()
         action = "очищен" if clear else f"проставлено '{hours_str}'"
         messagebox.showinfo("Проставить часы", f"День {day} {action} у {len(self.rows)} сотрудников.")
 
+    def delete_row(self, roww: RowWidget):
+        try:
+            self.rows.remove(roww)
+        except Exception:
+            pass
+        roww.destroy()
+        self._regrid_rows()
 
-    # --- Логика работы с файлами (Обновление схемы колонок) ---
-    
+    def clear_all_rows(self):
+        if not self.rows:
+            return
+        if not messagebox.askyesno("Объектный табель", "Очистить все строки?"):
+            return
+        for r in self.rows:
+            r.destroy()
+        self.rows.clear()
+        self._regrid_rows()
+
+    def _current_file_path(self) -> Optional[Path]:
+        addr = self.cmb_address.get().strip()
+        oid = self.cmb_object_id.get().strip()
+        if not addr and not oid:
+            return None
+        y, m = self.get_year_month()
+        id_part = oid if oid else safe_filename(addr)
+        return self.out_dir / f"Объектный_табель_{id_part}_{y}_{m:02d}.xlsx"
+
+    def _file_path_for(self, year: int, month: int, addr: Optional[str] = None, oid: Optional[str] = None) -> Optional[Path]:
+        addr = (addr if addr is not None else self.cmb_address.get().strip())
+        oid = (oid if oid is not None else self.cmb_object_id.get().strip())
+        if not addr and not oid:
+            return None
+        id_part = oid if oid else safe_filename(addr)
+        return self.out_dir / f"Объектный_табель_{id_part}_{year}_{month:02d}.xlsx"
+
     def _ensure_sheet(self, wb) -> Any:
-        # Обновлено использование TS_SCHEMA
-        
-        required_cols = TOTAL_DATA_COLUMNS # 42 колонки
+        required_cols = TOTAL_DATA_COLUMNS
         
         if "Табель" in wb.sheetnames:
             ws = wb["Табель"]
             hdr_first = str(ws.cell(1, 1).value or "")
-            # Проверяем наличие новых столбцов (Подразделение + Переработки)
             if hdr_first == "ID объекта" and ws.max_column >= required_cols:
                 return ws
             
-            # Если формат старый, переименовываем лист
             base = "Табель_OLD"
             new_name = base
             i = 1
@@ -1187,29 +1350,22 @@ class TimesheetPage(tk.Frame):
         
         ws2.append(hdr)
         
-        # Установка ширины колонок по TS_SCHEMA
-        ws2.column_dimensions[get_column_letter(TS_SCHEMA.ID_OBJECT)].width = 14
-        ws2.column_dimensions[get_column_letter(TS_SCHEMA.ADDRESS)].width = 40
-        ws2.column_dimensions[get_column_letter(TS_SCHEMA.MONTH)].width = 10
-        ws2.column_dimensions[get_column_letter(TS_SCHEMA.YEAR)].width = 8
-        ws2.column_dimensions[get_column_letter(TS_SCHEMA.FIO)].width = 28
-        ws2.column_dimensions[get_column_letter(TS_SCHEMA.TBN)].width = 14
-        ws2.column_dimensions[get_column_letter(TS_SCHEMA.DEPARTMENT)].width = 20
-        
-        # Дни месяца (1-31)
+        for col_index, width in [
+            (TS_SCHEMA.ID_OBJECT, 14), (TS_SCHEMA.ADDRESS, 40), (TS_SCHEMA.MONTH, 10), 
+            (TS_SCHEMA.YEAR, 8), (TS_SCHEMA.FIO, 28), (TS_SCHEMA.TBN, 14), 
+            (TS_SCHEMA.DEPARTMENT, 20), (TS_SCHEMA.TOTAL_DAYS, 10), 
+            (TS_SCHEMA.TOTAL_HOURS, 18), (TS_SCHEMA.OVERTIME_DAY, 14), 
+            (TS_SCHEMA.OVERTIME_NIGHT, 14)
+        ]:
+            ws2.column_dimensions[get_column_letter(col_index)].width = width
+            
         for i in range(TS_SCHEMA.DAILY_HOURS_START, TS_SCHEMA.DAILY_HOURS_START + 31):
             ws2.column_dimensions[get_column_letter(i)].width = 6
-        
-        ws2.column_dimensions[get_column_letter(TS_SCHEMA.TOTAL_DAYS)].width = 10
-        ws2.column_dimensions[get_column_letter(TS_SCHEMA.TOTAL_HOURS)].width = 18
-        ws2.column_dimensions[get_column_letter(TS_SCHEMA.OVERTIME_DAY)].width = 14
-        ws2.column_dimensions[get_column_letter(TS_SCHEMA.OVERTIME_NIGHT)].width = 14
     
         ws2.freeze_panes = "A2"
         return ws2
 
     def _load_existing_rows(self):
-        # Используем TS_SCHEMA
         for r in list(self.rows):
             r.destroy()
         self.rows.clear()
@@ -1221,7 +1377,7 @@ class TimesheetPage(tk.Frame):
     
         try:
             wb = load_workbook(fpath)
-            ws = self._ensure_sheet(wb) # Создаст новый, если старый формат
+            ws = self._ensure_sheet(wb)
             y, m = self.get_year_month()
             addr = self.cmb_address.get().strip()
             oid = self.cmb_object_id.get().strip()
@@ -1241,16 +1397,14 @@ class TimesheetPage(tk.Frame):
                 else:
                     if row_addr != addr: continue
             
-                # Загружаем ячейки КАК ЕСТЬ (с переработкой) - с колонки DAILY_HOURS_START
                 hours_raw: List[Optional[str]] = []
                 for c in range(TS_SCHEMA.DAILY_HOURS_START, TS_SCHEMA.DAILY_HOURS_START + 31):
                     v = ws.cell(r, c).value
-                    # openpyxl может вернуть float даже для строкового формата, приводим к строке
                     hours_raw.append(str(v).replace('.', ',') if v is not None else None)
             
                 roww = RowWidget(self.table, len(self.rows) + 1, fio, tbn, self.get_year_month, self.delete_row)
                 roww.set_day_font(self.DAY_ENTRY_FONT)
-                roww.set_hours(hours_raw) # set_hours обновляет кэш и вызывает update_days_enabled
+                roww.set_hours(hours_raw)
                 self.rows.append(roww)
         
             self._regrid_rows()
@@ -1259,7 +1413,6 @@ class TimesheetPage(tk.Frame):
             traceback.print_exc()
 
     def save_all(self):
-        # Используем TS_SCHEMA и кэшированные ParsedHours
         fpath = self._current_file_path()
         if not fpath:
             messagebox.showwarning("Сохранение", "Укажите адрес и/или ID объекта, а также период.")
@@ -1269,7 +1422,6 @@ class TimesheetPage(tk.Frame):
         oid = self.cmb_object_id.get().strip()
         y, m = self.get_year_month()
 
-        # --- Валидация перед сохранением (UX) ---
         errors = self._validate_before_save()
         if errors:
             if not messagebox.askyesno("Сохранение: Обнаружены ошибки", 
@@ -1289,7 +1441,6 @@ class TimesheetPage(tk.Frame):
         
             ws = self._ensure_sheet(wb)
 
-            # Удаляем старые записи
             to_del = []
             for r in range(2, ws.max_row + 1):
                 row_oid = (ws.cell(r, TS_SCHEMA.ID_OBJECT).value or "")
@@ -1301,9 +1452,7 @@ class TimesheetPage(tk.Frame):
             for r in reversed(to_del):
                 ws.delete_rows(r, 1)
 
-            # Записываем новые
             for roww in self.rows:
-                # Получаем кэшированные, актуальные данные
                 parsed_data = roww.get_hours_with_overtime()
                 
                 total_hours = 0.0
@@ -1313,7 +1462,6 @@ class TimesheetPage(tk.Frame):
             
                 day_values = []
                 for parsed in parsed_data:
-                    # Сохраняем в исходном строковом формате (для сохранения переработки)
                     if parsed.raw_input:
                         day_values.append(parsed.raw_input)
                     else:
@@ -1326,7 +1474,6 @@ class TimesheetPage(tk.Frame):
                         total_ot_day += parsed.ot_day
                         total_ot_night += parsed.ot_night
             
-                # Получаем подразделение сотрудника из карты (для скорости)
                 fio = roww.fio()
                 department = self.emp_dep_map.get(fio, "")
             
@@ -1348,7 +1495,6 @@ class TimesheetPage(tk.Frame):
             traceback.print_exc()
             
     def _validate_before_save(self) -> List[str]:
-        """Возвращает список ФИО с невалидными часами."""
         errors: List[str] = []
         for roww in self.rows:
             parsed_data = roww.get_hours_with_overtime()
@@ -1361,250 +1507,140 @@ class TimesheetPage(tk.Frame):
                 errors.append(f"{roww.fio()} ({roww.tbn()}): {', '.join(invalid_days)}")
         return errors
 
-# ------------- Сводный экспорт (Полностью переписан на Pandas) -------------
+    def copy_from_month(self):
+        addr = self.cmb_address.get().strip()
+        oid = self.cmb_object_id.get().strip()
+        if not addr and not oid:
+            messagebox.showwarning("Копирование", "Укажите адрес и/или ID объекта для назначения.")
+            return
 
-def perform_summary_export(year: int, month: int, fmt: str) -> Tuple[int, List[Path]]:
-    if pd is None:
-        messagebox.showerror("Ошибка", "Pandas не установлен. Сводный экспорт невозможен.")
-        return 0, []
+        cy, cm = self.get_year_month()
+        src_y, src_m = cy, cm - 1
+        if src_m < 1:
+            src_m = 12
+            src_y -= 1
+
+        dlg = CopyFromDialog(self, init_year=src_y, init_month=src_m)
+        if not getattr(dlg, "result", None):
+            return
+
+        src_y = dlg.result["year"]
+        src_m = dlg.result["month"]
+        with_hours = dlg.result["with_hours"]
+        mode = dlg.result["mode"]
+
+        src_path = self._file_path_for(src_y, src_m, addr=addr, oid=oid)
+        if not src_path or not src_path.exists():
+            messagebox.showwarning("Копирование", f"Не найден файл источника:\n{src_path}")
+            return
+
+        try:
+            wb = load_workbook(src_path, data_only=True)
+            ws = self._ensure_sheet(wb)
+
+            found = []
+            for r in range(2, ws.max_row + 1):
+                row_oid = (ws.cell(r, TS_SCHEMA.ID_OBJECT).value or "")
+                row_addr = (ws.cell(r, TS_SCHEMA.ADDRESS).value or "")
+                row_m = int(ws.cell(r, TS_SCHEMA.MONTH).value or 0)
+                row_y = int(ws.cell(r, TS_SCHEMA.YEAR).value or 0)
+                fio = str(ws.cell(r, TS_SCHEMA.FIO).value or "").strip()
+                tbn = str(ws.cell(r, TS_SCHEMA.TBN).value or "").strip()
+
+                if row_m != src_m or row_y != src_y: continue
+                if oid:
+                    if row_oid != oid: continue
+                else:
+                    if row_addr != addr: continue
+
+                hrs_raw: List[Optional[str]] = []
+                if with_hours:
+                    for c in range(TS_SCHEMA.DAILY_HOURS_START, TS_SCHEMA.DAILY_HOURS_START + 31):
+                        v = ws.cell(r, c).value
+                        hrs_raw.append(str(v).replace('.', ',') if v is not None else None)
+
+                if fio:
+                    found.append((fio, tbn, hrs_raw))
+
+            if not found:
+                messagebox.showinfo("Копирование", "В источнике нет сотрудников для выбранного объекта и периода.")
+                return
+
+            uniq = {}
+            for fio, tbn, hrs in found:
+                key = (fio.strip().lower(), tbn.strip())
+                if key not in uniq:
+                    uniq[key] = (fio, tbn, hrs)
+            found = list(uniq.values())
+
+            added = 0
+            if mode == "replace":
+                for r in self.rows: r.destroy()
+                self.rows.clear()
+
+            existing = {(r.fio().strip().lower(), r.tbn().strip()) for r in self.rows}
+
+            dy, dm = self.get_year_month()
+            for fio, tbn, hrs_raw in found:
+                key = (fio.strip().lower(), tbn.strip())
+                if mode == "merge" and key in existing:
+                    continue
+                roww = RowWidget(self.table, len(self.rows) + 1, fio, tbn, self.get_year_month, self.delete_row)
+                roww.set_day_font(self.DAY_ENTRY_FONT)
+                roww.update_days_enabled(dy, dm)
+                if with_hours and hrs_raw:
+                    roww.set_hours(hrs_raw)
+                self.rows.append(roww)
+                added += 1
+
+            self._regrid_rows()
+            messagebox.showinfo("Копирование", f"Добавлено сотрудников: {added}")
+
+        except Exception as e:
+            messagebox.showerror("Копирование", f"Ошибка копирования:\n{e}")
+            traceback.print_exc()
+
+    def _content_total_width(self, fio_px: Optional[int] = None) -> int:
+        px = self.COLPX.copy()
+        if fio_px is not None:
+            px["fio"] = fio_px
+        return px["fio"] + px["tbn"] + 31*px["day"] + px["days"] + px["hours"] * 3 + px["btn52"] + px["del"]
         
-    base_out = get_output_dir_from_config()
-    pattern = f"Объектный_табель_*_{year}_{month:02d}.xlsx"
-    files = list(base_out.glob(pattern))
-
-    if not files:
-        return 0, []
-
-    # 1. Сборка всех данных в один DataFrame
-    all_data_frames = []
-    
-    # Заголовки для чтения
-    daily_cols = {i: str(i) for i in range(1, 32)}
-    all_col_names = {
-        TS_SCHEMA.ID_OBJECT - 1: "ID объекта",
-        TS_SCHEMA.ADDRESS - 1: "Адрес",
-        TS_SCHEMA.MONTH - 1: "Месяц",
-        TS_SCHEMA.YEAR - 1: "Год",
-        TS_SCHEMA.FIO - 1: "ФИО",
-        TS_SCHEMA.TBN - 1: "Табельный №",
-        TS_SCHEMA.DEPARTMENT - 1: "Подразделение",
-        TS_SCHEMA.TOTAL_DAYS - 1: "Итого дней",
-        TS_SCHEMA.TOTAL_HOURS - 1: "Итого часов по табелю",
-        TS_SCHEMA.OVERTIME_DAY - 1: "Переработка день",
-        TS_SCHEMA.OVERTIME_NIGHT - 1: "Переработка ночь",
-    }
-    
-    # Добавляем дневные колонки в схему
-    for d in range(1, 32):
-        all_col_names[TS_SCHEMA.DAILY_HOURS_START - 1 + (d - 1)] = str(d)
-
-    # Задаем типы данных для ускорения
-    dtype_map = {
-        "ID объекта": str, "Адрес": str, "ФИО": str, "Табельный №": str, "Подразделение": str,
-        "Месяц": 'int16', "Год": 'int16',
-    }
-    
-    # 2. Итеративное чтение файлов с использованием Pandas
-    for f in files:
+    def _auto_fit_columns(self):
         try:
-            # Читаем Excel, пропуская первую строку (заголовок)
-            df = pd.read_excel(
-                f, 
-                sheet_name="Табель", 
-                header=None, 
-                skiprows=1,
-                dtype=dtype_map
-            )
-            
-            # Переименовываем колонки в соответствии с нашей схемой
-            df = df.rename(columns=all_col_names)
-            
-            # Фильтруем по периоду
-            df = df[(df['Год'] == year) & (df['Месяц'] == month)]
-            
-            # Убеждаемся, что DataFrame не пустой
-            if not df.empty:
-                all_data_frames.append(df)
-                
-        except Exception as e:
-            print(f"Ошибка чтения файла {f.name}: {e}")
-            continue
-
-    if not all_data_frames:
-        return 0, []
-
-    # 3. Объединение и очистка
-    final_df = pd.concat(all_data_frames, ignore_index=True)
-    
-    # Убедимся, что колонки для экспорта имеют нужный порядок
-    final_cols = [v for k, v in sorted(all_col_names.items())]
-    final_df = final_df[final_cols]
-    
-    count = len(final_df)
-    
-    # 4. Сохранение результатов
-    sum_dir = exe_dir() / "Сводные_отчеты"
-    sum_dir.mkdir(parents=True, exist_ok=True)
-    paths: List[Path] = []
-
-    file_name_base = f"Сводный_{year}_{month:02d}"
-
-    if fmt in ("xlsx", "both"):
-        p = sum_dir / f"{file_name_base}.xlsx"
-        try:
-            # Используем ExcelWriter для сохранения с автоматическим форматированием
-            writer = pd.ExcelWriter(p, engine='xlsxwriter')
-            final_df.to_excel(writer, sheet_name='Сводный', index=False)
-            
-            # Дополнительное форматирование (опционально, но полезно)
-            workbook = writer.book
-            worksheet = writer.sheets['Сводный']
-            
-            # Ширина колонок (базовая настройка)
-            for i, col_name in enumerate(final_df.columns):
-                width = 10 
-                if col_name == "Адрес": width = 40
-                elif col_name == "ФИО": width = 28
-                elif col_name == "Подразделение": width = 20
-                elif len(col_name) <= 2: width = 6 # Дни
-                worksheet.set_column(i, i, width)
-                
-            writer.close()
-            paths.append(p)
-        except Exception as e:
-            print(f"Ошибка записи XLSX: {e}")
-            messagebox.showerror("Экспорт", f"Ошибка записи XLSX:\n{e}")
-
-    if fmt in ("csv", "both"):
-        p = sum_dir / f"{file_name_base}.csv"
-        try:
-            # Сохранение в CSV с разделителем ";" и кодировкой utf-8-sig
-            final_df.to_csv(p, sep=';', encoding='utf-8-sig', index=False)
-            paths.append(p)
-        except Exception as e:
-            print(f"Ошибка записи CSV: {e}")
-            messagebox.showerror("Экспорт", f"Ошибка записи CSV:\n{e}")
-
-    return count, paths
-
-# ------------- Остальной код (MainApp, Dialogs, AutoCompleteCombobox) -------------
-
-# (Класс AutoCompleteCombobox - без изменений)
-class AutoCompleteCombobox(ttk.Combobox):
-    # ... (неизмененный код) ...
-    def __init__(self, master=None, **kw):
-        super().__init__(master, **kw)
-        self._all_values: List[str] = []
-        self.bind("<KeyRelease>", self._on_keyrelease)
-        self.bind("<Control-BackSpace>", self._clear_all)
-
-    def set_completion_list(self, values: List[str]):
-        self._all_values = list(values)
-        self["values"] = self._all_values
-
-    def _clear_all(self, _=None):
-        self.delete(0, tk.END)
-        self["values"] = self._all_values
-
-    def _on_keyrelease(self, event):
-        if event.keysym in ("Up", "Down", "Left", "Right", "Home", "End", "Return", "Escape", "Tab"):
-            return
-        typed = self.get().strip()
-        if not typed:
-            self["values"] = self._all_values
-            return
-        self["values"] = [x for x in self._all_values if typed.lower() in x.lower()]
-
-# (Класс ExportMonthDialog - без изменений)
-class ExportMonthDialog(simpledialog.Dialog):
-    # ... (неизмененный код) ...
-    def __init__(self, parent):
-        self.result = None
-        super().__init__(parent, title="Сводный экспорт по месяцу")
-
-    def body(self, master):
-        now = datetime.now()
-        tk.Label(master, text="Месяц:").grid(row=0, column=0, sticky="e")
-        self.cmb_month = ttk.Combobox(master, state="readonly", width=18,
-                                      values=[month_name_ru(i) for i in range(1, 13)])
-        self.cmb_month.grid(row=0, column=1, sticky="w")
-        self.cmb_month.current(now.month - 1)
-
-        tk.Label(master, text="Год:").grid(row=0, column=2, sticky="e", padx=(10, 4))
-        self.spn_year = tk.Spinbox(master, from_=2000, to=2100, width=6)
-        self.spn_year.grid(row=0, column=3, sticky="w")
-        self.spn_year.delete(0, "end")
-        self.spn_year.insert(0, str(now.year))
-
-        tk.Label(master, text="Формат:").grid(row=1, column=0, sticky="e", pady=(8, 0))
-        self.var_fmt = tk.StringVar(value="both")
-        fmtf = tk.Frame(master)
-        fmtf.grid(row=1, column=1, columnspan=3, sticky="w", pady=(8, 0))
-        ttk.Radiobutton(fmtf, text="XLSX", value="xlsx", variable=self.var_fmt).pack(anchor="w")
-        ttk.Radiobutton(fmtf, text="CSV",  value="csv",  variable=self.var_fmt).pack(anchor="w")
-        ttk.Radiobutton(fmtf, text="Оба (XLSX+CSV)", value="both", variable=self.var_fmt).pack(anchor="w")
-        return self.cmb_month
-
-    def validate(self):
-        try:
-            y = int(self.spn_year.get())
-            if not (2000 <= y <= 2100):
-                raise ValueError
-            return True
+            viewport = self.main_canvas.winfo_width()
         except Exception:
-            messagebox.showwarning("Сводный экспорт", "Введите корректный год (2000–2100).")
-            return False
+            viewport = 0
+        if viewport <= 1:
+            self.after(120, self._auto_fit_columns)
+            return
+        total = self._content_total_width(self.COLPX["fio"])
+        new_fio = self.COLPX["fio"]
+        if total > viewport:
+            deficit = total - viewport
+            new_fio = max(self.MIN_FIO_PX, self.COLPX["fio"] - deficit)
+        elif total < viewport:
+            surplus = viewport - total
+            new_fio = min(self.MAX_FIO_PX, self.COLPX["fio"] + surplus)
+        if int(new_fio) != int(self.COLPX["fio"]):
+            self.COLPX["fio"] = int(new_fio)
+            self._configure_table_columns()
+            self._on_scroll_frame_configure()
 
-    def apply(self):
-        self.result = {
-            "year": int(self.spn_year.get()),
-            "month": self.cmb_month.current() + 1,
-            "fmt": self.var_fmt.get(),
-        }
-
-# (Класс HomePage - без изменений)
-class HomePage(tk.Frame):
-    def __init__(self, master):
-        log_message("HOMEPAGE: Starting __init__")
-        super().__init__(master, bg="#f7f7f7")
-        log_message("HOMEPAGE: Super init done.")
-
-        outer = tk.Frame(self, bg="#f7f7f7")
-        outer.pack(fill="both", expand=True)
-
-        center = tk.Frame(outer, bg="#f7f7f7")
-        center.place(relx=0.5, rely=0.5, anchor="center")
-
-        log_message("HOMEPAGE: Calling embedded_logo_image.")
-        self.logo_img = embedded_logo_image(center, max_w=360, max_h=360) # <--- ВОЗМОЖНЫЙ СБОЙ ЗДЕСЬ
-        log_message(f"HOMEPAGE: Logo loaded. Success: {self.logo_img is not None}")
-        
-        if self.logo_img:
-            tk.Label(center, image=self.logo_img, bg="#f7f7f7").pack(anchor="center", pady=(0, 12))
-        
-        # ... (Остальной текст) ...
-        log_message("HOMEPAGE: UI constructed successfully.")
-
-        tk.Label(center, text="Добро пожаловать!", font=("Segoe UI", 18, "bold"), bg="#f7f7f7")\
-            .pack(anchor="center", pady=(4, 6))
-        tk.Label(center, text="Выберите раздел в верхнем меню.\nОбъектный табель → Создать — для работы с табелями.",
-                 font=("Segoe UI", 10), fg="#444", bg="#f7f7f7", justify="center").pack(anchor="center")
+    def _on_window_configure(self, _evt):
+        try:
+            self.after_cancel(self._fit_job)
+        except Exception:
+            pass
+        self._fit_job = self.after(150, self._auto_fit_columns)
 
 
-# (Класс MainApp - с добавлением стиля Accent)
-# ... (Весь код до MainApp)
+# ------------- Главное окно (единоe) -------------
 
 class MainApp(tk.Tk):
-    def __init__(self):
-        log_message("INIT: Starting MainApp.__init__")
-        super().__init__()
-        log_message("INIT: Tkinter base initialized.")
+    # --- МЕТОДЫ-УТИЛИТЫ (ПЕРЕМЕЩЕНЫ В ТЕЛО КЛАССА, НО ПЕРЕД __init__ ДЛЯ ЧИСТОТЫ) ---
 
-        ensure_config()
-        log_message("INIT: Config ensured.")
-    # --- ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ---
     def _show_page(self, key: str, builder):
-        # ... (Ваш код _show_page) ...
         for w in self.content.winfo_children():
             try: w.destroy()
             except Exception: pass
@@ -1617,6 +1653,7 @@ class MainApp(tk.Tk):
         self._pages[key] = page
 
     def show_home(self):
+        log_message("SHOW: Executing show_home.")
         self._show_page("home", lambda parent: HomePage(parent))
 
     def open_spravochnik(self):
@@ -1628,7 +1665,6 @@ class MainApp(tk.Tk):
             messagebox.showerror("Справочник", f"Не удалось открыть файл:\n{e}")
 
     def refresh_spravochnik_global(self):
-        # ... (Ваш код refresh_spravochnik_global) ...
         cfg = read_config()
         use_remote = cfg.get(CONFIG_SECTION_REMOTE, KEY_REMOTE_USE, fallback="false")
         link = cfg.get(CONFIG_SECTION_REMOTE, KEY_YA_PUBLIC_LINK, fallback="")
@@ -1644,7 +1680,6 @@ class MainApp(tk.Tk):
 
     def open_orders_folder(self):
         try:
-            from pathlib import Path
             orders_dir = exe_dir() / "Заявки_спецтехники"
             orders_dir.mkdir(parents=True, exist_ok=True)
             os.startfile(orders_dir)
@@ -1652,7 +1687,6 @@ class MainApp(tk.Tk):
             messagebox.showerror("Папка заявок", f"Не удалось открыть папку:\n{e}")
 
     def summary_export(self):
-        # ... (Ваш код summary_export) ...
         pwd = simpledialog.askstring("Сводный экспорт", "Введите пароль:", show="*", parent=self)
         if pwd is None:
             return
@@ -1681,23 +1715,27 @@ class MainApp(tk.Tk):
             traceback.print_exc()
 
     def run_special_orders_exe(self):
-        # Оставляем заглушку
         messagebox.showwarning("Запуск", "Модуль Заявок должен быть встроен в TabelSuite. Проверьте импорт.")
 
     def run_converter_exe(self):
-        # Оставляем заглушку
         messagebox.showwarning("Запуск", "Модуль Конвертера должен быть встроен в TabelSuite. Проверьте импорт.")
-
-    # --- КОНСТРУКТОР (Использует методы, определенные выше) ---
+    
+    # --- КОНСТРУКТОР ---
     def __init__(self):
+        log_message("INIT: Starting MainApp.__init__")
         super().__init__()
+        log_message("INIT: Tkinter base initialized.")
+
+        # Мы уже вызвали ensure_config() перед MainApp для создания конфига, 
+        # но вызываем еще раз, чтобы убедиться, что все пути загружены.
+        # ensure_config() (Уже вызывается в read_config, которую вызывает get_..._config)
+        log_message("INIT: Config ensured.")
+        
         self.title(APP_NAME)
         self.geometry("1024x720")
         self.minsize(980, 640)
         self.resizable(True, True)
 
-        ensure_config()
-        
         # Добавляем стиль для акцентной кнопки (Save)
         s = ttk.Style(self)
         s.configure('Accent.TButton', background='#4CAF50', foreground='black', font=('Segoe UI', 9, 'bold'))
@@ -1706,38 +1744,23 @@ class MainApp(tk.Tk):
         # Меню
         menubar = tk.Menu(self)
 
-        # Кнопка Главная (теперь show_home определен!)
         menubar.add_command(label="Главная", command=self.show_home) 
-
         m_ts = tk.Menu(menubar, tearoff=0)
         m_ts.add_command(label="Создать", command=lambda: self._show_page("timesheet", lambda parent: TimesheetPage(parent)))
         menubar.add_cascade(label="Объектный табель", menu=m_ts)
 
-        # ========== АВТОТРАНСПОРТ ==========
         m_transport = tk.Menu(menubar, tearoff=0)
-        
         if SpecialOrders and hasattr(SpecialOrders, "create_page"):
-            m_transport.add_command(
-                label="📝 Создать заявку",
-                command=lambda: self._show_page("transport", lambda parent: SpecialOrders.create_page(parent))
-            )
+            m_transport.add_command(label="📝 Создать заявку", command=lambda: self._show_page("transport", lambda parent: SpecialOrders.create_page(parent)))
         else:
-            m_transport.add_command(label="📝 Создать заявку", 
-                                    command=self.run_special_orders_exe) # Если модуль не импортирован, вызываем заглушку
+            m_transport.add_command(label="📝 Создать заявку", command=self.run_special_orders_exe)
              
         if SpecialOrders and hasattr(SpecialOrders, "create_planning_page"):
-            m_transport.add_command(
-                label="🚛 Планирование транспорта",
-                command=lambda: self._show_page("planning", lambda parent: SpecialOrders.create_planning_page(parent))
-            )
+            m_transport.add_command(label="🚛 Планирование транспорта", command=lambda: self._show_page("planning", lambda parent: SpecialOrders.create_planning_page(parent)))
         m_transport.add_separator()
-        m_transport.add_command(
-            label="📂 Открыть папку заявок",
-            command=self.open_orders_folder # open_orders_folder теперь определен выше
-        )
+        m_transport.add_command(label="📂 Открыть папку заявок", command=self.open_orders_folder)
         menubar.add_cascade(label="Автотранспорт", menu=m_transport)
-        # ===================================
-
+        
         m_spr = tk.Menu(menubar, tearoff=0)
         m_spr.add_command(label="Открыть справочник", command=self.open_spravochnik)
         m_spr.add_command(label="Обновить справочник", command=self.refresh_spravochnik_global)
@@ -1747,40 +1770,30 @@ class MainApp(tk.Tk):
         m_analytics.add_command(label="Экспорт свода (XLSX/CSV)", command=self.summary_export)
         menubar.add_cascade(label="Аналитика", menu=m_analytics)
 
-        # ========== ИНСТРУМЕНТЫ ==========
         m_tools = tk.Menu(menubar, tearoff=0)
-        
         if timesheet_transformer and hasattr(timesheet_transformer, "open_converter"):
-            m_tools.add_command(label="Конвертер табеля (1С)", 
-                                command=lambda: timesheet_transformer.open_converter(self))
+            m_tools.add_command(label="Конвертер табеля (1С)", command=lambda: timesheet_transformer.open_converter(self))
         else:
-            m_tools.add_command(label="Конвертер табеля (1С)", 
-                                command=self.run_converter_exe) # Вызываем заглушку
+            m_tools.add_command(label="Конвертер табеля (1С)", command=self.run_converter_exe)
             
         if BudgetAnalyzer and hasattr(BudgetAnalyzer, "create_page"):
-            m_tools.add_command(label="Анализ смет", 
-                                command=lambda: self._show_page("budget", lambda parent: BudgetAnalyzer.create_page(parent)))
+            m_tools.add_command(label="Анализ смет", command=lambda: self._show_page("budget", lambda parent: BudgetAnalyzer.create_page(parent)))
         else:
-            m_tools.add_command(label="Анализ смет", 
-                                command=lambda: messagebox.showwarning("Анализ смет", "Модуль BudgetAnalyzer.py не найден."))
-
+            m_tools.add_command(label="Анализ смет", command=lambda: messagebox.showwarning("Анализ смет", "Модуль BudgetAnalyzer.py не найден."))
         menubar.add_cascade(label="Инструменты", menu=m_tools)
-        # =================================
-        
+
         self.config(menu=menubar)
 
-        # Шапка
+        # Шапка и Контент (должны быть созданы до show_home)
         header = tk.Frame(self)
         header.pack(fill="x", padx=12, pady=(10, 4))
         tk.Label(header, text="Управление строительством", font=("Segoe UI", 16, "bold")).pack(side="left")
         tk.Label(header, text="Выберите раздел в верхнем меню", font=("Segoe UI", 10), fg="#555").pack(side="right")
 
-        # Контент — контейнер для страниц
         self.content = tk.Frame(self, bg="#f7f7f7")
         self.content.pack(fill="both", expand=True)
         self._pages: Dict[str, tk.Widget] = {}
 
-        # Копирайт
         footer = tk.Frame(self)
         footer.pack(fill="x", padx=12, pady=(0, 10))
         tk.Label(footer, text="Разработал Алексей Зезюкин, АНО МЛСТ 2025",
@@ -1791,8 +1804,19 @@ class MainApp(tk.Tk):
         log_message("INIT: after(100, show_home) scheduled.")
 
 
-    def show_home(self):
-        log_message("SHOW: Calling _show_page for HomePage.")
-        self._show_page("home", lambda parent: HomePage(parent))
-        log_message("SHOW: HomePage displayed.")
+# ------------- СЕКЦИЯ ЗАПУСКА -------------
 
+if __name__ == "__main__":
+    # Очищаем старый лог при старте
+    try:
+        if os.path.exists(LOG_PATH):
+            os.remove(LOG_PATH)
+    except Exception:
+        pass
+        
+    log_message("START: Application launch initiated.")
+    
+    app = MainApp()
+    app.mainloop()
+    
+    log_message("END: Application closed normally.")
