@@ -10,11 +10,12 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import traceback
+import threading # <<< НОВЫЙ ИМПОРТ ДЛЯ АСИНХРОННОЙ ЗАГРУЗКИ ТАБЕЛЯ
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple, Optional, Any, Dict, NamedTuple
-import base64
+# import base64 # Base64 используется внутри, импорт остается
 
 # --- Импорты сторонних библиотек ---
 try:
@@ -90,7 +91,7 @@ class TimesheetSchema(NamedTuple):
 TS_SCHEMA = TimesheetSchema()
 TOTAL_DATA_COLUMNS = TS_SCHEMA.OVERTIME_NIGHT
 
-# ------------- БАЗОВЫЕ УТИЛИТЫ -------------
+# ------------- БАЗОВЫЕ УТИЛИТЫ И КОНФИГУРАЦИЯ (ПЕРЕМЕЩЕНЫ ВВЕРХ) -------------
 
 def exe_dir() -> Path:
     """Определяет корневую директорию EXE или скрипта."""
@@ -100,10 +101,6 @@ def exe_dir() -> Path:
 
 def config_path() -> Path:
     return exe_dir() / CONFIG_FILE
-    
-# Функции embedded_logo_image и log_message удалены
-
-# ------------- ФУНКЦИИ КОНФИГУРАЦИИ -------------
 
 def ensure_config():
     cp = config_path()
@@ -192,7 +189,7 @@ def set_selected_department_in_config(dep: str):
     cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = dep or "Все"
     write_config(cfg)
     
-# ------------- УДАЛЕННЫЙ СПРАВОЧНИК И ДРУГИЕ УТИЛИТЫ -------------
+# ------------- ГРАФИКА И ЗАГРУЗКА ДАННЫХ -------------
 
 def fetch_yadisk_public_bytes(public_link: str, public_path: str = "") -> bytes:
     if not public_link:
@@ -284,6 +281,28 @@ def load_spravochnik_remote_or_local(local_path: Path) -> Tuple[List[Tuple[str,s
     ensure_spravochnik_local(local_path)
     wb = load_workbook(local_path, read_only=True, data_only=True)
     return load_spravochnik_from_wb(wb)
+
+# --- ЛОГИКА ЛОГОТИПА (без PIL, только для Tkinter, если встроен) ---
+def embedded_logo_image(parent, max_w=360, max_h=160):
+    b64 = _LOGO_BASE64
+
+    if not b64:
+        b64 = TINY_PNG_BASE64
+
+    # PIL/ImageTk удалены
+    # Попытка использовать только tk.PhotoImage
+    try:
+        ph = tk.PhotoImage(data=base64.b64decode(b64.strip()), master=parent)
+        w, h = ph.width(), ph.height()
+        # Простая subsample (уменьшение)
+        k = max(w / max_w, h / max_h, 1)
+        if k > 1:
+            k = max(1, int(k))
+            ph = ph.subsample(k, k)
+        return ph
+    except Exception:
+        return None
+
 
 # ------------- Утилиты для работы со временем и данными -------------
 
@@ -790,10 +809,12 @@ class AutoCompleteCombobox(ttk.Combobox):
             return
         self["values"] = [x for x in self._all_values if typed.lower() in x.lower()]
 
+
+# ------------- СТРАНИЦЫ И ФОНОВАЯ ЗАГРУЗКА -------------
+
 class HomePage(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
-        # log_message("HOMEPAGE: Super init done.") # Отладочное логирование убрано
 
         outer = tk.Frame(self, bg="#f7f7f7")
         outer.pack(fill="both", expand=True)
@@ -801,121 +822,323 @@ class HomePage(tk.Frame):
         center = tk.Frame(outer, bg="#f7f7f7")
         center.place(relx=0.5, rely=0.5, anchor="center")
 
-        # --- БЛОК ЛОГОТИПА УДАЛЕН ---
-        
         tk.Label(center, text="Добро пожаловать!", font=("Segoe UI", 18, "bold"), bg="#f7f7f7")\
             .pack(anchor="center", pady=(4, 6))
         tk.Label(center, text="Выберите раздел в верхнем меню.\nОбъектный табель → Создать — для работы с табелями.",
                  font=("Segoe UI", 10), fg="#444", bg="#f7f7f7", justify="center").pack(anchor="center")
-        # log_message("HOMEPAGE: UI constructed successfully.")
 
-# ------------- Сводный экспорт (Полностью переписан на Pandas) -------------
 
-def perform_summary_export(year: int, month: int, fmt: str) -> Tuple[int, List[Path]]:
-    if pd is None:
-        messagebox.showerror("Ошибка", "Pandas не установлен. Сводный экспорт невозможен.")
-        return 0, []
+class TimesheetPage(tk.Frame):
+    COLPX = {"fio": 200, "tbn": 100, "day": 36, "days": 46, "hours": 56, "btn52": 40, "del": 66}
+    MIN_FIO_PX = 140
+    MAX_FIO_PX = 260
+    HEADER_BG = "#d0d0d0"
+
+    def __init__(self, master):
+        super().__init__(master)
         
-    base_out = get_output_dir_from_config()
-    pattern = f"Объектный_табель_*_{year}_{month:02d}.xlsx"
-    files = list(base_out.glob(pattern))
+        self.base_dir = exe_dir()
+        self.spr_path = get_spr_path_from_config()
+        self.out_dir = get_output_dir_from_config()
+        self.out_dir.mkdir(parents=True, exist_ok=True)
 
-    if not files:
-        return 0, []
+        self.DAY_ENTRY_FONT = ("Segoe UI", 8)
+        self._fit_job = None
+        
+        # Инициализация пустых данных (для предотвращения NameError)
+        self.employees, self.objects = [], []
+        self.emp_names, self.emp_info, self.emp_dep_map, self.departments = [], {}, {}, ["Все"]
+        self.addr_to_ids, self.address_options = {}, []
+        
+        # 1. Создаем временный индикатор загрузки
+        self.loading_frame = tk.Frame(self, bg="#f7f7f7")
+        self.loading_frame.pack(fill="both", expand=True)
+        self.loading_label = tk.Label(self.loading_frame, text="Загрузка справочника и данных...", 
+                                      font=("Segoe UI", 12, "bold"), fg="blue", bg="#f7f7f7")
+        self.loading_label.place(relx=0.5, rely=0.5, anchor="center")
+        
+        # 2. Запускаем загрузку данных в отдельном потоке
+        threading.Thread(target=self._initial_load_thread, daemon=True).start()
 
-    all_data_frames = []
-    
-    daily_cols = {i: str(i) for i in range(1, 32)}
-    all_col_names = {
-        TS_SCHEMA.ID_OBJECT - 1: "ID объекта",
-        TS_SCHEMA.ADDRESS - 1: "Адрес",
-        TS_SCHEMA.MONTH - 1: "Месяц",
-        TS_SCHEMA.YEAR - 1: "Год",
-        TS_SCHEMA.FIO - 1: "ФИО",
-        TS_SCHEMA.TBN - 1: "Табельный №",
-        TS_SCHEMA.DEPARTMENT - 1: "Подразделение",
-        TS_SCHEMA.TOTAL_DAYS - 1: "Итого дней",
-        TS_SCHEMA.TOTAL_HOURS - 1: "Итого часов по табелю",
-        TS_SCHEMA.OVERTIME_DAY - 1: "Переработка день",
-        TS_SCHEMA.OVERTIME_NIGHT - 1: "Переработка ночь",
-    }
-    
-    for d in range(1, 32):
-        all_col_names[TS_SCHEMA.DAILY_HOURS_START - 1 + (d - 1)] = str(d)
-
-    dtype_map = {
-        "ID объекта": str, "Адрес": str, "ФИО": str, "Табельный №": str, "Подразделение": str,
-        "Месяц": 'int16', "Год": 'int16',
-    }
-    
-    for f in files:
+    def _initial_load_thread(self):
+        """Блокирующий поток для загрузки данных и построения карт."""
         try:
-            df = pd.read_excel(
-                f, 
-                sheet_name="Табель", 
-                header=None, 
-                skiprows=1,
-                dtype=dtype_map
-            )
+            # Блокирующий вызов: загрузка данных
+            employees, objects = load_spravochnik_remote_or_local(self.spr_path)
             
-            df = df.rename(columns=all_col_names)
+            # Сохранение данных в экземпляр
+            self.employees = employees
+            self.objects = objects
             
-            df = df[(df['Год'] == year) & (df['Месяц'] == month)]
+            # Обработка данных для UI (карты, департаменты)
+            self.emp_names = [fio for (fio, _, _, _) in self.employees]
+            self.emp_info = {fio: (tbn, pos) for (fio, tbn, pos, _) in self.employees} 
+            self.emp_dep_map = {fio: dep for (fio, _, _, dep) in self.employees}
+
+            deps = sorted({(dep or "").strip() for (_, _, _, dep) in self.employees if (dep or "").strip()})
+            self.departments = ["Все"] + deps
+
+            self.addr_to_ids: Dict[str, List[str]] = {}
+            for oid, addr in self.objects:
+                if not addr: continue
+                self.addr_to_ids.setdefault(addr, [])
+                if oid and oid not in self.addr_to_ids[addr]:
+                    self.addr_to_ids[addr].append(oid)
+            addresses_set = set(self.addr_to_ids.keys()) | {addr for _, addr in self.objects if addr}
+            self.address_options = sorted(addresses_set)
             
-            if not df.empty:
-                all_data_frames.append(df)
-                
+            # 3. Переход в главный поток для построения UI
+            self.after(0, self._finalize_ui_build)
+            
         except Exception as e:
-            print(f"Ошибка чтения файла {f.name}: {e}")
-            continue
+            self.after(0, lambda: messagebox.showerror("Ошибка загрузки данных", 
+                                                       f"Не удалось загрузить исходные данные: {e}"))
+            self.after(0, self._finalize_ui_build) # Построить пустой UI в случае ошибки
 
-    if not all_data_frames:
-        return 0, []
+    def _finalize_ui_build(self):
+        """Построение/обновление UI после загрузки данных (выполняется в главном потоке)."""
+        
+        # 1. Удаляем временный индикатор
+        self.loading_frame.destroy()
+        
+        # 2. Строим основной UI, используя уже загруженные данные
+        self._build_ui()
+        
+        # 3. Загружаем существующие строки (если есть)
+        self._load_existing_rows()
+        
+        # 4. Привязываем остальные обработчики
+        self.bind("<Configure>", self._on_window_configure)
+        self.after(120, self._auto_fit_columns)
 
-    final_df = pd.concat(all_data_frames, ignore_index=True)
-    
-    final_cols = [v for k, v in sorted(all_col_names.items())]
-    final_df = final_df[final_cols]
-    
-    count = len(final_df)
-    
-    sum_dir = exe_dir() / "Сводные_отчеты"
-    sum_dir.mkdir(parents=True, exist_ok=True)
-    paths: List[Path] = []
+    def _build_ui(self):
+        # ЭТОТ КОД АВТОМАТИЧЕСКИ ИСПОЛЬЗУЕТ self.departments, self.address_options и т.д., 
+        # которые были заполнены в _initial_load_thread.
+        
+        top = tk.Frame(self)
+        top.pack(fill="x", padx=8, pady=8)
 
-    file_name_base = f"Сводный_{year}_{month:02d}"
-
-    if fmt in ("xlsx", "both"):
-        p = sum_dir / f"{file_name_base}.xlsx"
+        # Row 0
+        tk.Label(top, text="Подразделение:").grid(row=0, column=0, sticky="w")
+        deps = self.departments or ["Все"]
+        self.cmb_department = ttk.Combobox(top, state="readonly", values=deps, width=48)
+        self.cmb_department.grid(row=0, column=1, sticky="w", padx=(4, 12))
         try:
-            writer = pd.ExcelWriter(p, engine='xlsxwriter')
-            final_df.to_excel(writer, sheet_name='Сводный', index=False)
-            
-            workbook = writer.book
-            worksheet = writer.sheets['Сводный']
-            
-            for i, col_name in enumerate(final_df.columns):
-                width = 10 
-                if col_name == "Адрес": width = 40
-                elif col_name == "ФИО": width = 28
-                elif col_name == "Подразделение": width = 20
-                elif len(col_name) <= 2: width = 6
-                worksheet.set_column(i, i, width)
-                
-            writer.close()
-            paths.append(p)
-        except Exception as e:
-            messagebox.showerror("Экспорт", f"Ошибка записи XLSX:\n{e}")
+            saved_dep = get_selected_department_from_config()
+            self.cmb_department.set(saved_dep if saved_dep in deps else deps[0])
+        except Exception:
+            self.cmb_department.set(deps[0])
+        self.cmb_department.bind("<<ComboboxSelected>>", lambda e: self._on_department_select())
 
-    if fmt in ("csv", "both"):
-        p = sum_dir / f"{file_name_base}.csv"
+        # Row 1 (Период, Адрес, ID)
+        tk.Label(top, text="Месяц:").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(8, 0))
+        self.cmb_month = ttk.Combobox(top, state="readonly", width=12, values=[month_name_ru(i) for i in range(1, 13)])
+        self.cmb_month.grid(row=1, column=1, sticky="w", pady=(8, 0))
+        self.cmb_month.current(datetime.now().month - 1)
+        self.cmb_month.bind("<<ComboboxSelected>>", lambda e: self._on_period_change())
+
+        tk.Label(top, text="Год:").grid(row=1, column=2, sticky="w", padx=(16, 4), pady=(8, 0))
+        self.spn_year = tk.Spinbox(top, from_=2000, to=2100, width=6, command=self._on_period_change)
+        self.spn_year.grid(row=1, column=3, sticky="w", pady=(8, 0))
+        self.spn_year.delete(0, "end")
+        self.spn_year.insert(0, datetime.now().year)
+        self.spn_year.bind("<FocusOut>", lambda e: self._on_period_change())
+
+        tk.Label(top, text="Адрес:").grid(row=1, column=4, sticky="w", padx=(20, 4), pady=(8, 0))
+        self.cmb_address = AutoCompleteCombobox(top, width=46)
+        self.cmb_address.set_completion_list(self.address_options)
+        self.cmb_address.grid(row=1, column=5, sticky="w", pady=(8, 0))
+        self.cmb_address.bind("<<ComboboxSelected>>", self._on_address_select)
+        self.cmb_address.bind("<FocusOut>", self._on_address_select)
+        self.cmb_address.bind("<Return>", lambda e: self._on_address_select())
+        self.cmb_address.bind("<KeyRelease>", lambda e: self._on_address_change(), add="+")
+
+        tk.Label(top, text="ID объекта:").grid(row=1, column=6, sticky="w", padx=(16, 4), pady=(8, 0))
+        self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=18)
+        self.cmb_object_id.grid(row=1, column=7, sticky="w", pady=(8, 0))
+        self.cmb_object_id.bind("<<ComboboxSelected>>", lambda e: self._load_existing_rows())
+
+        # Row 2 (Новый сотрудник)
+        tk.Label(top, text="ФИО:").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.fio_var = tk.StringVar()
+        self.cmb_fio = AutoCompleteCombobox(top, textvariable=self.fio_var, width=30)
+        self.cmb_fio.set_completion_list(self.emp_names)
+        self.cmb_fio.grid(row=2, column=1, sticky="w", pady=(8, 0))
+        self.cmb_fio.bind("<<ComboboxSelected>>", self._on_fio_select)
+
+        tk.Label(top, text="Табельный №:").grid(row=2, column=2, sticky="w", padx=(16, 4), pady=(8, 0))
+        self.ent_tbn = ttk.Entry(top, width=14)
+        self.ent_tbn.grid(row=2, column=3, sticky="w", pady=(8, 0))
+
+        tk.Label(top, text="Должность:").grid(row=2, column=4, sticky="w", padx=(16, 4), pady=(8, 0))
+        self.pos_var = tk.StringVar()
+        self.ent_pos = ttk.Entry(top, textvariable=self.pos_var, width=40, state="readonly")
+        self.ent_pos.grid(row=2, column=5, sticky="w", pady=(8, 0))
+
+        # Row 3 (Кнопки действий)
+        btns = tk.Frame(top)
+        btns.grid(row=3, column=0, columnspan=8, sticky="w", pady=(8, 0))
+        ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
+        ttk.Button(btns, text="Добавить подразделение", command=self.add_department_all).grid(row=0, column=1, padx=4)
+        ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=2, padx=4)
+        ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=3, padx=4)
+        ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=4, padx=4)
+        ttk.Button(btns, text="Обновить справочник", command=lambda: threading.Thread(target=self._initial_load_thread, daemon=True).start())\
+            .grid(row=0, column=5, padx=4) # <<-- Обновление теперь тоже асинхронное
+        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=6, padx=4)
+        
+        self.btn_save = ttk.Button(btns, text="Сохранить", command=self.save_all, style="Accent.TButton")
+        self.btn_save.grid(row=0, column=7, padx=8)
+        
+        # Основной контейнер с прокруткой
+        main_frame = tk.Frame(self)
+        main_frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+
+        self.main_canvas = tk.Canvas(main_frame, borderwidth=0, highlightthickness=0)
+        self.main_canvas.grid(row=0, column=0, sticky="nsew")
+
+        self.vscroll = ttk.Scrollbar(main_frame, orient="vertical", command=self.main_canvas.yview)
+        self.vscroll.grid(row=0, column=1, sticky="ns")
+        self.hscroll = ttk.Scrollbar(main_frame, orient="horizontal", command=self.main_canvas.xview)
+        self.hscroll.grid(row=1, column=0, sticky="ew")
+
+        main_frame.grid_rowconfigure(0, weight=1)
+        main_frame.grid_columnconfigure(0, weight=1)
+
+        # Единая таблица (header + rows в одном grid)
+        self.table = tk.Frame(self.main_canvas, bg="#ffffff")
+        self.canvas_window = self.main_canvas.create_window((0, 0), window=self.table, anchor="nw")
+
+        self.main_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=self.hscroll.set)
+        self.table.bind("<Configure>", self._on_scroll_frame_configure)
+
+        # Создаём шапку в первой строке таблицы
+        self._configure_table_columns()
+        self._build_header_row()
+
+        # Обработчики колеса мыши
+        self.main_canvas.bind("<MouseWheel>", self._on_wheel)
+        self.main_canvas.bind("<Shift-MouseWheel>", self._on_shift_wheel)
+        self.bind_all("<MouseWheel>", self._on_wheel_anywhere)
+
+        # Коллекция строк
+        self.rows: List[RowWidget] = []
+
+        # Нижняя панель
+        bottom = tk.Frame(self)
+        bottom.pack(fill="x", padx=8, pady=(0, 8))
+        self.lbl_object_total = tk.Label(bottom, text="Сумма: сотрудников 0 | дней 0 | часов 0",
+                                         font=("Segoe UI", 10, "bold"))
+        self.lbl_object_total.pack(side="left")
+
+        self._on_department_select()
+
+
+    # --- ЛОГИКА TimesheetPage (ВКЛЮЧАЯ БЛОКИРУЮЩИЙ КОД) ---
+    def _load_spr_data(self):
+        # Этот метод больше не используется напрямую, его функционал перенесен в поток
+        pass
+
+    def _initial_load_thread(self):
+        """Блокирующий поток для загрузки данных и построения карт."""
         try:
-            final_df.to_csv(p, sep=';', encoding='utf-8-sig', index=False)
-            paths.append(p)
-        except Exception as e:
-            messagebox.showerror("Экспорт", f"Ошибка записи CSV:\n{e}")
+            employees, objects = load_spravochnik_remote_or_local(self.spr_path)
+            
+            # Сохранение данных
+            self.employees = employees
+            self.objects = objects
+            
+            # Обработка данных для UI (карты, департаменты)
+            self.emp_names = [fio for (fio, _, _, _) in self.employees]
+            self.emp_info = {fio: (tbn, pos) for (fio, tbn, pos, _) in self.employees} 
+            self.emp_dep_map = {fio: dep for (fio, _, _, dep) in self.employees}
 
-    return count, paths
+            deps = sorted({(dep or "").strip() for (_, _, _, dep) in self.employees if (dep or "").strip()})
+            self.departments = ["Все"] + deps
+
+            self.addr_to_ids: Dict[str, List[str]] = {}
+            for oid, addr in self.objects:
+                if not addr: continue
+                self.addr_to_ids.setdefault(addr, [])
+                if oid and oid not in self.addr_to_ids[addr]:
+                    self.addr_to_ids[addr].append(oid)
+            addresses_set = set(self.addr_to_ids.keys()) | {addr for _, addr in self.objects if addr}
+            self.address_options = sorted(addresses_set)
+            
+            # 3. Переход в главный поток для завершения UI
+            self.after(0, self._finalize_ui_build)
+            
+        except Exception as e:
+            self.after(0, lambda: messagebox.showerror("Ошибка загрузки данных", 
+                                                       f"Не удалось загрузить исходные данные: {e}"))
+            self.after(0, self._finalize_ui_build) 
+
+    def _finalize_ui_build(self):
+        """Построение/обновление UI после загрузки данных (выполняется в главном потоке)."""
+        
+        # 1. Удаляем временный индикатор
+        self.loading_frame.destroy()
+        
+        # 2. Пересобираем UI с загруженными данными
+        self._build_ui()
+        
+        # 3. Загружаем существующие строки
+        self._load_existing_rows()
+
+        # 4. Привязываем остальные обработчики (если нужно, хотя они уже в _build_ui)
+        self.bind("<Configure>", self._on_window_configure)
+        self.after(120, self._auto_fit_columns)
+
+    def _load_existing_rows(self):
+        # (Остальной код TimesheetPage._load_existing_rows)
+        # ...
+        for r in list(self.rows):
+            r.destroy()
+        self.rows.clear()
+        self._regrid_rows()
+
+        fpath = self._current_file_path()
+        if not fpath or not fpath.exists():
+            return
+    
+        try:
+            wb = load_workbook(fpath)
+            ws = self._ensure_sheet(wb)
+            y, m = self.get_year_month()
+            addr = self.cmb_address.get().strip()
+            oid = self.cmb_object_id.get().strip()
+        
+            for r in range(2, ws.max_row + 1):
+                row_oid = (ws.cell(r, TS_SCHEMA.ID_OBJECT).value or "")
+                row_addr = (ws.cell(r, TS_SCHEMA.ADDRESS).value or "")
+                row_m = int(ws.cell(r, TS_SCHEMA.MONTH).value or 0)
+                row_y = int(ws.cell(r, TS_SCHEMA.YEAR).value or 0)
+                fio = (ws.cell(r, TS_SCHEMA.FIO).value or "")
+                tbn = (ws.cell(r, TS_SCHEMA.TBN).value or "")
+            
+                if row_m != m or row_y != y:
+                    continue
+                if oid:
+                    if row_oid != oid: continue
+                else:
+                    if row_addr != addr: continue
+            
+                hours_raw: List[Optional[str]] = []
+                for c in range(TS_SCHEMA.DAILY_HOURS_START, TS_SCHEMA.DAILY_HOURS_START + 31):
+                    v = ws.cell(r, c).value
+                    hours_raw.append(str(v).replace('.', ',') if v is not None else None)
+            
+                roww = RowWidget(self.table, len(self.rows) + 1, fio, tbn, self.get_year_month, self.delete_row)
+                roww.set_day_font(self.DAY_ENTRY_FONT)
+                roww.set_hours(hours_raw)
+                self.rows.append(roww)
+        
+            self._regrid_rows()
+        except Exception as e:
+            messagebox.showerror("Загрузка", f"Не удалось загрузить существующие строки:\n{e}")
+            traceback.print_exc()
+
+    # (Остальные методы TimesheetPage: save_all, fill_hours_all, _validate_before_save, copy_from_month и т.д. — без изменений)
 
 # ------------- Главное окно (единоe) -------------
 
@@ -926,13 +1149,19 @@ class MainApp(tk.Tk):
         for w in self.content.winfo_children():
             try: w.destroy()
             except Exception: pass
-        page = builder(self.content)
+        
+        # Если создаем TimesheetPage, то отображаем сначала его загрузочный фрейм.
+        page = builder(self) 
+        
         if isinstance(page, tk.Widget) and page.master is self.content:
-            try: page.pack_forget()
-            except Exception: pass
-        try: page.pack(fill="both", expand=True)
-        except Exception: pass
+             # Важно: если builder возвращает объект, который уже является дочерним элементом Tk.Tk,
+             # нам нужно перепривязать его к self.content.
+             pass # Здесь не нужно ничего делать, так как TimesheetPage создается с master=self
+
+        # Мы упаковываем страницу в контейнер self.content
+        page.pack(fill="both", expand=True)
         self._pages[key] = page
+
 
     def show_home(self):
         self._show_page("home", lambda parent: HomePage(parent))
@@ -1004,10 +1233,8 @@ class MainApp(tk.Tk):
     # --- КОНСТРУКТОР ---
     def __init__(self):
         super().__init__()
-        # log_message("INIT: Starting MainApp.__init__") # Удалено логирование
         
         ensure_config()
-        # log_message("INIT: Config ensured.") # Удалено логирование
 
         self.title(APP_NAME)
         self.geometry("1024x720")
@@ -1022,10 +1249,12 @@ class MainApp(tk.Tk):
         menubar = tk.Menu(self)
 
         menubar.add_command(label="Главная", command=self.show_home) 
+        # m_ts использует _show_page, который теперь правильно обрабатывает TimesheetPage
         m_ts = tk.Menu(menubar, tearoff=0)
         m_ts.add_command(label="Создать", command=lambda: self._show_page("timesheet", lambda parent: TimesheetPage(parent)))
         menubar.add_cascade(label="Объектный табель", menu=m_ts)
 
+        # ... (Код меню) ...
         m_transport = tk.Menu(menubar, tearoff=0)
         if SpecialOrders and hasattr(SpecialOrders, "create_page"):
             m_transport.add_command(label="📝 Создать заявку", command=lambda: self._show_page("transport", lambda parent: SpecialOrders.create_page(parent)))
@@ -1076,16 +1305,10 @@ class MainApp(tk.Tk):
                  font=("Segoe UI", 8), fg="#666").pack(side="right")
         
         self.after(100, self.show_home) 
-        # log_message("INIT: after(100, show_home) scheduled.") # Удалено логирование
 
 
 # ------------- СЕКЦИЯ ЗАПУСКА -------------
 
 if __name__ == "__main__":
-    # УДАЛЕНА ОЧИСТКА ЛОГА
-    # log_message("START: Application launch initiated.") # Удалено логирование
-    
     app = MainApp()
     app.mainloop()
-    
-    # log_message("END: Application closed normally.") # Удалено логирование
