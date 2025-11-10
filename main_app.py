@@ -1689,16 +1689,16 @@ class MainApp(tk.Tk):
 
     def start_app():
     # Эта функция будет вызываться только после того, как MainApp полностью создан
-    app = MainApp()
+        app = MainApp()
     
     # Теперь мы вызываем show_home здесь, гарантируя, что объект app полностью готов
-    try:
-        app.show_home()
-    except AttributeError:
+        try:
+            app.show_home()
+        except AttributeError:
         # Если даже здесь ошибка, просто продолжаем, так как пользователь может использовать меню
-        print("Warning: Failed to auto-display home page.")
+            print("Warning: Failed to auto-display home page.")
         
-    app.mainloop()
+        app.mainloop()
 
 # --- Секция запуска (CLEANUP) ---
 if __name__ == "__main__":
