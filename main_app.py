@@ -1597,7 +1597,7 @@ class MainApp(tk.Tk):
 
         # Меню
         menubar = tk.Menu(self)
-        # ... (Код меню) ...
+
         # Кнопка Главная (возврат на стартовый экран)
         menubar.add_command(label="Главная", command=self.show_home)
 
@@ -1605,14 +1605,18 @@ class MainApp(tk.Tk):
         m_ts.add_command(label="Создать", command=lambda: self._show_page("timesheet", lambda parent: TimesheetPage(parent)))
         menubar.add_cascade(label="Объектный табель", menu=m_ts)
 
+        # ========== АВТОТРАНСПОРТ (Используем встроенные модули напрямую) ==========
         m_transport = tk.Menu(menubar, tearoff=0)
+        
         if SpecialOrders and hasattr(SpecialOrders, "create_page"):
             m_transport.add_command(
                 label="📝 Создать заявку",
                 command=lambda: self._show_page("transport", lambda parent: SpecialOrders.create_page(parent))
             )
         else:
-             m_transport.add_command(label="📝 Создать заявку", command=self.run_special_orders_exe)
+            # Fallback для случая, если импорт все-таки не удался (например, отсутствует BudgetAnalyzer.py)
+            m_transport.add_command(label="📝 Создать заявку", 
+                                    command=lambda: messagebox.showwarning("Автотранспорт", "Модуль SpecialOrders.py не найден."))
              
         if SpecialOrders and hasattr(SpecialOrders, "create_planning_page"):
             m_transport.add_command(
@@ -1625,6 +1629,7 @@ class MainApp(tk.Tk):
             command=self.open_orders_folder
         )
         menubar.add_cascade(label="Автотранспорт", menu=m_transport)
+        # =========================================================================
 
         m_spr = tk.Menu(menubar, tearoff=0)
         m_spr.add_command(label="Открыть справочник", command=self.open_spravochnik)
@@ -1635,19 +1640,26 @@ class MainApp(tk.Tk):
         m_analytics.add_command(label="Экспорт свода (XLSX/CSV)", command=self.summary_export)
         menubar.add_cascade(label="Аналитика", menu=m_analytics)
 
+        # ========== ИНСТРУМЕНТЫ (Используем встроенные модули напрямую) ==========
         m_tools = tk.Menu(menubar, tearoff=0)
+        
         if timesheet_transformer and hasattr(timesheet_transformer, "open_converter"):
-            m_tools.add_command(label="Конвертер табеля (1С)", command=lambda: timesheet_transformer.open_converter(self))
+            m_tools.add_command(label="Конвертер табеля (1С)", 
+                                command=lambda: timesheet_transformer.open_converter(self))
         else:
-            m_tools.add_command(label="Конвертер табеля (1С)", command=self.run_converter_exe)
+            m_tools.add_command(label="Конвертер табеля (1С)", 
+                                command=lambda: messagebox.showwarning("Конвертер", "Модуль timesheet_transformer.py не найден."))
             
         if BudgetAnalyzer and hasattr(BudgetAnalyzer, "create_page"):
-            m_tools.add_command(label="Анализ смет", command=lambda: self._show_page("budget", lambda parent: BudgetAnalyzer.create_page(parent)))
+            m_tools.add_command(label="Анализ смет", 
+                                command=lambda: self._show_page("budget", lambda parent: BudgetAnalyzer.create_page(parent)))
         else:
-            m_tools.add_command(label="Анализ смет", command=lambda: messagebox.showwarning("Анализ смет", "Модуль BudgetAnalyzer.py не найден."))
+            m_tools.add_command(label="Анализ смет", 
+                                command=lambda: messagebox.showwarning("Анализ смет", "Модуль BudgetAnalyzer.py не найден."))
 
         menubar.add_cascade(label="Инструменты", menu=m_tools)
-
+        # =========================================================================
+        
         self.config(menu=menubar)
 
         # Шапка
@@ -1668,108 +1680,20 @@ class MainApp(tk.Tk):
                  font=("Segoe UI", 8), fg="#666").pack(side="right")
 
         self.show_home()
-        # ... (Конец кода MainApp) ...
-
-    def _show_page(self, key: str, builder):
-        for w in self.content.winfo_children():
-            try: w.destroy()
-            except Exception: pass
-        page = builder(self.content)
-        if isinstance(page, tk.Widget) and page.master is self.content:
-            try: page.pack_forget()
-            except Exception: pass
-        try: page.pack(fill="both", expand=True)
-        except Exception: pass
-        self._pages[key] = page
-
-    def show_home(self):
-        self._show_page("home", lambda parent: HomePage(parent))
-
-    def open_spravochnik(self):
-        path = get_spr_path_from_config()
-        ensure_spravochnik_local(path)
-        try:
-            os.startfile(path)
-        except Exception as e:
-            messagebox.showerror("Справочник", f"Не удалось открыть файл:\n{e}")
-
-    def refresh_spravochnik_global(self):
-        cfg = read_config()
-        use_remote = cfg.get(CONFIG_SECTION_REMOTE, KEY_REMOTE_USE, fallback="false")
-        link = cfg.get(CONFIG_SECTION_REMOTE, KEY_YA_PUBLIC_LINK, fallback="")
-        path = get_spr_path_from_config()
-        ensure_spravochnik_local(path)
-        messagebox.showinfo(
-            "Справочник",
-            "Справочник проверен/создан локально.\n"
-            f"Удалённый доступ: use_remote={use_remote}\n"
-            f"Публичная ссылка: {link or '(не задана)'}\n\n"
-            "В окнах используйте «Обновить справочник» для перечтения."
-        )
-
-    def open_orders_folder(self):
-        try:
-            from pathlib import Path
-            orders_dir = exe_dir() / "Заявки_спецтехники"
-            orders_dir.mkdir(parents=True, exist_ok=True)
-            os.startfile(orders_dir)
-        except Exception as e:
-            messagebox.showerror("Папка заявок", f"Не удалось открыть папку:\n{e}")
-
-    def summary_export(self):
-        pwd = simpledialog.askstring("Сводный экспорт", "Введите пароль:", show="*", parent=self)
-        if pwd is None:
-            return
-        if pwd != get_export_password_from_config():
-            messagebox.showerror("Сводный экспорт", "Неверный пароль.")
-            return
-
-        dlg = ExportMonthDialog(self)
-        if not getattr(dlg, "result", None):
-            return
-        y = dlg.result["year"]
-        m = dlg.result["month"]
-        fmt = dlg.result["fmt"]
-        try:
-            count, paths = perform_summary_export(y, m, fmt)
-            if count <= 0:
-                messagebox.showinfo("Сводный экспорт", "Не найдено строк для выгрузки.")
-                return
-            msg = f"Экспортировано строк: {count}\n\nФайлы:\n" + "\n".join(str(p) for p in paths)
-            
-            # Предложение открыть папку (UX)
-            if paths and messagebox.askyesno("Экспорт завершен", msg + "\n\nОткрыть папку с отчетами?"):
-                os.startfile(paths[0].parent)
-                
-        except Exception as e:
-            messagebox.showerror("Сводный экспорт", f"Ошибка выгрузки:\n{e}")
-            traceback.print_exc()
 
     def run_special_orders_exe(self):
-        try:
-            p = exe_dir() / "SpecialOrders.exe"
-            if not p.exists():
-                messagebox.showwarning("Заказ спецтехники", "Не найден SpecialOrders.exe рядом с программой.")
-                return
-            subprocess.Popen([str(p)], shell=False)
-        except Exception as e:
-            messagebox.showerror("Заказ спецтехники", f"Не удалось запустить модуль:\n{e}")
+        # Этот метод больше не используется в меню, но если вдруг нужен как фолбэк:
+        messagebox.showwarning("Запуск", "Модуль Заявок должен быть встроен в TabelSuite. Проверьте импорт.")
 
     def run_converter_exe(self):
-        try:
-            p = exe_dir() / CONVERTER_EXE
-            if not p.exists():
-                messagebox.showwarning("Конвертер", f"Не найден {CONVERTER_EXE} рядом с программой.")
-                return
-            subprocess.Popen([str(p)], shell=False)
-        except Exception as e:
-            messagebox.showerror("Конвертер", f"Не удалось запустить конвертер:\n{e}")
+        # Этот метод больше не используется в меню, но если вдруг нужен как фолбэк:
+        messagebox.showwarning("Запуск", "Модуль Конвертера должен быть встроен в TabelSuite. Проверьте импорт.")
 
+
+# --- Секция запуска (CLEANUP) ---
 if __name__ == "__main__":
-    if pd is None:
-        # Проверка Pandas при старте
-        messagebox.showerror("Ошибка зависимостей", "Библиотека 'pandas' не найдена. Пожалуйста, установите ее (pip install pandas).")
-        sys.exit(1)
-        
+    # 1. Удаляем проверку 'if pd is None:'
+    # В собранном EXE Pandas будет включен, а в среде разработки это задача разработчика.
+    
     app = MainApp()
     app.mainloop()
