@@ -1,1 +1,6 @@
 openpyxl==3.1.2
+Pillow  # Если вы используете логотип и PIL/ImageTk
+# ... другие ваши модули (например, SpecialOrders, BudgetAnalyzer)
+#
+# Добавляем Pandas
+pandas
