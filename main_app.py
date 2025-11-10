@@ -1589,21 +1589,36 @@ class MainApp(tk.Tk):
     # --- МЕТОДЫ-УТИЛИТЫ ---
 
     def _show_page(self, key: str, builder):
-        # 1. Удаляем все из контейнера self.content
+        # 1. Удаляем страницу из кеша, если она там есть
+        if key in self._pages:
+            try:
+                self._pages[key].destroy()
+            except:
+                pass
+            del self._pages[key]
+    
+        # 2. Удаляем все из контейнера self.content
         for w in self.content.winfo_children():
             try: 
                 w.destroy()
             except Exception:
                 pass
-        
-        # 2. Создаем новую страницу, ПЕРЕДАВАЯ КОНТЕЙНЕР self.content КАК МАСТЕР
-        page = builder(self.content) 
-        
-        # 3. Размещаем новую страницу внутри контейнера self.content
-        page.grid(row=0, column=0, sticky="nsew") 
-        self.content.grid_rowconfigure(0, weight=1)
-        self.content.grid_columnconfigure(0, weight=1)
-        self._pages[key] = page
+    
+        # 3. Принудительно обновляем интерфейс после удаления
+        self.content.update()
+    
+        # 4. Создаем новую страницу с небольшой задержкой
+        def create_page():
+            try:
+                page = builder(self.content) 
+                page.pack(fill="both", expand=True)
+                self._pages[key] = page
+                self.update_idletasks()
+            except Exception as e:
+                print(f"Ошибка создания страницы {key}: {e}")
+    
+        # 5. Создаем страницу с минимальной задержкой
+        self.after(1, create_page)
 
     def show_home(self):
         self._show_page("home", lambda parent: HomePage(parent))
@@ -1739,7 +1754,6 @@ class MainApp(tk.Tk):
         # КОНТЕЙНЕР (ЦЕНТРАЛЬНАЯ ОБЛАСТЬ)
         self.content = tk.Frame(self, bg="#f7f7f7")
         self.content.pack(fill="both", expand=True)
-        self._pages: Dict[str, tk.Widget] = {}
 
         # Подвал (Копирайт)
         footer = tk.Frame(self)
