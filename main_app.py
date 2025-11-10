@@ -1679,7 +1679,7 @@ class MainApp(tk.Tk):
         tk.Label(footer, text="Разработал Алексей Зезюкин, АНО МЛСТ 2025",
                  font=("Segoe UI", 8), fg="#666").pack(side="right")
 
-        self.show_home()
+        self.after(0, self.show_home) 
 
     def run_special_orders_exe(self):
         # Этот метод больше не используется в меню, но если вдруг нужен как фолбэк:
