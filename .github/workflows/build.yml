@@ -40,16 +40,14 @@ jobs:
         shell: pwsh
         run: |
           # 1. Основные аргументы: -D (onedir) для минимизации размера
-          #    Если хотите только один файл, используйте -F
           $args = @("-D", "-w", "--clean", "-n", "TabelSuite") 
 
           # 2. Явное включение всех дочерних скриптов (плагинов)
-          #    Это заставляет PyInstaller анализировать их зависимости (Openpyxl, Pandas и т.д.)
           $args += @("--hidden-import=BudgetAnalyzer", 
                     "--hidden-import=SpecialOrders", 
                     "--hidden-import=timesheet_transformer")
 
-          # 3. Обеспечение включения Pandas/Openpyxl (для главного меню и аналитики)
+          # 3. Обеспечение включения Pandas/Openpyxl 
           $args += @("--collect-all", "pandas",
                     "--collect-all", "openpyxl")
           
@@ -60,15 +58,14 @@ jobs:
             Write-Host "icon.ico not found: building TabelSuite without custom icon"
           }
           
-          # Указываем PyInstaller, что BudgetAnalyzer.py, SpecialOrders.py, timesheet_transformer.py 
-          # являются вспомогательными файлами для main_app.py
+          # Указываем PyInstaller, что дочерние модули являются вспомогательными
           $args += @("--collect-all", "BudgetAnalyzer",
                     "--collect-all", "SpecialOrders",
                     "--collect-all", "timesheet_transformer",
                     "main_app.py")
           
-          # Выполняем PyInstaller с помощью оператора вызова (&)
-          & pyinstaller $args
+          # Выполняем PyInstaller через python -m
+          & python -m PyInstaller $args # <-- КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ
 
 
       - name: Upload artifacts
