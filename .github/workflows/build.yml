@@ -87,71 +87,73 @@ jobs:
           Get-Content assets_logo.py -TotalCount 3
       # -----------------------------------------------------------------
 
-      - name: Build TabelSuite (main menu, windowed)
+       - name: Build TabelSuite (main menu, windowed)
         shell: pwsh
         run: |
-          $cmd = "pyinstaller -F -w --clean "
+          # Собираем базовые аргументы
+          $args = @("-F", "-w", "--clean", "-n", "TabelSuite", "main_app.py")
+          
+          # Добавляем скрытые импорты
+          $args += @("--hidden-import=pandas", 
+                    "--hidden-import=openpyxl", 
+                    "--hidden-import=BudgetAnalyzer", 
+                    "--hidden-import=SpecialOrders", 
+                    "--hidden-import=timesheet_transformer")
+          
+          # Добавляем иконку, если она есть
           if (Test-Path "icon.ico") {
-            $cmd += "-i icon.ico "
+            $args += @("-i", "icon.ico")
           } else {
             Write-Host "icon.ico not found: building TabelSuite without custom icon"
           }
           
-          # Сборка основной команды PyInstaller с использованием корректных переносов
-          $cmd += "--hidden-import=pandas `
-                  --hidden-import=openpyxl `
-                  --hidden-import=BudgetAnalyzer `
-                  --hidden-import=SpecialOrders `
-                  --hidden-import=timesheet_transformer `
-                  -n TabelSuite main_app.py"
-          
-          # Запуск команды
-          Invoke-Expression $cmd
+          # Выполняем PyInstaller с помощью оператора вызова (&) и массива аргументов
+          & pyinstaller $args
 
 
       - name: Build TabelConverter (converter, windowed)
         shell: pwsh
         run: |
-          $cmd = "pyinstaller -F -w --clean "
+          $args = @("-F", "-w", "--clean", "-n", "TabelConverter", "timesheet_transformer.py")
+          $args += @("--hidden-import=tkinter", "--hidden-import=openpyxl")
+          
           if (Test-Path "icon2.ico") {
-            $cmd += "-i icon2.ico "
+            $args += @("-i", "icon2.ico")
           } else {
             Write-Host "icon2.ico not found: building TabelConverter without custom icon"
           }
-          $cmd += "--hidden-import=tkinter `
-                  --hidden-import=openpyxl `
-                  -n TabelConverter timesheet_transformer.py"
-          Invoke-Expression $cmd
+          
+          & pyinstaller $args
 
 
       - name: Build SpecialOrders (orders module, windowed)
         shell: pwsh
         run: |
-          $cmd = "pyinstaller -F -w --clean "
+          $args = @("-F", "-w", "--clean", "-n", "SpecialOrders", "SpecialOrders.py")
+          $args += @("--hidden-import=tkinter", "--hidden-import=openpyxl")
+          
           if (Test-Path "icon2.ico") {
-            $cmd += "-i icon2.ico "
+            $args += @("-i", "icon2.ico")
           } else {
             Write-Host "icon2.ico not found: building SpecialOrders without custom icon"
           }
-          $cmd += "--hidden-import=tkinter `
-                  --hidden-import=openpyxl `
-                  -n SpecialOrders SpecialOrders.py"
-          Invoke-Expression $cmd
+          
+          & pyinstaller $args
 
 
       - name: Build BudgetAnalyzer (windowed)
         shell: pwsh
         run: |
-          $cmd = "pyinstaller -F -w --clean "
+          $args = @("-F", "-w", "--clean", "-n", "BudgetAnalyzer", "BudgetAnalyzer.py")
+          $args += @("--hidden-import=tkinter", "--hidden-import=pandas")
+          
           if (Test-Path "icon2.ico") {
-            $cmd += "-i icon2.ico "
+            $args += @("-i", "icon2.ico")
           } else {
             Write-Host "icon2.ico not found: building BudgetAnalyzer without custom icon"
           }
-          $cmd += "--hidden-import=tkinter `
-                  --hidden-import=pandas `
-                  -n BudgetAnalyzer BudgetAnalyzer.py"
-          Invoke-Expression $cmd
+          
+          & pyinstaller $args
 
       - name: List dist
         shell: pwsh
