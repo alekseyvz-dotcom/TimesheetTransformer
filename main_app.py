@@ -104,12 +104,7 @@ def embedded_logo_image(parent, max_w=360, max_h=160):
     b64 = _LOGO_BASE64
 
     if not b64:
-        try:
-            import urllib.request
-            data = urllib.request.urlopen(RAW_LOGO_URL, timeout=5).read()
-            b64 = base64.b64encode(data).decode("ascii")
-        except Exception:
-            b64 = TINY_PNG_BASE64
+        b64 = TINY_PNG_BASE64
 
     if Image and ImageTk:
         try:
