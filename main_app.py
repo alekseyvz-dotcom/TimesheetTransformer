@@ -187,7 +187,6 @@ def set_selected_department_in_config(dep: str):
     cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = dep or "Все"
     write_config(cfg)
     
-# --- ЛОГИКА ЛОГОТИПА ---
 def embedded_logo_image(parent, max_w=360, max_h=160):
     b64 = _LOGO_BASE64
 
@@ -840,7 +839,6 @@ class TimesheetPage(tk.Frame):
         self.DAY_ENTRY_FONT = ("Segoe UI", 8)
         self._fit_job = None
         
-        # Инициализация пустых данных (для предотвращения NameError)
         self.employees, self.objects = [], []
         self.emp_names, self.emp_info, self.emp_dep_map, self.departments = [], {}, {}, ["Все"]
         self.addr_to_ids, self.address_options = {}, []
@@ -863,7 +861,6 @@ class TimesheetPage(tk.Frame):
             self.employees = employees
             self.objects = objects
             
-            # Обработка данных для UI (карты, департаменты)
             self.emp_names = [fio for (fio, _, _, _) in self.employees]
             self.emp_info = {fio: (tbn, pos) for (fio, tbn, pos, _) in self.employees} 
             self.emp_dep_map = {fio: dep for (fio, _, _, dep) in self.employees}
@@ -890,16 +887,16 @@ class TimesheetPage(tk.Frame):
     def _finalize_ui_build(self):
         """Построение/обновление UI после загрузки данных (выполняется в главном потоке)."""
         
-        # 1. Удаляем временный индикатор
         try:
+            # Уничтожаем загрузочный фрейм
             self.loading_frame.destroy()
         except:
             pass
         
-        # 2. Строим основной UI, используя уже загруженные данные
+        # 2. Строим основной UI
         self._build_ui()
         
-        # 3. Загружаем существующие строки (если есть)
+        # 3. Загружаем существующие строки
         self._load_existing_rows()
         
         # 4. Привязываем остальные обработчики
@@ -911,7 +908,7 @@ class TimesheetPage(tk.Frame):
         top = tk.Frame(self)
         top.pack(fill="x", padx=8, pady=8)
         
-        # --- НАСТРОЙКА ВЕСОВ КОЛОНОК В top ---
+        # --- НАСТРОЙКА ВЕСОВ КОЛОНОК В top (Увеличиваем вес колонок 1 и 5 для растяжения) ---
         for col in range(8):
             weight = 0
             if col == 1 or col == 5:
@@ -919,7 +916,7 @@ class TimesheetPage(tk.Frame):
             top.grid_columnconfigure(col, weight=weight)
         # ------------------------------------
 
-        # ROW 0
+        # ROW 0: Подразделение
         tk.Label(top, text="Подразделение:").grid(row=0, column=0, sticky="w")
         deps = self.departments or ["Все"]
         self.cmb_department = ttk.Combobox(top, state="readonly", values=deps, width=48)
@@ -931,7 +928,7 @@ class TimesheetPage(tk.Frame):
             self.cmb_department.set(deps[0])
         self.cmb_department.bind("<<ComboboxSelected>>", lambda e: self._on_department_select())
 
-        # ROW 1
+        # ROW 1: Месяц, Год, Адрес, ID объекта
         tk.Label(top, text="Месяц:").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(8, 0))
         self.cmb_month = ttk.Combobox(top, state="readonly", width=12, values=[month_name_ru(i) for i in range(1, 13)])
         self.cmb_month.grid(row=1, column=1, sticky="w", pady=(8, 0))
@@ -959,7 +956,7 @@ class TimesheetPage(tk.Frame):
         self.cmb_object_id.grid(row=1, column=7, sticky="w", pady=(8, 0))
         self.cmb_object_id.bind("<<ComboboxSelected>>", lambda e: self._load_existing_rows())
 
-        # ROW 2 (Новый сотрудник)
+        # ROW 2: ФИО, Таб.№, Должность
         tk.Label(top, text="ФИО:").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.fio_var = tk.StringVar()
         self.cmb_fio = AutoCompleteCombobox(top, textvariable=self.fio_var, width=30)
@@ -976,10 +973,8 @@ class TimesheetPage(tk.Frame):
         self.ent_pos = ttk.Entry(top, textvariable=self.pos_var, width=40, state="readonly")
         self.ent_pos.grid(row=2, column=5, sticky="w", pady=(8, 0))
 
-        # ROW 3 (Кнопки действий)
+        # ROW 3: Кнопки действий
         btns = tk.Frame(top)
-        # ВАЖНО: sticky="w" предотвращает растягивание кнопок на всю ширину top, 
-        # но мы используем columnconfigure внутри btns для управления кнопками
         btns.grid(row=3, column=0, columnspan=8, sticky="w", pady=(8, 0))
         
         for col in range(8):
@@ -1022,19 +1017,15 @@ class TimesheetPage(tk.Frame):
         self.main_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=self.hscroll.set)
         self.table.bind("<Configure>", self._on_scroll_frame_configure)
 
-        # Создаём шапку в первой строке таблицы
         self._configure_table_columns()
         self._build_header_row()
 
-        # Обработчики колеса мыши
         self.main_canvas.bind("<MouseWheel>", self._on_wheel)
         self.main_canvas.bind("<Shift-MouseWheel>", self._on_shift_wheel)
         self.bind_all("<MouseWheel>", self._on_wheel_anywhere)
 
-        # Коллекция строк
         self.rows: List[RowWidget] = []
 
-        # Нижняя панель
         bottom = tk.Frame(self)
         bottom.pack(fill="x", padx=8, pady=(0, 8))
         self.lbl_object_total = tk.Label(bottom, text="Сумма: сотрудников 0 | дней 0 | часов 0",
