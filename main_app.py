@@ -1589,36 +1589,27 @@ class MainApp(tk.Tk):
     # --- МЕТОДЫ-УТИЛИТЫ ---
 
     def _show_page(self, key: str, builder):
-        # 1. Удаляем страницу из кеша, если она там есть
-        if key in self._pages:
-            try:
-                self._pages[key].destroy()
-            except:
-                pass
-            del self._pages[key]
-    
-        # 2. Удаляем все из контейнера self.content
+        # 1. Удаляем все из контейнера self.content
         for w in self.content.winfo_children():
             try: 
                 w.destroy()
             except Exception:
                 pass
     
-        # 3. Принудительно обновляем интерфейс после удаления
-        self.content.update()
+        # 2. Обновляем интерфейс
+        self.content.update_idletasks()
     
-        # 4. Создаем новую страницу с небольшой задержкой
-        def create_page():
-            try:
-                page = builder(self.content) 
-                page.pack(fill="both", expand=True)
-                self._pages[key] = page
-                self.update_idletasks()
-            except Exception as e:
-                print(f"Ошибка создания страницы {key}: {e}")
-    
-        # 5. Создаем страницу с минимальной задержкой
-        self.after(1, create_page)
+        # 3. Создаем новую страницу
+        try:
+            page = builder(self.content) 
+            page.pack(fill="both", expand=True)
+            self._pages[key] = page
+        except Exception as e:
+            print(f"Ошибка создания страницы {key}: {e}")
+            traceback.print_exc()
+            # В случае ошибки показываем домашнюю страницу
+            if key != "home":
+                self.show_home()
 
     def show_home(self):
         self._show_page("home", lambda parent: HomePage(parent))
@@ -1701,6 +1692,7 @@ class MainApp(tk.Tk):
         s = ttk.Style(self)
         s.configure('Accent.TButton', background='#4CAF50', foreground='black', font=('Segoe UI', 9, 'bold'))
         s.map('Accent.TButton', background=[('active', '#66BB6A')])
+        self._pages: Dict[str, tk.Widget] = {}
 
         # Меню
         menubar = tk.Menu(self)
