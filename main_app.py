@@ -750,6 +750,7 @@ class HoursFillDialog(simpledialog.Dialog):
             d = int(self.spn_day.get())
             if not (1 <= d <= 31):
                 raise ValueError
+            return True
         except Exception:
             messagebox.showwarning("Проставить часы", "День должен быть числом от 1 до 31.")
             return False
@@ -857,10 +858,8 @@ class TimesheetPage(tk.Frame):
     def _initial_load_thread(self):
         """Блокирующий поток для загрузки данных и построения карт."""
         try:
-            # Блокирующий вызов: загрузка данных
             employees, objects = load_spravochnik_remote_or_local(self.spr_path)
             
-            # Сохранение данных
             self.employees = employees
             self.objects = objects
             
@@ -881,7 +880,6 @@ class TimesheetPage(tk.Frame):
             addresses_set = set(self.addr_to_ids.keys()) | {addr for _, addr in self.objects if addr}
             self.address_options = sorted(addresses_set)
             
-            # 3. Переход в главный поток для построения UI
             self.after(0, self._finalize_ui_build)
             
         except Exception as e:
@@ -908,19 +906,20 @@ class TimesheetPage(tk.Frame):
         self.bind("<Configure>", self._on_window_configure)
         self.after(120, self._auto_fit_columns)
 
-    # --- ВОССТАНОВЛЕНИЕ КОДА TimesheetPage._build_ui ---
     def _build_ui(self):
         
         top = tk.Frame(self)
         top.pack(fill="x", padx=8, pady=8)
-
+        
+        # --- НАСТРОЙКА ВЕСОВ КОЛОНОК В top ---
         for col in range(8):
-            # Колонка 5 (Адрес) и, возможно, 1 (Подразделение) должны быть растягиваемыми
             weight = 0
             if col == 1 or col == 5:
                 weight = 1
             top.grid_columnconfigure(col, weight=weight)
+        # ------------------------------------
 
+        # ROW 0
         tk.Label(top, text="Подразделение:").grid(row=0, column=0, sticky="w")
         deps = self.departments or ["Все"]
         self.cmb_department = ttk.Combobox(top, state="readonly", values=deps, width=48)
@@ -932,6 +931,7 @@ class TimesheetPage(tk.Frame):
             self.cmb_department.set(deps[0])
         self.cmb_department.bind("<<ComboboxSelected>>", lambda e: self._on_department_select())
 
+        # ROW 1
         tk.Label(top, text="Месяц:").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(8, 0))
         self.cmb_month = ttk.Combobox(top, state="readonly", width=12, values=[month_name_ru(i) for i in range(1, 13)])
         self.cmb_month.grid(row=1, column=1, sticky="w", pady=(8, 0))
@@ -959,7 +959,7 @@ class TimesheetPage(tk.Frame):
         self.cmb_object_id.grid(row=1, column=7, sticky="w", pady=(8, 0))
         self.cmb_object_id.bind("<<ComboboxSelected>>", lambda e: self._load_existing_rows())
 
-        # Row 2 (Новый сотрудник)
+        # ROW 2 (Новый сотрудник)
         tk.Label(top, text="ФИО:").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.fio_var = tk.StringVar()
         self.cmb_fio = AutoCompleteCombobox(top, textvariable=self.fio_var, width=30)
@@ -976,21 +976,22 @@ class TimesheetPage(tk.Frame):
         self.ent_pos = ttk.Entry(top, textvariable=self.pos_var, width=40, state="readonly")
         self.ent_pos.grid(row=2, column=5, sticky="w", pady=(8, 0))
 
-        # Row 3 (Кнопки действий)
+        # ROW 3 (Кнопки действий)
         btns = tk.Frame(top)
+        # ВАЖНО: sticky="w" предотвращает растягивание кнопок на всю ширину top, 
+        # но мы используем columnconfigure внутри btns для управления кнопками
         btns.grid(row=3, column=0, columnspan=8, sticky="w", pady=(8, 0))
-
-        for col in range(8):
-            btns.grid_columnconfigure(col, weight=1) # Даем равный вес всем 8 колонкам кнопок
         
-        # ВОССТАНОВЛЕННЫЙ БЛОК КНОПОК
+        for col in range(8):
+            btns.grid_columnconfigure(col, weight=1)
+
         ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
         ttk.Button(btns, text="Добавить подразделение", command=self.add_department_all).grid(row=0, column=1, padx=4)
+        
         ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=2, padx=4)
         ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=3, padx=4)
         ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=4, padx=4)
         
-        # Обновление справочника (вызывает асинхронную загрузку)
         ttk.Button(btns, text="Обновить справочник", command=lambda: threading.Thread(target=self._initial_load_thread, daemon=True).start())\
             .grid(row=0, column=5, padx=4)
             
@@ -999,7 +1000,7 @@ class TimesheetPage(tk.Frame):
         self.btn_save = ttk.Button(btns, text="Сохранить", command=self.save_all, style="Accent.TButton")
         self.btn_save.grid(row=0, column=7, padx=8)
         
-        # Основной контейнер с прокруткой
+        # Основной контейнер с прокруткой (растягивается на всю оставшуюся высоту TimesheetPage)
         main_frame = tk.Frame(self)
         main_frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
@@ -1041,17 +1042,6 @@ class TimesheetPage(tk.Frame):
         self.lbl_object_total.pack(side="left")
 
         self._on_department_select()
-
-    # ... (Остальные методы TimesheetPage)
-    
-    # ... (Код TimesheetPage, RowWidget, Dialogs и т.д. без изменений)
-    
-    # (КОД RowWidget, CopyFromDialog, HoursFillDialog, AutoCompleteCombobox, HomePage, perform_summary_export)
-    # ... (Весь этот код остается как в последней полной версии)
-
-    # ... (Все методы TimesheetPage, кроме тех, что мы изменили выше) ...
-    
-    # ИСХОДНЫЙ КОД MainApp:
     
 class MainApp(tk.Tk):
     # --- МЕТОДЫ-УТИЛИТЫ ---
