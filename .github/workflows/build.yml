@@ -1,4 +1,4 @@
-name: Build EXE (Unified TabelSuite)
+name: Build EXE (Suite + Converter + Orders)
 
 on:
   workflow_dispatch:
@@ -8,12 +8,11 @@ on:
       - timesheet_transformer.py
       - SpecialOrders.py
       - assets_logo.py
-      - BudgetAnalyzer.py
+      - BudgetAnalyzer.py. 
       - requirements.txt
       - icon.ico
       - icon2.ico
       - .github/workflows/build.yml
-      - src/**
 
 concurrency:
   group: build-${{ github.ref }}
@@ -28,11 +27,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Изменено на 3.10 для лучшей совместимости с Pandas/PyInstaller
-      - name: Set up Python 3.10
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
       - name: Cache pip
         uses: actions/cache@v4
@@ -44,10 +42,9 @@ jobs:
       - name: Install dependencies
         shell: pwsh
         run: |
-          # Устанавливаем все зависимости, включая Pandas, Openpyxl и PyInstaller
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install pyinstaller
+          pip install -r requirements.txt
+          pip install pyinstaller
 
       - name: Clean previous build folders
         shell: pwsh
@@ -83,46 +80,58 @@ jobs:
         run: |
           Get-Content assets_logo.py -TotalCount 3
 
-      - name: Build Unified TabelSuite Executable (Using -D for size optimization)
+      - name: Build TabelSuite (main menu, windowed)
         shell: pwsh
         run: |
-          # Основные аргументы: -D (OneDir) для минимизации размера
-          $args = @("-D", "-w", "--clean", "-n", "TabelSuite") 
-          
-          # Убеждаемся, что PyInstaller включит большие и сложно импортируемые пакеты
-          $args += @("--collect-all", "pandas",
-                    "--collect-all", "openpyxl")
-          
-          # Явно добавляем дочерние скрипты, чтобы PyInstaller проанализировал их код
-          # и включил их как модули, доступные для импорта в main_app.py
-          $args += @("--hidden-import=BudgetAnalyzer", 
-                    "--hidden-import=SpecialOrders", 
-                    "--hidden-import=timesheet_transformer")
-          
-          # Добавляем иконку и основной скрипт
           if (Test-Path "icon.ico") {
-            $args += @("-i", "icon.ico")
+            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=assets_logo -i icon.ico -n TabelSuite main_app.py
           } else {
             Write-Host "icon.ico not found: building TabelSuite without custom icon"
+            pyinstaller -F -w --clean --hidden-import=tkinter --hidden-import=assets_logo -n TabelSuite main_app.py
           }
           
-          $args += @("main_app.py")
-          
-          # Выполняем PyInstaller через python -m
-          python -m PyInstaller $args
+      - name: Build TabelConverter (converter, windowed)
+        shell: pwsh
+        run: |
+          if (Test-Path "icon2.ico") {
+            pyinstaller -F -w --clean --hidden-import=tkinter -i icon2.ico -n TabelConverter timesheet_transformer.py
+          } else {
+            Write-Host "icon2.ico not found: building TabelConverter without custom icon"
+            pyinstaller -F -w --clean --hidden-import=tkinter -n TabelConverter timesheet_transformer.py
+          }
 
-      # Удалены шаги сборки для Converter, SpecialOrders и BudgetAnalyzer
+      - name: Build SpecialOrders (orders module, windowed)
+        shell: pwsh
+        run: |
+          if (Test-Path "icon2.ico") {
+            pyinstaller -F -w --clean --hidden-import=tkinter -i icon2.ico -n SpecialOrders SpecialOrders.py
+          } else {
+            Write-Host "icon2.ico not found: building SpecialOrders without custom icon"
+            pyinstaller -F -w --clean --hidden-import=tkinter -n SpecialOrders SpecialOrders.py
+          }
+
+      - name: Build BudgetAnalyzer (windowed)
+        shell: pwsh
+        run: |
+          if (Test-Path "icon2.ico") {
+            pyinstaller -F -w --clean --hidden-import=tkinter -i icon2.ico -n BudgetAnalyzer BudgetAnalyzer.py
+          } else {
+            Write-Host "icon2.ico not found: building BudgetAnalyzer without custom icon"
+            pyinstaller -F -w --clean --hidden-import=tkinter -n BudgetAnalyzer BudgetAnalyzer.py
+          }
 
       - name: List dist
         shell: pwsh
         run: Get-ChildItem -Recurse dist
 
-      - name: Compress and Upload Unified Artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          # Загружаем всю папку dist/TabelSuite (папка режима -D)
-          # Пользователь скачает эту папку и запустит TabelSuite.exe внутри нее
-          name: TabelSuite_Unified_Package_D_Mode
-          path: dist/TabelSuite
+          name: TabelSuite_Pack
+          path: |
+            dist/TabelSuite.exe
+            dist/TabelConverter.exe
+            dist/SpecialOrders.exe
+            dist/BudgetAnalyzer.exe
           if-no-files-found: error
           retention-days: 14
