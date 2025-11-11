@@ -1447,7 +1447,7 @@ class TimesheetPage(tk.Frame):
         dep = self.cmb_department.get().strip()
     
         if not addr and not oid:
-        return None
+            return None
     
         y, m = self.get_year_month()
         id_part = oid if oid else safe_filename(addr)
