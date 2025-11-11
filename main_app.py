@@ -1026,12 +1026,12 @@ class TimesheetPage(tk.Frame):
         self._fit_job = None
 
         self._load_spr_data()
-        self._build_ui()
-        # Модель табеля (все строки по объекту/подразделению/периоду)
-        # Каждый элемент: {"fio": str, "tbn": str, "hours": List[Optional[str]] длиной 31}
+        # ИНИЦИАЛИЗИРУЕМ ПАГИНАЦИЮ И МОДЕЛЬ ДО ПОСТРОЕНИЯ UI
         self.model_rows: List[Dict[str, Any]] = []
         self.current_page = 1
-        self.page_size = tk.IntVar(value=50)  # размер страницы: 25/50/100
+        self.page_size = tk.IntVar(value=50)
+
+        self._build_ui()
         # Отрисуем первую пустую страницу
         self._render_page(1)
         self._load_existing_rows()
@@ -2196,7 +2196,15 @@ class MainApp(tk.Tk):
             except Exception:
                 pass
         # построить новый
-        page = builder(self.content)
+        try:
+            page = builder(self.content)
+        except Exception as e:
+            traceback.print_exc()
+            messagebox.showerror("Ошибка", f"Не удалось открыть страницу:\n{e}")
+            # Покажем главную страницу как резерв
+            self.show_home()
+            return
+
         if isinstance(page, tk.Widget) and page.master is self.content:
             try:
                 page.pack_forget()
