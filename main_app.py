@@ -551,6 +551,7 @@ class RowWidget:
         self.widgets: List[tk.Widget] = []
         
         self.parsed_hours_cache: List[ParsedHours] = [ParsedHours() for _ in range(31)]
+        self.table.update_idletasks = lambda: None
 
         # ФИО
         self.lbl_fio = tk.Label(self.table, text=fio, anchor="w", bg=zebra_bg)
@@ -600,6 +601,8 @@ class RowWidget:
         self.btn_del = ttk.Button(self.table, text="Удалить", width=7, command=self.delete_row)
         self.btn_del.grid(row=self.row, column=TS_SCHEMA.OVERTIME_NIGHT + 1, padx=1, pady=0, sticky="nsew")
         self.widgets.append(self.btn_del)
+
+        self.table.update_idletasks = self.table.tk.call
 
     # --- Новая логика для массового копирования (UX) ---
     def _on_paste_in_entry(self, event):
@@ -927,6 +930,73 @@ class AutoCompleteCombobox(ttk.Combobox):
             return
         self["values"] = [x for x in self._all_values if typed.lower() in x.lower()]
 
+class ProgressDialog(tk.Toplevel):
+    def __init__(self, parent, title="Обработка", message="Пожалуйста, ждите..."):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("400x150")
+        self.resizable(False, False)
+        self.grab_set()  # Модальное окно
+        
+        # Центрирование относительно родителя
+        self.transient(parent)
+        parent_x = parent.winfo_rootx()
+        parent_y = parent.winfo_rooty()
+        parent_width = parent.winfo_width()
+        parent_height = parent.winfo_height()
+        x = parent_x + (parent_width // 2) - 200
+        y = parent_y + (parent_height // 2) - 75
+        self.geometry(f"400x150+{x}+{y}")
+        
+        # Интерфейс
+        main_frame = tk.Frame(self, padx=20, pady=20)
+        main_frame.pack(fill="both", expand=True)
+        
+        self.message_label = tk.Label(main_frame, text=message, font=("Segoe UI", 10))
+        self.message_label.pack(pady=(0, 15))
+        
+        # Прогресс-бар
+        self.progress = ttk.Progressbar(main_frame, mode='determinate', length=350)
+        self.progress.pack(pady=(0, 10))
+        
+        # Информация о прогрессе
+        self.info_label = tk.Label(main_frame, text="", font=("Segoe UI", 8), fg="#666")
+        self.info_label.pack()
+        
+        # Кнопка отмены (опционально)
+        self.cancelled = False
+        cancel_frame = tk.Frame(main_frame)
+        cancel_frame.pack(pady=(10, 0))
+        
+        self.cancel_button = ttk.Button(cancel_frame, text="Отмена", command=self.cancel)
+        self.cancel_button.pack()
+        
+    def set_progress(self, value, maximum=100, info_text=""):
+        """Обновляет прогресс-бар"""
+        self.progress['maximum'] = maximum
+        self.progress['value'] = value
+        if info_text:
+            self.info_label.config(text=info_text)
+        self.update_idletasks()
+    
+    def set_message(self, message):
+        """Изменяет основное сообщение"""
+        self.message_label.config(text=message)
+        self.update_idletasks()
+    
+    def cancel(self):
+        """Обработчик отмены"""
+        self.cancelled = True
+        self.cancel_button.config(state="disabled", text="Отменяется...")
+        
+    def close_dialog(self):
+        """Закрывает диалог"""
+        try:
+            self.grab_release()
+            self.destroy()
+        except:
+            pass
+
 
 # ------------- СТРАНИЦЫ И АСИНХРОННАЯ ЗАГРУЗКА -------------
 
@@ -1093,7 +1163,7 @@ class TimesheetPage(tk.Frame):
             tk.Label(top, text="ID объекта:").grid(row=1, column=6, sticky="w", padx=(16, 4), pady=(8, 0))
             self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=18)
             self.cmb_object_id.grid(row=1, column=7, sticky="w", pady=(8, 0))
-            self.cmb_object_id.bind("<<ComboboxSelected>>", lambda e: self._load_existing_rows())
+            self.cmb_object_id.bind("<<ComboboxSelected>>", lambda e: self.after(50, self._load_existing_rows))
 
             # ROW 2: ФИО, Таб.№, Должность
             tk.Label(top, text="ФИО:").grid(row=2, column=0, sticky="w", pady=(8, 0))
@@ -1126,14 +1196,15 @@ class TimesheetPage(tk.Frame):
             ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=2, padx=4)
             ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=3, padx=4)
             ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=4, padx=4)
+            ttk.Button(btns, text="Очистить реестр", command=self.clear_registry).grid(row=0, column=5, padx=4)
             
             ttk.Button(btns, text="Обновить справочник", command=lambda: threading.Thread(target=self._initial_load_thread, daemon=True).start())\
-                .grid(row=0, column=5, padx=4)
+                .grid(row=0, column=6, padx=4)
                 
-            ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=6, padx=4)
+            ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=7, padx=4)
             
             self.btn_save = ttk.Button(btns, text="Сохранить", command=self.save_all, style="Accent.TButton")
-            self.btn_save.grid(row=0, column=7, padx=8)
+            self.btn_save.grid(row=0, column=8, padx=8)
             
             # Основной контейнер с прокруткой (растягивается на всю оставшуюся высоту TimesheetPage)
             main_frame = tk.Frame(self)
@@ -1178,6 +1249,18 @@ class TimesheetPage(tk.Frame):
             print(f"Критическая ошибка в _build_ui: {e}")
             traceback.print_exc()
             raise
+
+    def clear_registry(self):
+        """Полная очистка реестра с подтверждением."""
+        if not self.rows:
+            messagebox.showinfo("Очистка", "Реестр уже пуст")
+            return
+    
+        if messagebox.askyesno("Очистка реестра", 
+                              f"Удалить всех {len(self.rows)} сотрудников из реестра?\n\n"
+                              "Несохраненные данные будут потеряны!"):
+            self._clear_current_rows()
+            messagebox.showinfo("Очистка", "Реестр очищен")
 
     def _configure_table_columns(self):
         """Настройка ширин колонок в таблице."""
@@ -1268,8 +1351,27 @@ class TimesheetPage(tk.Frame):
             else:
                 self.cmb_object_id.configure(values=[])
                 self.cmb_object_id.set("")
-        except Exception:
-            pass
+        
+            # Автоматически загружаем существующие данные
+            self.after(100, self._load_existing_rows)
+        
+        except Exception as e:
+            print(f"Ошибка в _on_address_select: {e}")
+
+def _on_period_change(self):
+    """Обработчик изменения месяца/года."""
+    try:
+        year, month = self.get_year_month()
+        
+        # Обновляем состояние дней для существующих строк
+        for row in self.rows:
+            row.update_days_enabled(year, month)
+        
+        # Автоматически загружаем данные для нового периода
+        self.after(100, self._load_existing_rows)
+        
+    except Exception as e:
+        print(f"Ошибка в _on_period_change: {e}")
 
     def _on_address_change(self):
         """Обработчик изменения адреса при печати."""
@@ -1330,37 +1432,123 @@ class TimesheetPage(tk.Frame):
             messagebox.showerror("Ошибка", f"Не удалось добавить сотрудника: {e}")
 
     def add_department_all(self):
-        """Добавление всех сотрудников подразделения."""
+        """Добавление всех сотрудников подразделения (асинхронно)."""
         try:
             dept = self.cmb_department.get()
             if dept == "Все":
                 messagebox.showinfo("Добавление", "Выберите конкретное подразделение")
                 return
-            
-            added = 0
+        
+            # 1. Подготавливаем список сотрудников для добавления
+            employees_to_add = []
             for fio, tbn, pos, dep in self.employees:
                 if (dep or "").strip() == dept:
                     # Проверка на дубликат
                     exists = any(row.fio() == fio and row.tbn() == tbn for row in self.rows)
                     if not exists:
-                        new_row_index = len(self.rows) + 1
-                        row_widget = RowWidget(
-                            self.table, new_row_index, fio, tbn,
-                            self.get_year_month, self._on_delete_row
-                        )
-                        year, month = self.get_year_month()
-                        row_widget.update_days_enabled(year, month)
-                        self.rows.append(row_widget)
-                        added += 1
-            
-            if added > 0:
-                messagebox.showinfo("Добавление", f"Добавлено сотрудников: {added}")
-                self._recalc_object_total()
-            else:
-                messagebox.showinfo("Добавление", "Все сотрудники подразделения уже добавлены")
-                
+                        employees_to_add.append((fio, tbn))
+        
+            if not employees_to_add:
+                messagebox.showinfo("Добавление", "Все сотрудники подразделения уже добавлены или подразделение пустое")
+                return
+        
+            total_count = len(employees_to_add)
+        
+            # 2. Если сотрудников много, предупреждаем и спрашиваем подтверждение
+            if total_count > 50:
+                if not messagebox.askyesno("Добавление большого количества сотрудников", 
+                                         f"Будет добавлено {total_count} сотрудников.\n"
+                                         f"Это может занять некоторое время.\n\n"
+                                         f"Продолжить?"):
+                    return
+        
+            # 3. Создаем прогресс-диалог
+            progress_dialog = ProgressDialog(
+                self, 
+                "Добавление сотрудников", 
+                f"Добавляем {total_count} сотрудников из подразделения '{dept}'"
+            )
+        
+            # 4. Запускаем асинхронное добавление
+            self._add_employees_async(employees_to_add, progress_dialog)
+        
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось добавить подразделение: {e}")
+
+    def _add_employees_async(self, employees_to_add, progress_dialog):
+        """Асинхронное добавление сотрудников порциями."""
+    
+        # Настройки для асинхронной обработки
+        BATCH_SIZE = 10  # Количество сотрудников в одной порции
+        DELAY_MS = 50    # Задержка между порциями в миллисекундах
+    
+        total_count = len(employees_to_add)
+        added_count = 0
+    
+        def add_batch(start_index):
+            nonlocal added_count
+        
+            # Проверка на отмену
+            if progress_dialog.cancelled:
+                progress_dialog.close_dialog()
+                messagebox.showinfo("Добавление", f"Операция отменена. Добавлено {added_count} из {total_count} сотрудников.")
+                return
+        
+            # Определяем границы текущей порции
+            end_index = min(start_index + BATCH_SIZE, total_count)
+        
+            try:
+                # Добавляем сотрудников из текущей порции
+                for i in range(start_index, end_index):
+                    if progress_dialog.cancelled:
+                        break
+                    
+                    fio, tbn = employees_to_add[i]
+                
+                    # Создание нового виджета строки
+                    new_row_index = len(self.rows) + 1
+                    row_widget = RowWidget(
+                        self.table, new_row_index, fio, tbn,
+                        self.get_year_month, self._on_delete_row
+                    )
+                
+                    year, month = self.get_year_month()
+                    row_widget.update_days_enabled(year, month)
+                
+                    self.rows.append(row_widget)
+                    added_count += 1
+                
+                    # Обновляем прогресс
+                    progress_text = f"Добавлено {added_count} из {total_count} сотрудников"
+                    progress_dialog.set_progress(added_count, total_count, progress_text)
+            
+                # Если еще есть сотрудники для добавления, планируем следующую порцию
+                if end_index < total_count and not progress_dialog.cancelled:
+                    self.after(DELAY_MS, lambda: add_batch(end_index))
+                else:
+                    # Завершение операции
+                    progress_dialog.close_dialog()
+                
+                    if not progress_dialog.cancelled:
+                        # Обновляем итоги
+                        self._recalc_object_total()
+                    
+                        # Прокручиваем к концу списка, чтобы показать новых сотрудников
+                        self.after(100, lambda: self.main_canvas.yview_moveto(1.0))
+                    
+                        # Показываем результат
+                        messagebox.showinfo("Добавление", f"Успешно добавлено {added_count} сотрудников из подразделения '{self.cmb_department.get()}'")
+                    else:
+                        messagebox.showinfo("Добавление", f"Операция отменена. Добавлено {added_count} из {total_count} сотрудников.")
+                    
+            except Exception as e:
+                progress_dialog.close_dialog()
+                messagebox.showerror("Ошибка", f"Произошла ошибка при добавлении сотрудников: {e}")
+                print(f"Ошибка в _add_employees_async: {e}")
+                traceback.print_exc()
+    
+        # Запускаем первую порцию
+        add_batch(0)
 
     def fill_52_all(self):
         """Заполнение 5/2 для всех сотрудников."""
@@ -1543,8 +1731,156 @@ class TimesheetPage(tk.Frame):
 
     def _load_existing_rows(self):
         """Загрузка существующих строк из сохраненного файла."""
-        # TODO: Реализовать загрузку из существующих файлов
-        pass
+        try:
+            year, month = self.get_year_month()
+            address = self.cmb_address.get().strip()
+            object_id = self.cmb_object_id.get().strip()
+        
+            if not address and not object_id:
+                return
+        
+            # Поиск подходящего файла
+            filepath = self._find_existing_file(year, month, address, object_id)
+            if not filepath:
+                return
+            
+            # Очищаем текущие строки перед загрузкой
+            self._clear_current_rows()
+        
+            # Загружаем данные из файла
+            self._load_from_file(filepath, year, month)
+        
+        except Exception as e:
+            print(f"Ошибка загрузки существующих строк: {e}")
+            traceback.print_exc()
+
+    def _find_existing_file(self, year: int, month: int, address: str, object_id: str) -> Optional[Path]:
+        """Поиск существующего файла табеля."""
+        try:
+            month_name = month_name_ru(month)
+        
+            # Возможные варианты имен файлов
+            possible_names = []
+        
+            if object_id and address:
+                possible_names.extend([
+                    f"{safe_filename(object_id)}_{safe_filename(address)}_{month_name}_{year}.xlsx",
+                    f"{safe_filename(address)}_{safe_filename(object_id)}_{month_name}_{year}.xlsx",
+                ])
+        
+            if object_id:
+                possible_names.append(f"{safe_filename(object_id)}_{month_name}_{year}.xlsx")
+            
+            if address:
+                possible_names.append(f"{safe_filename(address)}_{month_name}_{year}.xlsx")
+        
+            # Ищем файл в папке вывода
+            for name in possible_names:
+                filepath = self.out_dir / name
+                if filepath.exists():
+                    return filepath
+        
+            # Если точного совпадения нет, ищем файлы содержащие ключевые слова
+            pattern_parts = []
+            if object_id:
+                pattern_parts.append(safe_filename(object_id).lower())
+            if address:
+                addr_parts = safe_filename(address).lower().split('_')
+                pattern_parts.extend(addr_parts)
+            pattern_parts.extend([month_name.lower(), str(year)])
+        
+            for file_path in self.out_dir.glob("*.xlsx"):
+                if file_path.name.startswith("~"):  # Пропускаем временные файлы Excel
+                    continue
+                
+                filename_lower = file_path.name.lower()
+                # Проверяем, содержит ли имя файла все ключевые части
+                if all(part in filename_lower for part in pattern_parts):
+                    return file_path
+        
+            return None
+        
+        except Exception as e:
+            print(f"Ошибка поиска файла: {e}")
+            return None
+
+    def _load_from_file(self, filepath: Path, target_year: int, target_month: int):
+        """Загружает данные из Excel файла."""
+        try:
+            wb = load_workbook(filepath, read_only=True, data_only=True)
+            ws = wb.active
+        
+            loaded_count = 0
+        
+            # Читаем строки данных (пропускаем заголовок)
+            for row_data in ws.iter_rows(min_row=2, values_only=True):
+                if not row_data or len(row_data) < 7:  # Минимально необходимые колонки
+                    continue
+            
+                try:
+                    # Извлекаем основные данные
+                    file_month = row_data[TS_SCHEMA.MONTH - 1] if len(row_data) >= TS_SCHEMA.MONTH else None
+                    file_year = row_data[TS_SCHEMA.YEAR - 1] if len(row_data) >= TS_SCHEMA.YEAR else None
+                    fio = _s(row_data[TS_SCHEMA.FIO - 1]) if len(row_data) >= TS_SCHEMA.FIO else ""
+                    tbn = _s(row_data[TS_SCHEMA.TBN - 1]) if len(row_data) >= TS_SCHEMA.TBN else ""
+                
+                    # Проверяем соответствие периода
+                    if file_month != target_month or file_year != target_year:
+                        continue
+                    
+                    if not fio:
+                        continue
+                
+                    # Проверка на дубликат
+                    if any(row.fio() == fio and row.tbn() == tbn for row in self.rows):
+                        continue
+                
+                    # Создаем виджет строки
+                    new_row_index = len(self.rows) + 1
+                    row_widget = RowWidget(
+                        self.table, new_row_index, fio, tbn,
+                        self.get_year_month, self._on_delete_row
+                    )
+                
+                    # Загружаем часы по дням (колонки 8-38)
+                    hours_data = []
+                    for day_col in range(TS_SCHEMA.DAILY_HOURS_START, TS_SCHEMA.DAILY_HOURS_START + 31):
+                        if len(row_data) > day_col - 1:
+                            day_value = row_data[day_col - 1]
+                            hours_data.append(_s(day_value) if day_value is not None else "")
+                        else:
+                            hours_data.append("")
+                
+                    # Устанавливаем часы
+                    row_widget.set_hours(hours_data)
+                
+                    # Обновляем состояние дней
+                    row_widget.update_days_enabled(target_year, target_month)
+                
+                    self.rows.append(row_widget)
+                    loaded_count += 1
+                
+                except Exception as e:
+                    print(f"Ошибка загрузки строки: {e}")
+                    continue
+        
+            if loaded_count > 0:
+                self._recalc_object_total()
+                print(f"Загружено {loaded_count} сотрудников из файла {filepath.name}")
+            
+        except Exception as e:
+            print(f"Ошибка чтения файла {filepath}: {e}")
+            messagebox.showerror("Ошибка загрузки", f"Не удалось загрузить файл:\n{filepath.name}\n\nОшибка: {e}")
+
+    def _clear_current_rows(self):
+        """Очищает текущие строки в реестре."""
+        try:
+            for row in self.rows:
+                row.destroy()
+            self.rows.clear()
+            self._recalc_object_total()
+        except Exception as e:
+            print(f"Ошибка очистки строк: {e}")
 
     def _on_window_configure(self, event):
         """Обработчик изменения размера окна."""
