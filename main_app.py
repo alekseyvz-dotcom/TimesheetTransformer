@@ -1504,35 +1504,6 @@ class TimesheetPage(tk.Frame):
 
         add_chunk(0)
 
-    def _on_department_select(self):
-        dep_sel = (self.cmb_department.get() or "Все").strip()
-        set_selected_department_in_config(dep_sel)
-
-        # очистка модели и UI
-        self.model_rows.clear()
-        for r in list(self.rows):
-            r.destroy()
-        self.rows.clear()
-        self._regrid_rows()
-        
-        if dep_sel == "Все":
-            names = [e[0] for e in self.employees]
-        else:
-            names = [e[0] for e in self.employees if len(e) > 3 and (e[3] or "").strip() == dep_sel]
-        seen = set()
-        filtered = []
-        for n in names:
-            if n not in seen:
-                seen.add(n)
-                filtered.append(n)
-        self.cmb_fio.set_completion_list(filtered)
-        cur = self.fio_var.get().strip()
-        if cur and cur not in filtered:
-            self.fio_var.set("")
-            self.ent_tbn.delete(0, "end")
-            self.pos_var.set("")
-            self._load_existing_rows()
-
     def _on_fio_select(self, *_):
         fio = self.fio_var.get().strip()
         tbn, pos = self.emp_info.get(fio, ("", ""))
