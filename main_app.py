@@ -1771,8 +1771,8 @@ class TimesheetPage(tk.Frame):
             self._regrid_rows()
             messagebox.showinfo("Копирование", f"Добавлено сотрудников: {added}")
 
-    except Exception as e:
-        messagebox.showerror("Копирование", f"Ошибка копирования:\n{e}")
+        except Exception as e:
+            messagebox.showerror("Копирование", f"Ошибка копирования:\n{e}")
 
 
     def _content_total_width(self, fio_px: Optional[int] = None) -> int:
