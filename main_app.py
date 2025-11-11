@@ -530,7 +530,7 @@ def perform_summary_export(year: int, month: int, fmt: str = "xlsx") -> Tuple[in
         
         return len(all_rows), [export_path]
 
-# ------------- Ряд реестра (RowWidget) и Диалоги -------------
+# ------------- Ряд реестра (RowWidget) и Диалоги (Сохраненный код) -------------
 
 class RowWidget:
     WEEK_BG_SAT = "#fff8e1"
@@ -551,6 +551,7 @@ class RowWidget:
         self.widgets: List[tk.Widget] = []
         
         self.parsed_hours_cache: List[ParsedHours] = [ParsedHours() for _ in range(31)]
+        self.table.update_idletasks = lambda: None
 
         # ФИО
         self.lbl_fio = tk.Label(self.table, text=fio, anchor="w", bg=zebra_bg)
@@ -600,6 +601,8 @@ class RowWidget:
         self.btn_del = ttk.Button(self.table, text="Удалить", width=7, command=self.delete_row)
         self.btn_del.grid(row=self.row, column=TS_SCHEMA.OVERTIME_NIGHT + 1, padx=1, pady=0, sticky="nsew")
         self.widgets.append(self.btn_del)
+
+        self.table.update_idletasks = self.table.tk.call
 
     # --- Новая логика для массового копирования (UX) ---
     def _on_paste_in_entry(self, event):
@@ -755,6 +758,7 @@ class RowWidget:
         if hasattr(self.table.master.master, '_recalc_object_total'):
             self.table.master.master._recalc_object_total()
 
+
     def fill_52(self):
         y, m = self.get_year_month()
         days = month_days(y, m)
@@ -780,7 +784,7 @@ class RowWidget:
     def delete_row(self):
         self.on_delete(self)
 
-# ------------- Диалоги -------------
+# ------------- Диалоги и прочее (Сохраненный код) -------------
 
 class CopyFromDialog(simpledialog.Dialog):
     def __init__(self, parent, init_year: int, init_month: int):
@@ -993,7 +997,8 @@ class ProgressDialog(tk.Toplevel):
         except:
             pass
 
-# ------------- СТРАНИЦЫ -------------
+
+# ------------- СТРАНИЦЫ И АСИНХРОННАЯ ЗАГРУЗКА -------------
 
 class HomePage(tk.Frame):
     def __init__(self, master):
@@ -1009,6 +1014,7 @@ class HomePage(tk.Frame):
             .pack(anchor="center", pady=(4, 6))
         tk.Label(center, text="Выберите раздел в верхнем меню.\nОбъектный табель → Создать — для работы с табелями.",
                  font=("Segoe UI", 10), fg="#444", bg="#f7f7f7", justify="center").pack(anchor="center")
+
 
 class TimesheetPage(tk.Frame):
     COLPX = {"fio": 200, "tbn": 100, "day": 36, "days": 46, "hours": 56, "btn52": 40, "del": 66}
@@ -1031,6 +1037,9 @@ class TimesheetPage(tk.Frame):
         self.employees, self.objects = [], []
         self.emp_names, self.emp_info, self.emp_dep_map, self.departments = [], {}, {}, ["Все"]
         self.addr_to_ids, self.address_options = {}, []
+        
+        # Флаг для предотвращения двойной инициализации
+        self._ui_built = False
         
         # 1. Создаем временный индикатор загрузки
         self.loading_frame = tk.Frame(self, bg="#f7f7f7")
@@ -1083,6 +1092,11 @@ class TimesheetPage(tk.Frame):
     def _finalize_ui_build(self):
         """Построение/обновление UI после загрузки данных (выполняется в главном потоке)."""
         
+        # Предотвращаем двойную инициализацию UI
+        if self._ui_built:
+            self._update_data_only()
+            return
+            
         try:
             # Уничтожаем загрузочный фрейм
             self.loading_frame.destroy()
@@ -1092,6 +1106,7 @@ class TimesheetPage(tk.Frame):
         try:
             # 2. Строим основной UI
             self._build_ui()
+            self._ui_built = True
             
             # 3. Загружаем существующие строки
             self._load_existing_rows()
@@ -1105,17 +1120,87 @@ class TimesheetPage(tk.Frame):
             traceback.print_exc()
             messagebox.showerror("Ошибка", f"Произошла ошибка при построении интерфейса: {e}")
 
+    def _update_data_only(self):
+        """Обновляет только данные в существующих виджетах без пересоздания UI."""
+        try:
+            if not self._ui_built:
+                return
+                
+            # Обновляем combobox с подразделениями
+            if hasattr(self, 'cmb_department'):
+                current_dept = self.cmb_department.get()
+                deps = self.departments if self.departments else ["Все"]
+                self.cmb_department.configure(values=deps)
+                if current_dept in deps:
+                    self.cmb_department.set(current_dept)
+                else:
+                    self.cmb_department.set(deps[0])
+            
+            # Обновляем combobox с адресами
+            if hasattr(self, 'cmb_address'):
+                current_addr = self.cmb_address.get()
+                addr_options = self.address_options if self.address_options else []
+                self.cmb_address.set_completion_list(addr_options)
+                
+            # Обновляем combobox с ФИО
+            if hasattr(self, 'cmb_fio'):
+                emp_names = self.emp_names if self.emp_names else []
+                self.cmb_fio.set_completion_list(emp_names)
+                
+            print("Справочник обновлен успешно")
+            
+        except Exception as e:
+            print(f"Ошибка обновления данных: {e}")
+
+    def refresh_spravochnik(self):
+        """Обновление справочника без пересоздания UI."""
+        if not self._ui_built:
+            return
+            
+        def refresh_thread():
+            try:
+                employees, objects = load_spravochnik_remote_or_local(self.spr_path)
+                
+                self.employees = employees
+                self.objects = objects
+                
+                self.emp_names = [fio for (fio, _, _, _) in self.employees]
+                self.emp_info = {fio: (tbn, pos) for (fio, tbn, pos, _) in self.employees} 
+                self.emp_dep_map = {fio: dep for (fio, _, _, dep) in self.employees}
+
+                deps = sorted({(dep or "").strip() for (_, _, _, dep) in self.employees if (dep or "").strip()})
+                self.departments = ["Все"] + deps
+
+                self.addr_to_ids: Dict[str, List[str]] = {}
+                for oid, addr in self.objects:
+                    if not addr: continue
+                    self.addr_to_ids.setdefault(addr, [])
+                    if oid and oid not in self.addr_to_ids[addr]:
+                        self.addr_to_ids[addr].append(oid)
+                addresses_set = set(self.addr_to_ids.keys()) | {addr for _, addr in self.objects if addr}
+                self.address_options = sorted(addresses_set)
+                
+                self.after(0, self._update_data_only)
+                
+            except Exception as e:
+                print(f"Ошибка обновления справочника: {e}")
+                self.after(0, lambda: messagebox.showerror("Ошибка обновления", 
+                                                           f"Не удалось обновить справочник: {e}"))
+        
+        threading.Thread(target=refresh_thread, daemon=True).start()
+
     def _build_ui(self):
         try:
             top = tk.Frame(self)
             top.pack(fill="x", padx=8, pady=8)
             
-            # Настройка весов колонок
+            # --- НАСТРОЙКА ВЕСОВ КОЛОНОК В top (Увеличиваем вес колонок 1 и 5 для растяжения) ---
             for col in range(8):
                 weight = 0
                 if col == 1 or col == 5:
                     weight = 1
                 top.grid_columnconfigure(col, weight=weight)
+            # ------------------------------------
 
             # ROW 0: Подразделение
             tk.Label(top, text="Подразделение:").grid(row=0, column=0, sticky="w")
@@ -1180,8 +1265,7 @@ class TimesheetPage(tk.Frame):
             btns = tk.Frame(top)
             btns.grid(row=3, column=0, columnspan=8, sticky="w", pady=(8, 0))
             
-            # ИСПРАВЛЕНО: увеличено количество колонок до 9
-            for col in range(9):
+            for col in range(9):  # ИСПРАВЛЕНО: увеличено до 9 колонок
                 btns.grid_columnconfigure(col, weight=1)
 
             ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
@@ -1190,17 +1274,16 @@ class TimesheetPage(tk.Frame):
             ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=2, padx=4)
             ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=3, padx=4)
             ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=4, padx=4)
-            ttk.Button(btns, text="Очистить реестр", command=self.clear_registry).grid(row=0, column=5, padx=4)
             
-            ttk.Button(btns, text="Обновить справочник", command=lambda: threading.Thread(target=self._initial_load_thread, daemon=True).start())\
-                .grid(row=0, column=6, padx=4)
+            ttk.Button(btns, text="Обновить справочник", command=self.refresh_spravochnik)\
+                .grid(row=0, column=5, padx=4)
                 
-            ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=7, padx=4)
+            ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=6, padx=4)
             
             self.btn_save = ttk.Button(btns, text="Сохранить", command=self.save_all, style="Accent.TButton")
-            self.btn_save.grid(row=0, column=8, padx=8)
+            self.btn_save.grid(row=0, column=7, padx=8)
             
-            # Основной контейнер с прокруткой
+            # Основной контейнер с прокруткой (растягивается на всю оставшуюся высоту TimesheetPage)
             main_frame = tk.Frame(self)
             main_frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
@@ -1293,7 +1376,7 @@ class TimesheetPage(tk.Frame):
         tk.Label(self.table, text="Удалить", bg=hdr_bg, relief="ridge", bd=1, font=("Arial", 7))\
             .grid(row=0, column=TS_SCHEMA.OVERTIME_NIGHT + 1, sticky="nsew")
 
-    # ============== МЕТОДЫ-ОБРАБОТЧИКИ ===============
+    # ============== НЕДОСТАЮЩИЕ МЕТОДЫ ===============
 
     def get_year_month(self) -> tuple:
         """Возвращает текущий год и месяц."""
@@ -1310,6 +1393,10 @@ class TimesheetPage(tk.Frame):
         try:
             dept = self.cmb_department.get()
             set_selected_department_in_config(dept)
+            
+            # ИСПРАВЛЕНО: Очищаем реестр при смене подразделения
+            if self.rows:
+                self._clear_current_rows()
         except Exception as e:
             print(f"Ошибка в _on_department_select: {e}")
 
@@ -1343,7 +1430,7 @@ class TimesheetPage(tk.Frame):
                 self.cmb_object_id.configure(values=[])
                 self.cmb_object_id.set("")
         
-            # Автоматически загружаем существующие данные
+            # ИСПРАВЛЕНО: Автоматически загружаем существующие данные
             self.after(100, self._load_existing_rows)
         
         except Exception as e:
@@ -1366,8 +1453,8 @@ class TimesheetPage(tk.Frame):
             else:
                 self.ent_tbn.delete(0, tk.END)
                 self.pos_var.set("")
-        except Exception as e:
-            print(f"Ошибка в _on_fio_select: {e}")
+        except Exception:
+            pass
 
     def add_row(self):
         """Добавление новой строки сотрудника."""
@@ -1577,22 +1664,7 @@ class TimesheetPage(tk.Frame):
             return
         
         if messagebox.askyesno("Очистка", "Удалить всех сотрудников из табеля?"):
-            for row in self.rows:
-                row.destroy()
-            self.rows.clear()
-            self._recalc_object_total()
-
-    def clear_registry(self):
-        """Полная очистка реестра с подтверждением."""
-        if not self.rows:
-            messagebox.showinfo("Очистка", "Реестр уже пуст")
-            return
-    
-        if messagebox.askyesno("Очистка реестра", 
-                              f"Удалить всех {len(self.rows)} сотрудников из реестра?\n\n"
-                              "Несохраненные данные будут потеряны!"):
             self._clear_current_rows()
-            messagebox.showinfo("Очистка", "Реестр очищен")
 
     def copy_from_month(self):
         """Копирование сотрудников из другого месяца."""
