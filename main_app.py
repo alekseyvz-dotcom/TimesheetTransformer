@@ -574,6 +574,21 @@ class RowWidget:
         self.update_total()
 
     def update_total(self):
+        # Если страница сообщает о массовой операции — пропускаем тяжелые перекраски,
+        # но все равно посчитаем итоги быстро.
+        parent_page = None
+        try:
+            # self.table — это frame таблицы на странице TimesheetPage
+            parent_page = self.table.master.master.master  # аккуратно: Table -> Canvas window -> main_frame -> Page
+        except Exception:
+            parent_page = None
+
+        fast_mode = False
+        try:
+            fast_mode = bool(getattr(parent_page, "_mass_add_in_progress", False))
+        except Exception:
+            fast_mode = False
+            
         total_hours = 0.0
         total_days = 0
         total_overtime_day = 0.0
@@ -584,7 +599,8 @@ class RowWidget:
         
         for i, e in enumerate(self.day_entries, start=1):
             raw = e.get().strip()
-            self._repaint_day_cell(i - 1, y, m)
+            if not fast_mode:
+                self._repaint_day_cell(i - 1, y, m)
             
             if i <= days_in_m and raw:
                 hours = parse_hours_value(raw)
@@ -683,6 +699,62 @@ class CopyFromDialog(simpledialog.Dialog):
             "with_hours": bool(self.var_copy_hours.get()),
             "mode": self.var_mode.get(),
         }
+
+class BatchAddDialog(tk.Toplevel):
+    def __init__(self, parent, total: int, title: str = "Добавление сотрудников"):
+        super().__init__(parent)
+        self.parent = parent
+        self.total = max(1, int(total))
+        self.done = 0
+        self.cancelled = False
+        self.title(title)
+        self.resizable(False, False)
+        self.grab_set()
+
+        frm = tk.Frame(self, padx=12, pady=12)
+        frm.pack(fill="both", expand=True)
+
+        self.lbl = tk.Label(frm, text=f"Добавлено: 0 из {self.total}")
+        self.lbl.pack(fill="x")
+
+        self.pb = ttk.Progressbar(frm, mode="determinate", maximum=self.total, length=420)
+        self.pb.pack(fill="x", pady=(8, 8))
+
+        self.btn_cancel = ttk.Button(frm, text="Отмена", command=self._on_cancel)
+        self.btn_cancel.pack(anchor="e", pady=(6, 0))
+
+        # позиционируем по центру родителя
+        try:
+            self.update_idletasks()
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            sw = self.winfo_width()
+            sh = self.winfo_height()
+            self.geometry(f"+{px + (pw - sw)//2}+{py + (ph - sh)//2}")
+        except Exception:
+            pass
+
+    def step(self, n: int = 1):
+        if self.cancelled:
+            return
+        self.done += n
+        if self.done > self.total:
+            self.done = self.total
+        self.pb['value'] = self.done
+        self.lbl.config(text=f"Добавлено: {self.done} из {self.total}")
+        self.update_idletasks()
+
+    def _on_cancel(self):
+        self.cancelled = True
+
+    def close(self):
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
 
 class HoursFillDialog(simpledialog.Dialog):
     def __init__(self, parent, max_day: int):
@@ -1192,9 +1264,21 @@ class TimesheetPage(tk.Frame):
 
     def _update_rows_days_enabled(self):
         y, m = self.get_year_month()
-        for r in self.rows:
-            r.set_day_font(self.DAY_ENTRY_FONT)
-            r.update_days_enabled(y, m)
+        CHUNK = 20
+        rows_list = list(self.rows)
+
+        def apply_chunk(idx: int = 0):
+            end = min(idx + CHUNK, len(rows_list))
+            for j in range(idx, end):
+                r = rows_list[j]
+                r.set_day_font(self.DAY_ENTRY_FONT)
+                r.update_days_enabled(y, m)
+            if end < len(rows_list):
+                self.after(1, lambda: apply_chunk(end))
+            else:
+                self._recalc_object_total()
+
+        apply_chunk(0)
 
     def _regrid_rows(self):
         # Перегрид всех строк под заголовком (начиная с 1)
@@ -1265,9 +1349,10 @@ class TimesheetPage(tk.Frame):
 
     def add_department_all(self):
         dep_sel = (self.cmb_department.get() or "Все").strip()
+
         # Подбор списка сотрудников по подразделению
         if dep_sel == "Все":
-            candidates = self.employees[:]  # все сотрудники
+            candidates = self.employees[:]  # все
             if not candidates:
                 messagebox.showinfo("Объектный табель", "Справочник сотрудников пуст.")
                 return
@@ -1281,22 +1366,77 @@ class TimesheetPage(tk.Frame):
 
         # Уникальность по (fio.lower, tbn)
         existing = {(r.fio().strip().lower(), r.tbn().strip()) for r in self.rows}
+
+        # Диалог прогресса и пакетная обработка
+        dlg = BatchAddDialog(self, total=len(candidates), title="Добавление сотрудников")
+        self._mass_add_in_progress = True  # флаг для подавления лишних перерисовок
+    
+        CHUNK = 10  # размер пакета (подберите 10–20)
         added = 0
         y, m = self.get_year_month()
-        for fio, tbn, pos, dep in candidates:
-            key = (fio.strip().lower(), (tbn or "").strip())
-            if key in existing:
-                continue  # пропускаем дубликаты без вопросов
-            row_index = len(self.rows) + 1
-            w = RowWidget(self.table, row_index, fio, tbn, self.get_year_month, self.delete_row)
-            w.set_day_font(self.DAY_ENTRY_FONT)
-            w.update_days_enabled(y, m)
-            self.rows.append(w)
-            existing.add(key)
-            added += 1
 
-        self._regrid_rows()
-        messagebox.showinfo("Объектный табель", f"Добавлено сотрудников: {added}")
+        def add_chunk(start_idx: int = 0):
+            nonlocal added, existing
+            if dlg.cancelled:
+                finalize()
+                return
+
+            end_idx = min(start_idx + CHUNK, len(candidates))
+            for i in range(start_idx, end_idx):
+                fio, tbn, pos, dep = candidates[i]
+                key = (fio.strip().lower(), (tbn or "").strip())
+                if key in existing:
+                    dlg.step(1)
+                    continue
+
+                row_index = len(self.rows) + 1
+                w = RowWidget(self.table, row_index, fio, tbn, self.get_year_month, self.delete_row)
+                w.set_day_font(self.DAY_ENTRY_FONT)
+                # важная оптимизация: не вызываем update_days_enabled на каждом шаге
+                # w.update_days_enabled(y, m)
+                self.rows.append(w)
+                existing.add(key)
+                added += 1
+                dlg.step(1)
+
+            if end_idx >= len(candidates):
+                finalize()
+            else:
+                # планируем следующую порцию
+                self.after(1, lambda: add_chunk(end_idx))
+
+        def finalize():
+            # После окончания добавления — одна массовая настройка дней (в пакетах)
+            def apply_days_chunk(idx: int = 0):
+                if dlg.cancelled:
+                    finish_close()
+                    return
+                end = min(idx + CHUNK, len(self.rows))
+                for j in range(idx, end):
+                    try:
+                        self.rows[j].update_days_enabled(y, m)
+                    except Exception:
+                        pass
+                if end >= len(self.rows):
+                    finish_close()
+                else:
+                    self.after(1, lambda: apply_days_chunk(end))
+
+            def finish_close():
+                self._mass_add_in_progress = False
+                self._regrid_rows()
+                self._recalc_object_total()
+                try:
+                    dlg.close()
+                except Exception:
+                    pass
+                messagebox.showinfo("Объектный табель", f"Добавлено сотрудников: {added}")
+
+            # Запускаем пакетное применение дней
+            apply_days_chunk(0)
+
+        # Стартуем
+        add_chunk(0)
 
     def _on_department_select(self):
         dep_sel = (self.cmb_department.get() or "Все").strip()
