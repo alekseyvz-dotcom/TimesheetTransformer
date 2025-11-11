@@ -9,73 +9,127 @@ import configparser
 import urllib.request
 import urllib.error
 import urllib.parse
-import traceback
-import threading
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple, Optional, Any, Dict, NamedTuple
+from typing import List, Tuple, Optional, Any, Dict
 import base64
-
-# --- Импорты сторонних библиотек ---
+from io import BytesIO
 try:
-    import pandas as pd
-except ImportError:
-    pd = None
-
-# Мягкий импорт модулей
+    from PIL import Image, ImageTk
+except Exception:
+    Image = ImageTk = None
 try:
     import BudgetAnalyzer  # должен содержать create_page(parent)
 except Exception:
     BudgetAnalyzer = None
+
+
+# мягкий импорт модуля (не падает, если переменной нет)
 try:
     import assets_logo as _assets_logo
     _LOGO_BASE64 = getattr(_assets_logo, "LOGO_BASE64", None)
 except Exception:
     _LOGO_BASE64 = None
-try:
-    import SpecialOrders  # должен содержать open_special_orders(parent)
-except Exception:
-    SpecialOrders = None
-try:
-    import timesheet_transformer  # должен содержать open_converter(parent)
-except Exception:
-    timesheet_transformer = None
-    
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog, filedialog
 
-from openpyxl import Workbook, load_workbook
-from openpyxl.utils import get_column_letter
-
-APP_NAME = "Управление строительством (Главное меню)"
-
-# ------------- КОНФИГ, СХЕМЫ И КОНСТАНТЫ -------------
-CONFIG_FILE = "tabel_config.ini"
-CONFIG_SECTION_PATHS = "Paths"
-CONFIG_SECTION_UI = "UI"
-CONFIG_SECTION_INTEGR = "Integrations"
-CONFIG_SECTION_REMOTE = "Remote"
-KEY_SPR = "spravochnik_path"
-KEY_OUTPUT_DIR = "output_dir"
-KEY_EXPORT_PWD = "export_password"
-KEY_PLANNING_PASSWORD = "planning_password"
-KEY_SELECTED_DEP = "selected_department"
-KEY_REMOTE_USE = "use_remote"
-KEY_YA_PUBLIC_LINK = "yadisk_public_link"
-KEY_YA_PUBLIC_PATH = "yadisk_public_path"
-SPRAVOCHNIK_FILE_DEFAULT = "Справочник.xlsx"
-OUTPUT_DIR_DEFAULT = "Объектные_табели"
+# raw-URL на логотип (фолбэк, если _ отсутствует)
 RAW_LOGO_URL = "https://raw.githubusercontent.com/alekseyvz-dotcom/TimesheetTransformer/main/logo.png"
+
+# tiny PNG 1x1 — последний фолбэк, чтобы не падать
 TINY_PNG_BASE64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
     "/w8AAn8B9w3G2kIAAAAASUVORK5CYII="
 )
 
-# ------------- БАЗОВЫЕ УТИЛИТЫ И КОНФИГУРАЦИЯ -------------
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog
+
+from openpyxl import Workbook, load_workbook
+from openpyxl.utils import get_column_letter
+
+# Встроенные модули (если доступны)
+try:
+    import SpecialOrders  # должен содержать open_special_orders(parent)
+except Exception:
+    SpecialOrders = None
+
+try:
+    import timesheet_transformer  # должен содержать open_converter(parent)
+except Exception:
+    timesheet_transformer = None
+try:
+    from PIL import Image, ImageTk
+except Exception:
+    Image = ImageTk = None
+    
+APP_NAME = "Управление строительством (Главное меню)"
+
+# ------------- Конфиг и файлы -------------
+CONFIG_FILE = "tabel_config.ini"
+
+CONFIG_SECTION_PATHS = "Paths"
+CONFIG_SECTION_UI = "UI"
+CONFIG_SECTION_INTEGR = "Integrations"
+CONFIG_SECTION_REMOTE = "Remote"
+
+KEY_SPR = "spravochnik_path"
+KEY_OUTPUT_DIR = "output_dir"
+
+KEY_EXPORT_PWD = "export_password"
+KEY_PLANNING_PASSWORD = "planning_password"
+
+KEY_SELECTED_DEP = "selected_department"
+
+KEY_REMOTE_USE = "use_remote"
+KEY_YA_PUBLIC_LINK = "yadisk_public_link"
+KEY_YA_PUBLIC_PATH = "yadisk_public_path"
+
+# Значения по умолчанию
+SPRAVOCHNIK_FILE_DEFAULT = "Справочник.xlsx"
+OUTPUT_DIR_DEFAULT = "Объектные_табели"
+CONVERTER_EXE = "TabelConverter.exe"  # резервный exe
+
+# ------------- Базовые утилиты -------------
+# python
+def embedded_logo_image(parent, max_w=360, max_h=160):
+    """
+    Источники по приоритету:
+    1) _LOGO_BASE64 из assets_logo.py (если есть)
+    2) RAW-скачивание из GitHub
+    3) tiny PNG
+    """
+    b64 = _LOGO_BASE64
+
+    if not b64:
+        try:
+            import urllib.request
+            data = urllib.request.urlopen(RAW_LOGO_URL, timeout=5).read()
+            b64 = base64.b64encode(data).decode("ascii")
+        except Exception:
+            b64 = TINY_PNG_BASE64
+
+    if Image and ImageTk:
+        try:
+            raw = base64.b64decode(b64.strip())
+            im = Image.open(BytesIO(raw))
+            im.thumbnail((max_w, max_h), Image.LANCZOS)
+            return ImageTk.PhotoImage(im, master=parent)
+        except Exception:
+            pass
+
+    try:
+        ph = tk.PhotoImage(data=b64.strip(), master=parent)
+        w, h = ph.width(), ph.height()
+        k = max(w / max_w, h / max_h, 1)
+        if k > 1:
+            k = max(1, int(k))
+            ph = ph.subsample(k, k)
+        return ph
+    except Exception:
+        return None
+
 
 def exe_dir() -> Path:
-    """Определяет корневую директорию EXE или скрипта."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
@@ -90,25 +144,59 @@ def ensure_config():
         cfg.read(cp, encoding="utf-8")
         changed = False
         # Paths
-        if not cfg.has_section(CONFIG_SECTION_PATHS): cfg[CONFIG_SECTION_PATHS] = {}; changed = True
-        if KEY_SPR not in cfg[CONFIG_SECTION_PATHS]: cfg[CONFIG_SECTION_PATHS][KEY_SPR] = str(exe_dir() / SPRAVOCHNIK_FILE_DEFAULT); changed = True
-        if KEY_OUTPUT_DIR not in cfg[CONFIG_SECTION_PATHS]: cfg[CONFIG_SECTION_PATHS][KEY_OUTPUT_DIR] = str(exe_dir() / OUTPUT_DIR_DEFAULT); changed = True
+        if not cfg.has_section(CONFIG_SECTION_PATHS):
+            cfg[CONFIG_SECTION_PATHS] = {}
+            changed = True
+        if KEY_SPR not in cfg[CONFIG_SECTION_PATHS]:
+            cfg[CONFIG_SECTION_PATHS][KEY_SPR] = str(exe_dir() / SPRAVOCHNIK_FILE_DEFAULT)
+            changed = True
+        if KEY_OUTPUT_DIR not in cfg[CONFIG_SECTION_PATHS]:
+            cfg[CONFIG_SECTION_PATHS][KEY_OUTPUT_DIR] = str(exe_dir() / OUTPUT_DIR_DEFAULT)
+            changed = True
+
         # UI
-        if not cfg.has_section(CONFIG_SECTION_UI): cfg[CONFIG_SECTION_UI] = {}; changed = True
-        if KEY_SELECTED_DEP not in cfg[CONFIG_SECTION_UI]: cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = "Все"; changed = True
+        if not cfg.has_section(CONFIG_SECTION_UI):
+            cfg[CONFIG_SECTION_UI] = {}
+            changed = True
+        if KEY_SELECTED_DEP not in cfg[CONFIG_SECTION_UI]:
+            cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = "Все"
+            changed = True
+
         # Integrations
-        if not cfg.has_section(CONFIG_SECTION_INTEGR): cfg[CONFIG_SECTION_INTEGR] = {}; changed = True
-        if KEY_EXPORT_PWD not in cfg[CONFIG_SECTION_INTEGR]: cfg[CONFIG_SECTION_INTEGR][KEY_EXPORT_PWD] = "2025"; changed = True
-        if KEY_PLANNING_PASSWORD not in cfg[CONFIG_SECTION_INTEGR]: cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_PASSWORD] = "2025"; changed = True
+        if not cfg.has_section(CONFIG_SECTION_INTEGR):
+            cfg[CONFIG_SECTION_INTEGR] = {}
+            changed = True
+        if KEY_EXPORT_PWD not in cfg[CONFIG_SECTION_INTEGR]:
+            cfg[CONFIG_SECTION_INTEGR][KEY_EXPORT_PWD] = "2025"
+            changed = True
+        if KEY_PLANNING_PASSWORD not in cfg[CONFIG_SECTION_INTEGR]:
+            cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_PASSWORD] = "2025" 
+            changed = True
+
         # Remote
-        if not cfg.has_section(CONFIG_SECTION_REMOTE): cfg[CONFIG_SECTION_REMOTE] = {}; changed = True
-        if KEY_REMOTE_USE not in cfg[CONFIG_SECTION_REMOTE]: cfg[CONFIG_SECTION_REMOTE][KEY_REMOTE_USE] = "false"; changed = True
-        if KEY_YA_PUBLIC_LINK not in cfg[CONFIG_SECTION_REMOTE]: cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_LINK] = ""; changed = True
-        if KEY_YA_PUBLIC_PATH not in cfg[CONFIG_SECTION_REMOTE]: cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_PATH] = ""; changed = True
-        # Orders
-        if not cfg.has_section("Orders"): cfg["Orders"] = {}; changed = True
-        if "cutoff_enabled" not in cfg["Orders"]: cfg["Orders"]["cutoff_enabled"] = "false"; changed = True
-        if "cutoff_hour" not in cfg["Orders"]: cfg["Orders"]["cutoff_hour"] = "13"; changed = True
+        if not cfg.has_section(CONFIG_SECTION_REMOTE):
+            cfg[CONFIG_SECTION_REMOTE] = {}
+            changed = True
+        if KEY_REMOTE_USE not in cfg[CONFIG_SECTION_REMOTE]:
+            cfg[CONFIG_SECTION_REMOTE][KEY_REMOTE_USE] = "false"
+            changed = True
+        if KEY_YA_PUBLIC_LINK not in cfg[CONFIG_SECTION_REMOTE]:
+            cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_LINK] = ""
+            changed = True
+        if KEY_YA_PUBLIC_PATH not in cfg[CONFIG_SECTION_REMOTE]:
+            cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_PATH] = ""
+            changed = True
+
+        # Orders — добавляем секцию и дефолты, если их нет (существующие значения не трогаем)
+        if not cfg.has_section("Orders"):
+            cfg["Orders"] = {}
+            changed = True
+        if "cutoff_enabled" not in cfg["Orders"]:
+            cfg["Orders"]["cutoff_enabled"] = "false"
+            changed = True
+        if "cutoff_hour" not in cfg["Orders"]:
+            cfg["Orders"]["cutoff_hour"] = "13"
+            changed = True
 
         if changed:
             with open(cp, "w", encoding="utf-8") as f:
@@ -122,7 +210,7 @@ def ensure_config():
         KEY_OUTPUT_DIR: str(exe_dir() / OUTPUT_DIR_DEFAULT),
     }
     cfg[CONFIG_SECTION_UI] = {KEY_SELECTED_DEP: "Все"}
-    cfg[CONFIG_SECTION_INTEGR] = {KEY_EXPORT_PWD: "2025", KEY_PLANNING_PASSWORD: "2025"}
+    cfg[CONFIG_SECTION_INTEGR] = {KEY_EXPORT_PWD: "2025"}
     cfg[CONFIG_SECTION_REMOTE] = {
         KEY_REMOTE_USE: "false",
         KEY_YA_PUBLIC_LINK: "",
@@ -169,25 +257,8 @@ def set_selected_department_in_config(dep: str):
         cfg[CONFIG_SECTION_UI] = {}
     cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = dep or "Все"
     write_config(cfg)
-    
-def embedded_logo_image(parent, max_w=360, max_h=160):
-    b64 = _LOGO_BASE64
 
-    if not b64:
-        b64 = TINY_PNG_BASE64
-
-    try:
-        ph = tk.PhotoImage(data=base64.b64decode(b64.strip()), master=parent)
-        w, h = ph.width(), ph.height()
-        k = max(w / max_w, h / max_h, 1)
-        if k > 1:
-            k = max(1, int(k))
-            ph = ph.subsample(k, k)
-        return ph
-    except Exception:
-        return None
-
-# ------------- УДАЛЕННЫЙ СПРАВОЧНИК И ДРУГИЕ УТИЛИТЫ -------------
+# ------------- Удалённый справочник: Я.Диск -------------
 
 def fetch_yadisk_public_bytes(public_link: str, public_path: str = "") -> bytes:
     if not public_link:
@@ -280,7 +351,7 @@ def load_spravochnik_remote_or_local(local_path: Path) -> Tuple[List[Tuple[str,s
     wb = load_workbook(local_path, read_only=True, data_only=True)
     return load_spravochnik_from_wb(wb)
 
-# ------------- Утилиты для работы со временем и данными -------------
+# ------------- Общие утилиты -------------
 
 def month_days(year: int, month: int) -> int:
     return calendar.monthrange(year, month)[1]
@@ -376,222 +447,7 @@ def find_logo_path() -> Optional[Path]:
             return p
     return None
 
-# ------------- Диалоги экспорта -------------
-
-class ExportMonthDialog(simpledialog.Dialog):
-    def __init__(self, parent):
-        self.result = None
-        super().__init__(parent, title="Экспорт сводного табеля")
-
-    def body(self, master):
-        tk.Label(master, text="Выберите период для экспорта:").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
-
-        tk.Label(master, text="Месяц:").grid(row=1, column=0, sticky="e", padx=(0, 5))
-        self.cmb_month = ttk.Combobox(master, state="readonly", width=12, 
-                                     values=[month_name_ru(i) for i in range(1, 13)])
-        self.cmb_month.grid(row=1, column=1, sticky="w")
-        self.cmb_month.current(datetime.now().month - 1)
-
-        tk.Label(master, text="Год:").grid(row=2, column=0, sticky="e", padx=(0, 5))
-        self.spn_year = tk.Spinbox(master, from_=2000, to=2100, width=6)
-        self.spn_year.grid(row=2, column=1, sticky="w")
-        self.spn_year.delete(0, "end")
-        self.spn_year.insert(0, str(datetime.now().year))
-
-        tk.Label(master, text="Формат:").grid(row=3, column=0, sticky="e", padx=(0, 5), pady=(10, 0))
-        self.var_fmt = tk.StringVar(value="both")
-        frame_fmt = tk.Frame(master)
-        frame_fmt.grid(row=3, column=1, sticky="w", pady=(10, 0))
-        ttk.Radiobutton(frame_fmt, text="XLSX", value="xlsx", variable=self.var_fmt).pack(anchor="w")
-        ttk.Radiobutton(frame_fmt, text="CSV", value="csv", variable=self.var_fmt).pack(anchor="w")
-        ttk.Radiobutton(frame_fmt, text="Оба (XLSX+CSV)", value="both", variable=self.var_fmt).pack(anchor="w")
-
-        return self.cmb_month
-
-    def validate(self):
-        try:
-            y = int(self.spn_year.get())
-            if not (2000 <= y <= 2100):
-                raise ValueError
-            return True
-        except:
-            messagebox.showwarning("Экспорт", "Введите корректный год (2000–2100).")
-            return False
-
-    def apply(self):
-        self.result = {
-            "year": int(self.spn_year.get()),
-            "month": self.cmb_month.current() + 1,
-            "fmt": self.var_fmt.get()
-        }
-
-# ------------- Функции экспорта -------------
-
-def perform_summary_export(year: int, month: int, fmt: str) -> Tuple[int, List[Path]]:
-    base_out = get_output_dir_from_config()
-    base_out.mkdir(parents=True, exist_ok=True)
-    pattern = f"Объектный_табель_*_{year}_{month:02d}.xlsx"
-    files = list(base_out.glob(pattern))
-    rows = []
-
-    for f in files:
-        try:
-            wb = load_workbook(f, read_only=True, data_only=True)
-        except Exception:
-            continue
-        if "Табель" not in wb.sheetnames:
-            continue
-        ws = wb["Табель"]
-        for r in range(2, ws.max_row + 1):
-            row_oid = (ws.cell(r, 1).value or "")
-            row_addr = (ws.cell(r, 2).value or "")
-            row_m = int(ws.cell(r, 3).value or 0)
-            row_y = int(ws.cell(r, 4).value or 0)
-            
-            if row_m != month or row_y != year:
-                continue
-                
-            fio = (ws.cell(r, 5).value or "")
-            tbn = (ws.cell(r, 6).value or "")
-            department = (ws.cell(r, 7).value or "")
-            
-            hours: List[Optional[str]] = []
-            for c in range(8, 8 + 31):
-                v = ws.cell(r, c).value
-                hours.append(str(v) if v else None)
-            
-            total_days_val = ws.cell(r, 39).value
-            total_hours_val = ws.cell(r, 40).value
-            overtime_day_val = ws.cell(r, 41).value
-            overtime_night_val = ws.cell(r, 42).value
-            
-            total_days = int(total_days_val) if total_days_val else None
-            total_hours = float(total_hours_val) if total_hours_val else None
-            overtime_day = float(overtime_day_val) if overtime_day_val else None
-            overtime_night = float(overtime_night_val) if overtime_night_val else None
-            
-            row_values = [row_oid, row_addr, month, year, fio, tbn, department] + hours + [
-                total_days, total_hours, overtime_day, overtime_night
-            ]
-            rows.append(row_values)
-
-    if not rows:
-        return 0, []
-
-    sum_dir = exe_dir() / "Сводные_отчеты"
-    sum_dir.mkdir(parents=True, exist_ok=True)
-    paths: List[Path] = []
-
-    hdr = ["ID объекта", "Адрес", "Месяц", "Год", "ФИО", "Табельный №", "Подразделение"] + \
-          [str(i) for i in range(1, 32)] + \
-          ["Итого дней", "Итого часов по табелю", "Переработка день", "Переработка ночь"]
-
-    if fmt in ("xlsx", "both"):
-        wb_out = Workbook()
-        ws_out = wb_out.active
-        ws_out.title = "Сводный"
-        ws_out.append(hdr)
-        for rv in rows:
-            ws_out.append(rv)
-        ws_out.freeze_panes = "A2"
-        ws_out.column_dimensions["A"].width = 14
-        ws_out.column_dimensions["B"].width = 40
-        ws_out.column_dimensions["C"].width = 10
-        ws_out.column_dimensions["D"].width = 8
-        ws_out.column_dimensions["E"].width = 28
-        ws_out.column_dimensions["F"].width = 14
-        ws_out.column_dimensions["G"].width = 20
-        for i in range(8, 8 + 31):
-            ws_out.column_dimensions[get_column_letter(i)].width = 6
-        ws_out.column_dimensions[get_column_letter(39)].width = 10
-        ws_out.column_dimensions[get_column_letter(40)].width = 18
-        ws_out.column_dimensions[get_column_letter(41)].width = 14
-        ws_out.column_dimensions[get_column_letter(42)].width = 14
-        p = sum_dir / f"Сводный_{year}_{month:02d}.xlsx"
-        wb_out.save(p)
-        paths.append(p)
-
-    if fmt in ("csv", "both"):
-        p = sum_dir / f"Сводный_{year}_{month:02d}.csv"
-        with open(p, "w", encoding="utf-8-sig", newline="") as fcsv:
-            writer = csv.writer(fcsv, delimiter=";")
-            writer.writerow(hdr)
-            for rv in rows:
-                writer.writerow(rv)
-        paths.append(p)
-
-    return len(rows), paths
-
-# ------------- Прогресс-диалог для асинхронного добавления -------------
-
-class ProgressDialog(tk.Toplevel):
-    def __init__(self, parent, title="Обработка", message="Пожалуйста, ждите..."):
-        super().__init__(parent)
-        self.title(title)
-        self.geometry("400x150")
-        self.resizable(False, False)
-        self.grab_set()  # Модальное окно
-        
-        # Центрирование относительно родителя
-        self.transient(parent)
-        parent_x = parent.winfo_rootx()
-        parent_y = parent.winfo_rooty()
-        parent_width = parent.winfo_width()
-        parent_height = parent.winfo_height()
-        x = parent_x + (parent_width // 2) - 200
-        y = parent_y + (parent_height // 2) - 75
-        self.geometry(f"400x150+{x}+{y}")
-        
-        # Интерфейс
-        main_frame = tk.Frame(self, padx=20, pady=20)
-        main_frame.pack(fill="both", expand=True)
-        
-        self.message_label = tk.Label(main_frame, text=message, font=("Segoe UI", 10))
-        self.message_label.pack(pady=(0, 15))
-        
-        # Прогресс-бар
-        self.progress = ttk.Progressbar(main_frame, mode='determinate', length=350)
-        self.progress.pack(pady=(0, 10))
-        
-        # Информация о прогрессе
-        self.info_label = tk.Label(main_frame, text="", font=("Segoe UI", 8), fg="#666")
-        self.info_label.pack()
-        
-        # Кнопка отмены (опционально)
-        self.cancelled = False
-        cancel_frame = tk.Frame(main_frame)
-        cancel_frame.pack(pady=(10, 0))
-        
-        self.cancel_button = ttk.Button(cancel_frame, text="Отмена", command=self.cancel)
-        self.cancel_button.pack()
-        
-    def set_progress(self, value, maximum=100, info_text=""):
-        """Обновляет прогресс-бар"""
-        self.progress['maximum'] = maximum
-        self.progress['value'] = value
-        if info_text:
-            self.info_label.config(text=info_text)
-        self.update_idletasks()
-    
-    def set_message(self, message):
-        """Изменяет основное сообщение"""
-        self.message_label.config(text=message)
-        self.update_idletasks()
-    
-    def cancel(self):
-        """Обработчик отмены"""
-        self.cancelled = True
-        self.cancel_button.config(state="disabled", text="Отменяется...")
-        
-    def close_dialog(self):
-        """Закрывает диалог"""
-        try:
-            self.grab_release()
-            self.destroy()
-        except:
-            pass
-
-# ------------- Ряд реестра (RowWidget) -------------
+# ------------- Ряд реестра (в едином grid) -------------
 
 class RowWidget:
     WEEK_BG_SAT = "#fff8e1"
@@ -641,7 +497,7 @@ class RowWidget:
         self.lbl_total.grid(row=self.row, column=34, padx=(4, 1), pady=1, sticky="nsew")
         self.widgets.append(self.lbl_total)
 
-        # МЕТКИ ДЛЯ ПЕРЕРАБОТКИ
+        # НОВЫЕ МЕТКИ ДЛЯ ПЕРЕРАБОТКИ
         self.lbl_overtime_day = tk.Label(self.table, text="0", anchor="e", bg=zebra_bg)
         self.lbl_overtime_day.grid(row=self.row, column=35, padx=(4, 1), pady=1, sticky="nsew")
         self.widgets.append(self.lbl_overtime_day)
@@ -669,20 +525,16 @@ class RowWidget:
 
     def regrid_to(self, new_row: int):
         self.row = new_row
-        zebra_bg = self.ZEBRA_EVEN if (new_row % 2 == 0) else self.ZEBRA_ODD
-        
-        self.lbl_fio.grid_configure(row=new_row); self.lbl_fio.config(bg=zebra_bg)
-        self.lbl_tbn.grid_configure(row=new_row); self.lbl_tbn.config(bg=zebra_bg)
-        
+        self.lbl_fio.grid_configure(row=new_row, column=0)
+        self.lbl_tbn.grid_configure(row=new_row, column=1)
         for i, e in enumerate(self.day_entries, start=2):
             e.grid_configure(row=new_row, column=i)
-        
-        self.lbl_days.grid_configure(row=new_row); self.lbl_days.config(bg=zebra_bg)
-        self.lbl_total.grid_configure(row=new_row); self.lbl_total.config(bg=zebra_bg)
-        self.lbl_overtime_day.grid_configure(row=new_row); self.lbl_overtime_day.config(bg=zebra_bg)
-        self.lbl_overtime_night.grid_configure(row=new_row); self.lbl_overtime_night.config(bg=zebra_bg)
-        self.btn_52.grid_configure(row=new_row)
-        self.btn_del.grid_configure(row=new_row)
+        self.lbl_days.grid_configure(row=new_row, column=33)
+        self.lbl_total.grid_configure(row=new_row, column=34)
+        self.lbl_overtime_day.grid_configure(row=new_row, column=35)
+        self.lbl_overtime_night.grid_configure(row=new_row, column=36)
+        self.btn_52.grid_configure(row=new_row, column=37)
+        self.btn_del.grid_configure(row=new_row, column=38)
 
     def destroy(self):
         for w in self.widgets:
@@ -822,7 +674,33 @@ class RowWidget:
     def delete_row(self):
         self.on_delete(self)
 
-# ------------- Диалоги и прочее -------------
+# ------------- Автокомплит -------------
+
+class AutoCompleteCombobox(ttk.Combobox):
+    def __init__(self, master=None, **kw):
+        super().__init__(master, **kw)
+        self._all_values: List[str] = []
+        self.bind("<KeyRelease>", self._on_keyrelease)
+        self.bind("<Control-BackSpace>", self._clear_all)
+
+    def set_completion_list(self, values: List[str]):
+        self._all_values = list(values)
+        self["values"] = self._all_values
+
+    def _clear_all(self, _=None):
+        self.delete(0, tk.END)
+        self["values"] = self._all_values
+
+    def _on_keyrelease(self, event):
+        if event.keysym in ("Up", "Down", "Left", "Right", "Home", "End", "Return", "Escape", "Tab"):
+            return
+        typed = self.get().strip()
+        if not typed:
+            self["values"] = self._all_values
+            return
+        self["values"] = [x for x in self._all_values if typed.lower() in x.lower()]
+
+# ------------- Диалоги -------------
 
 class CopyFromDialog(simpledialog.Dialog):
     def __init__(self, parent, init_year: int, init_month: int):
@@ -901,7 +779,7 @@ class HoursFillDialog(simpledialog.Dialog):
         self.ent_hours.grid(row=3, column=1, sticky="w", pady=(6, 0))
         self.ent_hours.insert(0, "8")
 
-        tk.Label(master, text="Форматы: 8 | 8,25 | 8:30 | 1/7 | 8(2/1)").grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 2))
+        tk.Label(master, text="Форматы: 8 | 8,25 | 8:30 | 1/7").grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 2))
         return self.spn_day
 
     def _on_toggle_clear(self):
@@ -921,71 +799,27 @@ class HoursFillDialog(simpledialog.Dialog):
 
         if self.var_clear.get():
             self._d = d
-            self._h_str = ""
+            self._h = 0.0
             self._clear = True
             return True
 
-        h_str = self.ent_hours.get().strip()
-        hv = parse_hours_value(h_str)
+        hv = parse_hours_value(self.ent_hours.get().strip())
         if hv is None or hv < 0:
             messagebox.showwarning("Проставить часы", "Введите корректное значение часов (например, 8, 8:30, 1/7).")
             return False
         self._d = d
-        self._h_str = h_str
+        self._h = float(hv)
         self._clear = False
         return True
 
     def apply(self):
         self.result = {
             "day": self._d,
-            "hours_str": self._h_str,
+            "hours": self._h,
             "clear": self._clear,
         }
 
-class AutoCompleteCombobox(ttk.Combobox):
-    def __init__(self, master=None, **kw):
-        super().__init__(master, **kw)
-        self._all_values: List[str] = []
-        self.bind("<KeyRelease>", self._on_keyrelease)
-        self.bind("<Control-BackSpace>", self._clear_all)
-
-    def set_completion_list(self, values: List[str]):
-        self._all_values = list(values)
-        self["values"] = self._all_values
-
-    def _clear_all(self, _=None):
-        self.delete(0, tk.END)
-        self["values"] = self._all_values
-
-    def _on_keyrelease(self, event):
-        if event.keysym in ("Up", "Down", "Left", "Right", "Home", "End", "Return", "Escape", "Tab"):
-            return
-        typed = self.get().strip()
-        if not typed:
-            self["values"] = self._all_values
-            return
-        self["values"] = [x for x in self._all_values if typed.lower() in x.lower()]
-
-# ------------- СТРАНИЦЫ И АСИНХРОННАЯ ЗАГРУЗКА -------------
-
-class HomePage(tk.Frame):
-    def __init__(self, master):
-        super().__init__(master, bg="#f7f7f7")
-
-        outer = tk.Frame(self, bg="#f7f7f7")
-        outer.pack(fill="both", expand=True)
-
-        center = tk.Frame(outer, bg="#f7f7f7")
-        center.place(relx=0.5, rely=0.5, anchor="center")
-
-        self.logo_img = embedded_logo_image(center, max_w=360, max_h=360)
-        if self.logo_img:
-            tk.Label(center, image=self.logo_img, bg="#f7f7f7").pack(anchor="center", pady=(0, 12))
-
-        tk.Label(center, text="Добро пожаловать!", font=("Segoe UI", 18, "bold"), bg="#f7f7f7")\
-            .pack(anchor="center", pady=(4, 6))
-        tk.Label(center, text="Выберите раздел в верхнем меню.\nОбъектный табель → Создать — для работы с табелями.",
-                 font=("Segoe UI", 10), fg="#444", bg="#f7f7f7", justify="center").pack(anchor="center")
+# ------------- Страница Объектного табеля (Frame) -------------
 
 class TimesheetPage(tk.Frame):
     COLPX = {"fio": 200, "tbn": 100, "day": 36, "days": 46, "hours": 56, "btn52": 40, "del": 66}
@@ -1165,7 +999,7 @@ class TimesheetPage(tk.Frame):
         tk.Label(self.table, text="Часы", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
             row=0, column=34, padx=(4, 1), pady=(0, 2), sticky="nsew")
     
-        # ЗАГОЛОВКИ ДЛЯ ПЕРЕРАБОТКИ
+        # НОВЫЕ ЗАГОЛОВКИ
         tk.Label(self.table, text="Пер.день", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
             row=0, column=35, padx=(4, 1), pady=(0, 2), sticky="nsew")
         tk.Label(self.table, text="Пер.ночь", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
@@ -1187,7 +1021,7 @@ class TimesheetPage(tk.Frame):
             self.table.grid_columnconfigure(col, minsize=px['day'], weight=0)
         self.table.grid_columnconfigure(33, minsize=px['days'], weight=0)
         self.table.grid_columnconfigure(34, minsize=px['hours'], weight=0)
-        # КОЛОНКИ ДЛЯ ПЕРЕРАБОТКИ
+        # НОВЫЕ КОЛОНКИ ДЛЯ ПЕРЕРАБОТКИ
         self.table.grid_columnconfigure(35, minsize=px['hours'], weight=0)  # Пер.день
         self.table.grid_columnconfigure(36, minsize=px['hours'], weight=0)  # Пер.ночь
         self.table.grid_columnconfigure(37, minsize=px['btn52'], weight=0)
@@ -1325,40 +1159,7 @@ class TimesheetPage(tk.Frame):
                 messagebox.showinfo("Объектный табель", f"В подразделении «{dep_sel}» нет сотрудников.")
                 return
 
-        total_count = len(candidates)
-        
-        # Если сотрудников много, используем асинхронное добавление с прогресс-баром
-        if total_count > 50:
-            if not messagebox.askyesno("Добавление большого количества сотрудников", 
-                                     f"Будет добавлено {total_count} сотрудников.\n"
-                                     f"Это может занять некоторое время.\n\n"
-                                     f"Продолжить?"):
-                return
-            
-            # Подготавливаем список для добавления
-            existing = {(r.fio().strip().lower(), r.tbn().strip()) for r in self.rows}
-            employees_to_add = []
-            for fio, tbn, pos, dep in candidates:
-                key = (fio.strip().lower(), (tbn or "").strip())
-                if key not in existing:
-                    employees_to_add.append((fio, tbn))
-                    existing.add(key)
-            
-            if not employees_to_add:
-                messagebox.showinfo("Добавление", "Все сотрудники подразделения уже добавлены")
-                return
-            
-            # Создаем прогресс-диалог и запускаем асинхронное добавление
-            progress_dialog = ProgressDialog(
-                self, 
-                "Добавление сотрудников", 
-                f"Добавляем {len(employees_to_add)} сотрудников из подразделения '{dep_sel}'"
-            )
-            
-            self._add_employees_async(employees_to_add, progress_dialog)
-            return
-
-        # Обычное синхронное добавление для небольшого количества
+        # Уникальность по (fio.lower, tbn)
         existing = {(r.fio().strip().lower(), r.tbn().strip()) for r in self.rows}
         added = 0
         y, m = self.get_year_month()
@@ -1376,83 +1177,6 @@ class TimesheetPage(tk.Frame):
 
         self._regrid_rows()
         messagebox.showinfo("Объектный табель", f"Добавлено сотрудников: {added}")
-
-    def _add_employees_async(self, employees_to_add, progress_dialog):
-        """Асинхронное добавление сотрудников порциями."""
-        
-        # Настройки для асинхронной обработки
-        BATCH_SIZE = 10  # Количество сотрудников в одной порции
-        DELAY_MS = 50    # Задержка между порциями в миллисекундах
-        
-        total_count = len(employees_to_add)
-        added_count = 0
-        
-        def add_batch(start_index):
-            nonlocal added_count
-            
-            # Проверка на отмену
-            if progress_dialog.cancelled:
-                progress_dialog.close_dialog()
-                messagebox.showinfo("Добавление", f"Операция отменена. Добавлено {added_count} из {total_count} сотрудников.")
-                return
-            
-            # Определяем границы текущей порции
-            end_index = min(start_index + BATCH_SIZE, total_count)
-            
-            try:
-                # Добавляем сотрудников из текущей порции
-                for i in range(start_index, end_index):
-                    if progress_dialog.cancelled:
-                        break
-                        
-                    fio, tbn = employees_to_add[i]
-                    
-                    # Создание нового виджета строки
-                    new_row_index = len(self.rows) + 1
-                    row_widget = RowWidget(
-                        self.table, new_row_index, fio, tbn,
-                        self.get_year_month, self.delete_row
-                    )
-                    
-                    year, month = self.get_year_month()
-                    row_widget.set_day_font(self.DAY_ENTRY_FONT)
-                    row_widget.update_days_enabled(year, month)
-                    
-                    self.rows.append(row_widget)
-                    added_count += 1
-                    
-                    # Обновляем прогресс
-                    progress_text = f"Добавлено {added_count} из {total_count} сотрудников"
-                    progress_dialog.set_progress(added_count, total_count, progress_text)
-                
-                # Если еще есть сотрудники для добавления, планируем следующую порцию
-                if end_index < total_count and not progress_dialog.cancelled:
-                    self.after(DELAY_MS, lambda: add_batch(end_index))
-                else:
-                    # Завершение операции
-                    progress_dialog.close_dialog()
-                    
-                    if not progress_dialog.cancelled:
-                        # Обновляем итоги
-                        self._regrid_rows()
-                        
-                        # Прокручиваем к концу списка, чтобы показать новых сотрудников
-                        self.after(100, lambda: self.main_canvas.yview_moveto(1.0))
-                        
-                        # Показываем результат
-                        messagebox.showinfo("Добавление", f"Успешно добавлено {added_count} сотрудников из подразделения '{self.cmb_department.get()}'")
-                    else:
-                        self._regrid_rows()
-                        messagebox.showinfo("Добавление", f"Операция отменена. Добавлено {added_count} из {total_count} сотрудников.")
-                        
-            except Exception as e:
-                progress_dialog.close_dialog()
-                messagebox.showerror("Ошибка", f"Произошла ошибка при добавлении сотрудников: {e}")
-                print(f"Ошибка в _add_employees_async: {e}")
-                traceback.print_exc()
-        
-        # Запускаем первую порцию
-        add_batch(0)
 
     def _on_department_select(self):
         dep_sel = (self.cmb_department.get() or "Все").strip()
@@ -1558,14 +1282,16 @@ class TimesheetPage(tk.Frame):
             messagebox.showinfo("Проставить часы", f"День {day} очищен у {len(self.rows)} сотрудников.")
             return
 
-        hours_str = dlg.result["hours_str"]
+        hours_val = float(dlg.result["hours"])
+        s = f"{hours_val:.2f}".rstrip("0").rstrip(".").replace(".", ",")
         for r in self.rows:
             e = r.day_entries[day - 1]
             e.delete(0, "end")
-            e.insert(0, hours_str)
+            if hours_val > 1e-12:
+                e.insert(0, s)
             r.update_total()
         self._recalc_object_total()
-        messagebox.showinfo("Проставить часы", f"Проставлено '{hours_str}' в день {day} для {len(self.rows)} сотрудников.")
+        messagebox.showinfo("Проставить часы", f"Проставлено {s} ч в день {day} для {len(self.rows)} сотрудников.")
 
     def delete_row(self, roww: RowWidget):
         try:
@@ -1828,9 +1554,13 @@ class TimesheetPage(tk.Frame):
 
                 hrs = []
                 if with_hours:
-                    for c in range(8, 8 + 31):  # С учетом колонки подразделения
+                    for c in range(7, 7 + 31):
                         v = ws.cell(r, c).value
-                        hrs.append(str(v) if v else None)
+                        try:
+                            n = float(v) if isinstance(v, (int, float)) else parse_hours_value(v)
+                        except Exception:
+                            n = None
+                        hrs.append(n)
 
                 if fio:
                     found.append((fio, tbn, hrs))
@@ -1907,6 +1637,173 @@ class TimesheetPage(tk.Frame):
             pass
         self._fit_job = self.after(150, self._auto_fit_columns)
 
+# ------------- Сводный экспорт -------------
+
+def perform_summary_export(year: int, month: int, fmt: str) -> Tuple[int, List[Path]]:
+    base_out = get_output_dir_from_config()
+    base_out.mkdir(parents=True, exist_ok=True)
+    pattern = f"Объектный_табель_*_{year}_{month:02d}.xlsx"
+    files = list(base_out.glob(pattern))
+    rows = []
+
+    for f in files:
+        try:
+            wb = load_workbook(f, read_only=True, data_only=True)
+        except Exception:
+            continue
+        if "Табель" not in wb.sheetnames:
+            continue
+        ws = wb["Табель"]
+        for r in range(2, ws.max_row + 1):
+            row_oid = (ws.cell(r, 1).value or "")
+            row_addr = (ws.cell(r, 2).value or "")
+            row_m = int(ws.cell(r, 3).value or 0)
+            row_y = int(ws.cell(r, 4).value or 0)
+            
+            if row_m != month or row_y != year:
+                continue
+                
+            fio = (ws.cell(r, 5).value or "")
+            tbn = (ws.cell(r, 6).value or "")
+            department = (ws.cell(r, 7).value or "")
+            
+            hours: List[Optional[str]] = []
+            for c in range(8, 8 + 31):
+                v = ws.cell(r, c).value
+                hours.append(str(v) if v else None)
+            
+            total_days_val = ws.cell(r, 39).value
+            total_hours_val = ws.cell(r, 40).value
+            overtime_day_val = ws.cell(r, 41).value
+            overtime_night_val = ws.cell(r, 42).value
+            
+            total_days = int(total_days_val) if total_days_val else None
+            total_hours = float(total_hours_val) if total_hours_val else None
+            overtime_day = float(overtime_day_val) if overtime_day_val else None
+            overtime_night = float(overtime_night_val) if overtime_night_val else None
+            
+            row_values = [row_oid, row_addr, month, year, fio, tbn, department] + hours + [
+                total_days, total_hours, overtime_day, overtime_night
+            ]
+            rows.append(row_values)
+
+    if not rows:
+        return 0, []
+
+    sum_dir = exe_dir() / "Сводные_отчеты"
+    sum_dir.mkdir(parents=True, exist_ok=True)
+    paths: List[Path] = []
+
+    hdr = ["ID объекта", "Адрес", "Месяц", "Год", "ФИО", "Табельный №", "Подразделение"] + \
+          [str(i) for i in range(1, 32)] + \
+          ["Итого дней", "Итого часов по табелю", "Переработка день", "Переработка ночь"]
+
+    if fmt in ("xlsx", "both"):
+        wb_out = Workbook()
+        ws_out = wb_out.active
+        ws_out.title = "Сводный"
+        ws_out.append(hdr)
+        for rv in rows:
+            ws_out.append(rv)
+        ws_out.freeze_panes = "A2"
+        ws_out.column_dimensions["A"].width = 14
+        ws_out.column_dimensions["B"].width = 40
+        ws_out.column_dimensions["C"].width = 10
+        ws_out.column_dimensions["D"].width = 8
+        ws_out.column_dimensions["E"].width = 28
+        ws_out.column_dimensions["F"].width = 14
+        ws_out.column_dimensions["G"].width = 20
+        for i in range(8, 8 + 31):
+            ws_out.column_dimensions[get_column_letter(i)].width = 6
+        ws_out.column_dimensions[get_column_letter(39)].width = 10
+        ws_out.column_dimensions[get_column_letter(40)].width = 18
+        ws_out.column_dimensions[get_column_letter(41)].width = 14
+        ws_out.column_dimensions[get_column_letter(42)].width = 14
+        p = sum_dir / f"Сводный_{year}_{month:02d}.xlsx"
+        wb_out.save(p)
+        paths.append(p)
+
+    if fmt in ("csv", "both"):
+        p = sum_dir / f"Сводный_{year}_{month:02d}.csv"
+        with open(p, "w", encoding="utf-8-sig", newline="") as fcsv:
+            writer = csv.writer(fcsv, delimiter=";")
+            writer.writerow(hdr)
+            for rv in rows:
+                writer.writerow(rv)
+        paths.append(p)
+
+    return len(rows), paths
+
+class ExportMonthDialog(simpledialog.Dialog):
+    def __init__(self, parent):
+        self.result = None
+        super().__init__(parent, title="Сводный экспорт по месяцу")
+
+    def body(self, master):
+        now = datetime.now()
+        tk.Label(master, text="Месяц:").grid(row=0, column=0, sticky="e")
+        self.cmb_month = ttk.Combobox(master, state="readonly", width=18,
+                                      values=[month_name_ru(i) for i in range(1, 13)])
+        self.cmb_month.grid(row=0, column=1, sticky="w")
+        self.cmb_month.current(now.month - 1)
+
+        tk.Label(master, text="Год:").grid(row=0, column=2, sticky="e", padx=(10, 4))
+        self.spn_year = tk.Spinbox(master, from_=2000, to=2100, width=6)
+        self.spn_year.grid(row=0, column=3, sticky="w")
+        self.spn_year.delete(0, "end")
+        self.spn_year.insert(0, str(now.year))
+
+        tk.Label(master, text="Формат:").grid(row=1, column=0, sticky="e", pady=(8, 0))
+        self.var_fmt = tk.StringVar(value="both")
+        fmtf = tk.Frame(master)
+        fmtf.grid(row=1, column=1, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Radiobutton(fmtf, text="XLSX", value="xlsx", variable=self.var_fmt).pack(anchor="w")
+        ttk.Radiobutton(fmtf, text="CSV",  value="csv",  variable=self.var_fmt).pack(anchor="w")
+        ttk.Radiobutton(fmtf, text="Оба (XLSX+CSV)", value="both", variable=self.var_fmt).pack(anchor="w")
+        return self.cmb_month
+
+    def validate(self):
+        try:
+            y = int(self.spn_year.get())
+            if not (2000 <= y <= 2100):
+                raise ValueError
+            return True
+        except Exception:
+            messagebox.showwarning("Сводный экспорт", "Введите корректный год (2000–2100).")
+            return False
+
+    def apply(self):
+        self.result = {
+            "year": int(self.spn_year.get()),
+            "month": self.cmb_month.current() + 1,
+            "fmt": self.var_fmt.get(),
+        }
+
+# ------------- Домашняя страница -------------
+
+# python
+class HomePage(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master, bg="#f7f7f7")
+
+        outer = tk.Frame(self, bg="#f7f7f7")
+        outer.pack(fill="both", expand=True)
+
+        center = tk.Frame(outer, bg="#f7f7f7")
+        center.place(relx=0.5, rely=0.5, anchor="center")
+
+        self.logo_img = embedded_logo_image(center, max_w=360, max_h=360)
+        if self.logo_img:
+            tk.Label(center, image=self.logo_img, bg="#f7f7f7").pack(anchor="center", pady=(0, 12))
+
+        tk.Label(center, text="Добро пожаловать!", font=("Segoe UI", 18, "bold"), bg="#f7f7f7")\
+            .pack(anchor="center", pady=(4, 6))
+        tk.Label(center, text="Выберите раздел в верхнем меню.\nОбъектный табель → Создать — для работы с табелями.",
+                 font=("Segoe UI", 10), fg="#444", bg="#f7f7f7", justify="center").pack(anchor="center")
+
+
+# ------------- Главное окно (единоe) -------------
+
 class MainApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -1927,16 +1824,12 @@ class MainApp(tk.Tk):
         m_ts.add_command(label="Создать", command=lambda: self._show_page("timesheet", lambda parent: TimesheetPage(parent)))
         menubar.add_cascade(label="Объектный табель", menu=m_ts)
 
-        # МЕНЮ АВТОТРАНСПОРТ
+        # ========== ОБНОВЛЕННОЕ МЕНЮ АВТОТРАНСПОРТ ==========
         m_transport = tk.Menu(menubar, tearoff=0)
-        if SpecialOrders and hasattr(SpecialOrders, "create_page"):
-            m_transport.add_command(
-                label="📝 Создать заявку",
-                command=lambda: self._show_page("transport", lambda parent: SpecialOrders.create_page(parent))
-            )
-        else:
-            m_transport.add_command("📝 Создать заявку", command=self.run_special_orders_exe)
-            
+        m_transport.add_command(
+            label="📝 Создать заявку",
+            command=lambda: self._show_page("transport", lambda parent: SpecialOrders.create_page(parent))
+        )
         # Добавляем планирование (если включено в конфиге)
         if SpecialOrders and hasattr(SpecialOrders, "create_planning_page"):
             m_transport.add_command(
@@ -1949,6 +1842,7 @@ class MainApp(tk.Tk):
             command=self.open_orders_folder
         )
         menubar.add_cascade(label="Автотранспорт", menu=m_transport)
+        # ===================================================
 
         m_spr = tk.Menu(menubar, tearoff=0)
         m_spr.add_command(label="Открыть справочник", command=self.open_spravochnik)
@@ -1964,11 +1858,11 @@ class MainApp(tk.Tk):
             m_tools.add_command(label="Конвертер табеля (1С)", command=lambda: timesheet_transformer.open_converter(self))
         else:
             m_tools.add_command(label="Конвертер табеля (1С)", command=self.run_converter_exe)
-            
         if BudgetAnalyzer and hasattr(BudgetAnalyzer, "create_page"):
             m_tools.add_command(label="Анализ смет", command=lambda: self._show_page("budget", lambda parent: BudgetAnalyzer.create_page(parent)))
         else:
             m_tools.add_command(label="Анализ смет", command=lambda: messagebox.showwarning("Анализ смет", "Модуль BudgetAnalyzer.py не найден."))
+
         menubar.add_cascade(label="Инструменты", menu=m_tools)
 
         self.config(menu=menubar)
@@ -1979,20 +1873,123 @@ class MainApp(tk.Tk):
         tk.Label(header, text="Управление строительством", font=("Segoe UI", 16, "bold")).pack(side="left")
         tk.Label(header, text="Выберите раздел в верхнем меню", font=("Segoe UI", 10), fg="#555").pack(side="right")
 
-        # КОНТЕЙНЕР (ЦЕНТРАЛЬНАЯ ОБЛАСТЬ)
+        # Контент — контейнер для страниц
         self.content = tk.Frame(self, bg="#f7f7f7")
         self.content.pack(fill="both", expand=True)
+        self._pages: Dict[str, tk.Widget] = {}
 
-        # Подвал (Копирайт)
+        # Копирайт
         footer = tk.Frame(self)
         footer.pack(fill="x", padx=12, pady=(0, 10))
         tk.Label(footer, text="Разработал Алексей Зезюкин, АНО МЛСТ 2025",
                  font=("Segoe UI", 8), fg="#666").pack(side="right")
-        
-        self.after(100, self.show_home) 
 
+        # Показать домашнюю страницу при запуске
+        self.show_home()
 
-# ------------- СЕКЦИЯ ЗАПУСКА -------------
+    def _show_page(self, key: str, builder):
+        # очистить контейнер
+        for w in self.content.winfo_children():
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        # построить новый
+        page = builder(self.content)
+        if isinstance(page, tk.Widget) and page.master is self.content:
+            try:
+                page.pack_forget()
+            except Exception:
+                pass
+        try:
+            page.pack(fill="both", expand=True)
+        except Exception:
+            pass
+        self._pages[key] = page
+
+    def show_home(self):
+        self._show_page("home", lambda parent: HomePage(parent))
+
+    # --- Справочник ---
+    def open_spravochnik(self):
+        path = get_spr_path_from_config()
+        ensure_spravochnik_local(path)
+        try:
+            os.startfile(path)
+        except Exception as e:
+            messagebox.showerror("Справочник", f"Не удалось открыть файл:\n{e}")
+
+    def refresh_spravochnik_global(self):
+        cfg = read_config()
+        use_remote = cfg.get(CONFIG_SECTION_REMOTE, KEY_REMOTE_USE, fallback="false")
+        link = cfg.get(CONFIG_SECTION_REMOTE, KEY_YA_PUBLIC_LINK, fallback="")
+        path = get_spr_path_from_config()
+        ensure_spravochnik_local(path)
+        messagebox.showinfo(
+            "Справочник",
+            "Справочник проверен/создан локально.\n"
+            f"Удалённый доступ: use_remote={use_remote}\n"
+            f"Публичная ссылка: {link or '(не задана)'}\n\n"
+            "В окнах используйте «Обновить справочник» для перечтения."
+        )
+
+    # ========== НОВЫЙ МЕТОД: Открыть папку заявок ==========
+    def open_orders_folder(self):
+        """Открывает папку с заявками на автотранспорт"""
+        try:
+            from pathlib import Path
+            orders_dir = exe_dir() / "Заявки_спецтехники"
+            orders_dir.mkdir(parents=True, exist_ok=True)
+            os.startfile(orders_dir)
+        except Exception as e:
+            messagebox.showerror("Папка заявок", f"Не удалось открыть папку:\n{e}")
+    # ======================================================
+
+    # --- Аналитика ---
+    def summary_export(self):
+        pwd = simpledialog.askstring("Сводный экспорт", "Введите пароль:", show="*", parent=self)
+        if pwd is None:
+            return
+        if pwd != get_export_password_from_config():
+            messagebox.showerror("Сводный экспорт", "Неверный пароль.")
+            return
+
+        dlg = ExportMonthDialog(self)
+        if not getattr(dlg, "result", None):
+            return
+        y = dlg.result["year"]
+        m = dlg.result["month"]
+        fmt = dlg.result["fmt"]
+        try:
+            count, paths = perform_summary_export(y, m, fmt)
+            if count <= 0:
+                messagebox.showinfo("Сводный экспорт", "Не найдено строк для выгрузки.")
+                return
+            msg = f"Экспортировано строк: {count}\n\nФайлы:\n" + "\n".join(str(p) for p in paths)
+            messagebox.showinfo("Сводный экспорт", msg)
+        except Exception as e:
+            messagebox.showerror("Сводный экспорт", f"Ошибка выгрузки:\n{e}")
+
+    # --- Резервные запуски внешних EXE ---
+    def run_special_orders_exe(self):
+        try:
+            p = exe_dir() / "SpecialOrders.exe"
+            if not p.exists():
+                messagebox.showwarning("Заказ спецтехники", "Не найден SpecialOrders.exe рядом с программой.")
+                return
+            subprocess.Popen([str(p)], shell=False)
+        except Exception as e:
+            messagebox.showerror("Заказ спецтехники", f"Не удалось запустить модуль:\n{e}")
+
+    def run_converter_exe(self):
+        try:
+            p = exe_dir() / CONVERTER_EXE
+            if not p.exists():
+                messagebox.showwarning("Конвертер", f"Не найден {CONVERTER_EXE} рядом с программой.")
+                return
+            subprocess.Popen([str(p)], shell=False)
+        except Exception as e:
+            messagebox.showerror("Конвертер", f"Не удалось запустить конвертер:\n{e}")
 
 if __name__ == "__main__":
     app = MainApp()
