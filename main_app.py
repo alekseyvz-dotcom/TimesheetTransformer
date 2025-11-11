@@ -1438,75 +1438,59 @@ class TimesheetPage(tk.Frame):
         self.rows.clear()
         self._regrid_rows()
 
+    # ========== ИСПРАВЛЕННЫЕ МЕТОДЫ ==========
+
     def _current_file_path(self) -> Optional[Path]:
+        """Генерирует путь к файлу с учетом подразделения"""
         addr = self.cmb_address.get().strip()
         oid = self.cmb_object_id.get().strip()
+        dep = self.cmb_department.get().strip()
+    
         if not addr and not oid:
-            return None
+        return None
+    
         y, m = self.get_year_month()
         id_part = oid if oid else safe_filename(addr)
-        return self.out_dir / f"Объектный_табель_{id_part}_{y}_{m:02d}.xlsx"
+    
+        # Добавляем подразделение в имя файла
+        dep_part = safe_filename(dep) if dep and dep != "Все" else "ВсеПодразделения"
+    
+        return self.out_dir / f"Объектный_табель_{id_part}_{dep_part}_{y}_{m:02d}.xlsx"
 
-    def _file_path_for(self, year: int, month: int, addr: Optional[str] = None, oid: Optional[str] = None) -> Optional[Path]:
+    def _file_path_for(self, year: int, month: int, addr: Optional[str] = None, 
+                   oid: Optional[str] = None, department: Optional[str] = None) -> Optional[Path]:
+        """Генерирует путь к файлу для заданных параметров"""
         addr = (addr if addr is not None else self.cmb_address.get().strip())
         oid = (oid if oid is not None else self.cmb_object_id.get().strip())
+        dep = (department if department is not None else self.cmb_department.get().strip())
+    
         if not addr and not oid:
             return None
+    
         id_part = oid if oid else safe_filename(addr)
-        return self.out_dir / f"Объектный_табель_{id_part}_{year}_{month:02d}.xlsx"
-
-    def _ensure_sheet(self, wb) -> Any:
-        if "Табель" in wb.sheetnames:
-            ws = wb["Табель"]
-            hdr_first = str(ws.cell(1, 1).value or "")
-            # Проверяем наличие новых столбцов (включая Подразделение)
-            if hdr_first == "ID объекта" and ws.max_column >= (7 + 31 + 4):  # +1 для подразделения, +4 для итогов и переработок
-                return ws
-            base = "Табель_OLD"
-            new_name = base
-            i = 1
-            while new_name in wb.sheetnames:
-                i += 1
-                new_name = f"{base}{i}"
-            ws.title = new_name
+        dep_part = safe_filename(dep) if dep and dep != "Все" else "ВсеПодразделения"
     
-        ws2 = wb.create_sheet("Табель")
-        hdr = ["ID объекта", "Адрес", "Месяц", "Год", "ФИО", "Табельный №", "Подразделение"] + \
-              [str(i) for i in range(1, 32)] + \
-              ["Итого дней", "Итого часов по табелю", "Переработка день", "Переработка ночь"]
-        ws2.append(hdr)
-    
-        ws2.column_dimensions["A"].width = 14  # ID объекта
-        ws2.column_dimensions["B"].width = 40  # Адрес
-        ws2.column_dimensions["C"].width = 10  # Месяц
-        ws2.column_dimensions["D"].width = 8   # Год
-        ws2.column_dimensions["E"].width = 28  # ФИО
-        ws2.column_dimensions["F"].width = 14  # Табельный №
-        ws2.column_dimensions["G"].width = 20  # Подразделение
-    
-        # Дни месяца (1-31)
-        for i in range(8, 8 + 31):
-            ws2.column_dimensions[get_column_letter(i)].width = 6
-    
-        ws2.column_dimensions[get_column_letter(39)].width = 10  # Итого дней
-        ws2.column_dimensions[get_column_letter(40)].width = 18  # Итого часов по табелю
-        ws2.column_dimensions[get_column_letter(41)].width = 14  # Переработка день
-        ws2.column_dimensions[get_column_letter(42)].width = 14  # Переработка ночь
-    
-        ws2.freeze_panes = "A2"
-        return ws2
+        return self.out_dir / f"Объектный_табель_{id_part}_{dep_part}_{year}_{month:02d}.xlsx"
 
     def _load_existing_rows(self):
+        """Загружает существующие строки с фильтром по подразделению"""
+        # Очищаем текущий реестр перед загрузкой
+        for r in list(self.rows):
+            r.destroy()
+        self.rows.clear()
+    
         fpath = self._current_file_path()
         if not fpath or not fpath.exists():
+            self._regrid_rows()
             return
-    
+
         try:
-            wb = load_workbook(fpath)
+            wb = load_workbook(fpath, data_only=True)
             ws = self._ensure_sheet(wb)
             y, m = self.get_year_month()
             addr = self.cmb_address.get().strip()
             oid = self.cmb_object_id.get().strip()
+            current_dep = self.cmb_department.get().strip()
         
             for r in range(2, ws.max_row + 1):
                 row_oid = (ws.cell(r, 1).value or "")
@@ -1515,10 +1499,13 @@ class TimesheetPage(tk.Frame):
                 row_y = int(ws.cell(r, 4).value or 0)
                 fio = (ws.cell(r, 5).value or "")
                 tbn = (ws.cell(r, 6).value or "")
-                # department = (ws.cell(r, 7).value or "")  # Подразделение (если нужно использовать)
+                row_department = (ws.cell(r, 7).value or "")
             
+                # Проверка периода
                 if row_m != m or row_y != y:
                     continue
+            
+                # Проверка объекта
                 if oid:
                     if row_oid != oid:
                         continue
@@ -1526,23 +1513,31 @@ class TimesheetPage(tk.Frame):
                     if row_addr != addr:
                         continue
             
-                # Загружаем ячейки КАК ЕСТЬ (с переработкой) - теперь с колонки 8
+                # КЛЮЧЕВАЯ ПРОВЕРКА: фильтр по подразделению
+                if current_dep != "Все" and row_department != current_dep:
+                    continue
+            
+                # Загружаем ячейки КАК ЕСТЬ (с переработкой)
                 hours_raw: List[Optional[str]] = []
-                for c in range(8, 8 + 31):  # Изменено с 7 на 8 из-за нового столбца
+                for c in range(8, 8 + 31):
                     v = ws.cell(r, c).value
                     hours_raw.append(str(v) if v else None)
             
-                roww = RowWidget(self.table, len(self.rows) + 1, fio, tbn, self.get_year_month, self.delete_row)
+                roww = RowWidget(self.table, len(self.rows) + 1, fio, tbn, 
+                               self.get_year_month, self.delete_row)
                 roww.set_day_font(self.DAY_ENTRY_FONT)
                 roww.update_days_enabled(y, m)
                 roww.set_hours(hours_raw)
                 self.rows.append(roww)
         
             self._regrid_rows()
+        
         except Exception as e:
             messagebox.showerror("Загрузка", f"Не удалось загрузить существующие строки:\n{e}")
+            self._regrid_rows()
 
     def save_all(self):
+        """Сохраняет табель с учетом подразделения"""
         fpath = self._current_file_path()
         if not fpath:
             messagebox.showwarning("Сохранение", "Укажите адрес и/или ID объекта, а также период.")
@@ -1551,6 +1546,7 @@ class TimesheetPage(tk.Frame):
         addr = self.cmb_address.get().strip()
         oid = self.cmb_object_id.get().strip()
         y, m = self.get_year_month()
+        current_dep = self.cmb_department.get().strip()
 
         try:
             if fpath.exists():
@@ -1560,39 +1556,45 @@ class TimesheetPage(tk.Frame):
                 wb = Workbook()
                 if wb.active:
                     wb.remove(wb.active)
-        
+    
             ws = self._ensure_sheet(wb)
 
-            # Удаляем старые записи
+            # Удаляем старые записи ТЕКУЩЕГО подразделения
             to_del = []
             for r in range(2, ws.max_row + 1):
                 row_oid = (ws.cell(r, 1).value or "")
                 row_addr = (ws.cell(r, 2).value or "")
                 row_m = int(ws.cell(r, 3).value or 0)
                 row_y = int(ws.cell(r, 4).value or 0)
-                if row_m == m and row_y == y and ((oid and row_oid == oid) or (not oid and row_addr == addr)):
+                row_dep = (ws.cell(r, 7).value or "")
+            
+                match_obj = (oid and row_oid == oid) or (not oid and row_addr == addr)
+                match_period = (row_m == m and row_y == y)
+                match_dep = (current_dep == "Все" or row_dep == current_dep)
+            
+                if match_obj and match_period and match_dep:
                     to_del.append(r)
+        
             for r in reversed(to_del):
                 ws.delete_rows(r, 1)
 
-            # Записываем новые
+            # Записываем новые строки
             for roww in self.rows:
                 data_with_ot = roww.get_hours_with_overtime()
-            
+        
                 total_hours = 0.0
                 total_days = 0
                 total_ot_day = 0.0
                 total_ot_night = 0.0
-            
+        
                 day_values = []
                 for hrs, d_ot, n_ot in data_with_ot:
-                    # Сохраняем в исходном формате
                     if hrs is None or abs(hrs) < 1e-12:
                         day_values.append(None)
                     else:
                         total_hours += hrs
                         total_days += 1
-                    
+                
                         cell_str = f"{hrs:.2f}".rstrip("0").rstrip(".")
                         if d_ot or n_ot:
                             d_ot_val = d_ot if d_ot else 0
@@ -1600,17 +1602,18 @@ class TimesheetPage(tk.Frame):
                             cell_str += f"({d_ot_val:.0f}/{n_ot_val:.0f})"
                             total_ot_day += d_ot_val
                             total_ot_night += n_ot_val
-                    
+                
                         day_values.append(cell_str)
-            
-                # Получаем подразделение сотрудника
+        
+                # Получаем подразделение сотрудника из справочника
                 fio = roww.fio()
-                department = ""
+                department = current_dep if current_dep != "Все" else ""
+            
                 for emp_fio, emp_tbn, emp_pos, emp_dep in self.employees:
                     if emp_fio == fio:
-                        department = emp_dep or ""
+                        department = emp_dep or department
                         break
-            
+        
                 row_values = [oid, addr, m, y, fio, roww.tbn(), department] + day_values + [
                     total_days if total_days else None,
                     None if abs(total_hours) < 1e-12 else total_hours,
@@ -1620,13 +1623,51 @@ class TimesheetPage(tk.Frame):
                 ws.append(row_values)
 
             wb.save(fpath)
-            messagebox.showinfo("Сохранение", f"Сохранено:\n{fpath}")
+            messagebox.showinfo("Сохранение", f"Сохранено:\n{fpath.name}")
+        
         except Exception as e:
             messagebox.showerror("Сохранение", f"Ошибка сохранения:\n{e}")
 
+    def _on_department_select(self):
+        """Обработчик смены подразделения"""
+        dep_sel = (self.cmb_department.get() or "Все").strip()
+        set_selected_department_in_config(dep_sel)
+    
+        # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: очищаем реестр и загружаем данные для нового подразделения
+        for r in list(self.rows):
+            r.destroy()
+        self.rows.clear()
+    
+        # Фильтруем список сотрудников
+        if dep_sel == "Все":
+            names = [e[0] for e in self.employees]
+        else:
+            names = [e[0] for e in self.employees if len(e) > 3 and (e[3] or "").strip() == dep_sel]
+    
+        seen = set()
+        filtered = []
+        for n in names:
+            if n not in seen:
+                seen.add(n)
+                filtered.append(n)
+    
+        self.cmb_fio.set_completion_list(filtered)
+    
+        cur = self.fio_var.get().strip()
+        if cur and cur not in filtered:
+            self.fio_var.set("")
+            self.ent_tbn.delete(0, "end")
+            self.pos_var.set("")
+    
+        # Загружаем сохраненные данные для выбранного подразделения
+        self._load_existing_rows()
+
     def copy_from_month(self):
+        """Копирование с учетом подразделения"""
         addr = self.cmb_address.get().strip()
         oid = self.cmb_object_id.get().strip()
+        current_dep = self.cmb_department.get().strip()
+    
         if not addr and not oid:
             messagebox.showwarning("Копирование", "Укажите адрес и/или ID объекта для назначения.")
             return
@@ -1646,9 +1687,11 @@ class TimesheetPage(tk.Frame):
         with_hours = dlg.result["with_hours"]
         mode = dlg.result["mode"]
 
-        src_path = self._file_path_for(src_y, src_m, addr=addr, oid=oid)
+        # Путь к исходному файлу С УЧЕТОМ подразделения
+        src_path = self._file_path_for(src_y, src_m, addr=addr, oid=oid, department=current_dep)
         if not src_path or not src_path.exists():
-            messagebox.showwarning("Копирование", f"Не найден файл источника:\n{src_path}")
+            messagebox.showwarning("Копирование", 
+                f"Не найден файл источника для подразделения «{current_dep}»:\n{src_path.name if src_path else 'N/A'}")
             return
 
         try:
@@ -1664,32 +1707,37 @@ class TimesheetPage(tk.Frame):
                 row_y = int(ws.cell(r, 4).value or 0)
                 fio = str(ws.cell(r, 5).value or "").strip()
                 tbn = str(ws.cell(r, 6).value or "").strip()
+                row_dep = str(ws.cell(r, 7).value or "").strip()
 
                 if row_m != src_m or row_y != src_y:
                     continue
+            
                 if oid:
                     if row_oid != oid:
                         continue
                 else:
                     if row_addr != addr:
                         continue
+            
+                # Фильтр по подразделению
+                if current_dep != "Все" and row_dep != current_dep:
+                    continue
 
                 hrs = []
                 if with_hours:
-                    for c in range(8, 8 + 31):  # Изменено с 7 на 8 из-за колонки подразделения
+                    for c in range(8, 8 + 31):
                         v = ws.cell(r, c).value
-                        if v is None:
-                            hrs.append(None)
-                        else:
-                            hrs.append(str(v))
+                        hrs.append(str(v) if v else None)
 
                 if fio:
                     found.append((fio, tbn, hrs))
 
             if not found:
-                messagebox.showinfo("Копирование", "В источнике нет сотрудников для выбранного объекта и периода.")
+                messagebox.showinfo("Копирование", 
+                    f"В источнике нет сотрудников подразделения «{current_dep}» для выбранного объекта и периода.")
                 return
 
+           # Убираем дубликаты
             uniq = {}
             for fio, tbn, hrs in found:
                 key = (fio.strip().lower(), tbn.strip())
@@ -1710,7 +1758,9 @@ class TimesheetPage(tk.Frame):
                 key = (fio.strip().lower(), tbn.strip())
                 if mode == "merge" and key in existing:
                     continue
-                roww = RowWidget(self.table, len(self.rows) + 1, fio, tbn, self.get_year_month, self.delete_row)
+            
+                roww = RowWidget(self.table, len(self.rows) + 1, fio, tbn, 
+                           self.get_year_month, self.delete_row)
                 roww.set_day_font(self.DAY_ENTRY_FONT)
                 roww.update_days_enabled(dy, dm)
                 if with_hours and hrs:
@@ -1721,8 +1771,9 @@ class TimesheetPage(tk.Frame):
             self._regrid_rows()
             messagebox.showinfo("Копирование", f"Добавлено сотрудников: {added}")
 
-        except Exception as e:
-            messagebox.showerror("Копирование", f"Ошибка копирования:\n{e}")
+    except Exception as e:
+        messagebox.showerror("Копирование", f"Ошибка копирования:\n{e}")
+
 
     def _content_total_width(self, fio_px: Optional[int] = None) -> int:
         px = self.COLPX.copy()
