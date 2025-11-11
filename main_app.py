@@ -1472,6 +1472,52 @@ class TimesheetPage(tk.Frame):
     
         return self.out_dir / f"Объектный_табель_{id_part}_{dep_part}_{year}_{month:02d}.xlsx"
 
+    def _ensure_sheet(self, wb) -> Any:
+        """Проверяет наличие листа 'Табель' с правильной структурой и создает его при необходимости"""
+        if "Табель" in wb.sheetnames:
+            ws = wb["Табель"]
+            hdr_first = str(ws.cell(1, 1).value or "")
+            # Проверяем наличие новых столбцов (включая Подразделение)
+            if hdr_first == "ID объекта" and ws.max_column >= (7 + 31 + 4):  # +1 для подразделения, +4 для итогов и переработок
+                return ws
+            # Если структура не совпадает, переименовываем старый лист
+            base = "Табель_OLD"
+            new_name = base
+            i = 1
+            while new_name in wb.sheetnames:
+                i += 1
+                new_name = f"{base}{i}"
+            ws.title = new_name
+
+        # Создаем новый лист с правильной структурой
+       ws2 = wb.create_sheet("Табель")
+        hdr = ["ID объекта", "Адрес", "Месяц", "Год", "ФИО", "Табельный №", "Подразделение"] + \
+              [str(i) for i in range(1, 32)] + \
+              ["Итого дней", "Итого часов по табелю", "Переработка день", "Переработка ночь"]
+        ws2.append(hdr)
+
+        # Настройка ширины столбцов
+        ws2.column_dimensions["A"].width = 14  # ID объекта
+        ws2.column_dimensions["B"].width = 40  # Адрес
+        ws2.column_dimensions["C"].width = 10  # Месяц
+        ws2.column_dimensions["D"].width = 8   # Год
+        ws2.column_dimensions["E"].width = 28  # ФИО
+        ws2.column_dimensions["F"].width = 14  # Табельный №
+        ws2.column_dimensions["G"].width = 20  # Подразделение
+
+        # Дни месяца (1-31) - столбцы 8-38
+        for i in range(8, 8 + 31):
+            ws2.column_dimensions[get_column_letter(i)].width = 6
+
+        # Итоговые столбцы
+        ws2.column_dimensions[get_column_letter(39)].width = 10  # Итого дней
+        ws2.column_dimensions[get_column_letter(40)].width = 18  # Итого часов по табелю
+        ws2.column_dimensions[get_column_letter(41)].width = 14  # Переработка день
+        ws2.column_dimensions[get_column_letter(42)].width = 14  # Переработка ночь
+
+        ws2.freeze_panes = "A2"
+        return ws2
+
     def _load_existing_rows(self):
         """Загружает существующие строки с фильтром по подразделению"""
         # Очищаем текущий реестр перед загрузкой
