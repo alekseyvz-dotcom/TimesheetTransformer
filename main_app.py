@@ -530,7 +530,7 @@ def perform_summary_export(year: int, month: int, fmt: str = "xlsx") -> Tuple[in
         
         return len(all_rows), [export_path]
 
-# ------------- Ряд реестра (RowWidget) и Диалоги (Сохраненный код) -------------
+# ------------- Ряд реестра (RowWidget) и Диалоги -------------
 
 class RowWidget:
     WEEK_BG_SAT = "#fff8e1"
@@ -551,7 +551,6 @@ class RowWidget:
         self.widgets: List[tk.Widget] = []
         
         self.parsed_hours_cache: List[ParsedHours] = [ParsedHours() for _ in range(31)]
-        self.table.update_idletasks = lambda: None
 
         # ФИО
         self.lbl_fio = tk.Label(self.table, text=fio, anchor="w", bg=zebra_bg)
@@ -601,8 +600,6 @@ class RowWidget:
         self.btn_del = ttk.Button(self.table, text="Удалить", width=7, command=self.delete_row)
         self.btn_del.grid(row=self.row, column=TS_SCHEMA.OVERTIME_NIGHT + 1, padx=1, pady=0, sticky="nsew")
         self.widgets.append(self.btn_del)
-
-        self.table.update_idletasks = self.table.tk.call
 
     # --- Новая логика для массового копирования (UX) ---
     def _on_paste_in_entry(self, event):
@@ -758,7 +755,6 @@ class RowWidget:
         if hasattr(self.table.master.master, '_recalc_object_total'):
             self.table.master.master._recalc_object_total()
 
-
     def fill_52(self):
         y, m = self.get_year_month()
         days = month_days(y, m)
@@ -784,7 +780,7 @@ class RowWidget:
     def delete_row(self):
         self.on_delete(self)
 
-# ------------- Диалоги и прочее (Сохраненный код) -------------
+# ------------- Диалоги -------------
 
 class CopyFromDialog(simpledialog.Dialog):
     def __init__(self, parent, init_year: int, init_month: int):
@@ -997,8 +993,7 @@ class ProgressDialog(tk.Toplevel):
         except:
             pass
 
-
-# ------------- СТРАНИЦЫ И АСИНХРОННАЯ ЗАГРУЗКА -------------
+# ------------- СТРАНИЦЫ -------------
 
 class HomePage(tk.Frame):
     def __init__(self, master):
@@ -1014,7 +1009,6 @@ class HomePage(tk.Frame):
             .pack(anchor="center", pady=(4, 6))
         tk.Label(center, text="Выберите раздел в верхнем меню.\nОбъектный табель → Создать — для работы с табелями.",
                  font=("Segoe UI", 10), fg="#444", bg="#f7f7f7", justify="center").pack(anchor="center")
-
 
 class TimesheetPage(tk.Frame):
     COLPX = {"fio": 200, "tbn": 100, "day": 36, "days": 46, "hours": 56, "btn52": 40, "del": 66}
@@ -1116,13 +1110,12 @@ class TimesheetPage(tk.Frame):
             top = tk.Frame(self)
             top.pack(fill="x", padx=8, pady=8)
             
-            # --- НАСТРОЙКА ВЕСОВ КОЛОНОК В top (Увеличиваем вес колонок 1 и 5 для растяжения) ---
+            # Настройка весов колонок
             for col in range(8):
                 weight = 0
                 if col == 1 or col == 5:
                     weight = 1
                 top.grid_columnconfigure(col, weight=weight)
-            # ------------------------------------
 
             # ROW 0: Подразделение
             tk.Label(top, text="Подразделение:").grid(row=0, column=0, sticky="w")
@@ -1187,7 +1180,8 @@ class TimesheetPage(tk.Frame):
             btns = tk.Frame(top)
             btns.grid(row=3, column=0, columnspan=8, sticky="w", pady=(8, 0))
             
-            for col in range(8):
+            # ИСПРАВЛЕНО: увеличено количество колонок до 9
+            for col in range(9):
                 btns.grid_columnconfigure(col, weight=1)
 
             ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
@@ -1206,7 +1200,7 @@ class TimesheetPage(tk.Frame):
             self.btn_save = ttk.Button(btns, text="Сохранить", command=self.save_all, style="Accent.TButton")
             self.btn_save.grid(row=0, column=8, padx=8)
             
-            # Основной контейнер с прокруткой (растягивается на всю оставшуюся высоту TimesheetPage)
+            # Основной контейнер с прокруткой
             main_frame = tk.Frame(self)
             main_frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
@@ -1249,18 +1243,6 @@ class TimesheetPage(tk.Frame):
             print(f"Критическая ошибка в _build_ui: {e}")
             traceback.print_exc()
             raise
-
-    def clear_registry(self):
-        """Полная очистка реестра с подтверждением."""
-        if not self.rows:
-            messagebox.showinfo("Очистка", "Реестр уже пуст")
-            return
-    
-        if messagebox.askyesno("Очистка реестра", 
-                              f"Удалить всех {len(self.rows)} сотрудников из реестра?\n\n"
-                              "Несохраненные данные будут потеряны!"):
-            self._clear_current_rows()
-            messagebox.showinfo("Очистка", "Реестр очищен")
 
     def _configure_table_columns(self):
         """Настройка ширин колонок в таблице."""
@@ -1311,7 +1293,7 @@ class TimesheetPage(tk.Frame):
         tk.Label(self.table, text="Удалить", bg=hdr_bg, relief="ridge", bd=1, font=("Arial", 7))\
             .grid(row=0, column=TS_SCHEMA.OVERTIME_NIGHT + 1, sticky="nsew")
 
-    # ============== НЕДОСТАЮЩИЕ МЕТОДЫ ===============
+    # ============== МЕТОДЫ-ОБРАБОТЧИКИ ===============
 
     def get_year_month(self) -> tuple:
         """Возвращает текущий год и месяц."""
@@ -1328,14 +1310,23 @@ class TimesheetPage(tk.Frame):
         try:
             dept = self.cmb_department.get()
             set_selected_department_in_config(dept)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Ошибка в _on_department_select: {e}")
 
     def _on_period_change(self):
         """Обработчик изменения месяца/года."""
-        year, month = self.get_year_month()
-        for row in self.rows:
-            row.update_days_enabled(year, month)
+        try:
+            year, month = self.get_year_month()
+            
+            # Обновляем состояние дней для существующих строк
+            for row in self.rows:
+                row.update_days_enabled(year, month)
+            
+            # Автоматически загружаем данные для нового периода
+            self.after(100, self._load_existing_rows)
+            
+        except Exception as e:
+            print(f"Ошибка в _on_period_change: {e}")
 
     def _on_address_select(self, event=None):
         """Обработчик выбора адреса."""
@@ -1358,21 +1349,6 @@ class TimesheetPage(tk.Frame):
         except Exception as e:
             print(f"Ошибка в _on_address_select: {e}")
 
-def _on_period_change(self):
-    """Обработчик изменения месяца/года."""
-    try:
-        year, month = self.get_year_month()
-        
-        # Обновляем состояние дней для существующих строк
-        for row in self.rows:
-            row.update_days_enabled(year, month)
-        
-        # Автоматически загружаем данные для нового периода
-        self.after(100, self._load_existing_rows)
-        
-    except Exception as e:
-        print(f"Ошибка в _on_period_change: {e}")
-
     def _on_address_change(self):
         """Обработчик изменения адреса при печати."""
         # Пустая заглушка для AutoComplete
@@ -1390,8 +1366,8 @@ def _on_period_change(self):
             else:
                 self.ent_tbn.delete(0, tk.END)
                 self.pos_var.set("")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Ошибка в _on_fio_select: {e}")
 
     def add_row(self):
         """Добавление новой строки сотрудника."""
@@ -1605,6 +1581,18 @@ def _on_period_change(self):
                 row.destroy()
             self.rows.clear()
             self._recalc_object_total()
+
+    def clear_registry(self):
+        """Полная очистка реестра с подтверждением."""
+        if not self.rows:
+            messagebox.showinfo("Очистка", "Реестр уже пуст")
+            return
+    
+        if messagebox.askyesno("Очистка реестра", 
+                              f"Удалить всех {len(self.rows)} сотрудников из реестра?\n\n"
+                              "Несохраненные данные будут потеряны!"):
+            self._clear_current_rows()
+            messagebox.showinfo("Очистка", "Реестр очищен")
 
     def copy_from_month(self):
         """Копирование сотрудников из другого месяца."""
@@ -2028,6 +2016,8 @@ class MainApp(tk.Tk):
         s = ttk.Style(self)
         s.configure('Accent.TButton', background='#4CAF50', foreground='black', font=('Segoe UI', 9, 'bold'))
         s.map('Accent.TButton', background=[('active', '#66BB6A')])
+        
+        # ИСПРАВЛЕНО: добавлена инициализация _pages
         self._pages: Dict[str, tk.Widget] = {}
 
         # Меню
