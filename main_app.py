@@ -1531,7 +1531,7 @@ class TimesheetPage(tk.Frame):
             self.fio_var.set("")
             self.ent_tbn.delete(0, "end")
             self.pos_var.set("")
-             self._load_existing_rows()
+            self._load_existing_rows()
 
     def _on_fio_select(self, *_):
         fio = self.fio_var.get().strip()
