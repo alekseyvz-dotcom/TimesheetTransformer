@@ -20,9 +20,15 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 from datetime import datetime, date, timedelta
 
+# Мягкий импорт менеджера настроек (зашифрованные настройки)
+try:
+    import settings_manager as Settings
+except Exception:
+    Settings = None
+
 APP_TITLE = "Заказ спецтехники"
 
-# Конфиг и файлы
+# Конфиг и файлы (ключи совместимы с main_app/settings_manager)
 CONFIG_FILE = "tabel_config.ini"
 CONFIG_SECTION_PATHS   = "Paths"
 CONFIG_SECTION_UI      = "UI"
@@ -36,13 +42,13 @@ KEY_SELECTED_DEP        = "selected_department"
 KEY_ORDERS_MODE         = "orders_mode"               # none | webhook
 KEY_ORDERS_WEBHOOK_URL  = "orders_webhook_url"        # https://script.google.com/macros/s/.../exec
 KEY_ORDERS_WEBHOOK_TOKEN= "orders_webhook_token"
-KEY_PLANNING_ENABLED = "planning_enabled"
-KEY_PLANNING_PASSWORD   = "planning_password"# true|false
+KEY_PLANNING_ENABLED    = "planning_enabled"          # true|false
+KEY_PLANNING_PASSWORD   = "planning_password"
 
 # Настройки отсечки подачи заявок
 KEY_CUTOFF_ENABLED      = "cutoff_enabled"            # true|false
 KEY_CUTOFF_HOUR         = "cutoff_hour"               # 0..23
-KEY_DRIVER_DEPARTMENTS = "driver_departments"
+KEY_DRIVER_DEPARTMENTS  = "driver_departments"
 
 # Удалённый справочник (Я.Диск)
 KEY_REMOTE_USE          = "use_remote"                # true|false
@@ -51,6 +57,22 @@ KEY_YA_PUBLIC_PATH      = "yadisk_public_path"        # если опублик�
 
 SPRAVOCHNIK_FILE = "Справочник.xlsx"
 ORDERS_DIR = "Заявки_спецтехники"
+
+# Если доступен settings_manager — подменяем конфиг-функции на зашифрованное хранилище
+if Settings:
+    ensure_config = Settings.ensure_config
+    read_config = Settings.read_config
+    write_config = Settings.write_config
+
+    # Совместимые обертки под старые имена
+    def get_spr_path() -> Path:
+        return Settings.get_spr_path_from_config()
+
+    def get_saved_dep() -> str:
+        return Settings.get_selected_department_from_config()
+
+    def set_saved_dep(dep: str):
+        return Settings.set_selected_department_in_config(dep)
 
 
 # ------------------------- Утилиты конфигурации -------------------------
@@ -62,141 +84,144 @@ def exe_dir() -> Path:
 
 def config_path() -> Path:
     return exe_dir() / CONFIG_FILE
-    
-def get_planning_password() -> str:
-    """Получить пароль для доступа к планированию"""
-    cfg = read_config()
-    return cfg.get(CONFIG_SECTION_INTEGR, KEY_PLANNING_PASSWORD, fallback="2025").strip()
 
-def ensure_config():
-    cp = config_path()
-    if cp.exists():
+# Старые ini-функции конфигурации — только если нет settings_manager
+if not Settings:
+    def get_planning_password() -> str:
+        cfg = read_config()
+        return cfg.get(CONFIG_SECTION_INTEGR, KEY_PLANNING_PASSWORD, fallback="2025").strip()
+
+    def ensure_config():
+        cp = config_path()
+        if cp.exists():
+            cfg = configparser.ConfigParser()
+            cfg.read(cp, encoding="utf-8")
+            changed = False
+
+            if not cfg.has_section(CONFIG_SECTION_PATHS):
+                cfg[CONFIG_SECTION_PATHS] = {}
+                changed = True
+            if KEY_SPR not in cfg[CONFIG_SECTION_PATHS]:
+                cfg[CONFIG_SECTION_PATHS][KEY_SPR] = str(exe_dir() / SPRAVOCHNIK_FILE)
+                changed = True
+
+            if not cfg.has_section(CONFIG_SECTION_UI):
+                cfg[CONFIG_SECTION_UI] = {}
+                changed = True
+            if KEY_SELECTED_DEP not in cfg[CONFIG_SECTION_UI]:
+                cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = "Все"
+                changed = True
+
+            if not cfg.has_section(CONFIG_SECTION_INTEGR):
+                cfg[CONFIG_SECTION_INTEGR] = {}
+                changed = True
+            if KEY_ORDERS_MODE not in cfg[CONFIG_SECTION_INTEGR]:
+                cfg[CONFIG_SECTION_INTEGR][KEY_ORDERS_MODE] = "none"
+                changed = True
+            if KEY_ORDERS_WEBHOOK_URL not in cfg[CONFIG_SECTION_INTEGR]:
+                cfg[CONFIG_SECTION_INTEGR][KEY_ORDERS_WEBHOOK_URL] = ""
+                changed = True
+            if KEY_ORDERS_WEBHOOK_TOKEN not in cfg[CONFIG_SECTION_INTEGR]:
+                cfg[CONFIG_SECTION_INTEGR][KEY_ORDERS_WEBHOOK_TOKEN] = ""
+                changed = True
+            if KEY_PLANNING_ENABLED not in cfg[CONFIG_SECTION_INTEGR]:
+                cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_ENABLED] = "false"
+                changed = True
+            if KEY_DRIVER_DEPARTMENTS not in cfg[CONFIG_SECTION_INTEGR]:
+                cfg[CONFIG_SECTION_INTEGR][KEY_DRIVER_DEPARTMENTS] = "Служба гаража, Автопарк, Транспортный цех"
+                changed = True
+            if KEY_PLANNING_PASSWORD not in cfg[CONFIG_SECTION_INTEGR]:
+                cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_PASSWORD] = "2025"
+                changed = True
+
+            if not cfg.has_section(CONFIG_SECTION_ORDERS):
+                cfg[CONFIG_SECTION_ORDERS] = {}
+                changed = True
+            if KEY_CUTOFF_ENABLED not in cfg[CONFIG_SECTION_ORDERS]:
+                cfg[CONFIG_SECTION_ORDERS][KEY_CUTOFF_ENABLED] = "true"
+                changed = True
+            if KEY_CUTOFF_HOUR not in cfg[CONFIG_SECTION_ORDERS]:
+                cfg[CONFIG_SECTION_ORDERS][KEY_CUTOFF_HOUR] = "13"
+                changed = True
+
+            if not cfg.has_section(CONFIG_SECTION_REMOTE):
+                cfg[CONFIG_SECTION_REMOTE] = {}
+                changed = True
+            if KEY_REMOTE_USE not in cfg[CONFIG_SECTION_REMOTE]:
+                cfg[CONFIG_SECTION_REMOTE][KEY_REMOTE_USE] = "false"
+                changed = True
+            if KEY_YA_PUBLIC_LINK not in cfg[CONFIG_SECTION_REMOTE]:
+                cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_LINK] = ""
+                changed = True
+            if KEY_YA_PUBLIC_PATH not in cfg[CONFIG_SECTION_REMOTE]:
+                cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_PATH] = ""
+                changed = True
+
+            if changed:
+                with open(cp, "w", encoding="utf-8") as f:
+                    cfg.write(f)
+            return
+
+        # создаём ini с нуля (только если нет settings_manager)
         cfg = configparser.ConfigParser()
-        cfg.read(cp, encoding="utf-8")
-        changed = False
+        cfg[CONFIG_SECTION_PATHS] = {KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE)}
+        cfg[CONFIG_SECTION_UI] = {KEY_SELECTED_DEP: "Все"}
+        cfg[CONFIG_SECTION_INTEGR] = {
+            KEY_ORDERS_MODE: "none",
+            KEY_ORDERS_WEBHOOK_URL: "",
+            KEY_ORDERS_WEBHOOK_TOKEN: "",
+            KEY_PLANNING_ENABLED: "false",
+            KEY_DRIVER_DEPARTMENTS: "Служба гаража, Автопарк, Транспортный цех",
+            KEY_PLANNING_PASSWORD: "2025"
+        }
+        cfg[CONFIG_SECTION_ORDERS] = {
+            KEY_CUTOFF_ENABLED: "true",
+            KEY_CUTOFF_HOUR: "13"
+        }
+        cfg[CONFIG_SECTION_REMOTE] = {
+            KEY_REMOTE_USE: "false",
+            KEY_YA_PUBLIC_LINK: "",
+            KEY_YA_PUBLIC_PATH: ""
+        }
+        with open(cp, "w", encoding="utf-8") as f:
+            cfg.write(f)
 
-        if not cfg.has_section(CONFIG_SECTION_PATHS):
-            cfg[CONFIG_SECTION_PATHS] = {}
-            changed = True
-        if KEY_SPR not in cfg[CONFIG_SECTION_PATHS]:
-            cfg[CONFIG_SECTION_PATHS][KEY_SPR] = str(exe_dir() / SPRAVOCHNIK_FILE)
-            changed = True
+    def read_config() -> configparser.ConfigParser:
+        ensure_config()
+        cfg = configparser.ConfigParser()
+        cfg.read(config_path(), encoding="utf-8")
+        return cfg
 
+    def write_config(cfg: configparser.ConfigParser):
+        with open(config_path(), "w", encoding="utf-8") as f:
+            cfg.write(f)
+
+    def get_spr_path() -> Path:
+        cfg = read_config()
+        raw = cfg.get(CONFIG_SECTION_PATHS, KEY_SPR, fallback=str(exe_dir() / SPRAVOCHNIK_FILE))
+        return Path(os.path.expandvars(raw))
+
+    def get_saved_dep() -> str:
+        cfg = read_config()
+        return cfg.get(CONFIG_SECTION_UI, KEY_SELECTED_DEP, fallback="Все")
+
+    def set_saved_dep(dep: str):
+        cfg = read_config()
         if not cfg.has_section(CONFIG_SECTION_UI):
             cfg[CONFIG_SECTION_UI] = {}
-            changed = True
-        if KEY_SELECTED_DEP not in cfg[CONFIG_SECTION_UI]:
-            cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = "Все"
-            changed = True
+        cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = dep or "Все"
+        write_config(cfg)
 
-        if not cfg.has_section(CONFIG_SECTION_INTEGR):
-            cfg[CONFIG_SECTION_INTEGR] = {}
-            changed = True
-        if KEY_ORDERS_MODE not in cfg[CONFIG_SECTION_INTEGR]:
-            cfg[CONFIG_SECTION_INTEGR][KEY_ORDERS_MODE] = "none"
-            changed = True
-        if KEY_ORDERS_WEBHOOK_URL not in cfg[CONFIG_SECTION_INTEGR]:
-            cfg[CONFIG_SECTION_INTEGR][KEY_ORDERS_WEBHOOK_URL] = ""
-            changed = True
-        if KEY_ORDERS_WEBHOOK_TOKEN not in cfg[CONFIG_SECTION_INTEGR]:
-            cfg[CONFIG_SECTION_INTEGR][KEY_ORDERS_WEBHOOK_TOKEN] = ""
-            changed = True
+else:
+    # Если Settings есть, дополнительные геттеры на его Proxy
+    def get_planning_password() -> str:
+        cfg = read_config()
+        return cfg.get(CONFIG_SECTION_INTEGR, KEY_PLANNING_PASSWORD, fallback="2025").strip()
 
-        if not cfg.has_section(CONFIG_SECTION_ORDERS):
-            cfg[CONFIG_SECTION_ORDERS] = {}
-            changed = True
-        if KEY_CUTOFF_ENABLED not in cfg[CONFIG_SECTION_ORDERS]:
-            cfg[CONFIG_SECTION_ORDERS][KEY_CUTOFF_ENABLED] = "true"
-            changed = True
-        if KEY_CUTOFF_HOUR not in cfg[CONFIG_SECTION_ORDERS]:
-            cfg[CONFIG_SECTION_ORDERS][KEY_CUTOFF_HOUR] = "13"
-            changed = True
-
-        if not cfg.has_section(CONFIG_SECTION_REMOTE):
-            cfg[CONFIG_SECTION_REMOTE] = {}
-            changed = True
-        if KEY_REMOTE_USE not in cfg[CONFIG_SECTION_REMOTE]:
-            cfg[CONFIG_SECTION_REMOTE][KEY_REMOTE_USE] = "false"
-            changed = True
-        if KEY_YA_PUBLIC_LINK not in cfg[CONFIG_SECTION_REMOTE]:
-            cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_LINK] = ""
-            changed = True
-        if KEY_YA_PUBLIC_PATH not in cfg[CONFIG_SECTION_REMOTE]:
-            cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_PATH] = ""
-            changed = True
-        if KEY_PLANNING_ENABLED not in cfg[CONFIG_SECTION_INTEGR]:
-            cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_ENABLED] = "false"
-            changed = True
-        if KEY_DRIVER_DEPARTMENTS not in cfg[CONFIG_SECTION_INTEGR]:
-            cfg[CONFIG_SECTION_INTEGR][KEY_DRIVER_DEPARTMENTS] = "Служба гаража, Автопарк, Транспортный цех"
-            changed = True
-        if KEY_PLANNING_PASSWORD not in cfg[CONFIG_SECTION_INTEGR]:
-            cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_PASSWORD] = "2025"
-            changed = True
-
-        if changed:
-            with open(cp, "w", encoding="utf-8") as f:
-                cfg.write(f)
-        return
-
-    # создаём с нуля
-    cfg = configparser.ConfigParser()
-    cfg[CONFIG_SECTION_PATHS] = {
-        KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE)
-    }
-    cfg[CONFIG_SECTION_UI] = {
-        KEY_SELECTED_DEP: "Все"
-    }
-    cfg[CONFIG_SECTION_INTEGR] = {
-        KEY_ORDERS_MODE: "none",
-        KEY_ORDERS_WEBHOOK_URL: "",
-        KEY_ORDERS_WEBHOOK_TOKEN: "",
-        KEY_PLANNING_ENABLED: "false",
-        KEY_DRIVER_DEPARTMENTS: "Служба гаража, Автопарк, Транспортный цех",
-        KEY_PLANNING_PASSWORD: "2025" 
-    }
-    cfg[CONFIG_SECTION_ORDERS] = {
-        KEY_CUTOFF_ENABLED: "true",
-        KEY_CUTOFF_HOUR: "13"
-    }
-    cfg[CONFIG_SECTION_REMOTE] = {
-        KEY_REMOTE_USE: "false",
-        KEY_YA_PUBLIC_LINK: "",
-        KEY_YA_PUBLIC_PATH: ""
-    }
-    with open(cp, "w", encoding="utf-8") as f:
-        cfg.write(f)
-        
 def get_planning_enabled() -> bool:
     cfg = read_config()
     v = cfg.get(CONFIG_SECTION_INTEGR, KEY_PLANNING_ENABLED, fallback="false").strip().lower()
     return v in ("1", "true", "yes", "on")
-
-def read_config() -> configparser.ConfigParser:
-    ensure_config()
-    cfg = configparser.ConfigParser()
-    cfg.read(config_path(), encoding="utf-8")
-    return cfg
-
-def write_config(cfg: configparser.ConfigParser):
-    with open(config_path(), "w", encoding="utf-8") as f:
-        cfg.write(f)
-
-def get_spr_path() -> Path:
-    cfg = read_config()
-    raw = cfg.get(CONFIG_SECTION_PATHS, KEY_SPR, fallback=str(exe_dir() / SPRAVOCHNIK_FILE))
-    return Path(os.path.expandvars(raw))
-
-def get_saved_dep() -> str:
-    cfg = read_config()
-    return cfg.get(CONFIG_SECTION_UI, KEY_SELECTED_DEP, fallback="Все")
-
-def set_saved_dep(dep: str):
-    cfg = read_config()
-    if not cfg.has_section(CONFIG_SECTION_UI):
-        cfg[CONFIG_SECTION_UI] = {}
-    cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = dep or "Все"
-    write_config(cfg)
 
 def get_orders_mode() -> str:
     cfg = read_config()
@@ -346,8 +371,14 @@ def load_spravochnik_remote_or_local(local_path: Path):
             wb = load_workbook(BytesIO(raw), read_only=True, data_only=True)
             return load_spravochnik_from_wb(wb)
         except Exception as e:
-            print(f"[Remote YaDisk] ошибка: {e} — используется локальный файл")
+            print(f"[Remote YaDisk] ошибка: {e} — локальный справочник используем только если существует")
+            if local_path.exists():
+                wb = load_workbook(local_path, read_only=True, data_only=True)
+                return load_spravochnik_from_wb(wb)
+            # НЕ создаём локальный файл при удаленном режиме — пустые данные
+            return [], [], []
 
+    # Локальный режим — допускаем автосоздание
     ensure_spravochnik(local_path)
     wb = load_workbook(local_path, read_only=True, data_only=True)
     return load_spravochnik_from_wb(wb)
@@ -488,12 +519,8 @@ class PositionRow:
         """Вызывается при каждом изменении - запускает отложенное форматирование"""
         if self._formatting_time:
             return
-        
-        # Отменяем предыдущий таймер
         if self._format_timer:
             self.ent_time.after_cancel(self._format_timer)
-        
-        # Запускаем новый таймер на 500мс
         self._format_timer = self.ent_time.after(500, self._do_format)
     
     def _format_immediately(self, event=None):
@@ -508,16 +535,12 @@ class PositionRow:
         """Выполняет форматирование"""
         if self._formatting_time:
             return
-        
         current = self.time_var.get()
         formatted = self._auto_format_time_input(current)
-        
         if formatted != current:
             self._formatting_time = True
             try:
-                cursor_pos = self.ent_time.index(tk.INSERT)
                 self.time_var.set(formatted)
-                # Ставим курсор в конец
                 self.ent_time.icursor(tk.END)
             finally:
                 self._formatting_time = False
@@ -535,29 +558,20 @@ class PositionRow:
         """
         if not raw:
             return ""
-        
-        # Удаляем все кроме цифр
         digits = ''.join(c for c in raw if c.isdigit())
-        
         if not digits:
             return ""
-        
-        # Форматируем в зависимости от количества цифр
         if len(digits) == 1:
-            # '8' → '08:00'
             hh = int(digits)
             return f"{hh:02d}:00"
         elif len(digits) == 2:
-            # '13' → '13:00'
             hh = min(int(digits), 23)
             return f"{hh:02d}:00"
         elif len(digits) == 3:
-            # '130' → '01:30' (интерпретируем как Ч:ММ)
             hh = int(digits[0])
             mm = min(int(digits[1:3]), 59)
             return f"{hh:02d}:{mm:02d}"
-        else:  # 4 или больше цифр
-            # '1300' → '13:00' (интерпретируем как ЧЧММ)
+        else:
             hh = min(int(digits[:2]), 23)
             mm = min(int(digits[2:4]), 59)
             return f"{hh:02d}:{mm:02d}"
@@ -596,7 +610,7 @@ class PositionRow:
         except Exception:
             self._mark_err(self.ent_qty); ok = False
 
-        # время ПОДАЧИ — теперь ОБЯЗАТЕЛЬНО
+        # время ПОДАЧИ — обязательно
         tstr = (self.ent_time.get() or "").strip()
         if not tstr or parse_time_str(tstr) is None:
             self._mark_err(self.ent_time); ok = False
@@ -664,7 +678,7 @@ def post_json(url: str, payload: dict, token: str = '') -> Tuple[bool, str]:
 class SpecialOrdersPage(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
-        ensure_config()  # на всякий случай
+        ensure_config()  # из settings_manager, если доступен
         self.base_dir = exe_dir()
         self.spr_path = get_spr_path()
         self.orders_dir = self.base_dir / ORDERS_DIR
@@ -681,22 +695,13 @@ class SpecialOrdersPage(tk.Frame):
 
         # ========== ТЕХНИКА: ТОЛЬКО УНИКАЛЬНЫЕ ТИПЫ ДЛЯ ЗАЯВКИ ==========
         self.techs = []
-        tech_types = set()  # Собираем уникальные типы
+        tech_types = set()
     
         for tp, nm, pl, dep, note in tech:
-            if tp:  # Добавляем только если тип указан
+            if tp:
                 tech_types.add(tp)
-        
-            # ВАЖНО: сохраняем полную информацию для справки
-            self.techs.append({
-                'type': tp, 
-                'name': nm, 
-                'plate': pl, 
-                'dep': dep, 
-                'note': note
-            })
+            self.techs.append({'type': tp, 'name': nm, 'plate': pl, 'dep': dep, 'note': note})
     
-        # Для выпадающего списка в заявке - только типы (отсортированные)
         self.tech_values = sorted(list(tech_types))
         # ================================================================
 
@@ -886,7 +891,7 @@ class SpecialOrdersPage(tk.Frame):
         if req is None or req != tomorrow:
             messagebox.showwarning("Заявка", f"Заявка возможна только на дату: {tomorrow.strftime('%Y-%m-%d')}.")
             return False
-        # Адрес (теперь обязателен)
+        # Адрес (обязателен)
         addr = (self.cmb_address.get() or "").strip()
         if not addr:
             messagebox.showwarning("Заявка", "Укажите Адрес.")
@@ -1049,7 +1054,7 @@ class TransportPlanningPage(tk.Frame):
         self.authenticated = False
         self.row_meta: Dict[str, Dict[str, str]] = {} 
 
-        # ПРОВЕРКА ПАРОЛЯ (КАК В АНАЛИТИКЕ)
+        # ПРОВЕРКА ПАРОЛЯ
         if not self._check_password():
             self._show_access_denied()
             return
@@ -1108,46 +1113,29 @@ class TransportPlanningPage(tk.Frame):
         """Загрузка справочника"""
         employees, objects, tech = load_spravochnik_remote_or_local(self.spr_path)
     
-        # ========== ТРАНСПОРТ: полная структура для каскадных списков ==========
+        # ========== ТРАНСПОРТ: полная структура ==========
         self.vehicles = []
         self.vehicle_types = set()
     
         for tp, nm, pl, dep, note in tech:
-            self.vehicles.append({
-                'type': tp, 
-                'name': nm, 
-                'plate': pl, 
-                'dep': dep, 
-                'note': note
-            })
+            self.vehicles.append({'type': tp, 'name': nm, 'plate': pl, 'dep': dep, 'note': note})
             if tp:
                 self.vehicle_types.add(tp)
     
-        # Сортируем типы
         self.vehicle_types = sorted(list(self.vehicle_types))
         # ======================================================================
     
         # Водители
         cfg = read_config()
-        driver_depts_str = cfg.get(
-            CONFIG_SECTION_INTEGR, 
-            KEY_DRIVER_DEPARTMENTS, 
-            fallback="Служба гаража"
-        )
+        driver_depts_str = cfg.get(CONFIG_SECTION_INTEGR, KEY_DRIVER_DEPARTMENTS, fallback="Служба гаража")
         DRIVER_DEPARTMENTS = [d.strip() for d in driver_depts_str.split(",") if d.strip()]
     
         self.drivers = []
         for fio, tbn, pos, dep in employees:
             is_driver_dept = dep in DRIVER_DEPARTMENTS
             is_driver_pos = 'водитель' in pos.lower()
-        
             if is_driver_dept or is_driver_pos:
-                self.drivers.append({
-                    'fio': fio, 
-                    'tbn': tbn, 
-                    'pos': pos,
-                    'dep': dep
-                })
+                self.drivers.append({'fio': fio, 'tbn': tbn, 'pos': pos, 'dep': dep})
     
         self.drivers.sort(key=lambda x: x['fio'])
         self.departments = ["Все"] + sorted({dep for _, _, _, dep in employees if dep})
@@ -1184,7 +1172,6 @@ class TransportPlanningPage(tk.Frame):
         table_frame = tk.Frame(self)
         table_frame.pack(fill="both", expand=True, padx=10, pady=8)
         
-        # Создаем Treeview с колонками
         columns = (
             "id", "created", "date", "dept", "requester", 
             "object", "tech", "qty", "time", "hours", 
@@ -1193,7 +1180,6 @@ class TransportPlanningPage(tk.Frame):
         
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=20)
         
-        # Заголовки
         headers = {
             "id": "ID", "created": "Создано", "date": "Дата", 
             "dept": "Подразделение", "requester": "Заявитель",
@@ -1214,7 +1200,6 @@ class TransportPlanningPage(tk.Frame):
             self.tree.heading(col, text=headers.get(col, col))
             self.tree.column(col, width=widths.get(col, 100))
         
-        # Скроллбары
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
@@ -1226,10 +1211,8 @@ class TransportPlanningPage(tk.Frame):
         table_frame.grid_rowconfigure(0, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
         
-        # Двойной клик для редактирования
         self.tree.bind("<Double-1>", self.on_row_double_click)
         
-        # Цветовое выделение по статусам
         self.tree.tag_configure('Новая', background='#fff3cd')
         self.tree.tag_configure('Назначена', background='#d1ecf1')
         self.tree.tag_configure('В работе', background='#d4edda')
@@ -1249,7 +1232,6 @@ class TransportPlanningPage(tk.Frame):
             filter_dept = self.cmb_filter_dep.get()
             filter_status = self.cmb_filter_status.get()
             
-            # GET запрос
             params = {}
             if filter_date:
                 params['date'] = filter_date
@@ -1280,7 +1262,6 @@ class TransportPlanningPage(tk.Frame):
     def _check_vehicle_conflict(self, vehicle_full: str, req_date: str, req_time: str, current_id: str) -> List[Dict]:
         """
         Проверяет, не назначен ли этот автомобиль на другую заявку в это же время
-    
         vehicle_full: "Автокран | КС-45717 | А123ВС77"
         """
         if not vehicle_full or not req_date:
@@ -1290,44 +1271,32 @@ class TransportPlanningPage(tk.Frame):
     
         for item_id in self.tree.get_children():
             values = self.tree.item(item_id)['values']
-        
-            # Пропускаем текущую заявку
             if values[0] == current_id:
                 continue
+            other_date = values[2]
+            other_vehicle = values[10]
+            other_time = values[8]
+            other_requester = values[4]
+            other_object = values[5]
+            other_status = values[12]
         
-            other_date = values[2]          # Дата
-            other_vehicle = values[10]      # Назначенный авто
-            other_time = values[8]          # Подача
-            other_requester = values[4]     # Заявитель
-            other_object = values[5]        # Объект
-            other_status = values[12]       # Статус
-        
-            # Проверяем совпадение
             if (other_vehicle == vehicle_full and 
                 other_date == req_date and
                 other_status not in ['Выполнена', 'Отменена']):
-            
-                # Если время не указано - считаем потенциальным конфликтом
                 if not req_time or not other_time:
-                    conflicts.append({
-                        'time': other_time or 'не указано',
-                        'requester': other_requester,
-                        'object': other_object,
-                        'status': other_status
-                    })
-                # Если время указано - проверяем пересечение
+                    conflicts.append({'time': other_time or 'не указано',
+                                      'requester': other_requester,
+                                      'object': other_object,
+                                      'status': other_status})
                 elif req_time == other_time:
-                    conflicts.append({
-                        'time': other_time,
-                        'requester': other_requester,
-                        'object': other_object,
-                        'status': other_status
-                    })
+                    conflicts.append({'time': other_time,
+                                      'requester': other_requester,
+                                      'object': other_object,
+                                      'status': other_status})
     
         return conflicts
     
     def _populate_tree(self, orders: List[Dict]):
-        # Очищаем таблицу и мета
         for item in self.tree.get_children():
             self.tree.delete(item)
         self.row_meta = {}
@@ -1352,26 +1321,20 @@ class TransportPlanningPage(tk.Frame):
                 status
             ), tags=(status,))
 
-            # Сохраняем скрытые поля для каждой строки
             self.row_meta[item_id] = {
                 "comment": order.get("comment") or order.get("order_comment") or "",
                 "note": order.get("note") or order.get("position_note") or "",
             }
     
     def on_row_double_click(self, event):
-        """Открытие окна редактирования назначения"""
         selection = self.tree.selection()
         if not selection:
             return
-        
         item = self.tree.item(selection[0])
         values = item['values']
-        
-        # Открываем диалог для назначения транспорта
         self._show_assignment_dialog(selection[0], values)
 
     def _show_assignment_dialog(self, item_id, values):
-        """Диалог назначения транспорта и водителя"""
         dialog = tk.Toplevel(self)
         dialog.title("Назначение транспорта")
         dialog.geometry("640x700")
@@ -1379,13 +1342,12 @@ class TransportPlanningPage(tk.Frame):
         dialog.transient(self)
         dialog.grab_set()
 
-        # Центрируем
         dialog.update_idletasks()
         x = (dialog.winfo_screenwidth() // 2) - (640 // 2)
         y = (dialog.winfo_screenheight() // 2) - (700 // 2)
         dialog.geometry(f"640x700+{x}+{y}")
 
-        # ========== КОНТЕЙНЕР СО СКРОЛЛОМ ==========
+        # Контейнер со скроллом
         scroll_container = tk.Frame(dialog)
         scroll_container.pack(fill="both", expand=True, padx=0, pady=0)
 
@@ -1401,12 +1363,10 @@ class TransportPlanningPage(tk.Frame):
         canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        # Адаптация ширины
         def on_canvas_configure(event):
             canvas.itemconfig(canvas_window, width=event.width)
         canvas.bind("<Configure>", on_canvas_configure)
 
-        # Прокрутка колесиком
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1*(event.delta/120)), "units")
 
@@ -1421,8 +1381,6 @@ class TransportPlanningPage(tk.Frame):
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-
-        # ========== СОДЕРЖИМОЕ ==========
 
         # Информация о заявке
         info_frame = tk.LabelFrame(scrollable_frame, text="📋 Информация о заявке", padx=12, pady=10)
@@ -1454,7 +1412,7 @@ class TransportPlanningPage(tk.Frame):
             pady=8
         ).pack(anchor="w")
 
-        # === БЛОК: Комментарий и Примечание ===
+        # Тексты
         meta = self.row_meta.get(item_id, {})
         order_comment = (meta.get("comment") or "").strip()
         position_note = (meta.get("note") or "").strip()
@@ -1462,21 +1420,18 @@ class TransportPlanningPage(tk.Frame):
         texts_frame = tk.LabelFrame(scrollable_frame, text="🗒 Тексты заявки", padx=12, pady=10)
         texts_frame.pack(fill="x", padx=15, pady=(0, 8))
 
-        # Комментарий заявки
         row_c = tk.Frame(texts_frame)
         row_c.pack(fill="x", pady=2)
         tk.Label(row_c, text="Комментарий:", font=("Arial", 9), width=15, anchor="w").pack(side="left")
         tk.Label(row_c, text=(order_comment or "—"), font=("Arial", 9),
                  anchor="w", justify="left", wraplength=560).pack(side="left", fill="x", expand=True)
 
-        # Примечание позиции
         row_n = tk.Frame(texts_frame)
         row_n.pack(fill="x", pady=2)
         tk.Label(row_n, text="Примечание:", font=("Arial", 9), width=15, anchor="w").pack(side="left")
         tk.Label(row_n, text=(position_note or "—"), font=("Arial", 9),
                  anchor="w", justify="left", wraplength=560).pack(side="left", fill="x", expand=True)
 
-        # Предупреждение о конфликтах
         warning_frame = tk.Frame(scrollable_frame, bg="#fff3cd", relief="solid", borderwidth=1)
         warning_label = tk.Label(
             warning_frame, 
@@ -1489,11 +1444,9 @@ class TransportPlanningPage(tk.Frame):
         )
         warning_label.pack(padx=10, pady=8)
 
-        # Назначение транспорта
         assign_frame = tk.LabelFrame(scrollable_frame, text="🚗 Назначение транспорта", padx=15, pady=15)
         assign_frame.pack(fill="both", expand=True, padx=15, pady=5)
 
-        # ========== ПАРСИМ ТЕКУЩЕЕ НАЗНАЧЕНИЕ ==========
         current_assignment = values[10]
         current_type = ""
         current_name = ""
@@ -1507,7 +1460,6 @@ class TransportPlanningPage(tk.Frame):
         elif current_assignment:
             current_type = current_assignment.strip()
 
-        # ========== 1. ТИП ТЕХНИКИ ==========
         tk.Label(assign_frame, text="1️⃣ Тип техники:", font=("Arial", 9, "bold")).grid(
             row=0, column=0, sticky="w", pady=(5, 2)
         )
@@ -1522,7 +1474,6 @@ class TransportPlanningPage(tk.Frame):
         )
         cmb_vehicle_type.grid(row=1, column=0, pady=(0, 12), sticky="we")
 
-        # ========== 2. НАИМЕНОВАНИЕ ==========
         tk.Label(assign_frame, text="2️⃣ Наименование:", font=("Arial", 9, "bold")).grid(
             row=2, column=0, sticky="w", pady=(5, 2)
         )
@@ -1537,7 +1488,6 @@ class TransportPlanningPage(tk.Frame):
         )
         cmb_vehicle_name.grid(row=3, column=0, pady=(0, 12), sticky="we")
 
-        # ========== 3. ГОС. НОМЕР ==========
         tk.Label(assign_frame, text="3️⃣ Гос. номер:", font=("Arial", 9, "bold")).grid(
             row=4, column=0, sticky="w", pady=(5, 2)
         )
@@ -1552,7 +1502,6 @@ class TransportPlanningPage(tk.Frame):
         )
         cmb_vehicle_plate.grid(row=5, column=0, pady=(0, 12), sticky="we")
 
-        # Информация о выборе
         selection_info = tk.Label(
             assign_frame,
             text="💡 Выберите сначала тип, затем наименование и гос. номер",
@@ -1560,8 +1509,6 @@ class TransportPlanningPage(tk.Frame):
             fg="#666"
         )
         selection_info.grid(row=6, column=0, sticky="w", pady=(0, 10))
-
-        # ========== ЛОГИКА КАСКАДНЫХ СПИСКОВ ==========
 
         def update_names(*args):
             selected_type = vehicle_type_var.get()
@@ -1590,7 +1537,6 @@ class TransportPlanningPage(tk.Frame):
                 selection_info.config(text="⚠️ Нет доступных наименований для этого типа", fg="#dc3545")
             elif len(names) == 1:
                 vehicle_name_var.set(names[0])
-                # Не вызываем update_plates() здесь, он сработает по trace
             else:
                 selection_info.config(text=f"💡 Доступно наименований: {len(names)}", fg="#666")
 
@@ -1618,7 +1564,6 @@ class TransportPlanningPage(tk.Frame):
                 selection_info.config(text="⚠️ Нет доступных гос. номеров", fg="#dc3545")
             elif len(plates) == 1:
                 vehicle_plate_var.set(plates[0])
-                # check_conflicts() вызовется по trace
                 selection_info.config(text=f"✓ Назначен: {get_full_vehicle_string()}", fg="#28a745")
             else:
                 selection_info.config(text=f"💡 Доступно гос. номеров: {len(plates)}", fg="#666")
@@ -1633,17 +1578,13 @@ class TransportPlanningPage(tk.Frame):
                 parts.append(vehicle_plate_var.get())
             return " | ".join(parts) if parts else ""
 
-        # Привязываем обработчики
         vehicle_type_var.trace_add("write", update_names)
         vehicle_name_var.trace_add("write", update_plates)
-        vehicle_plate_var.trace_add("write", lambda *args: check_conflicts())
 
-        # Разделитель
         ttk.Separator(assign_frame, orient='horizontal').grid(
             row=7, column=0, sticky='ew', pady=15
         )
 
-        # Водитель
         tk.Label(assign_frame, text="👨‍✈️ Водитель:", font=("Arial", 9, "bold")).grid(
             row=8, column=0, sticky="w", pady=(5, 2)
         )
@@ -1674,7 +1615,6 @@ class TransportPlanningPage(tk.Frame):
         )
         cmb_driver.grid(row=9, column=0, pady=(0, 12), sticky="we")
 
-        # Статус
         tk.Label(assign_frame, text="📊 Статус:", font=("Arial", 9, "bold")).grid(
             row=10, column=0, sticky="w", pady=(5, 2)
         )
@@ -1691,7 +1631,6 @@ class TransportPlanningPage(tk.Frame):
 
         assign_frame.grid_columnconfigure(0, weight=1)
 
-        # ========== ПРОВЕРКА КОНФЛИКТОВ ==========
         def check_conflicts(*args):
             selected_vehicle = get_full_vehicle_string()
             if not selected_vehicle:
@@ -1715,16 +1654,16 @@ class TransportPlanningPage(tk.Frame):
             else:
                 warning_frame.pack_forget()
 
-        # Автоматическое изменение статуса
         def on_vehicle_or_driver_change(*args):
             if get_full_vehicle_string() and driver_var.get():
                 if status_var.get() == "Новая":
                     status_var.set("Назначена")
 
+        vehicle_plate_var = tk.StringVar(value="")
+        cmb_vehicle_plate['textvariable'] = vehicle_plate_var
         vehicle_plate_var.trace_add("write", on_vehicle_or_driver_change)
         driver_var.trace_add("write", on_vehicle_or_driver_change)
 
-        # ========== КНОПКИ (ФИКСИРОВАННЫЕ ВНИЗУ) ==========
         button_container = tk.Frame(dialog, bg="#f0f0f0", relief="raised", borderwidth=1)
         button_container.pack(fill="x", side="bottom", padx=0, pady=0)
 
@@ -1750,58 +1689,37 @@ class TransportPlanningPage(tk.Frame):
             unbind_mousewheel()
             dialog.destroy()
 
-        ttk.Button(
-            button_container, 
-            text="✓ Сохранить", 
-            command=save_and_close, 
-            width=20
-        ).pack(side="left", padx=15, pady=12)
+        ttk.Button(button_container, text="✓ Сохранить", command=save_and_close, width=20).pack(side="left", padx=15, pady=12)
+        ttk.Button(button_container, text="✗ Отмена", command=cancel_and_close, width=20).pack(side="left", padx=5, pady=12)
 
-        ttk.Button(
-            button_container, 
-            text="✗ Отмена", 
-            command=cancel_and_close, 
-            width=20
-        ).pack(side="left", padx=5, pady=12)
-
-        # ========== КРИТИЧЕСКИ ВАЖНО: ПРИНУДИТЕЛЬНОЕ ОБНОВЛЕНИЕ ==========
-        # Обновляем геометрию ДО инициализации значений
         dialog.update_idletasks()
         scrollable_frame.update_idletasks()
         canvas.update_idletasks()
     
-        # Теперь инициализируем значения (это должно вызвать trace и отрисовать виджеты)
         if current_type:
             vehicle_type_var.set(current_type)
-            dialog.update_idletasks()  # Даём время на обработку
-        
+            dialog.update_idletasks()
+            # После установки типа имена подтянутся через trace
             if current_name:
                 vehicle_name_var.set(current_name)
                 dialog.update_idletasks()
-            
                 if current_plate:
                     vehicle_plate_var.set(current_plate)
                     dialog.update_idletasks()
 
-        # Финальное обновление области прокрутки
         canvas.configure(scrollregion=canvas.bbox("all"))
         canvas.yview_moveto(0)
-    
-        # Ещё одно обновление для гарантии
         dialog.update()
-        # ================================================================
 
         cmb_vehicle_type.focus_set()
         dialog.bind("<Return>", lambda e: save_and_close())
         dialog.bind("<Escape>", lambda e: cancel_and_close())
 
-        # Проверяем конфликты при открытии
         check_conflicts()
 
     def save_assignments(self):
         """Сохранение назначений в Google Таблицы"""
         try:
-            # Собираем все назначения
             assignments = []
             for item in self.tree.get_children():
                 values = self.tree.item(item)['values']
@@ -1816,15 +1734,10 @@ class TransportPlanningPage(tk.Frame):
                 messagebox.showwarning("Сохранение", "Нет данных для сохранения")
                 return
             
-            # Отправляем на сервер
             url = get_orders_webhook_url()
             token = get_orders_webhook_token()
             
-            payload = {
-                'action': 'update_assignments',
-                'assignments': assignments
-            }
-            
+            payload = {'action': 'update_assignments', 'assignments': assignments}
             ok, info = post_json(url, payload, token)
             
             if ok:
@@ -1843,7 +1756,6 @@ class SpecialOrdersApp(tk.Tk):
         self.title(APP_TITLE)
         self.geometry("1180x720")
         self.resizable(True, True)
-        # Встроенная страница как корневой виджет
         page = SpecialOrdersPage(self)
         page.pack(fill="both", expand=True)
 
@@ -1877,7 +1789,6 @@ def open_special_orders(parent=None):
         app = SpecialOrdersApp()
         app.mainloop()
         return app
-    # Toplevel, но UI — тот же встраиваемый
     win = tk.Toplevel(parent)
     win.title(APP_TITLE)
     win.geometry("1180x720")
