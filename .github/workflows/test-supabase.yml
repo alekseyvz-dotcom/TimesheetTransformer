@@ -1,0 +1,49 @@
+name: Test Supabase DB connection
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  db-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pg client
+        run: npm install pg@8
+
+      - name: Run connection test
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          node -e "
+          (async () => {
+            try {
+              const { Client } = require('pg');
+              const url = process.env.DATABASE_URL;
+              if (!url) throw new Error('DATABASE_URL is empty');
+              const client = new Client({ connectionString: url, ssl: { rejectUnauthorized: false } });
+              await client.connect();
+              const ver = await client.query('select version()');
+              console.log('Connected OK:', ver.rows[0].version);
+              const now = await client.query('select now() as now');
+              console.log('Server time:', now.rows[0].now);
+              // мини-проверка схемы/прав
+              await client.query('create table if not exists healthcheck_test(id serial primary key, created_at timestamp default now())');
+              await client.query('insert into healthcheck_test default values');
+              const cnt = await client.query('select count(*) from healthcheck_test');
+              console.log('Rows in healthcheck_test:', cnt.rows[0].count);
+              await client.end();
+              console.log('All good.');
+            } catch (e) {
+              console.error('DB check failed:', e);
+              process.exit(1);
+            }
+          })();
+          "
