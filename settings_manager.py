@@ -6,11 +6,11 @@ import base64
 import hashlib
 import configparser
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-# Те же константы, что в main_app (чтобы не менять код)
+# Константы (совместимые с main_app)
 CONFIG_FILE = "tabel_config.ini"
 CONFIG_SECTION_PATHS = "Paths"
 CONFIG_SECTION_UI = "UI"
@@ -27,6 +27,10 @@ KEY_YA_PUBLIC_PATH = "yadisk_public_path"
 
 SETTINGS_FILENAME = "settings.dat"  # зашифрованное хранилище
 
+# ПАРОЛЬ ДОСТУПА К ОКНУ «НАСТРОЙКИ»
+# поменяйте по своему усмотрению
+SETTINGS_ACCESS_PASSWORD = "2025"
+
 def exe_dir() -> Path:
     if getattr(__import__("sys"), "frozen", False):
         return Path(__import__("sys").executable).resolve().parent
@@ -42,7 +46,6 @@ def _is_windows() -> bool:
     return platform.system().lower().startswith("win")
 
 def _dpapi_protect(data: bytes) -> bytes:
-    # Windows DPAPI через ctypes
     import ctypes
     from ctypes import wintypes
 
@@ -99,14 +102,12 @@ def _dpapi_unprotect(data: bytes) -> bytes:
         ctypes.windll.kernel32.LocalFree(out_blob.pbData)
 
 def _fallback_key() -> bytes:
-    # Ключ-«соль» из путей и имени пользователя (безопасная обфускация)
     user = os.environ.get("USERNAME") or os.environ.get("USER") or "user"
     root = str(exe_dir())
     payload = (user + "|" + root).encode("utf-8")
     return hashlib.sha256(payload).digest()
 
 def _fallback_encrypt(data: bytes) -> bytes:
-    # HMAC для целостности + base64
     key = _fallback_key()
     mac = hmac.new(key, data, hashlib.sha256).digest()
     return base64.b64encode(mac + data)
@@ -139,7 +140,6 @@ def _decrypt_dict(blob: bytes) -> Dict[str, Any]:
     if blob.startswith(b"FBK1"):
         data = _fallback_decrypt(blob[4:])
         return json.loads(data.decode("utf-8"))
-    # неизвестный формат — пробуем как есть (отладка)
     return json.loads(blob.decode("utf-8", errors="replace"))
 
 # ---------------- ХРАНИЛИЩЕ НАСТРОЕК ----------------
@@ -165,10 +165,7 @@ _defaults: Dict[str, Dict[str, Any]] = {
         KEY_YA_PUBLIC_LINK: "",
         KEY_YA_PUBLIC_PATH: "",
     },
-    "Orders": {
-        "cutoff_enabled": "false",
-        "cutoff_hour": "13",
-    },
+    # Раздел Orders удален из UI и defaults
 }
 
 _store: Dict[str, Dict[str, Any]] = {}
@@ -189,9 +186,7 @@ def load_settings():
             _ensure_sections()
             return
         except Exception:
-            # если что-то пошло не так — не теряемся, пробуем миграцию из INI
             pass
-    # Если нет файла — мигрируем из INI или создаем дефолт
     migrate_from_ini_or_create()
 
 def save_settings():
@@ -207,9 +202,7 @@ def migrate_from_ini_or_create():
             cfg.read(INI_PATH, encoding="utf-8")
         except Exception:
             pass
-    # начнем с дефолтов
     _store = json.loads(json.dumps(_defaults))
-    # перетащим значения из INI при наличии
     for sec in _store.keys():
         if cfg.has_section(sec):
             for key in _store[sec].keys():
@@ -217,12 +210,11 @@ def migrate_from_ini_or_create():
                 _store[sec][key] = val
     save_settings()
 
-# Публичные API (имена совместимы с вашим main_app)
+# Публичные API
 
 def ensure_config():
     load_settings()
 
-# Простой прокси-объект, похожий на ConfigParser для обратной совместимости
 class _ProxyConfig:
     def get(self, section: str, key: str, fallback: Optional[str] = None) -> str:
         try:
@@ -238,10 +230,7 @@ def read_config() -> _ProxyConfig:
     return _ProxyConfig()
 
 def write_config(_cfg=None):
-    # игнорируем внешний cfg, работаем с _store
     save_settings()
-
-# Специфические геттеры/сеттеры, которые вызывает main_app
 
 def get_spr_path_from_config() -> Path:
     ensure_config()
@@ -266,7 +255,6 @@ def set_selected_department_in_config(dep: str):
     _store["UI"][KEY_SELECTED_DEP] = dep or "Все"
     save_settings()
 
-# Доп. геттеры для Remote, чтобы не лазить в ini
 def get_remote_use() -> bool:
     ensure_config()
     v = str(_store["Remote"].get(KEY_REMOTE_USE, "false")).strip().lower()
@@ -282,56 +270,61 @@ def get_yadisk_public_path() -> str:
 
 # ---------------- UI ОКНО НАСТРОЕК ----------------
 
+# Храним Var-переменные для сохранения
+_vars: Dict[str, Dict[str, Any]] = {}
+
 def open_settings_window(parent: tk.Tk):
     ensure_config()
+
+    # Запрос пароля
+    pwd = simpledialog.askstring("Доступ к настройкам", "Введите пароль:", show="*", parent=parent)
+    if pwd is None:
+        return
+    if pwd != SETTINGS_ACCESS_PASSWORD:
+        messagebox.showerror("Доступ", "Неверный пароль.")
+        return
 
     win = tk.Toplevel(parent)
     win.title("Настройки")
     win.resizable(False, False)
-    frm = ttk.Notebook(win)
-    frm.pack(fill="both", expand=True, padx=10, pady=10)
+    nb = ttk.Notebook(win)
+    nb.pack(fill="both", expand=True, padx=10, pady=10)
 
-    # Paths tab
-    tab_paths = ttk.Frame(frm)
-    frm.add(tab_paths, text="Paths")
+    # Настройки папок (Paths)
+    tab_paths = ttk.Frame(nb)
+    nb.add(tab_paths, text="Настройки папок")
     _mk_entry_with_btn(tab_paths, "Справочник (xlsx):", "Paths", KEY_SPR, is_dir=False, row=0)
     _mk_entry_with_btn(tab_paths, "Папка табелей:", "Paths", KEY_OUTPUT_DIR, is_dir=True, row=1)
 
-    # UI tab
-    tab_ui = ttk.Frame(frm)
-    frm.add(tab_ui, text="UI")
+    # Основное (UI)
+    tab_ui = ttk.Frame(nb)
+    nb.add(tab_ui, text="Основное")
     _mk_entry(tab_ui, "Подразделение по умолчанию:", "UI", KEY_SELECTED_DEP, row=0, width=40)
 
-    # Integrations tab
-    tab_int = ttk.Frame(frm)
-    frm.add(tab_int, text="Integrations")
+    # Интеграции (Integrations)
+    tab_int = ttk.Frame(nb)
+    nb.add(tab_int, text="Интеграции")
     _mk_entry(tab_int, "Экспорт (пароль):", "Integrations", KEY_EXPORT_PWD, row=0, width=20, show="*")
     _mk_entry(tab_int, "Планирование (пароль):", "Integrations", KEY_PLANNING_PASSWORD, row=1, width=20, show="*")
-    _mk_entry(tab_int, "orders_mode:", "Integrations", "orders_mode", row=2, width=20)
-    _mk_entry(tab_int, "orders_webhook_url:", "Integrations", "orders_webhook_url", row=3, width=50)
+    _mk_entry(tab_int, "Настройка реестра:", "Integrations", "orders_mode", row=2, width=20)
+    _mk_entry(tab_int, "URL скрипта реестра:", "Integrations", "orders_webhook_url", row=3, width=64)
     _mk_check(tab_int, "planning_enabled:", "Integrations", "planning_enabled", row=4)
-    _mk_entry(tab_int, "driver_departments:", "Integrations", "driver_departments", row=5, width=50)
+    _mk_entry(tab_int, "Подразделения водителей:", "Integrations", "driver_departments", row=5, width=64)
 
-    # Remote tab
-    tab_rem = ttk.Frame(frm)
-    frm.add(tab_rem, text="Remote")
-    _mk_check(tab_rem, "use_remote:", "Remote", KEY_REMOTE_USE, row=0)
-    _mk_entry(tab_rem, "yadisk_public_link:", "Remote", KEY_YA_PUBLIC_LINK, row=1, width=60)
-    _mk_entry(tab_rem, "yadisk_public_path:", "Remote", KEY_YA_PUBLIC_PATH, row=2, width=40)
+    # Удаленный справочник (Remote)
+    tab_rem = ttk.Frame(nb)
+    nb.add(tab_rem, text="Удаленный справочник")
+    _mk_check(tab_rem, "Включить удаленный справочник:", "Remote", KEY_REMOTE_USE, row=0)
+    _mk_entry(tab_rem, "Публичная ссылка Я.Диска:", "Remote", KEY_YA_PUBLIC_LINK, row=1, width=64)
+    _mk_entry(tab_rem, "Путь внутри публичной папки:", "Remote", KEY_YA_PUBLIC_PATH, row=2, width=40)
 
-    # Orders tab
-    tab_ord = ttk.Frame(frm)
-    frm.add(tab_ord, text="Orders")
-    _mk_check(tab_ord, "cutoff_enabled:", "Orders", "cutoff_enabled", row=0)
-    _mk_entry(tab_ord, "cutoff_hour:", "Orders", "cutoff_hour", row=1, width=6)
-
-    # Buttons
+    # Кнопки
     btns = ttk.Frame(win)
     btns.pack(fill="x", padx=10, pady=(0, 10))
     ttk.Button(btns, text="Сохранить", command=lambda: (_save_from_vars(win), messagebox.showinfo("Настройки", "Сохранено")) ).pack(side="right", padx=4)
     ttk.Button(btns, text="Отмена", command=win.destroy).pack(side="right")
 
-    # Центрируем окно
+    # Центрирование окна
     try:
         win.update_idletasks()
         px, py = parent.winfo_rootx(), parent.winfo_rooty()
@@ -340,9 +333,6 @@ def open_settings_window(parent: tk.Tk):
         win.geometry(f"+{px + (pw - sw)//2}+{py + (ph - sh)//2}")
     except Exception:
         pass
-
-# Вспомогательное: храним указатели на Var для сохранения
-_vars: Dict[str, Dict[str, Any]] = {}
 
 def _mk_entry(parent, label, section, key, row, width=30, show=None):
     ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", padx=(6, 6), pady=4)
