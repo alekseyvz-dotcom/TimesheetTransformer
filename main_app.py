@@ -1861,7 +1861,7 @@ class TimesheetPage(tk.Frame):
         """Сохраняет текущий реестр в БД (Supabase)"""
         if not db:
            messagebox.showerror("Сохранение", "Модуль db.py не найден.")
-            return
+           return
 
         addr = (self.cmb_address.get() or "").strip()
         oid = (self.cmb_object_id.get() or "").strip()
