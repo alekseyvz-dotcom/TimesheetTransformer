@@ -418,6 +418,7 @@ class RowWidget:
         self.row = row_index
         self.get_year_month = get_year_month_callable
         self.on_delete = on_delete_callable
+        self._suspend_sync = False
 
         zebra_bg = self.ZEBRA_EVEN if (row_index % 2 == 0) else self.ZEBRA_ODD
         self.widgets: List[tk.Widget] = []
@@ -1139,16 +1140,37 @@ class TimesheetPage(tk.Frame):
         main_frame = tk.Frame(self)
         main_frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
+        # Канвас для шапки (фиксирован сверху)
+        self.header_canvas = tk.Canvas(main_frame, borderwidth=0, highlightthickness=0, height=28)
+        self.header_canvas.grid(row=0, column=0, sticky="ew")
+
+        # Канвас с телом таблицы (вертикально скроллится)
         self.main_canvas = tk.Canvas(main_frame, borderwidth=0, highlightthickness=0)
-        self.main_canvas.grid(row=0, column=0, sticky="nsew")
+        self.main_canvas.grid(row=1, column=0, sticky="nsew")
 
+        # Скроллбары
         self.vscroll = ttk.Scrollbar(main_frame, orient="vertical", command=self.main_canvas.yview)
-        self.vscroll.grid(row=0, column=1, sticky="ns")
-        self.hscroll = ttk.Scrollbar(main_frame, orient="horizontal", command=self.main_canvas.xview)
-        self.hscroll.grid(row=1, column=0, sticky="ew")
+        self.vscroll.grid(row=1, column=1, sticky="ns")
+        self.hscroll = ttk.Scrollbar(main_frame, orient="horizontal")
+        self.hscroll.grid(row=2, column=0, sticky="ew")
 
-        main_frame.grid_rowconfigure(0, weight=1)
+        main_frame.grid_rowconfigure(1, weight=1)
         main_frame.grid_columnconfigure(0, weight=1)
+
+        # Таблицы внутри канвасов
+        self.header_table = tk.Frame(self.header_canvas, bg="#ffffff")
+        self.header_window = self.header_canvas.create_window((0, 0), window=self.header_table, anchor="nw")
+
+        self.table = tk.Frame(self.main_canvas, bg="#ffffff")
+        self.canvas_window = self.main_canvas.create_window((0, 0), window=self.table, anchor="nw")
+
+        # Привязки скролла
+        self.main_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=self._on_xscroll_main)
+        # Горизонтальный скролл двигает оба канваса
+        self.hscroll.configure(command=self._xscroll_both)
+
+        # Обновление области прокрутки
+        self.table.bind("<Configure>", self._on_scroll_frame_configure)
 
         # Единая таблица (header + rows в одном grid)
         self.table = tk.Frame(self.main_canvas, bg="#ffffff")
@@ -1159,7 +1181,8 @@ class TimesheetPage(tk.Frame):
 
         # Создаём шапку в первой строке таблицы
         self._configure_table_columns()
-        self._build_header_row()
+        self._configure_table_columns()   # обновим оба фрейма (см. ниже)
+        self._build_header_row(self.header_table)
 
         # Обработчики колеса мыши
         self.main_canvas.bind("<MouseWheel>", self._on_wheel)
@@ -1200,49 +1223,60 @@ class TimesheetPage(tk.Frame):
 
         self._on_department_select()
 
-    def _build_header_row(self):
+    def _build_header_row(self, parent):
         hb = self.HEADER_BG
-        tk.Label(self.table, text="ФИО", bg=hb, anchor="w", font=("Segoe UI", 9, "bold")).grid(
+        tk.Label(parent, text="ФИО", bg=hb, anchor="w", font=("Segoe UI", 9, "bold")).grid(
             row=0, column=0, padx=0, pady=(0, 2), sticky="nsew")
-        tk.Label(self.table, text="Таб.№", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
+        tk.Label(parent, text="Таб.№", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
             row=0, column=1, padx=0, pady=(0, 2), sticky="nsew")
-    
+
         for d in range(1, 32):
-            tk.Label(self.table, text=str(d), bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
+            tk.Label(parent, text=str(d), bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
                 row=0, column=1 + d, padx=0, pady=(0, 2), sticky="nsew")
-    
-        tk.Label(self.table, text="Дней", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
+
+        tk.Label(parent, text="Дней", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
             row=0, column=33, padx=(4, 1), pady=(0, 2), sticky="nsew")
-        tk.Label(self.table, text="Часы", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
+        tk.Label(parent, text="Часы", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
             row=0, column=34, padx=(4, 1), pady=(0, 2), sticky="nsew")
-    
-        # НОВЫЕ ЗАГОЛОВКИ
-        tk.Label(self.table, text="Пер.день", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
+
+        tk.Label(parent, text="Пер.день", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
             row=0, column=35, padx=(4, 1), pady=(0, 2), sticky="nsew")
-        tk.Label(self.table, text="Пер.ночь", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
+        tk.Label(parent, text="Пер.ночь", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(
             row=0, column=36, padx=(4, 1), pady=(0, 2), sticky="nsew")
-    
-        tk.Label(self.table, text="5/2", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
+
+        tk.Label(parent, text="5/2", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
             row=0, column=37, padx=1, pady=(0, 2), sticky="nsew")
-        tk.Label(self.table, text="Удалить", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
+        tk.Label(parent, text="Удалить", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(
             row=0, column=38, padx=1, pady=(0, 2), sticky="nsew")
 
     def _on_scroll_frame_configure(self, _=None):
+        # Тело
         self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
+        # Шапка: обновим ширину области по ширине тела
+        try:
+            content_bbox = self.main_canvas.bbox("all")
+            if content_bbox:
+                x1, y1, x2, y2 = content_bbox
+                self.header_canvas.configure(scrollregion=(0, 0, x2, 0))
+        except Exception:
+            pass
 
     def _configure_table_columns(self):
         px = self.COLPX
-        self.table.grid_columnconfigure(0, minsize=px['fio'], weight=0)
-        self.table.grid_columnconfigure(1, minsize=px['tbn'], weight=0)
-        for col in range(2, 33):
-            self.table.grid_columnconfigure(col, minsize=px['day'], weight=0)
-        self.table.grid_columnconfigure(33, minsize=px['days'], weight=0)
-        self.table.grid_columnconfigure(34, minsize=px['hours'], weight=0)
-        # НОВЫЕ КОЛОНКИ ДЛЯ ПЕРЕРАБОТКИ
-        self.table.grid_columnconfigure(35, minsize=px['hours'], weight=0)  # Пер.день
-        self.table.grid_columnconfigure(36, minsize=px['hours'], weight=0)  # Пер.ночь
-        self.table.grid_columnconfigure(37, minsize=px['btn52'], weight=0)
-        self.table.grid_columnconfigure(38, minsize=px['del'], weight=0)
+        # для тела
+        for frame in (self.table, self.header_table):
+            if not frame:
+                continue
+            frame.grid_columnconfigure(0, minsize=px['fio'], weight=0)
+            frame.grid_columnconfigure(1, minsize=px['tbn'], weight=0)
+            for col in range(2, 33):
+                frame.grid_columnconfigure(col, minsize=px['day'], weight=0)
+            frame.grid_columnconfigure(33, minsize=px['days'], weight=0)
+            frame.grid_columnconfigure(34, minsize=px['hours'], weight=0)
+            frame.grid_columnconfigure(35, minsize=px['hours'], weight=0)
+            frame.grid_columnconfigure(36, minsize=px['hours'], weight=0)
+            frame.grid_columnconfigure(37, minsize=px['btn52'], weight=0)
+            frame.grid_columnconfigure(38, minsize=px['del'], weight=0)
 
     def _on_wheel(self, event):
         if self.main_canvas.winfo_exists():
@@ -1262,8 +1296,29 @@ class TimesheetPage(tk.Frame):
 
     def _on_shift_wheel(self, event):
         if self.main_canvas.winfo_exists():
-            self.main_canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+            dx = int(-1 * (event.delta / 120))
+            self.main_canvas.xview_scroll(dx, "units")
+            try:
+                self.header_canvas.xview_scroll(dx, "units")
+            except Exception:
+                pass
         return "break"
+
+    def _xscroll_both(self, *args):
+        try:
+            self.main_canvas.xview(*args)
+            self.header_canvas.xview(*args)
+        except Exception:
+            pass
+
+    def _on_xscroll_main(self, first, last):
+        try:
+            self.hscroll.set(first, last)
+            # Двигаем шапку вслед за телом
+            self.header_canvas.xview_moveto(first)
+        except Exception:
+            pass
+
 
     def _on_period_change(self):
         self._update_rows_days_enabled()
@@ -1357,8 +1412,9 @@ class TimesheetPage(tk.Frame):
 
     def _render_page(self, page: Optional[int] = None):
         """Рендерит только текущую страницу из модели."""
-        # Сохраняем видимые правки
-        self._sync_visible_to_model()
+        # Сохраняем видимые правки, если не в массовом режиме
+        if not getattr(self, "_suspend_sync", False):
+            self._sync_visible_to_model()
 
         # Очистка текущих UI-строк
         for r in list(getattr(self, "rows", [])):
@@ -1567,7 +1623,6 @@ class TimesheetPage(tk.Frame):
         y, m = self.get_year_month()
         days = month_days(y, m)
 
-        # Обновим модель
         for rec in self.model_rows:
             hrs = [None] * 31
             for d in range(1, days + 1):
@@ -1580,8 +1635,13 @@ class TimesheetPage(tk.Frame):
                     hrs[d - 1] = None
             rec["hours"] = hrs
 
-        # Обновим видимую страницу (минимальная нагрузка)
-        self._render_page(self.current_page)
+        # ВАЖНО: перерисовываем без синхронизации видимых значений
+        self._suspend_sync = True
+        try:
+            self._render_page(self.current_page)
+        finally:
+            self._suspend_sync = False
+
         messagebox.showinfo("5/2 всем", "Режим 5/2 установлен всем сотрудникам текущего реестра.")
 
     def fill_hours_all(self):
@@ -1604,7 +1664,11 @@ class TimesheetPage(tk.Frame):
                 hrs = rec.get("hours") or [None] * 31
                 hrs[day - 1] = None
                 rec["hours"] = hrs
-            self._render_page(self.current_page)
+            self._suspend_sync = True
+            try:
+                self._render_page(self.current_page)
+            finally:
+                self._suspend_sync = False
             messagebox.showinfo("Проставить часы", f"День {day} очищен у {len(self.model_rows)} сотрудников.")
             return
 
@@ -1615,8 +1679,14 @@ class TimesheetPage(tk.Frame):
             hrs[day - 1] = s if hours_val > 1e-12 else None
             rec["hours"] = hrs
 
-        self._render_page(self.current_page)
+        self._suspend_sync = True
+        try:
+            self._render_page(self.current_page)
+        finally:
+            self._suspend_sync = False
+
         messagebox.showinfo("Проставить часы", f"Проставлено {s} ч в день {day} для {len(self.model_rows)} сотрудников.")
+
 
     def delete_row(self, roww: RowWidget):
         # Синхронизируем видимые правки
