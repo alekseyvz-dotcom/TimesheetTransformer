@@ -47,6 +47,10 @@ try:
     import timesheet_transformer  # должен содержать open_converter(parent)
 except Exception:
     timesheet_transformer = None
+try:
+    import settings_manager as Settings
+except Exception:
+    Settings = None
     
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
@@ -77,6 +81,18 @@ TINY_PNG_BASE64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
     "/w8AAn8B9w3G2kIAAAAASUVORK5CYII="
 )
+
+if Settings:
+    ensure_config = Settings.ensure_config
+    read_config = Settings.read_config
+    write_config = Settings.write_config
+
+    get_spr_path_from_config = Settings.get_spr_path_from_config
+    get_output_dir_from_config = Settings.get_output_dir_from_config
+    get_export_password_from_config = Settings.get_export_password_from_config
+
+    get_selected_department_from_config = Settings.get_selected_department_from_config
+    set_selected_department_in_config = Settings.set_selected_department_in_config
 
 # ------------- БАЗОВЫЕ УТИЛИТЫ И КОНФИГУРАЦИЯ -------------
 
@@ -2203,6 +2219,10 @@ class MainApp(tk.Tk):
             m_tools.add_command(label="Анализ смет", command=lambda: messagebox.showwarning("Анализ смет", "Модуль BudgetAnalyzer.py не найден."))
 
         menubar.add_cascade(label="Инструменты", menu=m_tools)
+
+        m_settings = tk.Menu(menubar, tearoff=0)
+        m_settings.add_command(label="Открыть настройки", command=lambda: Settings.open_settings_window(self) if Settings else messagebox.showwarning("Настройки", "Модуль settings_manager не найден."))
+        menubar.add_cascade(label="Настройки", menu=m_settings)
 
         self.config(menu=menubar)
 
