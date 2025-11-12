@@ -1,4 +1,4 @@
-name: Test Supabase DB connection
+name: Test Supabase DB connection (IPv4 forced)
 
 on:
   workflow_dispatch: {}
@@ -7,7 +7,7 @@ jobs:
   db-check:
     runs-on: ubuntu-latest
     env:
-      NODE_OPTIONS: --dns-result-order=ipv4first   # форсим IPv4
+      NODE_OPTIONS: --dns-result-order=ipv4first
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,32 +20,67 @@ jobs:
       - name: Install pg client
         run: npm install pg@8
 
-      - name: Run connection test
+      - name: Run connection test (force IPv4 via DoH)
         env:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
-          node -e "
+          node <<'JS'
           (async () => {
+            const https = require('https');
+            const { URL } = require('url');
+            const { Client } = require('pg');
+
+            function dohResolveA(host) {
+              return new Promise((resolve, reject) => {
+                const url = `https://dns.google/resolve?name=${encodeURIComponent(host)}&type=A`;
+                https.get(url, res => {
+                  let data = '';
+                  res.on('data', d => data += d);
+                  res.on('end', () => {
+                    try {
+                      const j = JSON.parse(data);
+                      const ans = (j.Answer || []).find(a => a.type === 1 && a.data);
+                      if (ans && ans.data) {
+                        resolve(ans.data.trim());
+                      } else {
+                        reject(new Error('No A record in DoH response'));
+                      }
+                    } catch (e) {
+                      reject(e);
+                    }
+                  });
+                }).on('error', reject);
+              });
+            }
+
             try {
-              const dns = require('dns').promises;
-              const { URL } = require('url');
-              const { Client } = require('pg');
               let url = process.env.DATABASE_URL;
               if (!url) throw new Error('DATABASE_URL is empty');
-
-              // Попытка принудить IPv4 даже если Node не учтёт NODE_OPTIONS
               const u = new URL(url);
               const host = u.hostname;
-              let ipv4 = null;
+              const port = u.port || '5432';
+
+              // IPv4 через DoH
+              let ipv4;
               try {
-                ipv4 = (await dns.lookup(host, { family: 4 })).address;
+                ipv4 = await dohResolveA(host);
+                console.log('Resolved IPv4 via DoH:', host, '->', ipv4);
               } catch (e) {
-                console.warn('IPv4 lookup failed, will try default host:', e.message);
+                console.warn('DoH A lookup failed:', e.message);
               }
 
+              // Подключаемся к IP, но выставляем SNI servername=оригинальному host
               const client = ipv4
-                ? new Client({ connectionString: url, host: ipv4, ssl: { rejectUnauthorized: false } })
-                : new Client({ connectionString: url, ssl: { rejectUnauthorized: false } });
+                ? new Client({
+                    connectionString: url,
+                    host: ipv4,
+                    port: Number(port),
+                    ssl: { rejectUnauthorized: false, servername: host }
+                  })
+                : new Client({
+                    connectionString: url,
+                    ssl: { rejectUnauthorized: false }
+                  });
 
               await client.connect();
               const ver = await client.query('select version()');
@@ -63,4 +98,4 @@ jobs:
               process.exit(1);
             }
           })();
-          "
+          JS
