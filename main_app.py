@@ -2082,7 +2082,7 @@ class TimesheetPage(tk.Frame):
             for fio, tbn, hrs in found:
                 key = (fio.strip().lower(), tbn.strip())
                 if mode == "merge" and key in existing:
-                continue
+                    continue
                 self.model_rows.append({
                     "fio": fio,
                     "tbn": tbn,
