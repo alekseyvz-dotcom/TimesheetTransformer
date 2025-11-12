@@ -2065,7 +2065,7 @@ class TimesheetPage(tk.Frame):
 
             # Убираем дубликаты
             uniq = {}
-           for fio, tbn, hrs in found:
+            for fio, tbn, hrs in found:
                 key = (fio.strip().lower(), tbn.strip())
                 if key not in uniq:
                     uniq[key] = (fio, tbn, hrs)
