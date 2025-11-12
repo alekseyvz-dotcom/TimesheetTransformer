@@ -1031,6 +1031,8 @@ class TimesheetPage(tk.Frame):
         self.model_rows: List[Dict[str, Any]] = []
         self.current_page = 1
         self.page_size = tk.IntVar(value=50)
+        # флаг подавления синхронизации видимых значений в модель
+        self._suspend_sync = False
 
         self._build_ui()
         # Отрисуем первую пустую страницу
@@ -1170,13 +1172,6 @@ class TimesheetPage(tk.Frame):
         self.hscroll.configure(command=self._xscroll_both)
 
         # Обновление области прокрутки
-        self.table.bind("<Configure>", self._on_scroll_frame_configure)
-
-        # Единая таблица (header + rows в одном grid)
-        self.table = tk.Frame(self.main_canvas, bg="#ffffff")
-        self.canvas_window = self.main_canvas.create_window((0, 0), window=self.table, anchor="nw")
-
-        self.main_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=self.hscroll.set)
         self.table.bind("<Configure>", self._on_scroll_frame_configure)
 
         # Создаём шапку в первой строке таблицы
@@ -1997,11 +1992,11 @@ class TimesheetPage(tk.Frame):
         self._load_existing_rows()
 
     def copy_from_month(self):
-        """Копирование с учетом подразделения"""
+        """Копирование с учетом подразделения (в модель с пагинацией)"""
         addr = self.cmb_address.get().strip()
         oid = self.cmb_object_id.get().strip()
         current_dep = self.cmb_department.get().strip()
-    
+
         if not addr and not oid:
             messagebox.showwarning("Копирование", "Укажите адрес и/или ID объекта для назначения.")
             return
@@ -2024,14 +2019,13 @@ class TimesheetPage(tk.Frame):
         # Путь к исходному файлу С УЧЕТОМ подразделения
         src_path = self._file_path_for(src_y, src_m, addr=addr, oid=oid, department=current_dep)
         if not src_path or not src_path.exists():
-            messagebox.showwarning("Копирование", 
+            messagebox.showwarning("Копирование",
                 f"Не найден файл источника для подразделения «{current_dep}»:\n{src_path.name if src_path else 'N/A'}")
             return
 
         try:
             wb = load_workbook(src_path, data_only=True)
             ws = self._ensure_sheet(wb)
-            y, m = self.get_year_month()
 
             found = []
             for r in range(2, ws.max_row + 1):
@@ -2045,20 +2039,18 @@ class TimesheetPage(tk.Frame):
 
                 if row_m != src_m or row_y != src_y:
                     continue
-            
                 if oid:
                     if row_oid != oid:
                         continue
                 else:
                     if row_addr != addr:
                         continue
-            
-                # Фильтр по подразделению
                 if current_dep != "Все" and row_dep != current_dep:
                     continue
 
-                hrs = []
+                hrs = None
                 if with_hours:
+                    hrs = []
                     for c in range(8, 8 + 31):
                         v = ws.cell(r, c).value
                         hrs.append(str(v) if v else None)
@@ -2067,46 +2059,50 @@ class TimesheetPage(tk.Frame):
                     found.append((fio, tbn, hrs))
 
             if not found:
-                messagebox.showinfo("Копирование", 
+                messagebox.showinfo("Копирование",
                     f"В источнике нет сотрудников подразделения «{current_dep}» для выбранного объекта и периода.")
                 return
 
-           # Убираем дубликаты
+            # Убираем дубликаты
             uniq = {}
-            for fio, tbn, hrs in found:
+           for fio, tbn, hrs in found:
                 key = (fio.strip().lower(), tbn.strip())
                 if key not in uniq:
                     uniq[key] = (fio, tbn, hrs)
             found = list(uniq.values())
 
+            # Сохраним правки видимой страницы
+            self._sync_visible_to_model()
+
             added = 0
             if mode == "replace":
-                for r in self.rows:
-                    r.destroy()
-                self.rows.clear()
+                self.model_rows.clear()
 
-            existing = {(r.fio().strip().lower(), r.tbn().strip()) for r in self.rows}
-
-            dy, dm = self.get_year_month()
+            existing = {(r["fio"].strip().lower(), r["tbn"].strip()) for r in self.model_rows}
             for fio, tbn, hrs in found:
                 key = (fio.strip().lower(), tbn.strip())
                 if mode == "merge" and key in existing:
-                    continue
-            
-                roww = RowWidget(self.table, len(self.rows) + 1, fio, tbn, 
-                           self.get_year_month, self.delete_row)
-                roww.set_day_font(self.DAY_ENTRY_FONT)
-                roww.update_days_enabled(dy, dm)
-                if with_hours and hrs:
-                    roww.set_hours(hrs)
-                self.rows.append(roww)
+                continue
+                self.model_rows.append({
+                    "fio": fio,
+                    "tbn": tbn,
+                    "hours": hrs if hrs is not None else [None] * 31
+                })
+                existing.add(key)
                 added += 1
 
-            self._regrid_rows()
+            # Перерисовываем без синхронизации, чтобы не затирать модель пустыми Entry
+            self._suspend_sync = True
+            try:
+                self._render_page(1 if mode == "replace" else self.current_page)
+            finally:
+                self._suspend_sync = False
+
             messagebox.showinfo("Копирование", f"Добавлено сотрудников: {added}")
 
         except Exception as e:
             messagebox.showerror("Копирование", f"Ошибка копирования:\n{e}")
+
 
 
     def _content_total_width(self, fio_px: Optional[int] = None) -> int:
