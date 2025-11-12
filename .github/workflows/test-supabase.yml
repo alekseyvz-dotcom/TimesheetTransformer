@@ -6,6 +6,8 @@ on:
 jobs:
   db-check:
     runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: --dns-result-order=ipv4first   # форсим IPv4
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,16 +27,31 @@ jobs:
           node -e "
           (async () => {
             try {
+              const dns = require('dns').promises;
+              const { URL } = require('url');
               const { Client } = require('pg');
-              const url = process.env.DATABASE_URL;
+              let url = process.env.DATABASE_URL;
               if (!url) throw new Error('DATABASE_URL is empty');
-              const client = new Client({ connectionString: url, ssl: { rejectUnauthorized: false } });
+
+              // Попытка принудить IPv4 даже если Node не учтёт NODE_OPTIONS
+              const u = new URL(url);
+              const host = u.hostname;
+              let ipv4 = null;
+              try {
+                ipv4 = (await dns.lookup(host, { family: 4 })).address;
+              } catch (e) {
+                console.warn('IPv4 lookup failed, will try default host:', e.message);
+              }
+
+              const client = ipv4
+                ? new Client({ connectionString: url, host: ipv4, ssl: { rejectUnauthorized: false } })
+                : new Client({ connectionString: url, ssl: { rejectUnauthorized: false } });
+
               await client.connect();
               const ver = await client.query('select version()');
               console.log('Connected OK:', ver.rows[0].version);
               const now = await client.query('select now() as now');
               console.log('Server time:', now.rows[0].now);
-              // мини-проверка схемы/прав
               await client.query('create table if not exists healthcheck_test(id serial primary key, created_at timestamp default now())');
               await client.query('insert into healthcheck_test default values');
               const cnt = await client.query('select count(*) from healthcheck_test');
