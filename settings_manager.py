@@ -149,6 +149,12 @@ _defaults: Dict[str, Dict[str, Any]] = {
         KEY_SPR: str(exe_dir() / "Справочник.xlsx"),
         KEY_OUTPUT_DIR: str(exe_dir() / "Объектные_табели"),
     },
+    "DB": {
+        "provider": "sqlite",                         # sqlite | postgres | mysql
+        "database_url": "",                           # для postgres/mysql: "postgres://user:pass@host:port/db?sslmode=require"
+        "sqlite_path": str(exe_dir() / "app_data.sqlite3"),
+        "sslmode": "require",                         # для Postgres по умолчанию
+    },
     "UI": {
         KEY_SELECTED_DEP: "Все",
     },
@@ -268,6 +274,23 @@ def get_yadisk_public_path() -> str:
     ensure_config()
     return str(_store["Remote"].get(KEY_YA_PUBLIC_PATH, ""))
 
+def get_db_provider() -> str:
+    ensure_config()
+    return str(_store["DB"].get("provider", _defaults["DB"]["provider"]))
+
+def get_database_url() -> str:
+    ensure_config()
+    return str(_store["DB"].get("database_url", ""))
+
+def get_sqlite_path() -> str:
+    ensure_config()
+    return str(_store["DB"].get("sqlite_path", _defaults["DB"]["sqlite_path"]))
+
+def get_db_sslmode() -> str:
+    ensure_config()
+    return str(_store["DB"].get("sslmode", _defaults["DB"]["sslmode"]))
+
+
 # ---------------- UI ОКНО НАСТРОЕК ----------------
 
 # Храним Var-переменные для сохранения
@@ -317,6 +340,58 @@ def open_settings_window(parent: tk.Tk):
     _mk_check(tab_rem, "Включить удаленный справочник:", "Remote", KEY_REMOTE_USE, row=0)
     _mk_entry(tab_rem, "Публичная ссылка Я.Диска:", "Remote", KEY_YA_PUBLIC_LINK, row=1, width=64)
     _mk_entry(tab_rem, "Путь внутри публичной папки:", "Remote", KEY_YA_PUBLIC_PATH, row=2, width=40)
+
+        # База данных (DB)
+    tab_db = ttk.Frame(nb)
+    nb.add(tab_db, text="База данных")
+
+    # Провайдер
+    ttk.Label(tab_db, text="Провайдер:").grid(row=0, column=0, sticky="e", padx=(6,6), pady=4)
+    provider_var = tk.StringVar(value=str(_store["DB"].get("provider", "sqlite")))
+    cmb_provider = ttk.Combobox(tab_db, textvariable=provider_var, state="readonly", width=18,
+                                values=["sqlite", "postgres", "mysql"])
+    cmb_provider.grid(row=0, column=1, sticky="w", padx=(0,6), pady=4)
+    _vars.setdefault("DB", {})["provider"] = provider_var
+
+    # DATABASE_URL
+    ttk.Label(tab_db, text="Строка подключения (DATABASE_URL):").grid(row=1, column=0, sticky="e", padx=(6,6), pady=4)
+    v_url = tk.StringVar(value=str(_store["DB"].get("database_url", "")))
+    ent_url = ttk.Entry(tab_db, textvariable=v_url, width=64)
+    ent_url.grid(row=1, column=1, sticky="w", padx=(0,6), pady=4, columnspan=2)
+    _vars.setdefault("DB", {})["database_url"] = v_url
+
+    # SQLite путь
+    ttk.Label(tab_db, text="SQLite файл:").grid(row=2, column=0, sticky="e", padx=(6,6), pady=4)
+    v_sqlite = tk.StringVar(value=str(_store["DB"].get("sqlite_path", _defaults["DB"]["sqlite_path"])))
+    ent_sqlite = ttk.Entry(tab_db, textvariable=v_sqlite, width=56)
+    ent_sqlite.grid(row=2, column=1, sticky="w", padx=(0,6), pady=4)
+    def browse_sqlite():
+        p = filedialog.asksaveasfilename(title="Файл SQLite", defaultextension=".sqlite3",
+                                         filetypes=[("SQLite DB","*.sqlite3 *.db"), ("Все файлы","*.*")])
+        if p:
+            v_sqlite.set(p)
+    ttk.Button(tab_db, text="...", width=3, command=browse_sqlite).grid(row=2, column=2, sticky="w")
+    _vars.setdefault("DB", {})["sqlite_path"] = v_sqlite
+
+    # SSL mode (для Postgres)
+    ttk.Label(tab_db, text="SSL mode (Postgres):").grid(row=3, column=0, sticky="e", padx=(6,6), pady=4)
+    v_ssl = tk.StringVar(value=str(_store["DB"].get("sslmode", "require")))
+    cmb_ssl = ttk.Combobox(tab_db, textvariable=v_ssl, state="readonly", width=18,
+                           values=["require", "verify-full", "prefer", "disable"])
+    cmb_ssl.grid(row=3, column=1, sticky="w", padx=(0,6), pady=4)
+    _vars.setdefault("DB", {})["sslmode"] = v_ssl
+
+    # Автоматическое включение/выключение полей
+    def _toggle_db_fields(*_):
+        prov = provider_var.get()
+        if prov == "sqlite":
+            ent_url.configure(state="disabled")
+            ent_sqlite.configure(state="normal")
+        else:
+            ent_url.configure(state="normal")
+            ent_sqlite.configure(state="disabled")
+    provider_var.trace_add("write", _toggle_db_fields)
+    _toggle_db_fields()
 
     # Кнопки
     btns = ttk.Frame(win)
