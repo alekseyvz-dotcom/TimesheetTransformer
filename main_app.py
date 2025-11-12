@@ -216,6 +216,12 @@ def embedded_logo_image(parent, max_w=360, max_h=160):
     except Exception:
         return None
 
+    try:
+        import db
+        db.init_db()
+    except Exception as e:
+        print(f"[DB init] {e}")
+
 # ------------- УДАЛЕННЫЙ СПРАВОЧНИК И ДРУГИЕ УТИЛИТЫ -------------
 
 def fetch_yadisk_public_bytes(public_link: str, public_path: str = "") -> bytes:
