@@ -1,3 +1,4 @@
+# timesheet_transformer.py
 import argparse
 import ctypes
 import re
@@ -8,41 +9,38 @@ from typing import List, Optional, Tuple, Any
 
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Alignment, Font, Border, Side, PatternFill
-from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-# GUI (tkinter)
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, ttk, messagebox
 
-# ===== БРЕНДИНГ (жёстко вшито) =====
 APP_NAME = "Табель‑конвертер"
 WELCOME_HEADER = "Табель‑конвертер"
 WELCOME_SUBTITLE = "Преобразование табеля 1С ЗУП в удобную таблицу.\nВыберите режим:"
 WELCOME_COPYRIGHT = "Разработал Алексей Зезюкин, АНО МЛСТ 2025"
 
-# ===== Настройки =====
 START_ROW = 21
 HOURS_OFFSET = 2
 RESULT_SHEET_NAME = "Результат"
 
-# Под 3000+ сотрудников (4 строки на сотрудника ≈ 12000 строк)
-MAX_SCAN_ROWS = 20000       # максимум строк смотреть от START_ROW
-NO_GOOD_BREAK = 120         # обрывать поиск после стольких «пустых» строк подряд
-PROGRESS_EVERY = 200        # обновлять прогресс каждые N шагов
+MAX_SCAN_ROWS = 20000
+NO_GOOD_BREAK = 120
+PROGRESS_EVERY = 200
 
-# Полу-«ломаные» колонки дней
-DAY_COLS_HALF1_LETTERS = ["I", "K", "M", "N", "P", "R", "T", "V", "X", "Z", "AB", "AD", "AF", "AH", "AK"]          # 1..15
-DAY_COLS_HALF2_LETTERS = ["I", "K", "M", "N", "P", "R", "T", "V", "X", "Z", "AB", "AD", "AF", "AH", "AK", "AL"]     # 16..31
+DAY_COLS_HALF1_LETTERS = ["I", "K", "M", "N", "P", "R", "T", "V", "X", "Z", "AB", "AD", "AF", "AH", "AK"]
+DAY_COLS_HALF2_LETTERS = ["I", "K", "M", "N", "P", "R", "T", "V", "X", "Z", "AB", "AD", "AF", "AH", "AK", "AL"]
 AO_COL_LETTER = "AO"
 
 NON_WORKING_CODES = {"В", "НН", "ОТ", "ОД", "У", "УД", "Б", "ДО", "К", "ПР", "ОЖ", "ОЗ", "НС", "Н", "НВ"}
 
-# ===== ЛОГ И СООБЩЕНИЯ =====
 def exe_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
-    return Path.cwd()
+    # для модуля — используем папку скрипта
+    try:
+        return Path(__file__).resolve().parent
+    except Exception:
+        return Path.cwd()
 
 def safe_name(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]+', "_", str(name)).strip()
@@ -65,20 +63,34 @@ def clog(msg: str):
 
 def msg_info(title: str, text: str):
     try:
-        ctypes.windll.user32.MessageBoxW(0, text, title, 0x40)  # MB_ICONINFORMATION
+        ctypes.windll.user32.MessageBoxW(0, text, title, 0x40)
     except Exception:
-        pass
+        try:
+            messagebox.showinfo(title, text)
+        except Exception:
+            pass
 
 def msg_error(title: str, text: str):
     try:
-        ctypes.windll.user32.MessageBoxW(0, text, title, 0x10)  # MB_ICONERROR
+        ctypes.windll.user32.MessageBoxW(0, text, title, 0x10)
     except Exception:
-        pass
+        try:
+            messagebox.showerror(title, text)
+        except Exception:
+            pass
 
-# ===== GUI: Приветствие и Прогресс =====
+# ---------------- Встраиваемые окна ----------------
 class WelcomeUI:
-    def __init__(self):
-        self.root = tk.Tk()
+    def __init__(self, parent: Optional[tk.Misc] = None):
+        self._standalone = parent is None
+        self.choice = None  # ("file", path) | ("latest", folder) | None
+
+        if self._standalone:
+            self.root = tk.Tk()
+        else:
+            self.root = tk.Toplevel(parent)
+            self.root.transient(parent)
+            self.root.grab_set()
         self.root.title(APP_NAME)
         self.root.geometry("440x240")
         self.root.resizable(False, False)
@@ -92,8 +104,6 @@ class WelcomeUI:
         btn_frame = tk.Frame(self.root)
         btn_frame.pack(pady=4)
 
-        self.choice = None  # ("file", path) | ("latest", folder) | None
-
         b1 = tk.Button(btn_frame, text="Выбрать файл…", width=22, command=self.choose_file)
         b1.grid(row=0, column=0, padx=6, pady=6)
 
@@ -106,8 +116,37 @@ class WelcomeUI:
         copy = tk.Label(self.root, text=WELCOME_COPYRIGHT, font=("Segoe UI", 8), fg="#666666")
         copy.pack(side="bottom", pady=(0, 8))
 
-        self.root.attributes("-topmost", True)
-        self.root.after(200, lambda: self.root.attributes("-topmost", False))
+        self.root.update_idletasks()
+        try:
+            self.root.attributes("-topmost", True)
+            self.root.after(200, lambda: self.root.attributes("-topmost", False))
+        except Exception:
+            pass
+
+        # центрирование
+        try:
+            if self._standalone:
+                self._center_on_screen(440, 240)
+            else:
+                self._center_to_parent(parent, 440, 240)
+        except Exception:
+            pass
+
+    def _center_on_screen(self, w, h):
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        x = (sw - w) // 2
+        y = (sh - h) // 2
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _center_to_parent(self, parent, w, h):
+        px = parent.winfo_rootx()
+        py = parent.winfo_rooty()
+        pw = parent.winfo_width()
+        ph = parent.winfo_height()
+        x = px + (pw - w) // 2
+        y = py + (ph - h) // 2
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
 
     def choose_file(self):
         fp = filedialog.askopenfilename(
@@ -129,13 +168,21 @@ class WelcomeUI:
         self.root.destroy()
 
     def run(self):
-        self.root.mainloop()
+        if self._standalone:
+            self.root.mainloop()
+        else:
+            self.root.wait_window()
         return self.choice
 
-
 class ProgressUI:
-    def __init__(self):
-        self.root = tk.Tk()
+    def __init__(self, parent: Optional[tk.Misc] = None):
+        self._standalone = parent is None
+        if self._standalone:
+            self.root = tk.Tk()
+        else:
+            self.root = tk.Toplevel(parent)
+            self.root.transient(parent)
+            # Не захватываем grab_set, чтобы не блокировать диалоги выбора файла
         self.root.title(f"{APP_NAME} — выполняется")
         self.root.geometry("500x170")
         self.root.resizable(False, False)
@@ -158,8 +205,19 @@ class ProgressUI:
         self._set_total(100)
         self._update()
 
-        self.root.attributes("-topmost", True)
-        self.root.after(200, lambda: self.root.attributes("-topmost", False))
+        self.root.update_idletasks()
+        try:
+            if self._standalone:
+                self._center_on_screen(500, 170)
+        except Exception:
+            pass
+
+    def _center_on_screen(self, w, h):
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        x = (sw - w) // 2
+        y = (sh - h) // 2
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
 
     def _set_total(self, total: int):
         self.total = max(1, int(total))
@@ -206,7 +264,7 @@ class ProgressUI:
 class CancelledError(Exception):
     pass
 
-# ===== Утилиты =====
+# ---------------- Утилиты парсинга ----------------
 def only_digits(s: str) -> str:
     return "".join(ch for ch in str(s or "") if ch.isdigit())
 
@@ -244,12 +302,10 @@ def extract_code_token(s: Any) -> str:
 def is_non_working_code(code: str) -> bool:
     return code.upper().strip() in NON_WORKING_CODES
 
-# ===== Парсинг чисел/времени и 'a/b' =====
 def token_to_number(t: str) -> Optional[float]:
     t = clean_spaces(t)
     if not t:
         return None
-    # Время "h:mm(:ss)"
     if ":" in t:
         parts = t.split(":")
         if len(parts) >= 2:
@@ -260,7 +316,6 @@ def token_to_number(t: str) -> Optional[float]:
                 return hh + mm / 60.0 + ss / 3600.0
             except Exception:
                 pass
-    # Нормализуем разделители
     t = (t.replace("\uFF0C", ",").replace("\uFF0E", ".").replace("\u201A", ",").replace(" ", ""))
     while t and t[-1] in ",.":
         t = t[:-1]
@@ -322,7 +377,7 @@ def day_hours_from_values(code_val: Any, hours_val: Any) -> Optional[float]:
         return 0.0
     return None
 
-# ===== Поиск конца данных (быстрый, с прогрессом) =====
+# ---------------- Поиск конца данных ----------------
 def find_last_data_row(ws, start_row: int, ui: Optional[ProgressUI]) -> int:
     ao_col = column_index_from_string(AO_COL_LETTER)
     limit = min((ws.max_row or (start_row + MAX_SCAN_ROWS - 1)), start_row + MAX_SCAN_ROWS - 1)
@@ -330,9 +385,7 @@ def find_last_data_row(ws, start_row: int, ui: Optional[ProgressUI]) -> int:
     if ui:
         ui.set_phase("Поиск конца данных…", total)
 
-    rows_iter = ws.iter_rows(min_row=start_row, max_row=limit,
-                             min_col=2, max_col=ao_col, values_only=True)
-
+    rows_iter = ws.iter_rows(min_row=start_row, max_row=limit, min_col=2, max_col=ao_col, values_only=True)
     last_good = start_row - 1
     no_good = 0
     r = start_row - 1
@@ -345,7 +398,6 @@ def find_last_data_row(ws, start_row: int, ui: Optional[ProgressUI]) -> int:
         c_val = row[idx_C]
         e_val = row[idx_E]
         ao_val = row[idx_AO]
-
         good = False
         if has_letters(c_val):
             if (str(e_val or "").strip()) or (isinstance(ao_val, (int, float)) or re.search(r"\d", str(ao_val or ""))):
@@ -370,7 +422,7 @@ def find_last_data_row(ws, start_row: int, ui: Optional[ProgressUI]) -> int:
     clog(f"find_last_data_row -> {last_good}")
     return last_good
 
-# ===== Трансформация (быстро, с прогрессом) =====
+# ---------------- Трансформация ----------------
 def transform_sheet(ws, ui: Optional[ProgressUI]) -> Tuple[List[str], List[List[Any]]]:
     ao_col = column_index_from_string(AO_COL_LETTER)
     day_cols_h1 = [column_index_from_string(x) for x in DAY_COLS_HALF1_LETTERS]
@@ -392,14 +444,12 @@ def transform_sheet(ws, ui: Optional[ProgressUI]) -> Tuple[List[str], List[List[
     end_fetch = min(ws.max_row, last_row + 3)
     fetch_total = max(1, end_fetch - START_ROW + 1)
 
-    # Префетч B..AO блоком (с прогрессом)
     if ui:
         ui.set_phase("Загрузка данных…", fetch_total)
 
     rows_values: List[Tuple] = []
     r_counter = 0
-    for row in ws.iter_rows(min_row=START_ROW, max_row=end_fetch,
-                            min_col=2, max_col=ao_col, values_only=True):
+    for row in ws.iter_rows(min_row=START_ROW, max_row=end_fetch, min_col=2, max_col=ao_col, values_only=True):
         rows_values.append(row)
         r_counter += 1
         if ui:
@@ -444,16 +494,14 @@ def transform_sheet(ws, ui: Optional[ProgressUI]) -> Tuple[List[str], List[List[
         if not (has_letters(fio) and (len(tbn) > 0 or isinstance(days_num, (int, float)))):
             continue
 
-        out = [int(raw_num), fio, title, tbn, ""]  # ID объекта пусто
+        out = [int(raw_num), fio, title, tbn, ""]
 
-        # 1..15: коды — row, часы — row+1
         for dj in day_idx_h1:
             code_val = row[dj] if row else None
             hours_val = row_p1[dj] if row_p1 else None
             daily = day_hours_from_values(code_val, hours_val)
             out.append(daily if daily is not None else "")
 
-        # 16..31: коды — row+2, часы — row+3
         for dj in day_idx_h2:
             code_val = row_p2[dj] if row_p2 else None
             hours_val = row_p3[dj] if row_p3 else None
@@ -467,9 +515,8 @@ def transform_sheet(ws, ui: Optional[ProgressUI]) -> Tuple[List[str], List[List[
 
     return header, out_rows
 
-# ===== Постобработка чисел и оформление =====
+# ---------------- Постобработка и сохранение ----------------
 def parse_num_relaxed(v: Any) -> Optional[float]:
-    import re
     if v is None or v == "":
         return None
     if isinstance(v, (int, float)):
@@ -482,7 +529,6 @@ def parse_num_relaxed(v: Any) -> Optional[float]:
 
     s = str(v)
 
-    # "a/b[/c]" → сумма
     if "/" in s:
         total = 0.0
         got = False
@@ -494,7 +540,6 @@ def parse_num_relaxed(v: Any) -> Optional[float]:
         if got:
             return total
 
-    # "h:mm(:ss)" → часы
     if ":" in s:
         p = s.split(":")
         if len(p) >= 2:
@@ -506,7 +551,6 @@ def parse_num_relaxed(v: Any) -> Optional[float]:
             except Exception:
                 pass
 
-    # нормализуем экзотику и срезаем ЛЮБОЙ хвост из запятых/точек/пробелов (включая fullwidth/low‑9)
     s = (s.replace("\uFF0C", ",").replace("\uFF0E", ".").replace("\u201A", ",")
            .replace("\u00A0", " ").replace("\u202F", " ").replace("\u2009", " ").replace("\u200A", " ")
            .replace("\u200B", "").replace("\u2060", "").replace("\uFEFF", "")
@@ -538,7 +582,7 @@ def fix_numeric_range_py(ws, r1: int, r2: int, c1: int, c2: int):
                 continue
             if isinstance(v, (int, float)):
                 cell.value = float(v)
-                cell.number_format = "General"   # важно: снять текстовый/нестандартный формат
+                cell.number_format = "General"
                 continue
             n = parse_num_relaxed(v)
             if isinstance(n, (int, float)):
@@ -562,61 +606,48 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
     ws_out = wb_out.active
     ws_out.title = RESULT_SHEET_NAME
 
-    # Заголовок
     ws_out.append(header)
     for cell in ws_out[1]:
         cell.font = Font(bold=True)
 
-    # Данные
     for row in rows:
         ws_out.append(row)
 
-    # Индексы
-    day_start_col = 6   # после: №, ФИО, Должность, Таб.№, ID
+    day_start_col = 6
     total_days_col = day_start_col + 31
     total_hours_col = total_days_col + 1
     last_row = ws_out.max_row
     last_col = total_hours_col
 
-    # 1) ПРЕ‑нормализация (ломаем все "7," и пр. ещё до форматирования/границ)
     fix_numeric_range_py(ws_out, 2, last_row, day_start_col, day_start_col + 31 - 1)
     fix_numeric_range_py(ws_out, 2, last_row, total_days_col, total_hours_col)
 
-    # 2) Ширины
-    for col_idx in range(1, 6):
+    for col_idx in range(1, 5 + 1):
         ws_out.column_dimensions[get_column_letter(col_idx)].width = 16 if col_idx in (2, 3) else 12
-    # Чтобы General показывал "8,25", а не "8,3"
     for col_idx in range(day_start_col, day_start_col + 31):
         ws_out.column_dimensions[get_column_letter(col_idx)].width = 5.6
     ws_out.column_dimensions[get_column_letter(total_days_col)].width = 12
     ws_out.column_dimensions[get_column_letter(total_hours_col)].width = 14
 
-    # 3) Центрирование везде
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
     for r in range(1, last_row + 1):
         for c in range(1, last_col + 1):
             ws_out.cell(r, c).alignment = center
 
-    # 4) Заморозка + автофильтр
     ws_out.freeze_panes = "A2"
     last_col_letter = get_column_letter(last_col)
     ws_out.auto_filter.ref = f"A1:{last_col_letter}{last_row}"
 
-    # 5) Белая заливка для столбцов дней
     white = PatternFill(fill_type="solid", fgColor="FFFFFF")
     for c in range(day_start_col, day_start_col + 31):
         for r in range(1, last_row + 1):
             ws_out.cell(r, c).fill = white
 
-    # 6) Границы
     apply_borders(ws_out, 1, last_row, 1, last_col)
 
-    # 7) ФИНАЛЬНАЯ нормализация (после всех действий, ещё раз)
     fix_numeric_range_py(ws_out, 2, last_row, day_start_col, day_start_col + 31 - 1)
     fix_numeric_range_py(ws_out, 2, last_row, total_days_col, total_hours_col)
 
-    # 8) Форматы и сокрытие нулей:
-    # - Часы по дням: General; если 0 → пусто
     for c in range(day_start_col, day_start_col + 31):
         for r in range(2, last_row + 1):
             cell = ws_out.cell(r, c)
@@ -626,9 +657,8 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
                     cell.value = None
                     cell.number_format = "General"
                 else:
-                    cell.number_format = "General"   # принципиально: без кастомных форматов
+                    cell.number_format = "General"
 
-    # - Отработано часов: General; если 0 → пусто
     for r in range(2, last_row + 1):
         ch = ws_out.cell(r, total_hours_col)
         vh = ch.value
@@ -639,7 +669,6 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
             else:
                 ch.number_format = "General"
 
-    # - Отработано дней: целое; если 0 → пусто
     for r in range(2, last_row + 1):
         cd = ws_out.cell(r, total_days_col)
         vd = cd.value
@@ -650,7 +679,6 @@ def save_result(header: List[str], rows: List[List[Any]], out_path: str):
             else:
                 cd.number_format = "0"
 
-    # 9) Сохранение
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     wb_out.save(out_path)
 
@@ -666,7 +694,7 @@ def safe_save_result(header, rows, primary_out: Path) -> Path:
         save_result(header, rows, str(alt_path))
         return alt_path
 
-# ===== Сервис =====
+# ---------------- Сервис ----------------
 def latest_file_in_folder(folder: str) -> Optional[str]:
     folder = Path(folder)
     if not folder.exists():
@@ -688,8 +716,8 @@ def pick_candidate_sheet(wb) -> Optional[Any]:
             return ws
     return wb.worksheets[0] if wb.worksheets else None
 
-# ===== Запуск =====
-def transform_file(file_path: str, out_path: Optional[str] = None):
+# ---------------- Основная логика ----------------
+def transform_file(file_path: str, out_path: Optional[str] = None, parent: Optional[tk.Misc] = None):
     ui = None
     try:
         p = Path(file_path)
@@ -699,7 +727,7 @@ def transform_file(file_path: str, out_path: Optional[str] = None):
             return
 
         clog(f"Open workbook: {file_path}")
-        ui = ProgressUI()
+        ui = ProgressUI(parent=parent)
         ui.set_phase("Открытие книги…", 100)
         ui.set_progress(10)
 
@@ -741,6 +769,30 @@ def transform_file(file_path: str, out_path: Optional[str] = None):
         log(tb)
         msg_error(APP_NAME, f"{e}\n\nПодробности в логе:\n{LOG_PATH}")
 
+# ---------------- Точка входа для main_app ----------------
+def open_converter(parent: Optional[tk.Misc] = None):
+    """
+    Встраиваемый запуск конвертера:
+    - Если parent передан (из main_app), все окна будут Toplevel, без EXE.
+    - Если parent не передан — показывается отдельное окно выбора.
+    """
+    # Выбор источника
+    welcome = WelcomeUI(parent=parent)
+    choice = welcome.run()
+    if not choice:
+        msg_info(APP_NAME, "Файл не выбран.")
+        return
+    mode, payload = choice
+    if mode == "file":
+        transform_file(payload, None, parent=parent)
+    elif mode == "latest":
+        fp = latest_file_in_folder(payload)
+        if not fp:
+            msg_error(APP_NAME, "В папке не найден подходящий файл (*.xlsx, *.xlsm).")
+            return
+        transform_file(fp, None, parent=parent)
+
+# ---------------- CLI ----------------
 def main():
     parser = argparse.ArgumentParser(description="Преобразование табеля (1С ЗУП) в читаемую таблицу")
     g = parser.add_mutually_exclusive_group(required=False)
@@ -750,27 +802,12 @@ def main():
     parser.add_argument("--out", help="Путь для сохранения результата (xlsx)")
     args = parser.parse_args()
 
-    # Если аргументов нет — показываем приветственное окно
     if not any([args.file, args.pick, args.latest]):
-        welcome = WelcomeUI()
-        choice = welcome.run()
-        if not choice:
-            msg_info(APP_NAME, "Файл не выбран.")
-            return
-        mode, payload = choice
-        if mode == "file":
-            transform_file(payload, args.out)
-        elif mode == "latest":
-            fp = latest_file_in_folder(payload)
-            if not fp:
-                msg_error(APP_NAME, "В папке не найден подходящий файл (*.xlsx, *.xlsm).")
-                return
-            transform_file(fp, args.out)
+        open_converter(parent=None)
         return
 
-    # CLI‑режимы
     if args.file:
-        transform_file(args.file, args.out)
+        transform_file(args.file, args.out, parent=None)
     elif args.pick:
         fp = filedialog.askopenfilename(
             title="Выберите файл табеля",
@@ -779,18 +816,13 @@ def main():
         if not fp:
             msg_info(APP_NAME, "Файл не выбран.")
             return
-        transform_file(fp, args.out)
+        transform_file(fp, args.out, parent=None)
     elif args.latest:
         fp = latest_file_in_folder(args.latest)
         if not fp:
             msg_error(APP_NAME, "В папке не найден подходящий файл (*.xlsx, *.xlsm).")
             return
-        transform_file(fp, args.out)
+        transform_file(fp, args.out, parent=None)
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
