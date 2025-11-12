@@ -97,7 +97,6 @@ if Settings:
 # ------------- БАЗОВЫЕ УТИЛИТЫ И КОНФИГУРАЦИЯ -------------
 
 def exe_dir() -> Path:
-    """Определяет корневую директорию EXE или скрипта."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
@@ -105,92 +104,80 @@ def exe_dir() -> Path:
 def config_path() -> Path:
     return exe_dir() / CONFIG_FILE
 
-def ensure_config():
-    cp = config_path()
-    if cp.exists():
+# ОСТАЛЬНЫЕ ФУНКЦИИ КОНФИГА ОБЪЯВЛЯЕМ ТОЛЬКО ЕСЛИ Settings НЕ ДОСТУПЕН
+if not Settings:
+    def ensure_config():
+        cp = config_path()
+        if cp.exists():
+            cfg = configparser.ConfigParser()
+            cfg.read(cp, encoding="utf-8")
+            changed = False
+            if not cfg.has_section(CONFIG_SECTION_PATHS): cfg[CONFIG_SECTION_PATHS] = {}; changed = True
+            if KEY_SPR not in cfg[CONFIG_SECTION_PATHS]: cfg[CONFIG_SECTION_PATHS][KEY_SPR] = str(exe_dir() / SPRAVOCHNIK_FILE_DEFAULT); changed = True
+            if KEY_OUTPUT_DIR not in cfg[CONFIG_SECTION_PATHS]: cfg[CONFIG_SECTION_PATHS][KEY_OUTPUT_DIR] = str(exe_dir() / OUTPUT_DIR_DEFAULT); changed = True
+            if not cfg.has_section(CONFIG_SECTION_UI): cfg[CONFIG_SECTION_UI] = {}; changed = True
+            if KEY_SELECTED_DEP not in cfg[CONFIG_SECTION_UI]: cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = "Все"; changed = True
+            if not cfg.has_section(CONFIG_SECTION_INTEGR): cfg[CONFIG_SECTION_INTEGR] = {}; changed = True
+            if KEY_EXPORT_PWD not in cfg[CONFIG_SECTION_INTEGR]: cfg[CONFIG_SECTION_INTEGR][KEY_EXPORT_PWD] = "2025"; changed = True
+            if KEY_PLANNING_PASSWORD not in cfg[CONFIG_SECTION_INTEGR]: cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_PASSWORD] = "2025"; changed = True
+            if not cfg.has_section(CONFIG_SECTION_REMOTE): cfg[CONFIG_SECTION_REMOTE] = {}; changed = True
+            if KEY_REMOTE_USE not in cfg[CONFIG_SECTION_REMOTE]: cfg[CONFIG_SECTION_REMOTE][KEY_REMOTE_USE] = "false"; changed = True
+            if KEY_YA_PUBLIC_LINK not in cfg[CONFIG_SECTION_REMOTE]: cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_LINK] = ""; changed = True
+            if KEY_YA_PUBLIC_PATH not in cfg[CONFIG_SECTION_REMOTE]: cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_PATH] = ""; changed = True
+            if not cfg.has_section("Orders"): cfg["Orders"] = {}; changed = True
+            if "cutoff_enabled" not in cfg["Orders"]: cfg["Orders"]["cutoff_enabled"] = "false"; changed = True
+            if "cutoff_hour" not in cfg["Orders"]: cfg["Orders"]["cutoff_hour"] = "13"; changed = True
+            if changed:
+                with open(cp, "w", encoding="utf-8") as f:
+                    cfg.write(f)
+            return
+
         cfg = configparser.ConfigParser()
-        cfg.read(cp, encoding="utf-8")
-        changed = False
-        # Paths
-        if not cfg.has_section(CONFIG_SECTION_PATHS): cfg[CONFIG_SECTION_PATHS] = {}; changed = True
-        if KEY_SPR not in cfg[CONFIG_SECTION_PATHS]: cfg[CONFIG_SECTION_PATHS][KEY_SPR] = str(exe_dir() / SPRAVOCHNIK_FILE_DEFAULT); changed = True
-        if KEY_OUTPUT_DIR not in cfg[CONFIG_SECTION_PATHS]: cfg[CONFIG_SECTION_PATHS][KEY_OUTPUT_DIR] = str(exe_dir() / OUTPUT_DIR_DEFAULT); changed = True
-        # UI
-        if not cfg.has_section(CONFIG_SECTION_UI): cfg[CONFIG_SECTION_UI] = {}; changed = True
-        if KEY_SELECTED_DEP not in cfg[CONFIG_SECTION_UI]: cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = "Все"; changed = True
-        # Integrations
-        if not cfg.has_section(CONFIG_SECTION_INTEGR): cfg[CONFIG_SECTION_INTEGR] = {}; changed = True
-        if KEY_EXPORT_PWD not in cfg[CONFIG_SECTION_INTEGR]: cfg[CONFIG_SECTION_INTEGR][KEY_EXPORT_PWD] = "2025"; changed = True
-        if KEY_PLANNING_PASSWORD not in cfg[CONFIG_SECTION_INTEGR]: cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_PASSWORD] = "2025"; changed = True
-        # Remote
-        if not cfg.has_section(CONFIG_SECTION_REMOTE): cfg[CONFIG_SECTION_REMOTE] = {}; changed = True
-        if KEY_REMOTE_USE not in cfg[CONFIG_SECTION_REMOTE]: cfg[CONFIG_SECTION_REMOTE][KEY_REMOTE_USE] = "false"; changed = True
-        if KEY_YA_PUBLIC_LINK not in cfg[CONFIG_SECTION_REMOTE]: cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_LINK] = ""; changed = True
-        if KEY_YA_PUBLIC_PATH not in cfg[CONFIG_SECTION_REMOTE]: cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_PATH] = ""; changed = True
-        # Orders
-        if not cfg.has_section("Orders"): cfg["Orders"] = {}; changed = True
-        if "cutoff_enabled" not in cfg["Orders"]: cfg["Orders"]["cutoff_enabled"] = "false"; changed = True
-        if "cutoff_hour" not in cfg["Orders"]: cfg["Orders"]["cutoff_hour"] = "13"; changed = True
+        cfg[CONFIG_SECTION_PATHS] = {
+            KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE_DEFAULT),
+            KEY_OUTPUT_DIR: str(exe_dir() / OUTPUT_DIR_DEFAULT),
+        }
+        cfg[CONFIG_SECTION_UI] = {KEY_SELECTED_DEP: "Все"}
+        cfg[CONFIG_SECTION_INTEGR] = {KEY_EXPORT_PWD: "2025", KEY_PLANNING_PASSWORD: "2025"}
+        cfg[CONFIG_SECTION_REMOTE] = {KEY_REMOTE_USE: "false", KEY_YA_PUBLIC_LINK: "", KEY_YA_PUBLIC_PATH: ""}
+        cfg["Orders"] = {"cutoff_enabled": "false", "cutoff_hour": "13"}
+        with open(cp, "w", encoding="utf-8") as f:
+            cfg.write(f)
 
-        if changed:
-            with open(cp, "w", encoding="utf-8") as f:
-                cfg.write(f)
-        return
+    def read_config() -> configparser.ConfigParser:
+        ensure_config()
+        cfg = configparser.ConfigParser()
+        cfg.read(config_path(), encoding="utf-8")
+        return cfg
 
-    # новый файл
-    cfg = configparser.ConfigParser()
-    cfg[CONFIG_SECTION_PATHS] = {
-        KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE_DEFAULT),
-        KEY_OUTPUT_DIR: str(exe_dir() / OUTPUT_DIR_DEFAULT),
-    }
-    cfg[CONFIG_SECTION_UI] = {KEY_SELECTED_DEP: "Все"}
-    cfg[CONFIG_SECTION_INTEGR] = {KEY_EXPORT_PWD: "2025", KEY_PLANNING_PASSWORD: "2025"}
-    cfg[CONFIG_SECTION_REMOTE] = {
-        KEY_REMOTE_USE: "false",
-        KEY_YA_PUBLIC_LINK: "",
-        KEY_YA_PUBLIC_PATH: "",
-    }
-    cfg["Orders"] = {
-        "cutoff_enabled": "false",
-        "cutoff_hour": "13",
-    }
-    with open(cp, "w", encoding="utf-8") as f:
-        cfg.write(f)
+    def write_config(cfg: configparser.ConfigParser):
+        with open(config_path(), "w", encoding="utf-8") as f:
+            cfg.write(f)
 
-def read_config() -> configparser.ConfigParser:
-    ensure_config()
-    cfg = configparser.ConfigParser()
-    cfg.read(config_path(), encoding="utf-8")
-    return cfg
+    def get_spr_path_from_config() -> Path:
+        cfg = read_config()
+        raw = cfg.get(CONFIG_SECTION_PATHS, KEY_SPR, fallback=str(exe_dir() / SPRAVOCHNIK_FILE_DEFAULT))
+        return Path(os.path.expandvars(raw))
 
-def write_config(cfg: configparser.ConfigParser):
-    with open(config_path(), "w", encoding="utf-8") as f:
-        cfg.write(f)
+    def get_output_dir_from_config() -> Path:
+        cfg = read_config()
+        raw = cfg.get(CONFIG_SECTION_PATHS, KEY_OUTPUT_DIR, fallback=str(exe_dir() / OUTPUT_DIR_DEFAULT))
+        return Path(os.path.expandvars(raw))
 
-def get_spr_path_from_config() -> Path:
-    cfg = read_config()
-    raw = cfg.get(CONFIG_SECTION_PATHS, KEY_SPR, fallback=str(exe_dir() / SPRAVOCHNIK_FILE_DEFAULT))
-    return Path(os.path.expandvars(raw))
+    def get_export_password_from_config() -> str:
+        cfg = read_config()
+        return cfg.get(CONFIG_SECTION_INTEGR, KEY_EXPORT_PWD, fallback="2025")
 
-def get_output_dir_from_config() -> Path:
-    cfg = read_config()
-    raw = cfg.get(CONFIG_SECTION_PATHS, KEY_OUTPUT_DIR, fallback=str(exe_dir() / OUTPUT_DIR_DEFAULT))
-    return Path(os.path.expandvars(raw))
+    def get_selected_department_from_config() -> str:
+        cfg = read_config()
+        return cfg.get(CONFIG_SECTION_UI, KEY_SELECTED_DEP, fallback="Все")
 
-def get_export_password_from_config() -> str:
-    cfg = read_config()
-    return cfg.get(CONFIG_SECTION_INTEGR, KEY_EXPORT_PWD, fallback="2025")
-
-def get_selected_department_from_config() -> str:
-    cfg = read_config()
-    return cfg.get(CONFIG_SECTION_UI, KEY_SELECTED_DEP, fallback="Все")
-
-def set_selected_department_in_config(dep: str):
-    cfg = read_config()
-    if not cfg.has_section(CONFIG_SECTION_UI):
-        cfg[CONFIG_SECTION_UI] = {}
-    cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = dep or "Все"
-    write_config(cfg)
+    def set_selected_department_in_config(dep: str):
+        cfg = read_config()
+        if not cfg.has_section(CONFIG_SECTION_UI):
+            cfg[CONFIG_SECTION_UI] = {}
+        cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = dep or "Все"
+        write_config(cfg)
     
 def embedded_logo_image(parent, max_w=360, max_h=160):
     """
@@ -316,8 +303,13 @@ def load_spravochnik_remote_or_local(local_path: Path) -> Tuple[List[Tuple[str,s
             wb = load_workbook(BytesIO(raw), read_only=True, data_only=True)
             return load_spravochnik_from_wb(wb)
         except Exception as e:
-            print(f"[Remote YaDisk] ошибка: {e} — используем локальный файл")
+            print(f"[Remote YaDisk] ошибка: {e} — локальный справочник используем только если существует")
+            if local_path.exists():
+                wb = load_workbook(local_path, read_only=True, data_only=True)
+                return load_spravochnik_from_wb(wb)
+            return [], []  # НЕ создаём файл, возвращаем пустые данные
 
+    # Локальный режим — допускаем автосоздание
     ensure_spravochnik_local(local_path)
     wb = load_workbook(local_path, read_only=True, data_only=True)
     return load_spravochnik_from_wb(wb)
@@ -2279,7 +2271,19 @@ class MainApp(tk.Tk):
     # --- Справочник ---
     def open_spravochnik(self):
         path = get_spr_path_from_config()
-        ensure_spravochnik_local(path)
+        cfg = read_config()
+        use_remote = cfg.get(CONFIG_SECTION_REMOTE, KEY_REMOTE_USE, fallback="false").strip().lower() in ("1","true","yes","on")
+        if not path.exists():
+            if use_remote:
+                messagebox.showwarning("Справочник", "Включён удалённый справочник. Локальный файл отсутствует.")
+                return
+            if not messagebox.askyesno("Справочник", f"Локальный файл не найден:\n{path}\n\nСоздать пустой справочник?"):
+                return
+            try:
+                ensure_spravochnik_local(path)
+            except Exception as e:
+                messagebox.showerror("Справочник", f"Не удалось создать файл:\n{e}")
+                return
         try:
             os.startfile(path)
         except Exception as e:
@@ -2290,14 +2294,15 @@ class MainApp(tk.Tk):
         use_remote = cfg.get(CONFIG_SECTION_REMOTE, KEY_REMOTE_USE, fallback="false")
         link = cfg.get(CONFIG_SECTION_REMOTE, KEY_YA_PUBLIC_LINK, fallback="")
         path = get_spr_path_from_config()
-        ensure_spravochnik_local(path)
         messagebox.showinfo(
             "Справочник",
-            "Справочник проверен/создан локально.\n"
+            "Проверка параметров завершена.\n"
             f"Удалённый доступ: use_remote={use_remote}\n"
-            f"Публичная ссылка: {link or '(не задана)'}\n\n"
+            f"Публичная ссылка: {link or '(не задана)'}\n"
+            f"Локальный путь: {path}\n\n"
             "В окнах используйте «Обновить справочник» для перечтения."
         )
+
 
     # ========== НОВЫЙ МЕТОД: Открыть папку заявок ==========
     def open_orders_folder(self):
