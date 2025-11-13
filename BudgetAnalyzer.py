@@ -542,17 +542,27 @@ class BudgetAnalysisPage(tk.Frame):
     def _classify_smeta_row(self, row: List[Any]) -> Tuple[Optional[str], Optional[float]]:
         if self.smeta_name_col is None or not self.smeta_cost_cols:
             return None, None
-            
+        
         if self._is_summary_row(row, self.smeta_name_col):
             return None, None
-        
+    
         name = self._str(row[self.smeta_name_col]) if self.smeta_name_col < len(row) else ""
-        n = re.sub(r"[^а-яa-z0-9]", "", name.lower()) # Нормализованное имя (без пробелов, знаков)
+        n = re.sub(r"[^а-яa-z0-9]", "", name.lower())
 
         val = self._first_number_from_cols(row, self.smeta_cost_cols)
         if not isinstance(val, float) or val <= 0:
             return None, None
-            
+    
+        # ============ НОВОЕ: Проверка на МР/МРР в расценке (приоритетная проверка) ============
+        # Проверяем колонку 1 (шифр расценки), колонку 2 (может содержать код) и колонку 3
+        for col_idx in [1, 2, 3]:
+            if len(row) > col_idx:
+                col_val = self._str(row[col_idx]).upper().strip()
+                # Точное совпадение или начало строки
+                if col_val in ["МР", "МРР"] or col_val.startswith("МР ") or col_val.startswith("МРР "):
+                    return "mr", val
+        # =====================================================================================
+        
         # 1. Справочная ЗПМ (в т.ч. ЗПМ)
         if "втчзпм" in n or "втомчислезпм" in n:
             return "zpm_incl", val
@@ -560,34 +570,34 @@ class BudgetAnalysisPage(tk.Frame):
         # 2. ЗП (Заработная плата)
         if n == "зп" or n == "зпм" or "оплататруда" in n or "заработн" in n:
             return "zp", val
-            
+        
         # 3. ЭМ (Эксплуатация машин) - Гросс
-        if n.startswith("эм") and "эмм" not in n and "зпм" not in n: # Просто "ЭМ"
+        if n.startswith("эм") and "эмм" not in n and "зпм" not in n:
             return "em_gross", val 
-        if n.startswith("эмм") and "зпм" not in n: # Просто "ЭММ"
+        if n.startswith("эмм") and "зпм" not in n:
             return "em_gross", val 
         if "эксплуатациямашин" in n and "зпм" not in n:
              return "em_gross", val
 
         # 4. НР / СП
-        
+    
         # Комбинированные НР/СП от ЗПМ
         if "нриспотзпм" in n:
             return "nr_sp_zpm", val
-            
+        
         # Стандартные НР
         if "нротзп" in n or n == "нр" or "накладные" in n:
             return "nr", val
-            
+        
         # Стандартная СП
         if "спотзп" in n or n == "сп" or "сметнаяприбыль" in n:
             return "sp", val
 
-        # 5. МР (Материалы) - Inline Rule
-        
+        # 5. МР (Материалы) - Inline Rule (для позиций без явного МР/МРР)
+    
         # Проверяем, что это строка позиции (не НР/СП/ЗП/ЭМ)
         is_cost_line = ("zp" not in n) and ("эм" not in n) and ("нр" not in n) and ("сп" not in n)
-        
+    
         if self._has_numeric_position(row[0] if len(row) > 0 else None) and is_cost_line:
             # Проверяем единицу измерения (Колонка 3) - не трудочасы и не проценты
             unit = row[3] if len(row) > 3 else ""
