@@ -691,24 +691,47 @@ class BudgetAnalysisPage(tk.Frame):
 
         gross_stats: Dict[str, float] = {k: 0.0 for k in self.COST_KEYS + self.REFERENCE_KEYS + ["em_gross"]}
         self.breakdown_rows = []
-        
+    
         name_col_idx = self.smeta_name_col
+    
+    # ========== ОТЛАДКА ==========
+        not_classified_rows = []
+        classified_count = 0
+        total_rows = 0
+    # =============================
 
         for row in self.smeta_data_rows:
+            total_rows += 1
             pos_num = self._str(row[0]) if len(row) > 0 else ""
             rate_code = self._str(row[1]) if len(row) > 1 else ""
-            
+            name = self._str(row[name_col_idx])
+        
             cat, val = self._classify_smeta_row(row)
-            
-            # КРИТИЧНО: Убрана проверка val <= 0 для поддержки отрицательных значений!
+        
+        # ========== ОТЛАДКА: собираем нераспознанные строки ==========
+            if cat and isinstance(val, float):
+                classified_count += 1
+            else:
+                # Проверяем, есть ли вообще значение в столбцах цен
+                test_val = self._first_number_from_cols(row, self.smeta_cost_cols)
+                if isinstance(test_val, float) and abs(test_val) > 0.01:  # Больше 1 копейки
+                # Это строка с ценой, но она не классифицирована!
+                    not_classified_rows.append({
+                        "pos": pos_num,
+                        "code": rate_code,
+                        "name": name[:100],  # Первые 100 символов
+                        "val": test_val,
+                        "unit": self._str(row[3]) if len(row) > 3 else "",
+                        "is_summary": self._is_summary_row(row, name_col_idx)
+                    })
+        # =============================================================
+        
             if not cat or not isinstance(val, float):
                 continue
                 
-            name = self._str(row[name_col_idx])
-            
-            # Накопление (отрицательные значения автоматически вычитаются)
+        # Накопление (отрицательные значения автоматически вычитаются)
             gross_stats[cat] = gross_stats.get(cat, 0.0) + val
-            
+        
             display_cat = self.DISPLAY_CATEGORIES_MAP.get(cat, cat)
             self.breakdown_rows.append({
                 "pos_num": pos_num,
@@ -719,11 +742,11 @@ class BudgetAnalysisPage(tk.Frame):
                 "amount_base": val 
             })
 
-        # Финальный расчет
+    # Финальный расчет
         em_gross_total = gross_stats.pop("em_gross", 0.0)
         zpm_incl_total = gross_stats["zpm_incl"]
         em_net_total = max(0.0, em_gross_total - zpm_incl_total)
-        
+    
         final_stats = {
             "zp": gross_stats.get("zp", 0.0),
             "em": em_net_total, 
@@ -732,21 +755,92 @@ class BudgetAnalysisPage(tk.Frame):
             "sp": gross_stats.get("sp", 0.0),
             "nr_sp_zpm": gross_stats.get("nr_sp_zpm", 0.0),
         }
-        
-        total_cost = self.stats_base.get("total", 0.0)
-        
-        if total_cost <= 0.0:
-            total_cost = sum(final_stats.values())
-        
+    
+        # ========== ВЫЧИСЛЯЕМ ИТОГ ИЗ СУММЫ КАТЕГОРИЙ ==========
+        total_cost = sum(final_stats.values())
+    # ========================================================
+    
         self.stats_base.update(final_stats)
         self.stats_base["total"] = total_cost
         self.stats_base["zpm_incl"] = zpm_incl_total 
         self.stats_base["materials"] = self.stats_base["mr"]
         self.stats_base["wages"] = self.stats_base["zp"] 
+    
+    # ========== ПОКАЗЫВАЕМ ОТЛАДКУ (ВСЕГДА!) ==========
+        debug_lines = []
+        debug_lines.append(f"СТАТИСТИКА АНАЛИЗА:")
+        debug_lines.append("=" * 80)
+        debug_lines.append(f"Всего строк данных: {total_rows}")
+        debug_lines.append(f"Классифицировано: {classified_count}")
+        debug_lines.append(f"Не классифицировано с ценами: {len(not_classified_rows)}")
+        debug_lines.append("")
+        debug_lines.append(f"Вычисленный итог: {total_cost:,.2f} руб.")
+        debug_lines.append(f"Ожидаемый итог: 2 023 103,54 руб.")
+        debug_lines.append(f"Разница: {2023103.54 - total_cost:,.2f} руб.")
+        debug_lines.append("")
+        debug_lines.append("=" * 80)
+        debug_lines.append("")
+    
+        if not_classified_rows:
+            total_missing = sum(r["val"] for r in not_classified_rows)
+            debug_lines.append(f"НЕРАСПОЗНАННЫЕ СТРОКИ С ЦЕНАМИ:")
+            debug_lines.append(f"Сумма нераспознанных: {total_missing:,.2f} руб.")
+            debug_lines.append("")
+            debug_lines.append("=" * 80 + "\n")
         
+            for i, r in enumerate(not_classified_rows[:30], 1):  # Первые 30
+                debug_lines.append(f"{i}. Поз: '{r['pos']}' | Шифр: '{r['code']}'")
+                debug_lines.append(f"   Наименование: {r['name']}")
+                debug_lines.append(f"   Ед.изм: {r['unit']} | Сумма: {r['val']:,.2f} руб.")
+                debug_lines.append(f"   Итоговая строка: {'ДА' if r['is_summary'] else 'НЕТ'}")
+                debug_lines.append("")
+        
+            if len(not_classified_rows) > 30:
+                debug_lines.append(f"... и ещё {len(not_classified_rows) - 30} строк")
+        else:
+            debug_lines.append("Все строки с ценами успешно классифицированы!")
+    
+        # Создаём окно ВСЕГДА
+        debug_win = tk.Toplevel(self)
+        debug_win.title(f"Отчёт анализа сметы")
+        debug_win.geometry("950x650")
+    
+        text_frame = tk.Frame(debug_win)
+        text_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    
+        text_widget = tk.Text(text_frame, wrap="word", font=("Courier New", 9))
+        text_widget.pack(side="left", fill="both", expand=True)
+    
+        scrollbar = ttk.Scrollbar(text_frame, command=text_widget.yview)
+        scrollbar.pack(side="right", fill="y")
+        text_widget.config(yscrollcommand=scrollbar.set)
+    
+        text_widget.insert("1.0", "\n".join(debug_lines))
+        text_widget.config(state="disabled")
+    
+        btn_frame = tk.Frame(debug_win)
+        btn_frame.pack(fill="x", padx=10, pady=(0, 10))
+    
+        btn_close = ttk.Button(btn_frame, text="Закрыть", command=debug_win.destroy)
+        btn_close.pack(side="right")
+    
+        # Кнопка для сохранения отчёта в файл
+        def save_report():
+            try:
+                with open("smeta_analysis_report.txt", "w", encoding="utf-8") as f:
+                    f.write("\n".join(debug_lines))
+                messagebox.showinfo("Сохранено", "Отчёт сохранён в файл:\nsmeta_analysis_report.txt")
+            except Exception as e:
+                messagebox.showerror("Ошибка", f"Не удалось сохранить:\n{e}")
+    
+        btn_save = ttk.Button(btn_frame, text="Сохранить отчёт в файл", command=save_report)
+        btn_save.pack(side="left")
+    # ========================================
+    
         self._apply_vat()
         self._render_stats()
         self._fill_breakdown_table()
+
 
     def _parse_xlsx_generic(self, path: Path):
         wb = load_workbook(path, read_only=True, data_only=True)
