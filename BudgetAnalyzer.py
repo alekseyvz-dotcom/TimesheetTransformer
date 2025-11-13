@@ -536,9 +536,16 @@ class BudgetAnalysisPage(tk.Frame):
 
     def _has_numeric_position(self, cell: Any) -> bool:
         s = str(cell or "").strip()
-        return bool(s) and (s[0].isdigit() or re.match(r"^\d+\.", s))
-
-    # Новый классификатор Smeta.RU
+        if not s:
+            return False
+        # Поддержка различных форматов номеров позиций:
+        # - 1, 2, 3 (целые числа)
+        # - 1.1, 2.5 (дробные через точку)
+        # - 1,1, 2,5 (дробные через запятую)
+        # - 1., 2. (целые с точкой)
+        return bool(re.match(r'^\d+([.,]\d*)?', s))
+        
+        # Новый классификатор Smeta.RU
     def _classify_smeta_row(self, row: List[Any]) -> Tuple[Optional[str], Optional[float]]:
         if self.smeta_name_col is None or not self.smeta_cost_cols:
             return None, None
@@ -550,18 +557,18 @@ class BudgetAnalysisPage(tk.Frame):
         n = re.sub(r"[^а-яa-z0-9]", "", name.lower())
 
         val = self._first_number_from_cols(row, self.smeta_cost_cols)
-        if not isinstance(val, float) or val <= 0:
+    
+        # ИЗМЕНЕНО: убрали проверку val <= 0, чтобы обрабатывать отрицательные значения
+        if not isinstance(val, float):
             return None, None
     
-        # ============ НОВОЕ: Проверка на МР/МРР в расценке (приоритетная проверка) ============
-        # Проверяем колонку 1 (шифр расценки), колонку 2 (может содержать код) и колонку 3
+        # ============ Проверка на МР/МРР в расценке (приоритетная проверка) ============
         for col_idx in [1, 2, 3]:
             if len(row) > col_idx:
                 col_val = self._str(row[col_idx]).upper().strip()
-                # Точное совпадение или начало строки
                 if col_val in ["МР", "МРР"] or col_val.startswith("МР ") or col_val.startswith("МРР "):
                     return "mr", val
-        # =====================================================================================
+        # ===============================================================================
         
         # 1. Справочная ЗПМ (в т.ч. ЗПМ)
         if "втчзпм" in n or "втомчислезпм" in n:
