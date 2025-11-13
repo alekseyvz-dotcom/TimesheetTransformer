@@ -1460,7 +1460,7 @@ class TransportPlanningPage(tk.Frame):
         elif current_assignment:
             current_type = current_assignment.strip()
 
-        tk.Label(assign_frame, text="1️⃣ Тип техники:", font=("Arial", 9, "bold")).grid(
+        tk.Label(assign_frame, text="Тип техники:", font=("Arial", 9, "bold")).grid(
             row=0, column=0, sticky="w", pady=(5, 2)
         )
         vehicle_type_var = tk.StringVar(value=current_type)
@@ -1474,7 +1474,7 @@ class TransportPlanningPage(tk.Frame):
         )
         cmb_vehicle_type.grid(row=1, column=0, pady=(0, 12), sticky="we")
 
-        tk.Label(assign_frame, text="2️⃣ Наименование:", font=("Arial", 9, "bold")).grid(
+        tk.Label(assign_frame, text="Наименование:", font=("Arial", 9, "bold")).grid(
             row=2, column=0, sticky="w", pady=(5, 2)
         )
         vehicle_name_var = tk.StringVar(value="")
@@ -1488,7 +1488,7 @@ class TransportPlanningPage(tk.Frame):
         )
         cmb_vehicle_name.grid(row=3, column=0, pady=(0, 12), sticky="we")
 
-        tk.Label(assign_frame, text="3️⃣ Гос. номер:", font=("Arial", 9, "bold")).grid(
+        tk.Label(assign_frame, text="Гос. номер:", font=("Arial", 9, "bold")).grid(
             row=4, column=0, sticky="w", pady=(5, 2)
         )
         vehicle_plate_var = tk.StringVar(value="")
@@ -1504,7 +1504,7 @@ class TransportPlanningPage(tk.Frame):
 
         selection_info = tk.Label(
             assign_frame,
-            text="💡 Выберите сначала тип, затем наименование и гос. номер",
+            text="Выберите сначала тип, затем наименование и гос. номер",
             font=("Arial", 8),
             fg="#666"
         )
@@ -1520,7 +1520,7 @@ class TransportPlanningPage(tk.Frame):
                 cmb_vehicle_plate['values'] = []
                 cmb_vehicle_name.state(['disabled'])
                 cmb_vehicle_plate.state(['disabled'])
-                selection_info.config(text="💡 Выберите тип техники", fg="#666")
+                selection_info.config(text="Выберите тип техники", fg="#666")
                 return
     
             names = sorted(set(
@@ -1534,11 +1534,11 @@ class TransportPlanningPage(tk.Frame):
             cmb_vehicle_plate.state(['disabled'])
     
             if len(names) == 0:
-                selection_info.config(text="⚠️ Нет доступных наименований для этого типа", fg="#dc3545")
+                selection_info.config(text="Нет доступных наименований для этого типа", fg="#dc3545")
             elif len(names) == 1:
                 vehicle_name_var.set(names[0])
             else:
-                selection_info.config(text=f"💡 Доступно наименований: {len(names)}", fg="#666")
+                selection_info.config(text=f"Доступно наименований: {len(names)}", fg="#666")
 
         def update_plates(*args):
             selected_type = vehicle_type_var.get()
@@ -1561,12 +1561,12 @@ class TransportPlanningPage(tk.Frame):
             cmb_vehicle_plate.state(['!disabled'])
     
             if len(plates) == 0:
-                selection_info.config(text="⚠️ Нет доступных гос. номеров", fg="#dc3545")
+                selection_info.config(text="Нет доступных гос. номеров", fg="#dc3545")
             elif len(plates) == 1:
                 vehicle_plate_var.set(plates[0])
                 selection_info.config(text=f"✓ Назначен: {get_full_vehicle_string()}", fg="#28a745")
             else:
-                selection_info.config(text=f"💡 Доступно гос. номеров: {len(plates)}", fg="#666")
+                selection_info.config(text=f"Доступно гос. номеров: {len(plates)}", fg="#666")
 
         def get_full_vehicle_string() -> str:
             parts = []
@@ -1585,7 +1585,7 @@ class TransportPlanningPage(tk.Frame):
             row=7, column=0, sticky='ew', pady=15
         )
 
-        tk.Label(assign_frame, text="👨‍✈️ Водитель:", font=("Arial", 9, "bold")).grid(
+        tk.Label(assign_frame, text="Водитель:", font=("Arial", 9, "bold")).grid(
             row=8, column=0, sticky="w", pady=(5, 2)
         )
 
@@ -1615,7 +1615,7 @@ class TransportPlanningPage(tk.Frame):
         )
         cmb_driver.grid(row=9, column=0, pady=(0, 12), sticky="we")
 
-        tk.Label(assign_frame, text="📊 Статус:", font=("Arial", 9, "bold")).grid(
+        tk.Label(assign_frame, text="Статус:", font=("Arial", 9, "bold")).grid(
             row=10, column=0, sticky="w", pady=(5, 2)
         )
         status_var = tk.StringVar(value=values[12])
