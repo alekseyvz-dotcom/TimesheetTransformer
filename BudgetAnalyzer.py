@@ -623,13 +623,13 @@ class BudgetAnalysisPage(tk.Frame):
     
     # 2. Справочная ЗПМ (в т.ч. ЗПМ)
         if "втчзпм" in n or "втомчислезпм" in n:
-           return "zpm_incl", val
+            return "zpm_incl", val
 
     # 3. ЗП (Заработная плата)
         if n == "зп" or n == "зпм" or "оплататруда" in n or "заработн" in n:
             return "zp", val
     
-    # 4. ЭМ (Эксплуатация машин) - Гросс
+        # 4. ЭМ (Эксплуатация машин) - Гросс
         if n.startswith("эм") and "эмм" not in n and "зпм" not in n:
             return "em_gross", val 
         if n.startswith("эмм") and "зпм" not in n:
@@ -676,7 +676,7 @@ class BudgetAnalysisPage(tk.Frame):
             print(f"_has_numeric_position: {self._has_numeric_position(pos_cell)}")
     # =============================================
     
-    # ПРАВИЛО 1: Дробный номер + шифр + материальная единица
+        # ПРАВИЛО 1: Дробный номер + шифр + материальная единица
         if is_subposition and has_code and is_material_unit and is_cost_line:
             if "60.1" in pos_str or "60,1" in pos_str:
                 print(f"✅ ПРАВИЛО 1 СРАБОТАЛО: Классифицировано как МР")
@@ -688,7 +688,7 @@ class BudgetAnalysisPage(tk.Frame):
                 print(f"✅ ПРАВИЛО 2 СРАБОТАЛО: Классифицировано как МР")
             return "mr", val
     
-    # ПРАВИЛО 3: Числовая позиция + не трудовая единица
+        # ПРАВИЛО 3: Числовая позиция + не трудовая единица
         if self._has_numeric_position(pos_cell) and not_labor_unit and is_cost_line and name:
             exclude_words = ["машинист", "слесар", "монтаж", "установк", "демонтаж"]
             if not any(word in n for word in exclude_words):
@@ -696,12 +696,13 @@ class BudgetAnalysisPage(tk.Frame):
                     print(f"✅ ПРАВИЛО 3 СРАБОТАЛО: Классифицировано как МР")
                 return "mr", val
     
-    # ========== ОТЛАДКА: если ничего не сработало ==========
+        # ========== ОТЛАДКА: если ничего не сработало ==========
         if "60.1" in pos_str or "60,1" in pos_str:
             print(f"❌ НИ ОДНО ПРАВИЛО НЕ СРАБОТАЛО! Строка НЕ классифицирована.")
     # ========================================================
 
         return None, None
+
 
     def _analyze_smeta(self):
         """Основной анализ сметы Smeta.RU с поддержкой отрицательных значений"""
