@@ -526,12 +526,29 @@ class BudgetAnalysisPage(tk.Frame):
         return False
 
     def _has_numeric_position(self, cell: Any) -> bool:
-        """Проверяет, является ли ячейка номером позиции (целым или дробным)"""
-        s = str(cell or "").strip()
+        """Проверяет, является ли ячейка номером позиции (целым или дробным)
+        Работает с числами, текстом, дробными через точку/запятую"""
+        if cell is None:
+            return False
+    
+        # Преобразуем в строку (работает и с числами, и с текстом)
+        s = str(cell).strip()
+    
+        # Убираем все виды пробелов (обычные, неразрывные и т.д.)
+        s = s.replace("\u00A0", "").replace("\xa0", "").replace(" ", "").replace("\t", "")
+    
         if not s:
             return False
-        # Поддержка форматов: 1, 2, 1.1, 2.5, 1,1, 2,5, 1., 2.
-        return bool(re.match(r'^\d+([.,]\d*)?$', s))
+    
+        # Поддержка всех форматов:
+        # - Целые: 1, 2, 56
+        # - Дробные через точку: 1.1, 2.5, 56.1
+        # - Дробные через запятую: 1,1, 2,5, 56,1  
+        # - С точкой на конце: 1., 2.
+        # - Числа с плавающей точкой из Excel: 1.0, 2.0
+        pattern = r'^\d+([.,]\d*)?$'
+    
+        return bool(re.match(pattern, s))
 
     def _classify_smeta_row(self, row: List[Any]) -> Tuple[Optional[str], Optional[float]]:
         """Классификация строки сметы по категориям"""
