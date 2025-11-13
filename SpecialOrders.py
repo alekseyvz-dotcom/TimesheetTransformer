@@ -1133,8 +1133,7 @@ class TransportPlanningPage(tk.Frame):
         self.drivers = []
         for fio, tbn, pos, dep in employees:
             is_driver_dept = dep in DRIVER_DEPARTMENTS
-            is_driver_pos = 'водитель' in pos.lower()
-            if is_driver_dept or is_driver_pos:
+            if is_driver_dept:  # ✅ Только из настроенных подразделений
                 self.drivers.append({'fio': fio, 'tbn': tbn, 'pos': pos, 'dep': dep})
     
         self.drivers.sort(key=lambda x: x['fio'])
