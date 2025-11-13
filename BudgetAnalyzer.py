@@ -530,52 +530,50 @@ class BudgetAnalysisPage(tk.Frame):
         Работает с числами, текстом, дробными через точку/запятую"""
         if cell is None:
             return False
-    
+
         # Преобразуем в строку (работает и с числами, и с текстом)
         s = str(cell).strip()
-    
+
         # Убираем все виды пробелов (обычные, неразрывные и т.д.)
         s = s.replace("\u00A0", "").replace("\xa0", "").replace(" ", "").replace("\t", "")
-    
+
         if not s:
             return False
-    
+
         # Поддержка всех форматов:
-        # - Целые: 1, 2, 56
-        # - Дробные через точку: 1.1, 2.5, 56.1
-        # - Дробные через запятую: 1,1, 2,5, 56,1  
-        # - С точкой на конце: 1., 2.
+        # - Целые: 1, 2, 56, 60
+        # - Дробные через точку: 1.1, 2.5, 56.1, 60.1
+        # - Дробные через ЗАПЯТУЮ: 1,1, 2,5, 56,1, 60,1  <--- ЭТО ДОБАВЛЕНО!
+        # - С точкой/запятой на конце: 1., 2., 1,
         # - Числа с плавающей точкой из Excel: 1.0, 2.0
         pattern = r'^\d+([.,]\d*)?$'
-    
+
         return bool(re.match(pattern, s))
 
     def _classify_smeta_row(self, row: List[Any]) -> Tuple[Optional[str], Optional[float]]:
         """Классификация строки сметы по категориям"""
         if self.smeta_name_col is None or not self.smeta_cost_cols:
             return None, None
-        
+    
         if self._is_summary_row(row, self.smeta_name_col):
             return None, None
-    
+
         name = self._str(row[self.smeta_name_col]) if self.smeta_name_col < len(row) else ""
         n = re.sub(r"[^а-яa-z0-9]", "", name.lower())
 
         val = self._first_number_from_cols(row, self.smeta_cost_cols)
-    
-        # КРИТИЧНО: Не фильтруем по val <= 0, чтобы обрабатывать отрицательные значения!
+
         if not isinstance(val, float):
             return None, None
-    
+
         # ============ 1. Проверка на МР/МРР в столбцах 1-3 (приоритет!) ============
         for col_idx in [1, 2, 3]:
             if len(row) > col_idx:
                 col_val = self._str(row[col_idx]).upper().strip()
-                # Проверяем точное совпадение или начало строки
                 if col_val in ["МР", "МРР"] or col_val.startswith("МР ") or col_val.startswith("МРР "):
                     return "mr", val
         # ===========================================================================
-        
+    
         # 2. Справочная ЗПМ (в т.ч. ЗПМ)
         if "втчзпм" in n or "втомчислезпм" in n:
             return "zpm_incl", val
@@ -583,7 +581,7 @@ class BudgetAnalysisPage(tk.Frame):
         # 3. ЗП (Заработная плата)
         if n == "зп" or n == "зпм" or "оплататруда" in n or "заработн" in n:
             return "zp", val
-        
+    
         # 4. ЭМ (Эксплуатация машин) - Гросс
         if n.startswith("эм") and "эмм" not in n and "зпм" not in n:
             return "em_gross", val 
@@ -600,15 +598,55 @@ class BudgetAnalysisPage(tk.Frame):
         if "спотзп" in n or n == "сп" or "сметнаяприбыль" in n:
             return "sp", val
 
-        # 6. МР (Материалы) - Inline Rule
-        is_cost_line = ("zp" not in n) and ("эм" not in n) and ("нр" not in n) and ("сп" not in n)
-        
-        if self._has_numeric_position(row[0] if len(row) > 0 else None) and is_cost_line:
-            unit = row[3] if len(row) > 3 else ""
-            if not self._is_labor_or_percent_unit(unit):
+        # ============ 6. ПРАВИЛО ДЛЯ МАТЕРИАЛОВ (на основе реальной структуры CSV) ============
+    
+        # 6.1. Проверка номера позиции с запятой или точкой (60,1 или 60.1)
+        pos_cell = row[0] if len(row) > 0 else None
+        has_position = self._has_numeric_position(pos_cell)
+    
+        # 6.2. Дополнительная проверка: дробный номер с запятой/точкой
+        is_subposition = False
+        if pos_cell is not None:
+            pos_str = str(pos_cell).strip()
+            # Проверяем формат "число,число" или "число.число" (60,1 или 60.1)
+            if re.match(r'^\d+[.,]\d+$', pos_str):
+                is_subposition = True
+                has_position = True
+    
+        # 6.3. Проверка шифра в столбце 1 (формат типа "1.3-1-71")
+        # Если там шифр расценки (содержит цифры и дефисы/точки), то это может быть материал
+        col1_value = self._str(row[1]) if len(row) > 1 else ""
+        has_code = bool(col1_value and re.search(r'\d', col1_value))
+    
+        # 6.4. Единица измерения в столбце 3
+        unit = row[3] if len(row) > 3 else ""
+        unit_str = self._str(unit).lower()
+        not_labor_unit = not self._is_labor_or_percent_unit(unit)
+    
+        # Типичные единицы для материалов
+        material_units = ["м3", "м2", "м", "т", "кг", "шт", "компл", "л"]
+        is_material_unit = any(u in unit_str for u in material_units)
+    
+        # 6.5. Это строка затрат (не служебная)
+        is_cost_line = ("зп" not in n) and ("эм" not in n) and ("нр" not in n) and ("сп" not in n)
+    
+        # ГЛАВНОЕ ПРАВИЛО ДЛЯ МАТЕРИАЛОВ:
+        # Дробный номер (60,1) + есть шифр в столбце 1 + материальная единица измерения
+        if is_subposition and has_code and is_material_unit and is_cost_line:
+            return "mr", val
+    
+        # АЛЬТЕРНАТИВНОЕ ПРАВИЛО:
+        # Любой номер позиции + не трудовая единица + есть наименование
+        if has_position and not_labor_unit and is_cost_line and name:
+            # Исключаем строки с явно трудовыми/машинными ключевыми словами
+            exclude_words = ["машинист", "слесар", "электромонт", "монтаж", "установк"]
+            if not any(word in n for word in exclude_words):
                 return "mr", val
+    
+        # ===========================================================================
 
         return None, None
+
 
     def _analyze_smeta(self):
         """Основной анализ сметы Smeta.RU с поддержкой отрицательных значений"""
