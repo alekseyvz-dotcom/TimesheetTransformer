@@ -412,40 +412,67 @@ class BudgetAnalysisPage(tk.Frame):
         name_col: Optional[int] = None
         hdr_row_idx: Optional[int] = None
         ordered_cost_cols: List[int] = []
+    
         for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
             raw_vals = list(row)
             vals_norm = [self._normalize_header_text(v) for v in raw_vals]
             only_digits = [str(v).strip() for v in raw_vals if v is not None]
+        
             if only_digits and self._is_sequential_digits_list(only_digits):
                 hdr_row_idx = i
                 name_col = 2
-                ordered_cost_cols = [10, 9]
+                # ИСПРАВЛЕНО: сначала проверяем столбец 11 (индекс 10), потом 10 (индекс 9)
+                ordered_cost_cols = [10, 9, 8]  # Столбцы L, K, J
                 break
+        
             if not any(vals_norm):
                 continue
+            
             has_name = any(("наименование работ" in v and "затрат" in v) or ("наименование работ и затрат" in v) for v in vals_norm)
-            idx_current = [idx for idx, v in enumerate(vals_norm) if ("всего" in v and "коэфф" not in v and "текущ" in v)]
-            idx_other   = [idx for idx, v in enumerate(vals_norm) if ("всего" in v and "коэфф" not in v and "текущ" not in v)]
-            if has_name and (idx_current or idx_other):
+        
+            # Ищем колонку с "ВСЕГО затрат в текущем уровне цен"
+            idx_current = []
+            idx_base = []
+            idx_other = []
+        
+            for idx, v in enumerate(vals_norm):
+                if "всего" in v and "коэфф" not in v:
+                    if "текущ" in v:
+                        idx_current.append(idx)
+                    elif "базис" in v or "2000" in v or "января" in v:
+                        idx_base.append(idx)
+                    else:
+                        idx_other.append(idx)
+        
+            if has_name and (idx_current or idx_base or idx_other):
                 hdr_row_idx = i
+            
                 if name_col is None:
                     try:
                         name_col = vals_norm.index(next(v for v in vals_norm if ("наименование работ" in v and "затрат" in v) or ("наименование работ и затрат" in v)))
                     except StopIteration:
                         name_col = 2
-                ordered_cost_cols = idx_current + idx_other
+            
+                # Приоритет: текущие цены > прочие > базисные
+                ordered_cost_cols = idx_current + idx_other + idx_base
+            
                 if not ordered_cost_cols:
-                    ordered_cost_cols = [10, 9]
+                    # Если не нашли по заголовкам, используем порядок по умолчанию
+                    ordered_cost_cols = [10, 9, 8]  # L, K, J
+            
                 break
+    
         if hdr_row_idx is None:
             for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
                 only_digits = [str(v).strip() for v in row if v is not None]
                 if only_digits and self._is_sequential_digits_list(only_digits):
                     hdr_row_idx = i
                     name_col = 2
-                    ordered_cost_cols = [10, 9]
+                    ordered_cost_cols = [10, 9, 8]  # L, K, J
                     break
+    
         return hdr_row_idx, name_col, ordered_cost_cols
+
 
     def _is_numbering_row(self, cells: List[Any]) -> bool:
         vals = [str(v).strip() for v in cells if v is not None and str(v).strip() != ""]
@@ -589,7 +616,7 @@ class BudgetAnalysisPage(tk.Frame):
             return "em_gross", val 
         if "эксплуатациямашин" in n and "зпм" not in n:
              return "em_gross", val
-
+    
         # 5. НР / СП
         if "нриспотзпм" in n:
             return "nr_sp_zpm", val
@@ -598,54 +625,53 @@ class BudgetAnalysisPage(tk.Frame):
         if "спотзп" in n or n == "сп" or "сметнаяприбыль" in n:
             return "sp", val
 
-        # ============ 6. ПРАВИЛО ДЛЯ МАТЕРИАЛОВ (на основе реальной структуры CSV) ============
+        # ============ 6. МАТЕРИАЛЫ: на основе реальной структуры ============
     
-        # 6.1. Проверка номера позиции с запятой или точкой (60,1 или 60.1)
+        # 6.1. Проверка дробного номера позиции (60.1)
         pos_cell = row[0] if len(row) > 0 else None
-        has_position = self._has_numeric_position(pos_cell)
+        pos_str = self._str(pos_cell)
     
-        # 6.2. Дополнительная проверка: дробный номер с запятой/точкой
-        is_subposition = False
-        if pos_cell is not None:
-            pos_str = str(pos_cell).strip()
-            # Проверяем формат "число,число" или "число.число" (60,1 или 60.1)
-            if re.match(r'^\d+[.,]\d+$', pos_str):
-                is_subposition = True
-                has_position = True
+        # Дробный номер: "60.1" или "60,1"
+        is_subposition = bool(pos_str and re.match(r'^\d+[.,]\d+$', pos_str))
     
-        # 6.3. Проверка шифра в столбце 1 (формат типа "1.3-1-71")
-        # Если там шифр расценки (содержит цифры и дефисы/точки), то это может быть материал
-        col1_value = self._str(row[1]) if len(row) > 1 else ""
-        has_code = bool(col1_value and re.search(r'\d', col1_value))
+        # 6.2. Проверка шифра расценки в столбце 1 (формат "1.3-1-71")
+        code_cell = row[1] if len(row) > 1 else None
+        code_str = self._str(code_cell)
+        has_code = bool(code_str and re.search(r'[\d\.\-]+', code_str))
     
-        # 6.4. Единица измерения в столбце 3
+        # 6.3. Единица измерения в столбце 3
         unit = row[3] if len(row) > 3 else ""
         unit_str = self._str(unit).lower()
-        not_labor_unit = not self._is_labor_or_percent_unit(unit)
     
-        # Типичные единицы для материалов
-        material_units = ["м3", "м2", "м", "т", "кг", "шт", "компл", "л"]
+        # Материальные единицы
+        material_units = ["м3", "м2", "м", "т", "кг", "шт", "компл", "л", "м³", "м²"]
         is_material_unit = any(u in unit_str for u in material_units)
     
-        # 6.5. Это строка затрат (не служебная)
+        # НЕ трудовые единицы
+        not_labor_unit = not self._is_labor_or_percent_unit(unit)
+    
+        # 6.4. Это строка затрат (не служебная)
         is_cost_line = ("зп" not in n) and ("эм" not in n) and ("нр" not in n) and ("сп" not in n)
     
-        # ГЛАВНОЕ ПРАВИЛО ДЛЯ МАТЕРИАЛОВ:
-        # Дробный номер (60,1) + есть шифр в столбце 1 + материальная единица измерения
+        # ПРАВИЛО 1: Дробный номер + шифр + материальная единица = МАТЕРИАЛ
         if is_subposition and has_code and is_material_unit and is_cost_line:
             return "mr", val
     
-        # АЛЬТЕРНАТИВНОЕ ПРАВИЛО:
-        # Любой номер позиции + не трудовая единица + есть наименование
-        if has_position and not_labor_unit and is_cost_line and name:
-            # Исключаем строки с явно трудовыми/машинными ключевыми словами
-            exclude_words = ["машинист", "слесар", "электромонт", "монтаж", "установк"]
+        # ПРАВИЛО 2: Любой номер позиции + материальная единица + есть цена
+        if self._has_numeric_position(pos_cell) and is_material_unit and is_cost_line:
+            return "mr", val
+    
+        # ПРАВИЛО 3 (fallback): Числовая позиция + не трудовая единица
+        if self._has_numeric_position(pos_cell) and not_labor_unit and is_cost_line and name:
+            # Исключаем явно трудовые/машинные работы
+            exclude_words = ["машинист", "слесар", "монтаж", "установк", "демонтаж"]
             if not any(word in n for word in exclude_words):
                 return "mr", val
     
         # ===========================================================================
-
+    
         return None, None
+
 
 
     def _analyze_smeta(self):
