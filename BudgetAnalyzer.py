@@ -590,34 +590,54 @@ class BudgetAnalysisPage(tk.Frame):
 
         val = self._first_number_from_cols(row, self.smeta_cost_cols)
 
+    # ========== ОТЛАДКА: выводим информацию о строке 60.1 ==========
+        pos_cell = row[0] if len(row) > 0 else None
+        pos_str = self._str(pos_cell)
+    
+        if "60.1" in pos_str or "60,1" in pos_str:
+            print(f"\n=== ОТЛАДКА строки 60.1 ===")
+            print(f"Позиция: {pos_str}")
+            print(f"Столбец 1 (индекс 1): {row[1] if len(row) > 1 else 'НЕТ'}")
+            print(f"Наименование (столбец {self.smeta_name_col}): {name}")
+            print(f"Столбец 3 (ед.изм): {row[3] if len(row) > 3 else 'НЕТ'}")
+            print(f"smeta_cost_cols: {self.smeta_cost_cols}")
+            print(f"Значение val: {val}")
+            print(f"Тип val: {type(val)}")
+            print(f"Первые 15 ячеек строки: {row[:15]}")
+    # ================================================================
+
         if not isinstance(val, float):
+            if "60.1" in pos_str or "60,1" in pos_str:
+                print(f"❌ val не является float! Пропускаем строку.")
             return None, None
 
-        # ============ 1. Проверка на МР/МРР в столбцах 1-3 (приоритет!) ============
+    # ============ 1. Проверка на МР/МРР в столбцах 1-3 (приоритет!) ============
         for col_idx in [1, 2, 3]:
             if len(row) > col_idx:
                 col_val = self._str(row[col_idx]).upper().strip()
                 if col_val in ["МР", "МРР"] or col_val.startswith("МР ") or col_val.startswith("МРР "):
+                    if "60.1" in pos_str or "60,1" in pos_str:
+                        print(f"✅ Найден маркер МР/МРР в столбце {col_idx}")
                     return "mr", val
-        # ===========================================================================
+    # ===========================================================================
     
-        # 2. Справочная ЗПМ (в т.ч. ЗПМ)
+    # 2. Справочная ЗПМ (в т.ч. ЗПМ)
         if "втчзпм" in n or "втомчислезпм" in n:
-            return "zpm_incl", val
+           return "zpm_incl", val
 
-        # 3. ЗП (Заработная плата)
+    # 3. ЗП (Заработная плата)
         if n == "зп" or n == "зпм" or "оплататруда" in n or "заработн" in n:
             return "zp", val
     
-        # 4. ЭМ (Эксплуатация машин) - Гросс
+    # 4. ЭМ (Эксплуатация машин) - Гросс
         if n.startswith("эм") and "эмм" not in n and "зпм" not in n:
             return "em_gross", val 
         if n.startswith("эмм") and "зпм" not in n:
             return "em_gross", val 
         if "эксплуатациямашин" in n and "зпм" not in n:
              return "em_gross", val
-    
-        # 5. НР / СП
+
+    # 5. НР / СП
         if "нриспотзпм" in n:
             return "nr_sp_zpm", val
         if "нротзп" in n or n == "нр" or "накладные" in n:
@@ -625,54 +645,63 @@ class BudgetAnalysisPage(tk.Frame):
         if "спотзп" in n or n == "сп" or "сметнаяприбыль" in n:
             return "sp", val
 
-        # ============ 6. МАТЕРИАЛЫ: на основе реальной структуры ============
+    # ============ 6. МАТЕРИАЛЫ ============
     
-        # 6.1. Проверка дробного номера позиции (60.1)
-        pos_cell = row[0] if len(row) > 0 else None
-        pos_str = self._str(pos_cell)
-    
-        # Дробный номер: "60.1" или "60,1"
+    # Дробный номер: "60.1" или "60,1"
         is_subposition = bool(pos_str and re.match(r'^\d+[.,]\d+$', pos_str))
     
-        # 6.2. Проверка шифра расценки в столбце 1 (формат "1.3-1-71")
+    # Проверка шифра расценки в столбце 1
         code_cell = row[1] if len(row) > 1 else None
         code_str = self._str(code_cell)
         has_code = bool(code_str and re.search(r'[\d\.\-]+', code_str))
     
-        # 6.3. Единица измерения в столбце 3
+    # Единица измерения в столбце 3
         unit = row[3] if len(row) > 3 else ""
         unit_str = self._str(unit).lower()
     
-        # Материальные единицы
         material_units = ["м3", "м2", "м", "т", "кг", "шт", "компл", "л", "м³", "м²"]
         is_material_unit = any(u in unit_str for u in material_units)
-    
-        # НЕ трудовые единицы
         not_labor_unit = not self._is_labor_or_percent_unit(unit)
     
-        # 6.4. Это строка затрат (не служебная)
         is_cost_line = ("зп" not in n) and ("эм" not in n) and ("нр" not in n) and ("сп" not in n)
     
-        # ПРАВИЛО 1: Дробный номер + шифр + материальная единица = МАТЕРИАЛ
+    # ========== ОТЛАДКА для строки 60.1 ==========
+        if "60.1" in pos_str or "60,1" in pos_str:
+            print(f"\n--- Проверка правил для материалов ---")
+            print(f"is_subposition: {is_subposition}")
+            print(f"has_code: {has_code} (код: '{code_str}')")
+            print(f"is_material_unit: {is_material_unit} (единица: '{unit_str}')")
+            print(f"not_labor_unit: {not_labor_unit}")
+            print(f"is_cost_line: {is_cost_line}")
+            print(f"_has_numeric_position: {self._has_numeric_position(pos_cell)}")
+    # =============================================
+    
+    # ПРАВИЛО 1: Дробный номер + шифр + материальная единица
         if is_subposition and has_code and is_material_unit and is_cost_line:
+            if "60.1" in pos_str or "60,1" in pos_str:
+                print(f"✅ ПРАВИЛО 1 СРАБОТАЛО: Классифицировано как МР")
             return "mr", val
     
-        # ПРАВИЛО 2: Любой номер позиции + материальная единица + есть цена
+        # ПРАВИЛО 2: Любой номер позиции + материальная единица
         if self._has_numeric_position(pos_cell) and is_material_unit and is_cost_line:
+            if "60.1" in pos_str or "60,1" in pos_str:
+                print(f"✅ ПРАВИЛО 2 СРАБОТАЛО: Классифицировано как МР")
             return "mr", val
     
-        # ПРАВИЛО 3 (fallback): Числовая позиция + не трудовая единица
+    # ПРАВИЛО 3: Числовая позиция + не трудовая единица
         if self._has_numeric_position(pos_cell) and not_labor_unit and is_cost_line and name:
-            # Исключаем явно трудовые/машинные работы
             exclude_words = ["машинист", "слесар", "монтаж", "установк", "демонтаж"]
             if not any(word in n for word in exclude_words):
+                if "60.1" in pos_str or "60,1" in pos_str:
+                    print(f"✅ ПРАВИЛО 3 СРАБОТАЛО: Классифицировано как МР")
                 return "mr", val
     
-        # ===========================================================================
-    
+    # ========== ОТЛАДКА: если ничего не сработало ==========
+        if "60.1" in pos_str or "60,1" in pos_str:
+            print(f"❌ НИ ОДНО ПРАВИЛО НЕ СРАБОТАЛО! Строка НЕ классифицирована.")
+    # ========================================================
+
         return None, None
-
-
 
     def _analyze_smeta(self):
         """Основной анализ сметы Smeta.RU с поддержкой отрицательных значений"""
