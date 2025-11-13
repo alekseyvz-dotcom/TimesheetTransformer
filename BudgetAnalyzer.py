@@ -3,7 +3,9 @@
 # Логика (Smeta.RU режим):
 # - Введены детализированные категории: ЗП, ЭМ, МР, НР, СП, НР и СП от ЗПМ.
 # - Коррекция ЭМ: ЭМ = ЭМ_гросс - в т.ч. ЗПМ.
-# - Материалы (МР) рассчитываются по inline-правилу.
+# - Материалы (МР) рассчитываются по inline-правилу и по индексу МР/МРР.
+# - Поддержка отрицательных значений (вычитание из суммы).
+# - Поддержка дробных номеров позиций (1,1 или 1.1).
 # - Расшифровка строк включает Номер позиции и Шифр расценки.
 # - Диаграмма удалена.
 # Добавлена функция начисления НДС 20%
@@ -101,8 +103,6 @@ class BudgetAnalysisPage(tk.Frame):
         "zpm_incl": "в т.ч. ЗПМ",
     }
     
-    # Старые цвета удалены, так как нет диаграммы.
-    
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
         self.file_path: Optional[Path] = None
@@ -198,7 +198,7 @@ class BudgetAnalysisPage(tk.Frame):
 
         hint_text = ("Smeta.RU: лист «ЛОКАЛЬНАЯ СМЕТА». Расчет ведется по детализированным статьям (ЗП, ЭМ, МР, НР, СП).\n"
                      "Эксплуатация машин (ЭМ) автоматически корректируется на сумму 'в т.ч. ЗПМ' для избежания двойного учета.\n"
-                     "Чекбокс «Начислить НДС 20%» увеличивает все суммы на 20%.")
+                     "Поддержка отрицательных значений и дробных номеров позиций. Чекбокс «Начислить НДС 20%» увеличивает все суммы на 20%.")
         hint = tk.Label(self, text=hint_text, fg="#666", bg="#f7f7f7", justify="left", wraplength=980)
         hint.pack(fill="x", padx=12, pady=(0, 10))
 
@@ -247,8 +247,6 @@ class BudgetAnalysisPage(tk.Frame):
         self.tree.configure(yscrollcommand=yscroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
         yscroll.pack(side="right", fill="y")
-        
-        # Правый блок (диаграмма) удален, чтобы освободить место.
 
     def _add_metric_row(self, grid, r, title: str):
         lbl = tk.Label(grid, text=title, bg="#ffffff")
@@ -265,7 +263,6 @@ class BudgetAnalysisPage(tk.Frame):
         self._apply_vat()
         self._render_stats()
         self._fill_breakdown_table()
-        # _render_chart удален
 
     def _apply_vat(self):
         multiplier = 1.2 if self.vat_enabled.get() else 1.0
@@ -326,7 +323,6 @@ class BudgetAnalysisPage(tk.Frame):
                 self._analyze_generic()
                 return True
             else:
-                # Попытка универсального открытия
                 try:
                     if self._parse_xlsx_smeta_ru(path):
                         self.mode = "smeta"
@@ -355,9 +351,6 @@ class BudgetAnalysisPage(tk.Frame):
         if target_ws is None:
             return False
         
-        # hdr_row_idx: номер строки заголовков (1-based)
-        # name_col: индекс колонки наименований (0-based)
-        # cost_cols: список индексов колонок стоимости (0-based)
         hdr_row_idx, name_col, cost_cols = self._find_table_header(target_ws)
         
         if hdr_row_idx is None or name_col is None or not cost_cols:
@@ -375,7 +368,6 @@ class BudgetAnalysisPage(tk.Frame):
             if self._is_numbering_row(cells):
                 continue
                 
-            # Поиск итогов (нужен для определения общего итога)
             if self._is_summary_row(cells, name_col):
                 val = self._first_number_from_cols(cells, cost_cols)
                 low = name_cell.lower()
@@ -394,7 +386,6 @@ class BudgetAnalysisPage(tk.Frame):
         self.smeta_data_rows = data_rows
         
         total = last_grand_total if isinstance(last_grand_total, float) else last_local_total
-        # Итоговая сумма будет скорректирована в _analyze_smeta, но устанавливаем базу
         self.stats_base["total"] = float(total or 0.0) 
         
         self.lbl_sheet.config(text=f"Лист: {self.smeta_sheet_name} (режим Smeta.RU)")
@@ -535,18 +526,15 @@ class BudgetAnalysisPage(tk.Frame):
         return False
 
     def _has_numeric_position(self, cell: Any) -> bool:
+        """Проверяет, является ли ячейка номером позиции (целым или дробным)"""
         s = str(cell or "").strip()
         if not s:
             return False
-        # Поддержка различных форматов номеров позиций:
-        # - 1, 2, 3 (целые числа)
-        # - 1.1, 2.5 (дробные через точку)
-        # - 1,1, 2,5 (дробные через запятую)
-        # - 1., 2. (целые с точкой)
-        return bool(re.match(r'^\d+([.,]\d*)?', s))
-        
-        # Новый классификатор Smeta.RU
+        # Поддержка форматов: 1, 2, 1.1, 2.5, 1,1, 2,5, 1., 2.
+        return bool(re.match(r'^\d+([.,]\d*)?$', s))
+
     def _classify_smeta_row(self, row: List[Any]) -> Tuple[Optional[str], Optional[float]]:
+        """Классификация строки сметы по категориям"""
         if self.smeta_name_col is None or not self.smeta_cost_cols:
             return None, None
         
@@ -558,27 +546,28 @@ class BudgetAnalysisPage(tk.Frame):
 
         val = self._first_number_from_cols(row, self.smeta_cost_cols)
     
-        # ИЗМЕНЕНО: убрали проверку val <= 0, чтобы обрабатывать отрицательные значения
+        # КРИТИЧНО: Не фильтруем по val <= 0, чтобы обрабатывать отрицательные значения!
         if not isinstance(val, float):
             return None, None
     
-        # ============ Проверка на МР/МРР в расценке (приоритетная проверка) ============
+        # ============ 1. Проверка на МР/МРР в столбцах 1-3 (приоритет!) ============
         for col_idx in [1, 2, 3]:
             if len(row) > col_idx:
                 col_val = self._str(row[col_idx]).upper().strip()
+                # Проверяем точное совпадение или начало строки
                 if col_val in ["МР", "МРР"] or col_val.startswith("МР ") or col_val.startswith("МРР "):
                     return "mr", val
-        # ===============================================================================
+        # ===========================================================================
         
-        # 1. Справочная ЗПМ (в т.ч. ЗПМ)
+        # 2. Справочная ЗПМ (в т.ч. ЗПМ)
         if "втчзпм" in n or "втомчислезпм" in n:
             return "zpm_incl", val
 
-        # 2. ЗП (Заработная плата)
+        # 3. ЗП (Заработная плата)
         if n == "зп" or n == "зпм" or "оплататруда" in n or "заработн" in n:
             return "zp", val
         
-        # 3. ЭМ (Эксплуатация машин) - Гросс
+        # 4. ЭМ (Эксплуатация машин) - Гросс
         if n.startswith("эм") and "эмм" not in n and "зпм" not in n:
             return "em_gross", val 
         if n.startswith("эмм") and "зпм" not in n:
@@ -586,61 +575,49 @@ class BudgetAnalysisPage(tk.Frame):
         if "эксплуатациямашин" in n and "зпм" not in n:
              return "em_gross", val
 
-        # 4. НР / СП
-    
-        # Комбинированные НР/СП от ЗПМ
+        # 5. НР / СП
         if "нриспотзпм" in n:
             return "nr_sp_zpm", val
-        
-        # Стандартные НР
         if "нротзп" in n or n == "нр" or "накладные" in n:
             return "nr", val
-        
-        # Стандартная СП
         if "спотзп" in n or n == "сп" or "сметнаяприбыль" in n:
             return "sp", val
 
-        # 5. МР (Материалы) - Inline Rule (для позиций без явного МР/МРР)
-    
-        # Проверяем, что это строка позиции (не НР/СП/ЗП/ЭМ)
+        # 6. МР (Материалы) - Inline Rule
         is_cost_line = ("zp" not in n) and ("эм" not in n) and ("нр" not in n) and ("сп" not in n)
-    
+        
         if self._has_numeric_position(row[0] if len(row) > 0 else None) and is_cost_line:
-            # Проверяем единицу измерения (Колонка 3) - не трудочасы и не проценты
             unit = row[3] if len(row) > 3 else ""
             if not self._is_labor_or_percent_unit(unit):
                 return "mr", val
 
         return None, None
 
-    # Основная функция анализа Smeta.RU (переписана)
     def _analyze_smeta(self):
+        """Основной анализ сметы Smeta.RU с поддержкой отрицательных значений"""
         if self.smeta_name_col is None or not self.smeta_cost_cols:
             raise RuntimeError("Не заданы индексы колонок для сметы.")
 
-        # Накопители для сырых данных
         gross_stats: Dict[str, float] = {k: 0.0 for k in self.COST_KEYS + self.REFERENCE_KEYS + ["em_gross"]}
         self.breakdown_rows = []
         
         name_col_idx = self.smeta_name_col
 
         for row in self.smeta_data_rows:
-            # 1. Извлечение позиционных данных (нужны для расшифровки)
             pos_num = self._str(row[0]) if len(row) > 0 else ""
             rate_code = self._str(row[1]) if len(row) > 1 else ""
             
-            # 2. Классификация
             cat, val = self._classify_smeta_row(row)
             
-            if not cat or not isinstance(val, float) or val <= 0:
+            # КРИТИЧНО: Убрана проверка val <= 0 для поддержки отрицательных значений!
+            if not cat or not isinstance(val, float):
                 continue
                 
             name = self._str(row[name_col_idx])
             
-            # 3. Накопление
+            # Накопление (отрицательные значения автоматически вычитаются)
             gross_stats[cat] = gross_stats.get(cat, 0.0) + val
             
-            # 4. Сохранение в расшифровке (используем "em_gross" для корректного отображения)
             display_cat = self.DISPLAY_CATEGORIES_MAP.get(cat, cat)
             self.breakdown_rows.append({
                 "pos_num": pos_num,
@@ -651,9 +628,7 @@ class BudgetAnalysisPage(tk.Frame):
                 "amount_base": val 
             })
 
-        # --- Финальный расчет и коррекция ---
-        
-        # 1. ЭМ (нетто) = ЭМ (гросс) - в т.ч. ЗПМ
+        # Финальный расчет
         em_gross_total = gross_stats.pop("em_gross", 0.0)
         zpm_incl_total = gross_stats["zpm_incl"]
         em_net_total = max(0.0, em_gross_total - zpm_incl_total)
@@ -669,23 +644,18 @@ class BudgetAnalysisPage(tk.Frame):
         
         total_cost = self.stats_base.get("total", 0.0)
         
-        # Если "Итого по смете" не найдено, используем сумму деталей
         if total_cost <= 0.0:
             total_cost = sum(final_stats.values())
         
-        # Обновляем self.stats_base
         self.stats_base.update(final_stats)
         self.stats_base["total"] = total_cost
         self.stats_base["zpm_incl"] = zpm_incl_total 
-        
-        # Для generic экспорта (на всякий случай)
         self.stats_base["materials"] = self.stats_base["mr"]
         self.stats_base["wages"] = self.stats_base["zp"] 
         
         self._apply_vat()
         self._render_stats()
         self._fill_breakdown_table()
-
 
     def _parse_xlsx_generic(self, path: Path):
         wb = load_workbook(path, read_only=True, data_only=True)
@@ -746,7 +716,6 @@ class BudgetAnalysisPage(tk.Frame):
                 if s > best_sum:
                     best_sum, best_i = s, idx
             return best_i
-        # Оригинальная логика _analyze_generic использует только эти три ключа
         return {
             "total":     best_index(find_candidates(["итого", "всего", "стоим", "смет", "общая стоимость"])),
             "materials": best_index(find_candidates(["матер", "материа", "мр"])),
@@ -765,33 +734,27 @@ class BudgetAnalysisPage(tk.Frame):
         return s
 
     def _analyze_generic(self):
-        # Оставляем логику generic режима прежней, используя старые ключи
         total     = self._sum_column(self.mapping.get("total"))
         materials = self._sum_column(self.mapping.get("materials"))
         wages     = self._sum_column(self.mapping.get("wages"))
         
-        # В generic режиме мы не можем вычислить EM/NR/SP, поэтому используем старую структуру:
         if total <= 0:
             total = materials + wages
         other = max(0.0, total - materials - wages)
         
-        # Обновляем stats_base старыми ключами для совместимости с GUI
         self.stats_base = {
             "total": total, 
             "materials": materials, 
             "wages": wages, 
             "other": other
         }
-        # Инициализируем новые детализированные поля нулями, чтобы не ломать _render_stats
         self.stats_base.update({k: 0.0 for k in self.COST_KEYS + self.REFERENCE_KEYS})
         
-        # Заполнять breakdown rows в generic режиме сложнее, поэтому оставляем пустым, как и было
         self.breakdown_rows = [] 
         
         self._apply_vat()
         self._render_stats()
         self._fill_breakdown_table()
-        # _render_chart удален
 
     @staticmethod
     def _fmt_money(x: Optional[float]) -> str:
@@ -823,27 +786,24 @@ class BudgetAnalysisPage(tk.Frame):
         self._row_total["val"].config(text=self._fmt_money(total))
         self._row_total["pct"].config(text="100%" if total > 1e-12 else "-")
 
-        # 1. Основные категории (только для Smeta.RU режима)
         if self.mode == "smeta":
             for key, _ in self.DISPLAY_CATEGORIES:
                 val = float(self.stats.get(key) or 0.0)
                 p = self._safe_pct(val)
-                self._metric_rows[key]["label"].grid(row=self._metric_rows[key]["label"].grid_info()["row"], column=0, sticky="w", pady=3)
-                self._metric_rows[key]["val"].grid(row=self._metric_rows[key]["val"].grid_info()["row"], column=1, sticky="e", pady=3)
-                self._metric_rows[key]["pct"].grid(row=self._metric_rows[key]["pct"].grid_info()["row"], column=2, sticky="e", pady=3)
+                self._metric_rows[key]["label"].grid()
+                self._metric_rows[key]["val"].grid()
+                self._metric_rows[key]["pct"].grid()
                 self._metric_rows[key]["val"].config(text=self._fmt_money(val))
                 self._metric_rows[key]["pct"].config(text=self._fmt_pct(p))
             
-            # 2. Справочная ЗПМ
             zpm_incl = float(self.stats.get("zpm_incl") or 0.0)
-            self._row_zpm_ref["label"].grid(row=self._row_zpm_ref["label"].grid_info()["row"], column=0, sticky="w", pady=3)
-            self._row_zpm_ref["val"].grid(row=self._row_zpm_ref["val"].grid_info()["row"], column=1, sticky="e", pady=3)
-            self._row_zpm_ref["pct"].grid(row=self._row_zpm_ref["pct"].grid_info()["row"], column=2, sticky="e", pady=3)
+            self._row_zpm_ref["label"].grid()
+            self._row_zpm_ref["val"].grid()
+            self._row_zpm_ref["pct"].grid()
             self._row_zpm_ref["val"].config(text=self._fmt_money(zpm_incl))
             self._row_zpm_ref["pct"].config(text="-") 
         
         else:
-            # Скрываем детализированные строки и показываем старые (Прочие)
             for key, _ in self.DISPLAY_CATEGORIES:
                  self._metric_rows[key]["label"].grid_remove()
                  self._metric_rows[key]["val"].grid_remove()
@@ -852,14 +812,6 @@ class BudgetAnalysisPage(tk.Frame):
             self._row_zpm_ref["val"].grid_remove()
             self._row_zpm_ref["pct"].grid_remove()
             
-            # Отображение только Материалы, ЗП, Прочие (в режиме generic)
-            
-            # Эта логика была удалена из оригинального кода, но для generic режима ее нужно восстановить, 
-            # чтобы отображать хоть что-то, если Smeta.RU не сработала.
-            # Поскольку у нас нет ключей _row_materials, _row_wages, _row_other в новом UI, 
-            # мы временно используем ЗП/МР/НР для отображения generic-данных. 
-            
-            # HACK: Используем первые 3 строки для generic (ЗП, ЭМ, МР)
             generic_keys = [("mr", "Материалы"), ("zp", "Заработная плата"), ("nr", "Прочие")]
             
             generic_vals = {
@@ -871,7 +823,7 @@ class BudgetAnalysisPage(tk.Frame):
             for i, (key, title) in enumerate(generic_keys):
                 val = generic_vals[key]
                 p = self._safe_pct(val)
-                row_widget = list(self._metric_rows.values())[i] # Берем первые 3 строки
+                row_widget = list(self._metric_rows.values())[i]
                 row_widget["label"].config(text=title)
                 row_widget["label"].grid()
                 row_widget["val"].grid()
@@ -879,8 +831,6 @@ class BudgetAnalysisPage(tk.Frame):
                 row_widget["val"].config(text=self._fmt_money(val))
                 row_widget["pct"].config(text=self._fmt_pct(p))
 
-
-        # 3. НДС
         if self.vat_enabled.get():
             total_base = self.stats_base.get("total", 0.0)
             vat_amount = total_base * 0.2
@@ -910,7 +860,6 @@ class BudgetAnalysisPage(tk.Frame):
         for i in self.tree.get_children():
             self.tree.delete(i)
         
-        # Расшифровка строк доступна только в режиме Smeta.RU
         if not self.breakdown_rows or self.mode != "smeta":
             return
             
@@ -918,7 +867,6 @@ class BudgetAnalysisPage(tk.Frame):
         show_wag = self.var_show_wag.get()
         show_oth = self.var_show_oth.get()
 
-        # Группировка категорий для фильтрации
         WAGE_CATS = [self.DISPLAY_CATEGORIES_MAP["zp"], self.DISPLAY_CATEGORIES_MAP["em"], self.DISPLAY_CATEGORIES_MAP["zpm_incl"]]
         OTHER_CATS = [self.DISPLAY_CATEGORIES_MAP["nr"], self.DISPLAY_CATEGORIES_MAP["sp"], self.DISPLAY_CATEGORIES_MAP["nr_sp_zpm"]]
         MATERIAL_CATS = [self.DISPLAY_CATEGORIES_MAP["mr"]]
@@ -943,7 +891,6 @@ class BudgetAnalysisPage(tk.Frame):
                 self._fmt_money(amt)
             ))
 
-    # _render_chart удален
     def _render_chart(self):
         pass
 
@@ -956,7 +903,6 @@ class BudgetAnalysisPage(tk.Frame):
             self._analyze_generic()
 
     def _export_summary(self):
-        # Логика экспорта адаптирована под новые категории
         try:
             from tkinter import filedialog as fd
         except Exception:
@@ -969,7 +915,6 @@ class BudgetAnalysisPage(tk.Frame):
             return
         out = Path(fname)
         
-        # Подготовка данных для экспорта
         export_metrics = [
             ("Строительные затраты (Итого)", self.stats.get("total", 0.0), "100%"),
         ]
@@ -982,16 +927,15 @@ class BudgetAnalysisPage(tk.Frame):
             ref_zpm = self.stats.get("zpm_incl", 0.0)
             export_metrics.append(("в т.ч. ЗПМ (Справочно)", ref_zpm, "-"))
             
-        else: # Generic mode (используем старые 3 категории)
+        else:
             total = self.stats.get("total", 0.0)
             mats = self.stats.get("materials", 0.0)
             wages = self.stats.get("wages", 0.0)
-            other = self.stats_base.get("other", 0.0) * (1.2 if self.vat_enabled.get() else 1.0) # Применяем VAT к "Прочим"
+            other = self.stats_base.get("other", 0.0) * (1.2 if self.vat_enabled.get() else 1.0)
             
             export_metrics.append(("Материалы", mats, self._fmt_pct(self._safe_pct(mats))))
             export_metrics.append(("Заработная плата", wages, self._fmt_pct(self._safe_pct(wages))))
             export_metrics.append(("Прочие", other, self._fmt_pct(self._safe_pct(other))))
-
 
         if self.vat_enabled.get():
             total_base = self.stats_base.get("total", 0.0)
