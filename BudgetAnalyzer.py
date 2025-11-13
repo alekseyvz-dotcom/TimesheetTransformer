@@ -593,43 +593,18 @@ class BudgetAnalysisPage(tk.Frame):
         if not isinstance(val, float):
             return None, None
 
-        # ============ 1. Проверка на МР/МРР в столбцах 1-3 (приоритет!) ============
+        # ============ 1. Проверка на МР/МРР в столбцах 1-3 (ВЫСШИЙ ПРИОРИТЕТ!) ============
         for col_idx in [1, 2, 3]:
             if len(row) > col_idx:
                 col_val = self._str(row[col_idx]).upper().strip()
                 if col_val in ["МР", "МРР"] or col_val.startswith("МР ") or col_val.startswith("МРР "):
                     return "mr", val
-        # ===========================================================================
+        # ===================================================================================
 
-        # 2. Справочная ЗПМ (в т.ч. ЗПМ)
-        if "втчзпм" in n or "втомчислезпм" in n:
-            return "zpm_incl", val
-
-        # 3. ЗП (Заработная плата)
-        if n == "зп" or n == "зпм" or "оплататруда" in n or "заработн" in n:
-            return "zp", val
-
-        # 4. ЭМ (Эксплуатация машин) - Гросс
-        if n.startswith("эм") and "эмм" not in n and "зпм" not in n:
-            return "em_gross", val
-        if n.startswith("эмм") and "зпм" not in n:
-            return "em_gross", val
-        if "эксплуатациямашин" in n and "зпм" not in n:
-            return "em_gross", val
-
-        # 5. НР / СП
-        if "нриспотзпм" in n:
-            return "nr_sp_zpm", val
-        if "нротзп" in n or n == "нр" or "накладные" in n:
-            return "nr", val
-        if "спотзп" in n or n == "сп" or "сметнаяприбыль" in n:
-            return "sp", val
-
-        # ============ 6. МАТЕРИАЛЫ (УПРОЩЁННАЯ ЛОГИКА) ============
-
+        # Получаем данные о позиции
         pos_cell = row[0] if len(row) > 0 else None
         pos_str = self._str(pos_cell)
-
+    
         # Проверка дробного номера (60.1, 89.1 и т.д.)
         is_subposition = bool(pos_str and re.match(r'^\d+[.,]\d+$', pos_str))
 
@@ -638,27 +613,71 @@ class BudgetAnalysisPage(tk.Frame):
         unit_str = self._str(unit).lower()
 
         # Материальные единицы
-        material_units = ["м3", "м2", "м", "т", "кг", "шт", "компл", "л", "м³", "м²"]
+        material_units = ["м3", "м2", "м", "т", "кг", "шт", "компл", "л", "м³", "м²", "комплект"]
         is_material_unit = any(u in unit_str for u in material_units)
+
+        # ============ 2. ДРОБНЫЕ НОМЕРА (ВЫСОКИЙ ПРИОРИТЕТ!) ============
+        # Если у строки дробный номер позиции + материальная единица измерения,
+        # это ПОЧТИ ВСЕГДА материал, независимо от содержания наименования!
+        if is_subposition and is_material_unit:
+            return "mr", val
+        # ================================================================
+
+        # 3. Справочная ЗПМ (в т.ч. ЗПМ)
+        if "втчзпм" in n or "втомчислезпм" in n:
+            return "zpm_incl", val
+
+        # 4. ЗП (Заработная плата)
+        if n == "зп" or n == "зпм" or "оплататруда" in n or "заработн" in n:
+            return "zp", val
+
+        # 5. ЭМ (Эксплуатация машин) - Гросс
+        if n.startswith("эм") and "эмм" not in n and "зпм" not in n:
+            return "em_gross", val
+        if n.startswith("эмм") and "зпм" not in n:
+            return "em_gross", val
+        if "эксплуатациямашин" in n and "зпм" not in n:
+            return "em_gross", val
+
+        # 6. НР / СП
+        if "нриспотзпм" in n:
+            return "nr_sp_zpm", val
+        if "нротзп" in n or n == "нр" or "накладные" in n:
+            return "nr", val
+        if "спотзп" in n or n == "сп" or "сметнаяприбыль" in n:
+            return "sp", val
+
+        # ============ 7. МАТЕРИАЛЫ (обычные правила) ============
 
         # Не трудовые единицы
         not_labor_unit = not self._is_labor_or_percent_unit(unit)
 
-        # Это строка затрат (не служебная)
-        is_cost_line = ("зп" not in n) and ("эм" not in n) and ("нр" not in n) and ("сп" not in n)
+        # Это строка затрат (не служебная) - УЛУЧШЕННАЯ ПРОВЕРКА
+        # Проверяем только НАЧАЛО нормализованной строки для точности
+        is_cost_line = True
+        if n.startswith("зп") or n.startswith("эм") or n.startswith("нр") or n.startswith("сп"):
+            is_cost_line = False
+        # Также исключаем, если это точное совпадение
+        if n in ["зп", "эм", "нр", "сп", "зпм", "эмм"]:
+            is_cost_line = False
 
-        # ГЛАВНОЕ ПРАВИЛО: Дробный номер + материальная единица = МАТЕРИАЛ!
-        if is_subposition and is_material_unit and is_cost_line:
-            return "mr", val
-
-        # Дополнительно: любой числовой номер + материальная единица
+        # ПРАВИЛО 1: Любой числовой номер + материальная единица
         if self._has_numeric_position(pos_cell) and is_material_unit and is_cost_line:
             return "mr", val
 
-        # Fallback: числовая позиция + не трудовая единица + есть наименование
+        # ПРАВИЛО 2: Числовая позиция + не трудовая единица + есть наименование
         if self._has_numeric_position(pos_cell) and not_labor_unit and is_cost_line and name:
-            exclude_words = ["машинист", "слесар", "монтаж", "установк", "демонтаж"]
-            if not any(word in n for word in exclude_words):
+            # Исключаем явные трудовые/машинные работы
+            exclude_words = ["машинист", "слесар", "монтаж", "установк", "демонтаж", "разборк"]
+            # Проверяем только если слово в НАЧАЛЕ или как ОТДЕЛЬНОЕ слово
+            name_lower = name.lower()
+            is_excluded = False
+            for word in exclude_words:
+                if name_lower.startswith(word) or f" {word}" in name_lower:
+                    is_excluded = True
+                    break
+        
+            if not is_excluded:
                 return "mr", val
 
         # ===========================================================
