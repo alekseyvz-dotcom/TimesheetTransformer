@@ -744,12 +744,13 @@ class BudgetAnalysisPage(tk.Frame):
 
     # Финальный расчет
         em_gross_total = gross_stats.pop("em_gross", 0.0)
-        zpm_incl_total = gross_stats["zpm_incl"]
+        zpm_incl_total = gross_stats.get("zpm_incl", 0.0)
         em_net_total = max(0.0, em_gross_total - zpm_incl_total)
+        zp_total = gross_stats.get("zp", 0.0) + zpm_incl_total
     
         final_stats = {
-            "zp": gross_stats.get("zp", 0.0),
-            "em": em_net_total, 
+            "zp": zp_total,                          # <-- ключевая правка
+            "em": max(0.0, em_net_total),            # на всякий случай не даем уйти в минус
             "mr": gross_stats.get("mr", 0.0),
             "nr": gross_stats.get("nr", 0.0),
             "sp": gross_stats.get("sp", 0.0),
@@ -762,9 +763,9 @@ class BudgetAnalysisPage(tk.Frame):
     
         self.stats_base.update(final_stats)
         self.stats_base["total"] = total_cost
-        self.stats_base["zpm_incl"] = zpm_incl_total 
+        self.stats_base["zpm_incl"] = zpm_incl_total      # оставляем для справочной строки
         self.stats_base["materials"] = self.stats_base["mr"]
-        self.stats_base["wages"] = self.stats_base["zp"] 
+        self.stats_base["wages"] = self.stats_base["zp"]  # теперь ЗП включает ЗПМ 
     
     # ========== ПОКАЗЫВАЕМ ОТЛАДКУ (ВСЕГДА!) ==========
         debug_lines = []
