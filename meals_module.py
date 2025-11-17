@@ -756,18 +756,20 @@ class MealOrderPage(tk.Frame):
         except Exception as e:
             messagebox.showerror("Папка", f"Не удалось открыть папку:\n{e}")
 
-
 # ========================= СТРАНИЦА ПЛАНИРОВАНИЯ ПИТАНИЯ =========================
-
 class MealPlanningPage(tk.Frame):
+    """Страница планирования питания"""
+    
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
         self.spr_path = get_spr_path()
         self.authenticated = False
         self.row_meta: Dict[str, Dict[str, Any]] = {}
+        
         if not self._check_password():
             self._show_access_denied()
             return
+        
         self.authenticated = True
         self._load_spr()
         self._build_ui()
@@ -787,12 +789,15 @@ class MealPlanningPage(tk.Frame):
     def _show_access_denied(self):
         container = tk.Frame(self, bg="#f7f7f7")
         container.place(relx=0.5, rely=0.5, anchor="center")
-        tk.Label(container, text="Доступ запрещён", font=("Segoe UI", 18, "bold"), bg="#f7f7f7", fg="#666").pack(pady=(0, 10))
-        tk.Label(container, text="Для просмотра этого раздела требуется пароль", font=("Segoe UI", 10), bg="#f7f7f7", fg="#888").pack()
+        tk.Label(container, text="Доступ запрещён", font=("Segoe UI", 18, "bold"),
+                 bg="#f7f7f7", fg="#666").pack(pady=(0, 10))
+        tk.Label(container, text="Для просмотра этого раздела требуется пароль",
+                 font=("Segoe UI", 10), bg="#f7f7f7", fg="#888").pack()
 
     def _load_spr(self):
         employees, objects, meal_types = load_spravochnik_remote_or_local(self.spr_path)
-        self.emps = [{'fio': fio, 'tbn': tbn, 'pos': pos, 'dep': dep} for (fio, tbn, pos, dep) in employees]
+        self.emps = [{'fio': fio, 'tbn': tbn, 'pos': pos, 'dep': dep}
+                     for (fio, tbn, pos, dep) in employees]
         self.objects = objects
         self.meal_types = meal_types if meal_types else ["Одноразовое", "Двухразовое", "Трехразовое"]
         self.departments = ["Все"] + sorted({dep for _, _, _, dep in employees if dep})
@@ -800,33 +805,60 @@ class MealPlanningPage(tk.Frame):
     def _build_ui(self):
         top = tk.Frame(self, bg="#f7f7f7")
         top.pack(fill="x", padx=10, pady=8)
+        
+        # Дата
         tk.Label(top, text="Дата:", bg="#f7f7f7").grid(row=0, column=0, sticky="w")
         self.ent_filter_date = ttk.Entry(top, width=12)
         self.ent_filter_date.grid(row=0, column=1, padx=4)
         self.ent_filter_date.insert(0, date.today().strftime("%Y-%m-%d"))
-        tk.Label(top, text="Адрес:", bg="#f7f7f7").grid(row=0, column=2, sticky="w", padx=(12, 0))
-        self.ent_filter_address = ttk.Entry(top, width=40)
-        self.ent_filter_address.grid(row=0, column=3, padx=4)
-        ttk.Button(top, text="🔄 Загрузить реестр", command=self.load_registry).grid(row=0, column=4, padx=12)
-        ttk.Button(top, text="📊 Сформировать Excel", command=self.export_to_excel).grid(row=0, column=5, padx=4)
 
+        # Подразделение
+        tk.Label(top, text="Подразделение:", bg="#f7f7f7").grid(row=0, column=2, sticky="w", padx=(12, 0))
+        self.cmb_filter_dep = ttk.Combobox(top, state="readonly",
+                                           values=self.departments, width=20)
+        self.cmb_filter_dep.grid(row=0, column=3, padx=4)
+        self.cmb_filter_dep.set("Все")  # чтобы было видно слово «Все»
+
+        # Адрес
+        tk.Label(top, text="Адрес:", bg="#f7f7f7").grid(row=0, column=4, sticky="w", padx=(12, 0))
+        self.ent_filter_address = ttk.Entry(top, width=30)
+        self.ent_filter_address.grid(row=0, column=5, padx=4)
+        
+        ttk.Button(top, text="🔄 Загрузить реестр", command=self.load_registry)\
+            .grid(row=0, column=6, padx=12)
+        ttk.Button(top, text="📊 Сформировать Excel", command=self.export_to_excel)\
+            .grid(row=0, column=7, padx=4)
+
+        # Таблица реестра
         table_frame = tk.LabelFrame(self, text="Реестр заказа питания по объектам")
         table_frame.pack(fill="both", expand=True, padx=10, pady=8)
+        
         columns = ("date", "address", "total_count", "details")
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=15)
-        headers = {"date": "Дата", "address": "Адрес объекта", "total_count": "Всего заявок", "details": "Детали (двойной клик)"}
+        
+        headers = {
+            "date": "Дата",
+            "address": "Адрес объекта",
+            "total_count": "Всего заявок",
+            "details": "Детали (двойной клик)"
+        }
         widths = {"date": 100, "address": 400, "total_count": 120, "details": 300}
+        
         for col in columns:
             self.tree.heading(col, text=headers.get(col, col))
             self.tree.column(col, width=widths.get(col, 100))
+        
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        
         self.tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
+        
         table_frame.grid_rowconfigure(0, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
+        
         self.tree.bind("<Double-1>", self.on_row_double_click)
 
     def load_registry(self):
@@ -835,23 +867,32 @@ class MealPlanningPage(tk.Frame):
             if not url:
                 messagebox.showwarning("Загрузка", "Не настроен webhook URL в конфигурации")
                 return
+            
             token = get_meals_webhook_token()
             filter_date = self.ent_filter_date.get().strip()
             filter_address = self.ent_filter_address.get().strip()
+            filter_dep = self.cmb_filter_dep.get().strip()
+
             params = {'action': 'get_registry'}
             if filter_date:
                 params['date'] = filter_date
             if filter_address:
                 params['address'] = filter_address
+            if filter_dep and filter_dep != "Все":
+                params['department'] = filter_dep
             if token:
                 params['token'] = token
+            
             query = urllib.parse.urlencode(params)
             full_url = f"{url}?{query}"
+            
             with urllib.request.urlopen(full_url, timeout=15) as resp:
                 result = json.loads(resp.read().decode('utf-8'))
+            
             if not result.get('ok'):
                 messagebox.showerror("Ошибка", f"Сервер вернул ошибку:\n{result.get('error', 'Unknown')}")
                 return
+            
             registry = result.get('registry', [])
             self._populate_tree(registry)
             messagebox.showinfo("Загрузка", f"Загружено объектов: {len(registry)}")
@@ -862,6 +903,7 @@ class MealPlanningPage(tk.Frame):
         for item in self.tree.get_children():
             self.tree.delete(item)
         self.row_meta = {}
+        
         for entry in registry:
             req_date = entry.get('date', '')
             address = entry.get('address', '')
@@ -896,6 +938,7 @@ class MealPlanningPage(tk.Frame):
         dialog.resizable(True, True)
         dialog.transient(self)
         dialog.grab_set()
+        
         dialog.update_idletasks()
         x = (dialog.winfo_screenwidth() // 2) - (800 // 2)
         y = (dialog.winfo_screenheight() // 2) - (600 // 2)
@@ -903,14 +946,27 @@ class MealPlanningPage(tk.Frame):
 
         header = tk.Frame(dialog, bg="#e3f2fd", relief="solid", borderwidth=1)
         header.pack(fill="x", padx=0, pady=0)
-        tk.Label(header, text=f"📅 Дата: {entry.get('date', '')} | 📍 {entry.get('address', '')}", font=("Arial", 12, "bold"), bg="#e3f2fd", fg="#0066cc", padx=15, pady=12).pack(anchor="w")
+        tk.Label(
+            header,
+            text=f"📅 Дата: {entry.get('date', '')} | 📍 {entry.get('address', '')}",
+            font=("Arial", 12, "bold"),
+            bg="#e3f2fd",
+            fg="#0066cc",
+            padx=15,
+            pady=12
+        ).pack(anchor="w")
 
         info_frame = tk.Frame(dialog, bg="#f7f7f7")
         info_frame.pack(fill="x", padx=15, pady=10)
-        tk.Label(info_frame, text=f"Всего заявок: {entry.get('total_count', 0)} человек", font=("Arial", 11, "bold"), bg="#f7f7f7").pack(anchor="w")
+        tk.Label(info_frame,
+                 text=f"Всего заявок: {entry.get('total_count', 0)} человек",
+                 font=("Arial", 11, "bold"),
+                 bg="#f7f7f7").pack(anchor="w")
 
-        table_frame = tk.LabelFrame(dialog, text="Детализация по подразделениям и типам питания", padx=10, pady=10)
+        table_frame = tk.LabelFrame(dialog, text="Детализация по подразделениям и типам питания",
+                                    padx=10, pady=10)
         table_frame.pack(fill="both", expand=True, padx=15, pady=(0, 10))
+        
         columns = ("department", "meal_type", "count")
         tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=15)
         tree.heading("department", text="Подразделение")
@@ -919,6 +975,7 @@ class MealPlanningPage(tk.Frame):
         tree.column("department", width=300)
         tree.column("meal_type", width=200)
         tree.column("count", width=100)
+        
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(side="left", fill="both", expand=True)
@@ -926,17 +983,20 @@ class MealPlanningPage(tk.Frame):
 
         by_dept = entry.get('by_department', {})
         totals_by_type = {}
+        
         for dept, data in sorted(by_dept.items()):
             by_type = data.get('by_meal_type', {})
             for meal_type, count in sorted(by_type.items()):
                 tree.insert("", "end", values=(dept, meal_type, count))
                 totals_by_type[meal_type] = totals_by_type.get(meal_type, 0) + count
+        
         if totals_by_type:
             tree.insert("", "end", values=("", "", ""), tags=('separator',))
             tree.tag_configure('separator', background='#e0e0e0')
             for meal_type, total in sorted(totals_by_type.items()):
                 tree.insert("", "end", values=("ИТОГО", meal_type, total), tags=('total',))
             tree.tag_configure('total', background='#fff3cd', font=('Arial', 9, 'bold'))
+        
         ttk.Button(dialog, text="Закрыть", command=dialog.destroy, width=20).pack(pady=15)
 
     def export_to_excel(self):
@@ -945,32 +1005,47 @@ class MealPlanningPage(tk.Frame):
             if not url:
                 messagebox.showwarning("Экспорт", "Не настроен webhook URL в конфигурации")
                 return
+            
             token = get_meals_webhook_token()
             filter_date = self.ent_filter_date.get().strip()
             filter_address = self.ent_filter_address.get().strip()
+            filter_dep = self.cmb_filter_dep.get().strip()
+            
             params = {'action': 'get_details'}
             if filter_date:
                 params['date'] = filter_date
             if filter_address:
                 params['address'] = filter_address
+            if filter_dep and filter_dep != "Все":
+                params['department'] = filter_dep
             if token:
                 params['token'] = token
+            
             query = urllib.parse.urlencode(params)
             full_url = f"{url}?{query}"
+            
             with urllib.request.urlopen(full_url, timeout=15) as resp:
                 result = json.loads(resp.read().decode('utf-8'))
+            
             if not result.get('ok'):
                 messagebox.showerror("Ошибка", f"Сервер вернул ошибку:\n{result.get('error', 'Unknown')}")
                 return
+            
             orders = result.get('orders', [])
             if not orders:
                 messagebox.showinfo("Экспорт", "Нет данных для экспорта")
                 return
+            
             wb = Workbook()
             ws = wb.active
             ws.title = "Реестр питания"
-            headers = ["Дата", "Адрес", "ID объекта", "Подразделение", "ФИО", "Табельный №", "Должность", "Тип питания", "Комментарий"]
+            
+            headers = [
+                "Дата", "Адрес", "ID объекта", "Подразделение",
+                "ФИО", "Табельный №", "Должность", "Тип питания", "Комментарий"
+            ]
             ws.append(headers)
+            
             for order in orders:
                 ws.append([
                     order.get('date', ''),
@@ -983,22 +1058,31 @@ class MealPlanningPage(tk.Frame):
                     order.get('meal_type', ''),
                     order.get('comment', '')
                 ])
-            for col, width in enumerate([12, 40, 15, 25, 30, 15, 25, 18, 40], start=1):
+            
+            for col, width in enumerate(
+                [12, 40, 15, 25, 30, 15, 25, 18, 40], start=1
+            ):
                 ws.column_dimensions[get_column_letter(col)].width = width
+            
             ws.freeze_panes = "A2"
+            
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             fname = f"Реестр_питания_{filter_date or 'все'}_{ts}.xlsx"
             fpath = exe_dir() / ORDERS_DIR / fname
             fpath.parent.mkdir(parents=True, exist_ok=True)
+            
             wb.save(fpath)
-            messagebox.showinfo("Экспорт", f"Реестр успешно сформирован:\n{fpath}\n\nЗаписей: {len(orders)}")
+            messagebox.showinfo(
+                "Экспорт",
+                f"Реестр успешно сформирован:\n{fpath}\n\nЗаписей: {len(orders)}"
+            )
+            
             try:
                 os.startfile(fpath)
             except Exception:
                 pass
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось сформировать реестр:\n{e}")
-
 
 # ========================= СТРАНИЦА СОЗДАНИЯ ЗАЯВКИ (продолжение) =========================
 
