@@ -1257,14 +1257,21 @@ class TimesheetPage(tk.Frame):
             row=0, column=38, padx=1, pady=(0, 2), sticky="nsew")
 
     def _on_scroll_frame_configure(self, _=None):
-        # Тело
+        """
+        Вызывается при изменении размеров фрейма с телом таблицы.
+        Обновляет область прокрутки и синхронизирует ширину шапки с телом.
+        """
+        # Область прокрутки для тела
         self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
-        # Шапка: обновим ширину области по ширине тела
         try:
             content_bbox = self.main_canvas.bbox("all")
             if content_bbox:
                 x1, y1, x2, y2 = content_bbox
+                # Область прокрутки по X для шапки
                 self.header_canvas.configure(scrollregion=(0, 0, x2, 0))
+            # ВАЖНО: делаем ширину header_canvas такой же, как у main_canvas,
+            # чтобы grid‑колонки шапки и тела физически совпадали по ширине.
+            self.header_canvas.configure(width=self.main_canvas.winfo_width())
         except Exception:
             pass
 
@@ -2118,31 +2125,64 @@ class TimesheetPage(tk.Frame):
 
 
     def _content_total_width(self, fio_px: Optional[int] = None) -> int:
+        """
+        Полная ширина содержимого таблицы в пикселях, с учетом всех колонок:
+        ФИО, Таб.№, 31 день, Дней, Часы, Пер.день, Пер.ночь, 5/2, Удалить.
+        """
         px = self.COLPX.copy()
         if fio_px is not None:
             px["fio"] = fio_px
-        return px["fio"] + px["tbn"] + 31*px["day"] + px["days"] + px["hours"] + px["btn52"] + px["del"]
+
+        # fio + tbn + 31 * day + days + hours + overtime_day + overtime_night + btn52 + del
+        return (
+            px["fio"] +
+            px["tbn"] +
+            31 * px["day"] +
+            px["days"] +
+            px["hours"] +  # "Часы"
+            px["hours"] +  # "Пер.день"
+            px["hours"] +  # "Пер.ночь"
+            px["btn52"] +
+            px["del"]
+        )
 
     def _auto_fit_columns(self):
+        """
+        Автоматически подгоняет ширину колонки ФИО под текущую ширину окна.
+        После изменения ширины колонок синхронизирует шапку с телом.
+        """
         try:
             viewport = self.main_canvas.winfo_width()
         except Exception:
             viewport = 0
+
+        # Окно еще не отрисовано – повторим позже
         if viewport <= 1:
             self.after(120, self._auto_fit_columns)
             return
+
         total = self._content_total_width()
         new_fio = self.COLPX["fio"]
+
         if total > viewport:
+            # Не помещаемся – уменьшаем ФИО
             deficit = total - viewport
             new_fio = max(self.MIN_FIO_PX, self.COLPX["fio"] - deficit)
         elif total < viewport:
+            # Есть запас – чуть расширим ФИО до MAX_FIO_PX
             surplus = viewport - total
             new_fio = min(self.MAX_FIO_PX, self.COLPX["fio"] + surplus)
+
         if int(new_fio) != int(self.COLPX["fio"]):
             self.COLPX["fio"] = int(new_fio)
             self._configure_table_columns()
             self._on_scroll_frame_configure()
+        else:
+            # Даже если ширина не изменилась, синхронизируем ширину шапки
+            try:
+                self.header_canvas.configure(width=self.main_canvas.winfo_width())
+            except Exception:
+                pass
 
     def _on_window_configure(self, _evt):
         try:
