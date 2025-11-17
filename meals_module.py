@@ -1,4 +1,3 @@
-# meals_module.py
 import os
 import re
 import sys
@@ -32,7 +31,6 @@ CONFIG_FILE = "tabel_config.ini"
 CONFIG_SECTION_PATHS = "Paths"
 CONFIG_SECTION_UI = "UI"
 CONFIG_SECTION_INTEGR = "Integrations"
-CONFIG_SECTION_MEALS = "Meals"
 CONFIG_SECTION_REMOTE = "Remote"
 
 KEY_SPR = "spravochnik_path"
@@ -66,19 +64,14 @@ if Settings:
 
     def set_saved_dep(dep: str):
         return Settings.set_selected_department_in_config(dep)
+else:
+    def exe_dir() -> Path:
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).resolve().parent
+        return Path(__file__).resolve().parent
 
-def exe_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent
-
-def config_path() -> Path:
-    return exe_dir() / CONFIG_FILE
-
-if not Settings:
-    def get_meals_planning_password() -> str:
-        cfg = read_config()
-        return cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_PLANNING_PASSWORD, fallback="2025").strip()
+    def config_path() -> Path:
+        return exe_dir() / CONFIG_FILE
 
     def ensure_config():
         cp = config_path()
@@ -182,7 +175,19 @@ if not Settings:
         cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = dep or "Все"
         write_config(cfg)
 
+    def get_meals_planning_password() -> str:
+        cfg = read_config()
+        return cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_PLANNING_PASSWORD, fallback="2025").strip()
+
 else:
+    def exe_dir() -> Path:
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).resolve().parent
+        return Path(__file__).resolve().parent
+
+    def config_path() -> Path:
+        return exe_dir() / CONFIG_FILE
+
     def get_meals_planning_password() -> str:
         cfg = read_config()
         return cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_PLANNING_PASSWORD, fallback="2025").strip()
@@ -463,9 +468,12 @@ class EmployeeRow:
             "meal_type": (self.cmb_meal_type.get() or "").strip(),
             "comment": (self.ent_comment.get() or "").strip(),
         }
+
 # ========================= СТРАНИЦА СОЗДАНИЯ ЗАЯВКИ =========================
 
 class MealOrderPage(tk.Frame):
+    """Страница для создания заявок на питание"""
+
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
         ensure_config()
@@ -495,7 +503,6 @@ class MealOrderPage(tk.Frame):
         self.addresses = sorted(addresses_set)
 
     def _build_ui(self):
-        """Построение интерфейса"""
         top = tk.Frame(self, bg="#f7f7f7")
         top.pack(fill="x", padx=10, pady=8)
 
@@ -504,6 +511,8 @@ class MealOrderPage(tk.Frame):
         self.ent_date = ttk.Entry(top, width=12)
         self.ent_date.grid(row=0, column=1, sticky="w", padx=(4, 12))
         self.ent_date.insert(0, (date.today() + timedelta(days=1)).strftime("%Y-%m-%d"))
+        self.ent_date.bind("<KeyRelease>", lambda e: self._update_date_hint())
+        self.ent_date.bind("<FocusOut>", lambda e: self._update_date_hint())
 
         # Подразделение
         tk.Label(top, text="Подразделение*:", bg="#f7f7f7").grid(row=0, column=2, sticky="w")
@@ -525,13 +534,12 @@ class MealOrderPage(tk.Frame):
         tk.Label(top, text="Адрес объекта*:", bg="#f7f7f7").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.cmb_address = AutoCompleteCombobox(top, width=56)
         self.cmb_address.set_completion_list(self.addresses)
-        # адрес занимает столбцы 1 и 2
         self.cmb_address.grid(row=1, column=1, columnspan=2, sticky="we", padx=(4, 12), pady=(8, 0))
         self.cmb_address.bind("<<ComboboxSelected>>", lambda e: self._sync_ids_by_address())
         self.cmb_address.bind("<FocusOut>", lambda e: self._sync_ids_by_address())
         self.cmb_address.bind("<Return>", lambda e: self._sync_ids_by_address())
 
-        # ID объекта – СМЕЩЁН в 3–4 колонку, чтобы не налезать на адрес
+        # ID объекта
         tk.Label(top, text="ID объекта:", bg="#f7f7f7").grid(
             row=1, column=3, sticky="e", pady=(8, 0), padx=(0, 4)
         )
@@ -542,7 +550,7 @@ class MealOrderPage(tk.Frame):
         self.lbl_date_hint = tk.Label(top, text="", fg="#555", bg="#f7f7f7")
         self.lbl_date_hint.grid(row=1, column=5, sticky="w", padx=(12, 0))
 
-        # ---------------- Блок сотрудников ----------------
+        # ------- блок сотрудников -------
         emp_wrap = tk.LabelFrame(self, text="Сотрудники")
         emp_wrap.pack(fill="both", expand=True, padx=10, pady=(6, 8))
 
@@ -571,20 +579,17 @@ class MealOrderPage(tk.Frame):
         ttk.Button(btns, text="Добавить сотрудника", command=self.add_employee).pack(side="left", padx=2, pady=4)
         ttk.Button(btns, text="Добавить подразделение", command=self.add_department).pack(side="left", padx=4, pady=4)
 
-        # Нижние кнопки
         bottom = tk.Frame(self)
         bottom.pack(fill="x", padx=10, pady=(0, 10))
         ttk.Button(bottom, text="Сохранить заявку", command=self.save_order).pack(side="left", padx=4)
         ttk.Button(bottom, text="Очистить форму", command=self.clear_form).pack(side="left", padx=4)
         ttk.Button(bottom, text="Открыть папку заявок", command=self.open_orders_dir).pack(side="left", padx=4)
 
-        # Конфигурация колонок, чтобы адрес и бригада тянулись
         for c in range(6):
             top.grid_columnconfigure(c, weight=0)
         top.grid_columnconfigure(1, weight=1)  # адрес
-        top.grid_columnconfigure(5, weight=1)  # наименование бригады
+        top.grid_columnconfigure(5, weight=1)  # бригада
 
-        # Инициализация
         self._update_emp_list()
         self._update_date_hint()
         self.add_employee()
@@ -698,7 +703,7 @@ class MealOrderPage(tk.Frame):
             "created_at": created_at,
             "date": req_date.strftime("%Y-%m-%d"),
             "department": (self.cmb_dep.get() or "").strip(),
-            "team_name": (self.ent_team.get() or "").strip(),   # <‑ новое поле
+            "team_name": (self.ent_team.get() or "").strip(),
             "object": {"id": oid, "address": addr},
             "employees": employees,
         }
@@ -706,7 +711,6 @@ class MealOrderPage(tk.Frame):
     def save_order(self):
         if not self._validate_form():
             return
-        req_date = parse_date_any(self.ent_date.get()) or date.today()
         data = self._build_order_dict()
         ts = datetime.now().strftime("%H%M%S")
         id_part = data["object"]["id"] or safe_filename(data["object"]["address"])
@@ -720,7 +724,7 @@ class MealOrderPage(tk.Frame):
             ws.append(["Создано", data["created_at"]])
             ws.append(["Дата", data["date"]])
             ws.append(["Подразделение", data["department"]])
-            ws.append(["Наименование бригады", data.get("team_name", "")])  # <‑ добавили
+            ws.append(["Наименование бригады", data.get("team_name", "")])
             ws.append(["ID объекта", data["object"]["id"]])
             ws.append(["Адрес", data["object"]["address"]])
             ws.append([])
@@ -742,9 +746,16 @@ class MealOrderPage(tk.Frame):
             with open(csv_path, "a", encoding="utf-8-sig", newline="") as f:
                 w = csv.writer(f, delimiter=";")
                 if new:
-                    w.writerow(["Создано", "Дата", "Подразделение", "ID объекта", "Адрес", "ФИО", "Тип питания", "Комментарий"])
+                    w.writerow([
+                        "Создано", "Дата", "Подразделение", "Наименование бригады",
+                        "ID объекта", "Адрес", "ФИО", "Тип питания", "Комментарий"
+                    ])
                 for emp in data["employees"]:
-                    w.writerow([data["created_at"], data["date"], data["department"], data["object"]["id"], data["object"]["address"], emp["fio"], emp["meal_type"], emp["comment"]])
+                    w.writerow([
+                        data["created_at"], data["date"], data["department"], data.get("team_name", ""),
+                        data["object"]["id"], data["object"]["address"],
+                        emp["fio"], emp["meal_type"], emp["comment"]
+                    ])
         except Exception as e:
             messagebox.showwarning("Сводный CSV", f"XLSX сохранён, но не удалось добавить в CSV:\n{e}")
 
@@ -756,18 +767,33 @@ class MealOrderPage(tk.Frame):
                 if url:
                     ok, info = post_json(url, data, token)
                     if ok:
-                        messagebox.showinfo("Сохранение/Отправка", f"Заявка сохранена и отправлена онлайн.\n\nXLSX:\n{fpath}\nCSV:\n{csv_path}\n\nОтвет сервера:\n{info}")
+                        messagebox.showinfo(
+                            "Сохранение/Отправка",
+                            f"Заявка сохранена и отправлена онлайн.\n\nXLSX:\n{fpath}\nCSV:\n{csv_path}\n\nОтвет сервера:\n{info}"
+                        )
                     else:
-                        messagebox.showwarning("Сохранение/Отправка", f"Локально сохранено, но онлайн-отправка не удалась.\n\nXLSX:\n{fpath}\nCSV:\n{csv_path}\n\n{info}")
+                        messagebox.showwarning(
+                            "Сохранение/Отправка",
+                            f"Локально сохранено, но онлайн-отправка не удалась.\n\nXLSX:\n{fpath}\nCSV:\n{csv_path}\n\n{info}"
+                        )
                     return
                 else:
-                    messagebox.showinfo("Сохранение", f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}\n(Онлайн-отправка не настроена)")
+                    messagebox.showinfo(
+                        "Сохранение",
+                        f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}\n(Онлайн-отправка не настроена)"
+                    )
                     return
             else:
-                messagebox.showinfo("Сохранение", f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}")
+                messagebox.showinfo(
+                    "Сохранение",
+                    f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}"
+                )
                 return
         except Exception as e:
-            messagebox.showwarning("Сохранение/Отправка", f"Локально сохранено, но онлайн-отправка упала с ошибкой:\n{e}\n\nXLSX:\n{fpath}\nCSV:\n{csv_path}")
+            messagebox.showwarning(
+                "Сохранение/Отправка",
+                f"Локально сохранено, но онлайн-отправка упала с ошибкой:\n{e}\n\nXLSX:\n{fpath}\nCSV:\n{csv_path}"
+            )
             return
 
     def clear_form(self):
@@ -776,11 +802,43 @@ class MealOrderPage(tk.Frame):
         self.cmb_address.set("")
         self.cmb_object_id.config(values=[])
         self.cmb_object_id.set("")
+        self.ent_team.delete(0, "end")
         for r in self.emp_rows:
             r.destroy()
         self.emp_rows.clear()
         self.add_employee()
         self._update_date_hint()
+
+    def add_department(self):
+        """Добавить всех сотрудников выбранного подразделения в заявку"""
+        dep = (self.cmb_dep.get() or "Все").strip()
+
+        if dep == "Все":
+            candidates = self.emps[:]  # все сотрудники
+        else:
+            candidates = [e for e in self.emps if (e['dep'] or "") == dep]
+
+        if not candidates:
+            messagebox.showinfo("Питание", f"В подразделении «{dep}» нет сотрудников.")
+            return
+
+        existing_fio = {row.cmb_fio.get().strip() for row in self.emp_rows if row.cmb_fio.get().strip()}
+        added = 0
+
+        for e in candidates:
+            fio = e['fio']
+            if fio in existing_fio:
+                continue
+            row = EmployeeRow(self.rows_holder, len(self.emp_rows) + 1, [], self.meal_types, self.delete_employee)
+            row.grid(len(self.emp_rows))
+            row.apply_zebra(len(self.emp_rows))
+            row.fio_var.set(fio)
+            self.emp_rows.append(row)
+            existing_fio.add(fio)
+            added += 1
+
+        self._update_emp_list()
+        messagebox.showinfo("Питание", f"Добавлено сотрудников: {added}")
 
     def open_orders_dir(self):
         try:
@@ -789,19 +847,20 @@ class MealOrderPage(tk.Frame):
             messagebox.showerror("Папка", f"Не удалось открыть папку:\n{e}")
 
 # ========================= СТРАНИЦА ПЛАНИРОВАНИЯ ПИТАНИЯ =========================
+
 class MealPlanningPage(tk.Frame):
     """Страница планирования питания"""
-    
+
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
         self.spr_path = get_spr_path()
         self.authenticated = False
         self.row_meta: Dict[str, Dict[str, Any]] = {}
-        
+
         if not self._check_password():
             self._show_access_denied()
             return
-        
+
         self.authenticated = True
         self._load_spr()
         self._build_ui()
@@ -837,7 +896,7 @@ class MealPlanningPage(tk.Frame):
     def _build_ui(self):
         top = tk.Frame(self, bg="#f7f7f7")
         top.pack(fill="x", padx=10, pady=8)
-        
+
         # Дата
         tk.Label(top, text="Дата:", bg="#f7f7f7").grid(row=0, column=0, sticky="w")
         self.ent_filter_date = ttk.Entry(top, width=12)
@@ -849,25 +908,24 @@ class MealPlanningPage(tk.Frame):
         self.cmb_filter_dep = ttk.Combobox(top, state="readonly",
                                            values=self.departments, width=20)
         self.cmb_filter_dep.grid(row=0, column=3, padx=4)
-        self.cmb_filter_dep.set("Все")  # чтобы было видно слово «Все»
+        self.cmb_filter_dep.set("Все")
 
         # Адрес
         tk.Label(top, text="Адрес:", bg="#f7f7f7").grid(row=0, column=4, sticky="w", padx=(12, 0))
         self.ent_filter_address = ttk.Entry(top, width=30)
         self.ent_filter_address.grid(row=0, column=5, padx=4)
-        
+
         ttk.Button(top, text="🔄 Загрузить реестр", command=self.load_registry)\
             .grid(row=0, column=6, padx=12)
         ttk.Button(top, text="📊 Сформировать Excel", command=self.export_to_excel)\
             .grid(row=0, column=7, padx=4)
 
-        # Таблица реестра
         table_frame = tk.LabelFrame(self, text="Реестр заказа питания по объектам")
         table_frame.pack(fill="both", expand=True, padx=10, pady=8)
-        
+
         columns = ("date", "address", "total_count", "details")
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=15)
-        
+
         headers = {
             "date": "Дата",
             "address": "Адрес объекта",
@@ -875,28 +933,23 @@ class MealPlanningPage(tk.Frame):
             "details": "Детали (двойной клик)"
         }
         widths = {"date": 100, "address": 400, "total_count": 120, "details": 300}
-        
+
         for col in columns:
             self.tree.heading(col, text=headers.get(col, col))
             self.tree.column(col, width=widths.get(col, 100))
-        
+
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        
+
         self.tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
-        
+
         table_frame.grid_rowconfigure(0, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
-        
-        self.tree.bind("<Double-1>", self.on_row_double_click)
 
-        for c in range(5):
-            top.grid_columnconfigure(c, weight=0)
-        top.grid_columnconfigure(1, weight=1)  # колонка с комбобоксом адреса растягивается
-        top.grid_columnconfigure(2, weight=0)
+        self.tree.bind("<Double-1>", self.on_row_double_click)
 
     def load_registry(self):
         try:
@@ -904,7 +957,7 @@ class MealPlanningPage(tk.Frame):
             if not url:
                 messagebox.showwarning("Загрузка", "Не настроен webhook URL в конфигурации")
                 return
-            
+
             token = get_meals_webhook_token()
             filter_date = self.ent_filter_date.get().strip()
             filter_address = self.ent_filter_address.get().strip()
@@ -919,17 +972,17 @@ class MealPlanningPage(tk.Frame):
                 params['department'] = filter_dep
             if token:
                 params['token'] = token
-            
+
             query = urllib.parse.urlencode(params)
             full_url = f"{url}?{query}"
-            
+
             with urllib.request.urlopen(full_url, timeout=15) as resp:
                 result = json.loads(resp.read().decode('utf-8'))
-            
+
             if not result.get('ok'):
                 messagebox.showerror("Ошибка", f"Сервер вернул ошибку:\n{result.get('error', 'Unknown')}")
                 return
-            
+
             registry = result.get('registry', [])
             self._populate_tree(registry)
             messagebox.showinfo("Загрузка", f"Загружено объектов: {len(registry)}")
@@ -940,7 +993,7 @@ class MealPlanningPage(tk.Frame):
         for item in self.tree.get_children():
             self.tree.delete(item)
         self.row_meta = {}
-        
+
         for entry in registry:
             req_date = entry.get('date', '')
             address = entry.get('address', '')
@@ -975,7 +1028,7 @@ class MealPlanningPage(tk.Frame):
         dialog.resizable(True, True)
         dialog.transient(self)
         dialog.grab_set()
-        
+
         dialog.update_idletasks()
         x = (dialog.winfo_screenwidth() // 2) - (800 // 2)
         y = (dialog.winfo_screenheight() // 2) - (600 // 2)
@@ -1003,7 +1056,7 @@ class MealPlanningPage(tk.Frame):
         table_frame = tk.LabelFrame(dialog, text="Детализация по подразделениям и типам питания",
                                     padx=10, pady=10)
         table_frame.pack(fill="both", expand=True, padx=15, pady=(0, 10))
-        
+
         columns = ("department", "meal_type", "count")
         tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=15)
         tree.heading("department", text="Подразделение")
@@ -1012,7 +1065,7 @@ class MealPlanningPage(tk.Frame):
         tree.column("department", width=300)
         tree.column("meal_type", width=200)
         tree.column("count", width=100)
-        
+
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(side="left", fill="both", expand=True)
@@ -1020,20 +1073,20 @@ class MealPlanningPage(tk.Frame):
 
         by_dept = entry.get('by_department', {})
         totals_by_type = {}
-        
+
         for dept, data in sorted(by_dept.items()):
             by_type = data.get('by_meal_type', {})
             for meal_type, count in sorted(by_type.items()):
                 tree.insert("", "end", values=(dept, meal_type, count))
                 totals_by_type[meal_type] = totals_by_type.get(meal_type, 0) + count
-        
+
         if totals_by_type:
             tree.insert("", "end", values=("", "", ""), tags=('separator',))
             tree.tag_configure('separator', background='#e0e0e0')
             for meal_type, total in sorted(totals_by_type.items()):
                 tree.insert("", "end", values=("ИТОГО", meal_type, total), tags=('total',))
             tree.tag_configure('total', background='#fff3cd', font=('Arial', 9, 'bold'))
-        
+
         ttk.Button(dialog, text="Закрыть", command=dialog.destroy, width=20).pack(pady=15)
 
     def export_to_excel(self):
@@ -1042,12 +1095,12 @@ class MealPlanningPage(tk.Frame):
             if not url:
                 messagebox.showwarning("Экспорт", "Не настроен webhook URL в конфигурации")
                 return
-            
+
             token = get_meals_webhook_token()
             filter_date = self.ent_filter_date.get().strip()
             filter_address = self.ent_filter_address.get().strip()
             filter_dep = self.cmb_filter_dep.get().strip()
-            
+
             params = {'action': 'get_details'}
             if filter_date:
                 params['date'] = filter_date
@@ -1057,28 +1110,27 @@ class MealPlanningPage(tk.Frame):
                 params['department'] = filter_dep
             if token:
                 params['token'] = token
-            
+
             query = urllib.parse.urlencode(params)
             full_url = f"{url}?{query}"
-            
+
             with urllib.request.urlopen(full_url, timeout=15) as resp:
                 result = json.loads(resp.read().decode('utf-8'))
-            
+
             if not result.get('ok'):
                 messagebox.showerror("Ошибка", f"Сервер вернул ошибку:\n{result.get('error', 'Unknown')}")
                 return
-            
+
             orders = result.get('orders', [])
             if not orders:
                 messagebox.showinfo("Экспорт", "Нет данных для экспорта")
                 return
-            
+
             wb = Workbook()
             ws = wb.active
             ws.title = "Реестр питания"
 
-            # ---------- СВОД ПО АДРЕСАМ И ТИПАМ ПИТАНИЯ ----------
-            # Считаем: адрес -> тип питания -> количество строк
+            # свод
             summary: Dict[str, Dict[str, int]] = {}
             for o in orders:
                 addr = o.get('address', '') or ''
@@ -1096,46 +1148,45 @@ class MealPlanningPage(tk.Frame):
                 for mt, cnt in by_type.items():
                     ws.append([addr, mt, cnt])
 
-            ws.append([])  # пустая строка-разделитель
-            # ---------- ДЕТАЛИ ----------
+            ws.append([])
+
+            # детали
             headers = [
-                "Дата", "Адрес", "ID объекта", "Подразделение",
+                "Дата", "Адрес", "ID объекта", "Подразделение", "Наименование бригады",
                 "ФИО", "Табельный №", "Должность", "Тип питания", "Комментарий"
             ]
             ws.append(headers)
-            
+
             for order in orders:
                 ws.append([
                     order.get('date', ''),
                     order.get('address', ''),
                     order.get('object_id', ''),
                     order.get('department', ''),
+                    order.get('team_name', ''),
                     order.get('fio', ''),
                     order.get('tbn', ''),
                     order.get('position', ''),
                     order.get('meal_type', ''),
                     order.get('comment', '')
                 ])
-            
-            # ширина колонок
-            for col, width in enumerate([12, 40, 15, 25, 30, 15, 25, 18, 40], start=1):
+
+            for col, width in enumerate([12, 40, 15, 25, 25, 30, 15, 25, 18, 40], start=1):
                 ws.column_dimensions[get_column_letter(col)].width = width
-            
-            # заморозка после шапки деталей (строка с деталями сейчас 3 + len(summary)+1+1)
-            # но проще просто не замораживать или заморозить первую строку свода:
+
             ws.freeze_panes = "A4"
-            
+
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             fname = f"Реестр_питания_{filter_date or 'все'}_{ts}.xlsx"
             fpath = exe_dir() / ORDERS_DIR / fname
             fpath.parent.mkdir(parents=True, exist_ok=True)
-            
+
             wb.save(fpath)
             messagebox.showinfo(
                 "Экспорт",
                 f"Реестр успешно сформирован:\n{fpath}\n\nЗаписей: {len(orders)}"
             )
-            
+
             try:
                 os.startfile(fpath)
             except Exception:
@@ -1147,28 +1198,26 @@ class MealPlanningPage(tk.Frame):
 
 class MealsApp(tk.Tk):
     """Standalone приложение для модуля питания"""
-    
+
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
         self.geometry("1000x720")
         self.resizable(True, True)
-        
+
         notebook = ttk.Notebook(self)
         notebook.pack(fill="both", expand=True)
-        
+
         order_page = MealOrderPage(notebook)
         notebook.add(order_page, text="Создать заявку")
-        
+
         if get_meals_planning_enabled():
             planning_page = MealPlanningPage(notebook)
             notebook.add(planning_page, text="Планирование питания")
 
-
 # ========================= API ДЛЯ ВСТРАИВАНИЯ =========================
 
 def create_meals_order_page(parent) -> tk.Frame:
-    """Создание страницы заявки на питание для встраивания в главное приложение"""
     ensure_config()
     try:
         return MealOrderPage(parent)
@@ -1178,7 +1227,6 @@ def create_meals_order_page(parent) -> tk.Frame:
         return tk.Frame(parent)
 
 def create_meals_planning_page(parent) -> tk.Frame:
-    """Создание страницы планирования питания для встраивания в главное приложение"""
     ensure_config()
     try:
         return MealPlanningPage(parent)
@@ -1188,31 +1236,28 @@ def create_meals_planning_page(parent) -> tk.Frame:
         return tk.Frame(parent)
 
 def open_meals_module(parent=None):
-    """Открытие модуля питания (standalone или как дочернее окно)"""
     if parent is None:
         app = MealsApp()
         app.mainloop()
         return app
-    
+
     win = tk.Toplevel(parent)
     win.title(APP_TITLE)
     win.geometry("1000x720")
-    
+
     notebook = ttk.Notebook(win)
     notebook.pack(fill="both", expand=True)
-    
+
     order_page = MealOrderPage(notebook)
     notebook.add(order_page, text="Создать заявку")
-    
+
     if get_meals_planning_enabled():
         planning_page = MealPlanningPage(notebook)
         notebook.add(planning_page, text="Планирование питания")
-    
-    return win
 
+    return win
 
 if __name__ == "__main__":
     ensure_config()
     app = MealsApp()
     app.mainloop()
-
