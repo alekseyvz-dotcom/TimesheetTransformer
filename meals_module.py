@@ -18,11 +18,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 from datetime import datetime, date, timedelta
 
-# Мягкий импорт менеджера настроек
-try:
-    import settings_manager as Settings
-except Exception:
-    Settings = None
+# ========================= БАЗОВЫЕ КОНСТАНТЫ =========================
 
 APP_TITLE = "Заказ питания"
 
@@ -49,9 +45,29 @@ KEY_YA_PUBLIC_PATH = "yadisk_public_path"
 SPRAVOCHNIK_FILE = "Справочник.xlsx"
 ORDERS_DIR = "Заявки_питание"
 
+
+def exe_dir() -> Path:
+    """Каталог, откуда запущена программа/скрипт."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def config_path() -> Path:
+    """Путь к ini‑конфигу для fallback‑режима (без settings_manager)."""
+    return exe_dir() / CONFIG_FILE
+
+
 # ========================= РАБОТА С НАСТРОЙКАМИ =========================
 
+# Мягкий импорт менеджера настроек
+try:
+    import settings_manager as Settings
+except Exception:
+    Settings = None
+
 if Settings:
+    # Используем централизованный менеджер настроек
     ensure_config = Settings.ensure_config
     read_config = Settings.read_config
     write_config = Settings.write_config
@@ -64,14 +80,13 @@ if Settings:
 
     def set_saved_dep(dep: str):
         return Settings.set_selected_department_in_config(dep)
-else:
-    def exe_dir() -> Path:
-        if getattr(sys, "frozen", False):
-            return Path(sys.executable).resolve().parent
-        return Path(__file__).resolve().parent
 
-    def config_path() -> Path:
-        return exe_dir() / CONFIG_FILE
+    def get_meals_planning_password() -> str:
+        cfg = read_config()
+        return cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_PLANNING_PASSWORD, fallback="2025").strip()
+
+else:
+    # Локальный (старый) способ хранения настроек в INI
 
     def ensure_config():
         cp = config_path()
@@ -131,6 +146,7 @@ else:
                     cfg.write(f)
             return
 
+        # если ini отсутствует — создаём дефолтный
         cfg = configparser.ConfigParser()
         cfg[CONFIG_SECTION_PATHS] = {KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE)}
         cfg[CONFIG_SECTION_UI] = {KEY_SELECTED_DEP: "Все"}
@@ -139,12 +155,12 @@ else:
             KEY_MEALS_WEBHOOK_URL: "",
             KEY_MEALS_WEBHOOK_TOKEN: "",
             KEY_MEALS_PLANNING_ENABLED: "true",
-            KEY_MEALS_PLANNING_PASSWORD: "2025"
+            KEY_MEALS_PLANNING_PASSWORD: "2025",
         }
         cfg[CONFIG_SECTION_REMOTE] = {
             KEY_REMOTE_USE: "false",
             KEY_YA_PUBLIC_LINK: "",
-            KEY_YA_PUBLIC_PATH: ""
+            KEY_YA_PUBLIC_PATH: "",
         }
         with open(cp, "w", encoding="utf-8") as f:
             cfg.write(f)
@@ -161,7 +177,11 @@ else:
 
     def get_spr_path() -> Path:
         cfg = read_config()
-        raw = cfg.get(CONFIG_SECTION_PATHS, KEY_SPR, fallback=str(exe_dir() / SPRAVOCHNIK_FILE))
+        raw = cfg.get(
+            CONFIG_SECTION_PATHS,
+            KEY_SPR,
+            fallback=str(exe_dir() / SPRAVOCHNIK_FILE),
+        )
         return Path(os.path.expandvars(raw))
 
     def get_saved_dep() -> str:
@@ -179,31 +199,22 @@ else:
         cfg = read_config()
         return cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_PLANNING_PASSWORD, fallback="2025").strip()
 
-else:
-    def exe_dir() -> Path:
-        if getattr(sys, "frozen", False):
-            return Path(sys.executable).resolve().parent
-        return Path(__file__).resolve().parent
-
-    def config_path() -> Path:
-        return exe_dir() / CONFIG_FILE
-
-    def get_meals_planning_password() -> str:
-        cfg = read_config()
-        return cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_PLANNING_PASSWORD, fallback="2025").strip()
 
 def get_meals_planning_enabled() -> bool:
     cfg = read_config()
     v = cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_PLANNING_ENABLED, fallback="true").strip().lower()
     return v in ("1", "true", "yes", "on")
 
+
 def get_meals_mode() -> str:
     cfg = read_config()
     return cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_MODE, fallback="webhook").strip().lower()
 
+
 def get_meals_webhook_url() -> str:
     cfg = read_config()
     return cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_WEBHOOK_URL, fallback="").strip()
+
 
 def get_meals_webhook_token() -> str:
     cfg = read_config()
