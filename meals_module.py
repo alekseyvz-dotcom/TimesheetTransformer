@@ -348,7 +348,7 @@ def post_json(url: str, payload: dict, token: str = '') -> Tuple[bool, str]:
             sep = '&' if ('?' in url) else '?'
             url = f"{url}{sep}token={urllib.parse.quote(token)}"
         req = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/json; charset=utf-8'}, method='POST')
-        with urllib.request.urlopen(req, timeout=12) as resp:
+        with urllib.request.urlopen(req, timeout=25) as resp:
             code = resp.getcode()
             text = resp.read().decode('utf-8', errors='replace')
             return (200 <= code < 300, f"{code}: {text}")
@@ -525,41 +525,43 @@ class MealOrderPage(tk.Frame):
         self.ent_date.bind("<KeyRelease>", lambda e: self._update_date_hint())
         self.ent_date.bind("<FocusOut>", lambda e: self._update_date_hint())
 
-        # Подразделение
+        # Подразделение (шире)
         tk.Label(top, text="Подразделение*:", bg="#f7f7f7").grid(row=0, column=2, sticky="w")
-        self.cmb_dep = ttk.Combobox(top, state="readonly", values=self.deps, width=30)
+        self.cmb_dep = ttk.Combobox(top, state="readonly", values=self.deps, width=60)
         saved_dep = get_saved_dep()
         self.cmb_dep.set(saved_dep if saved_dep in self.deps else self.deps[0])
-        self.cmb_dep.grid(row=0, column=3, sticky="w", padx=(4, 12))
+        self.cmb_dep.grid(row=0, column=3, columnspan=3, sticky="we", padx=(4, 12))
         self.cmb_dep.bind(
             "<<ComboboxSelected>>",
             lambda e: (set_saved_dep(self.cmb_dep.get()), self._update_emp_list())
         )
 
-        # Наименование бригады
-        tk.Label(top, text="Наименование бригады:", bg="#f7f7f7").grid(row=0, column=4, sticky="w", padx=(12, 4))
-        self.ent_team = ttk.Entry(top, width=30)
-        self.ent_team.grid(row=0, column=5, sticky="we", padx=(0, 4))
-
-        # Адрес объекта
+        # Адрес объекта (уже в 2 раза)
         tk.Label(top, text="Адрес объекта*:", bg="#f7f7f7").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self.cmb_address = AutoCompleteCombobox(top, width=56)
+        self.cmb_address = AutoCompleteCombobox(top, width=28)
         self.cmb_address.set_completion_list(self.addresses)
-        self.cmb_address.grid(row=1, column=1, columnspan=2, sticky="we", padx=(4, 12), pady=(8, 0))
+        self.cmb_address.grid(row=1, column=1, sticky="w", padx=(4, 12), pady=(8, 0))
         self.cmb_address.bind("<<ComboboxSelected>>", lambda e: self._sync_ids_by_address())
         self.cmb_address.bind("<FocusOut>", lambda e: self._sync_ids_by_address())
         self.cmb_address.bind("<Return>", lambda e: self._sync_ids_by_address())
 
-        # ID объекта
+        # ID объекта (рядом с адресом)
         tk.Label(top, text="ID объекта:", bg="#f7f7f7").grid(
-            row=1, column=3, sticky="e", pady=(8, 0), padx=(0, 4)
+            row=1, column=2, sticky="e", pady=(8, 0), padx=(0, 4)
         )
         self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=20)
-        self.cmb_object_id.grid(row=1, column=4, sticky="w", padx=(4, 0), pady=(8, 0))
+        self.cmb_object_id.grid(row=1, column=3, sticky="w", padx=(4, 0), pady=(8, 0))
 
-        # Подсказка по дате
+        # Подсказка по дате — справа от ID
         self.lbl_date_hint = tk.Label(top, text="", fg="#555", bg="#f7f7f7")
-        self.lbl_date_hint.grid(row=1, column=5, sticky="w", padx=(12, 0))
+        self.lbl_date_hint.grid(row=1, column=4, columnspan=2, sticky="w", padx=(12, 0), pady=(8, 0))
+
+        # Наименование бригады — на 3‑ей строке, обязательное
+        tk.Label(top, text="Наименование бригады*:", bg="#f7f7f7").grid(
+            row=2, column=0, sticky="w", pady=(8, 0)
+        )
+        self.ent_team = ttk.Entry(top, width=60)
+        self.ent_team.grid(row=2, column=1, columnspan=5, sticky="we", padx=(4, 12), pady=(8, 0))
 
         # ------- блок сотрудников -------
         emp_wrap = tk.LabelFrame(self, text="Сотрудники")
@@ -596,10 +598,12 @@ class MealOrderPage(tk.Frame):
         ttk.Button(bottom, text="Очистить форму", command=self.clear_form).pack(side="left", padx=4)
         ttk.Button(bottom, text="Открыть папку заявок", command=self.open_orders_dir).pack(side="left", padx=4)
 
+        # ширины колонок
         for c in range(6):
             top.grid_columnconfigure(c, weight=0)
-        top.grid_columnconfigure(1, weight=1)  # адрес
-        top.grid_columnconfigure(5, weight=1)  # бригада
+        top.grid_columnconfigure(3, weight=1)  # расширяем колонку с подразделением
+        top.grid_columnconfigure(1, weight=0)  # адрес уже, не тянем
+        top.grid_columnconfigure(5, weight=0)
 
         self._update_emp_list()
         self._update_date_hint()
@@ -625,19 +629,20 @@ class MealOrderPage(tk.Frame):
         try:
             req = parse_date_any(self.ent_date.get())
             today = date.today()
+            tomorrow = today + timedelta(days=1)
             if req is None:
                 self.lbl_date_hint.config(
                     text="Укажите дату в формате YYYY-MM-DD или DD.MM.YYYY",
                     fg="#b00020"
                 )
-            elif req < today:
+            elif req < tomorrow:
                 self.lbl_date_hint.config(
-                    text="Дата не может быть в прошлом",
+                    text=f"Заявка возможна только на {tomorrow.strftime('%Y-%m-%d')} и позже",
                     fg="#b00020"
                 )
             else:
                 self.lbl_date_hint.config(
-                    text="Ок: заявка на выбранную дату",
+                    text="Ок: заявка на допустимую дату",
                     fg="#2e7d32"
                 )
         except Exception:
@@ -683,8 +688,12 @@ class MealOrderPage(tk.Frame):
     def _validate_form(self) -> bool:
         req = parse_date_any(self.ent_date.get())
         today = date.today()
-        if req is None or req < today:
-            messagebox.showwarning("Заявка", "Дата должна быть сегодня или позже.")
+        tomorrow = today + timedelta(days=1)
+        if req is None or req < tomorrow:
+            messagebox.showwarning(
+                "Заявка",
+                f"Дата заявки должна быть не раньше {tomorrow.strftime('%Y-%m-%d')}."
+            )
             return False
         if not (self.cmb_dep.get() or "").strip():
             messagebox.showwarning("Заявка", "Выберите Подразделение.")
@@ -692,6 +701,10 @@ class MealOrderPage(tk.Frame):
         addr = (self.cmb_address.get() or "").strip()
         if not addr:
             messagebox.showwarning("Заявка", "Укажите Адрес объекта.")
+            return False
+        team_name = (self.ent_team.get() or "").strip()
+        if not team_name:
+            messagebox.showwarning("Заявка", "Укажите Наименование бригады.")
             return False
         if not self.emp_rows:
             messagebox.showwarning("Заявка", "Добавьте хотя бы одного сотрудника.")
@@ -780,12 +793,17 @@ class MealOrderPage(tk.Frame):
                     if ok:
                         messagebox.showinfo(
                             "Сохранение/Отправка",
-                            f"Заявка сохранена и отправлена онлайн.\n\nXLSX:\n{fpath}\nCSV:\n{csv_path}\n\nОтвет сервера:\n{info}"
+                            f"Заявка сохранена и отправлена онлайн.\n\n"
+                            f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\nОтвет сервера:\n{info}"
                         )
                     else:
                         messagebox.showwarning(
                             "Сохранение/Отправка",
-                            f"Локально сохранено, но онлайн-отправка не удалась.\n\nXLSX:\n{fpath}\nCSV:\n{csv_path}\n\n{info}"
+                            "Заявка сохранена локально.\n"
+                            "При отправке онлайн возникла ошибка (например, таймаут).\n"
+                            "Записи в реестр могли быть добавлены частично — "
+                            "пожалуйста, проверьте реестр в Google Таблице.\n\n"
+                            f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\nПодробности:\n{info}"
                         )
                     return
                 else:
@@ -803,7 +821,9 @@ class MealOrderPage(tk.Frame):
         except Exception as e:
             messagebox.showwarning(
                 "Сохранение/Отправка",
-                f"Локально сохранено, но онлайн-отправка упала с ошибкой:\n{e}\n\nXLSX:\n{fpath}\nCSV:\n{csv_path}"
+                "Заявка сохранена локально, но при онлайн-отправке возникла ошибка "
+                "(возможно, часть данных уже попала в реестр).\n\n"
+                f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\nОшибка:\n{e}"
             )
             return
 
