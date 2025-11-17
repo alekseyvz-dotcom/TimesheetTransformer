@@ -512,17 +512,22 @@ class MealOrderPage(tk.Frame):
         self.cmb_dep.grid(row=0, column=3, sticky="w", padx=(4, 12))
         self.cmb_dep.bind("<<ComboboxSelected>>", lambda e: (set_saved_dep(self.cmb_dep.get()), self._update_emp_list()))
 
-        tk.Label(top, text="Адрес объекта*:", bg="#f7f7f7").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        tk.Label(top, text="Адрес объекта*:", bg="#f7f7f7").grid(
+            row=1, column=0, sticky="w", pady=(8, 0)
+        )
         self.cmb_address = AutoCompleteCombobox(top, width=56)
         self.cmb_address.set_completion_list(self.addresses)
-        self.cmb_address.grid(row=1, column=1, columnspan=2, sticky="w", padx=(4, 12), pady=(8, 0))
-        self.cmb_address.bind("<<ComboboxSelected>>", lambda e: self._sync_ids_by_address())
-        self.cmb_address.bind("<FocusOut>", lambda e: self._sync_ids_by_address())
-        self.cmb_address.bind("<Return>", lambda e: self._sync_ids_by_address())
+        self.cmb_address.grid(
+            row=1, column=1, columnspan=2, sticky="we", padx=(4, 12), pady=(8, 0)
+        )
 
-        tk.Label(top, text="ID объекта:", bg="#f7f7f7").grid(row=1, column=2, sticky="e", pady=(8, 0), padx=(0, 4))
+        tk.Label(top, text="ID объекта:", bg="#f7f7f7").grid(
+            row=1, column=3, sticky="e", pady=(8, 0), padx=(0, 4)
+        )
         self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=20)
-        self.cmb_object_id.grid(row=1, column=3, sticky="w", padx=(4, 0), pady=(8, 0))
+        self.cmb_object_id.grid(
+            row=1, column=4, sticky="w", padx=(4, 0), pady=(8, 0)
+        )
 
         self.lbl_date_hint = tk.Label(top, text="", fg="#555", bg="#f7f7f7")
         self.lbl_date_hint.grid(row=0, column=4, columnspan=2, sticky="w", padx=(12, 0))
@@ -860,6 +865,11 @@ class MealPlanningPage(tk.Frame):
         table_frame.grid_columnconfigure(0, weight=1)
         
         self.tree.bind("<Double-1>", self.on_row_double_click)
+
+        for c in range(5):
+            top.grid_columnconfigure(c, weight=0)
+        top.grid_columnconfigure(1, weight=1)  # колонка с комбобоксом адреса растягивается
+        top.grid_columnconfigure(2, weight=0)
 
     def load_registry(self):
         try:
