@@ -44,6 +44,10 @@ try:
 except Exception:
     SpecialOrders = None
 try:
+    import meals_module  # Модуль питания
+except Exception:
+    meals_module = None
+try:
     import timesheet_transformer  # должен содержать open_converter(parent)
 except Exception:
     timesheet_transformer = None
@@ -2189,7 +2193,32 @@ class MainApp(tk.Tk):
             command=self.open_orders_folder
         )
         menubar.add_cascade(label="Автотранспорт", menu=m_transport)
-        # ===================================================
+
+                # ========== МЕНЮ ПИТАНИЕ ==========
+        m_meals = tk.Menu(menubar, tearoff=0)
+        if meals_module and hasattr(meals_module, "create_meals_order_page"):
+            m_meals.add_command(
+                label="📝 Создать заявку",
+                command=lambda: self._show_page("meals_order", lambda parent: meals_module.create_meals_order_page(parent))
+            )
+        else:
+            m_meals.add_command(label="📝 Создать заявку", command=self.run_meals_exe)
+        
+        # Планирование питания (если включено)
+        if meals_module and hasattr(meals_module, "create_meals_planning_page"):
+            m_meals.add_command(
+                label="🍽️ Планирование питания",
+                command=lambda: self._show_page("meals_planning", lambda parent: meals_module.create_meals_planning_page(parent))
+            )
+        
+        m_meals.add_separator()
+        m_meals.add_command(
+            label="📂 Открыть папку заявок",
+            command=self.open_meals_folder
+        )
+        menubar.add_cascade(label="Питание", menu=m_meals)
+        # ==================================
+
 
         m_spr = tk.Menu(menubar, tearoff=0)
         m_spr.add_command(label="Открыть справочник", command=self.open_spravochnik)
@@ -2313,6 +2342,27 @@ class MainApp(tk.Tk):
             os.startfile(orders_dir)
         except Exception as e:
             messagebox.showerror("Папка заявок", f"Не удалось открыть папку:\n{e}")
+
+    def open_meals_folder(self):
+        """Открывает папку с заявками на питание"""
+        try:
+            meals_dir = exe_dir() / "Заявки_питание"
+            meals_dir.mkdir(parents=True, exist_ok=True)
+            os.startfile(meals_dir)
+        except Exception as e:
+            messagebox.showerror("Папка заявок", f"Не удалось открыть папку:\n{e}")
+
+    def run_meals_exe(self):
+        """Запуск standalone версии модуля питания"""
+        try:
+            p = exe_dir() / "meals_module.exe"
+            if not p.exists():
+                messagebox.showwarning("Заказ питания", "Не найден meals_module.exe рядом с программой.")
+                return
+            subprocess.Popen([str(p)], shell=False)
+        except Exception as e:
+            messagebox.showerror("Заказ питания", f"Не удалось запустить модуль:\n{e}")
+
     # ======================================================
 
     # --- Аналитика ---
