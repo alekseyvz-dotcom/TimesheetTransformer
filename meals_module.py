@@ -495,43 +495,54 @@ class MealOrderPage(tk.Frame):
         self.addresses = sorted(addresses_set)
 
     def _build_ui(self):
+        """Построение интерфейса"""
         top = tk.Frame(self, bg="#f7f7f7")
         top.pack(fill="x", padx=10, pady=8)
 
+        # Дата
         tk.Label(top, text="Дата заказа*:", bg="#f7f7f7").grid(row=0, column=0, sticky="w")
         self.ent_date = ttk.Entry(top, width=12)
         self.ent_date.grid(row=0, column=1, sticky="w", padx=(4, 12))
         self.ent_date.insert(0, (date.today() + timedelta(days=1)).strftime("%Y-%m-%d"))
-        self.ent_date.bind("<KeyRelease>", lambda e: self._update_date_hint())
-        self.ent_date.bind("<FocusOut>", lambda e: self._update_date_hint())
 
+        # Подразделение
         tk.Label(top, text="Подразделение*:", bg="#f7f7f7").grid(row=0, column=2, sticky="w")
         self.cmb_dep = ttk.Combobox(top, state="readonly", values=self.deps, width=30)
         saved_dep = get_saved_dep()
         self.cmb_dep.set(saved_dep if saved_dep in self.deps else self.deps[0])
         self.cmb_dep.grid(row=0, column=3, sticky="w", padx=(4, 12))
-        self.cmb_dep.bind("<<ComboboxSelected>>", lambda e: (set_saved_dep(self.cmb_dep.get()), self._update_emp_list()))
-
-        tk.Label(top, text="Адрес объекта*:", bg="#f7f7f7").grid(
-            row=1, column=0, sticky="w", pady=(8, 0)
+        self.cmb_dep.bind(
+            "<<ComboboxSelected>>",
+            lambda e: (set_saved_dep(self.cmb_dep.get()), self._update_emp_list())
         )
+
+        # Наименование бригады
+        tk.Label(top, text="Наименование бригады:", bg="#f7f7f7").grid(row=0, column=4, sticky="w", padx=(12, 4))
+        self.ent_team = ttk.Entry(top, width=30)
+        self.ent_team.grid(row=0, column=5, sticky="we", padx=(0, 4))
+
+        # Адрес объекта
+        tk.Label(top, text="Адрес объекта*:", bg="#f7f7f7").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.cmb_address = AutoCompleteCombobox(top, width=56)
         self.cmb_address.set_completion_list(self.addresses)
-        self.cmb_address.grid(
-            row=1, column=1, columnspan=2, sticky="we", padx=(4, 12), pady=(8, 0)
-        )
+        # адрес занимает столбцы 1 и 2
+        self.cmb_address.grid(row=1, column=1, columnspan=2, sticky="we", padx=(4, 12), pady=(8, 0))
+        self.cmb_address.bind("<<ComboboxSelected>>", lambda e: self._sync_ids_by_address())
+        self.cmb_address.bind("<FocusOut>", lambda e: self._sync_ids_by_address())
+        self.cmb_address.bind("<Return>", lambda e: self._sync_ids_by_address())
 
+        # ID объекта – СМЕЩЁН в 3–4 колонку, чтобы не налезать на адрес
         tk.Label(top, text="ID объекта:", bg="#f7f7f7").grid(
             row=1, column=3, sticky="e", pady=(8, 0), padx=(0, 4)
         )
         self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=20)
-        self.cmb_object_id.grid(
-            row=1, column=4, sticky="w", padx=(4, 0), pady=(8, 0)
-        )
+        self.cmb_object_id.grid(row=1, column=4, sticky="w", padx=(4, 0), pady=(8, 0))
 
+        # Подсказка по дате
         self.lbl_date_hint = tk.Label(top, text="", fg="#555", bg="#f7f7f7")
-        self.lbl_date_hint.grid(row=0, column=4, columnspan=2, sticky="w", padx=(12, 0))
+        self.lbl_date_hint.grid(row=1, column=5, sticky="w", padx=(12, 0))
 
+        # ---------------- Блок сотрудников ----------------
         emp_wrap = tk.LabelFrame(self, text="Сотрудники")
         emp_wrap.pack(fill="both", expand=True, padx=10, pady=(6, 8))
 
@@ -558,13 +569,22 @@ class MealOrderPage(tk.Frame):
         btns = tk.Frame(emp_wrap)
         btns.pack(fill="x")
         ttk.Button(btns, text="Добавить сотрудника", command=self.add_employee).pack(side="left", padx=2, pady=4)
+        ttk.Button(btns, text="Добавить подразделение", command=self.add_department).pack(side="left", padx=4, pady=4)
 
+        # Нижние кнопки
         bottom = tk.Frame(self)
         bottom.pack(fill="x", padx=10, pady=(0, 10))
         ttk.Button(bottom, text="Сохранить заявку", command=self.save_order).pack(side="left", padx=4)
         ttk.Button(bottom, text="Очистить форму", command=self.clear_form).pack(side="left", padx=4)
         ttk.Button(bottom, text="Открыть папку заявок", command=self.open_orders_dir).pack(side="left", padx=4)
 
+        # Конфигурация колонок, чтобы адрес и бригада тянулись
+        for c in range(6):
+            top.grid_columnconfigure(c, weight=0)
+        top.grid_columnconfigure(1, weight=1)  # адрес
+        top.grid_columnconfigure(5, weight=1)  # наименование бригады
+
+        # Инициализация
         self._update_emp_list()
         self._update_date_hint()
         self.add_employee()
@@ -588,13 +608,22 @@ class MealOrderPage(tk.Frame):
     def _update_date_hint(self):
         try:
             req = parse_date_any(self.ent_date.get())
-            tomorrow = date.today() + timedelta(days=1)
+            today = date.today()
             if req is None:
-                self.lbl_date_hint.config(text="Укажите дату в формате YYYY-MM-DD или DD.MM.YYYY", fg="#b00020")
-            elif req != tomorrow:
-                self.lbl_date_hint.config(text=f"Заявка возможна только на {tomorrow.strftime('%Y-%m-%d')}", fg="#b00020")
+                self.lbl_date_hint.config(
+                    text="Укажите дату в формате YYYY-MM-DD или DD.MM.YYYY",
+                    fg="#b00020"
+                )
+            elif req < today:
+                self.lbl_date_hint.config(
+                    text="Дата не может быть в прошлом",
+                    fg="#b00020"
+                )
             else:
-                self.lbl_date_hint.config(text="✓ Заявка на завтрашнюю дату", fg="#2e7d32")
+                self.lbl_date_hint.config(
+                    text="Ок: заявка на выбранную дату",
+                    fg="#2e7d32"
+                )
         except Exception:
             self.lbl_date_hint.config(text="", fg="#555")
 
@@ -637,9 +666,9 @@ class MealOrderPage(tk.Frame):
 
     def _validate_form(self) -> bool:
         req = parse_date_any(self.ent_date.get())
-        tomorrow = date.today() + timedelta(days=1)
-        if req is None or req != tomorrow:
-            messagebox.showwarning("Заявка", f"Заявка возможна только на дату: {tomorrow.strftime('%Y-%m-%d')}.")
+        today = date.today()
+        if req is None or req < today:
+            messagebox.showwarning("Заявка", "Дата должна быть сегодня или позже.")
             return False
         if not (self.cmb_dep.get() or "").strip():
             messagebox.showwarning("Заявка", "Выберите Подразделение.")
@@ -669,6 +698,7 @@ class MealOrderPage(tk.Frame):
             "created_at": created_at,
             "date": req_date.strftime("%Y-%m-%d"),
             "department": (self.cmb_dep.get() or "").strip(),
+            "team_name": (self.ent_team.get() or "").strip(),   # <‑ новое поле
             "object": {"id": oid, "address": addr},
             "employees": employees,
         }
@@ -676,11 +706,7 @@ class MealOrderPage(tk.Frame):
     def save_order(self):
         if not self._validate_form():
             return
-        req_date = parse_date_any(self.ent_date.get()) or (date.today() + timedelta(days=1))
-        tomorrow = date.today() + timedelta(days=1)
-        if req_date != tomorrow:
-            messagebox.showwarning("Заявка", f"Заявка возможна только на {tomorrow.strftime('%Y-%m-%d')}.")
-            return
+        req_date = parse_date_any(self.ent_date.get()) or date.today()
         data = self._build_order_dict()
         ts = datetime.now().strftime("%H%M%S")
         id_part = data["object"]["id"] or safe_filename(data["object"]["address"])
@@ -694,6 +720,7 @@ class MealOrderPage(tk.Frame):
             ws.append(["Создано", data["created_at"]])
             ws.append(["Дата", data["date"]])
             ws.append(["Подразделение", data["department"]])
+            ws.append(["Наименование бригады", data.get("team_name", "")])  # <‑ добавили
             ws.append(["ID объекта", data["object"]["id"]])
             ws.append(["Адрес", data["object"]["address"]])
             ws.append([])
@@ -1049,7 +1076,28 @@ class MealPlanningPage(tk.Frame):
             wb = Workbook()
             ws = wb.active
             ws.title = "Реестр питания"
-            
+
+            # ---------- СВОД ПО АДРЕСАМ И ТИПАМ ПИТАНИЯ ----------
+            # Считаем: адрес -> тип питания -> количество строк
+            summary: Dict[str, Dict[str, int]] = {}
+            for o in orders:
+                addr = o.get('address', '') or ''
+                mt = o.get('meal_type', '') or ''
+                if not addr or not mt:
+                    continue
+                summary.setdefault(addr, {})
+                summary[addr][mt] = summary[addr].get(mt, 0) + 1
+
+            ws.append(["Свод по объектам и типам питания"])
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=3)
+            ws.append(["Адрес", "Тип питания", "Общее количество"])
+
+            for addr, by_type in summary.items():
+                for mt, cnt in by_type.items():
+                    ws.append([addr, mt, cnt])
+
+            ws.append([])  # пустая строка-разделитель
+            # ---------- ДЕТАЛИ ----------
             headers = [
                 "Дата", "Адрес", "ID объекта", "Подразделение",
                 "ФИО", "Табельный №", "Должность", "Тип питания", "Комментарий"
@@ -1069,12 +1117,13 @@ class MealPlanningPage(tk.Frame):
                     order.get('comment', '')
                 ])
             
-            for col, width in enumerate(
-                [12, 40, 15, 25, 30, 15, 25, 18, 40], start=1
-            ):
+            # ширина колонок
+            for col, width in enumerate([12, 40, 15, 25, 30, 15, 25, 18, 40], start=1):
                 ws.column_dimensions[get_column_letter(col)].width = width
             
-            ws.freeze_panes = "A2"
+            # заморозка после шапки деталей (строка с деталями сейчас 3 + len(summary)+1+1)
+            # но проще просто не замораживать или заморозить первую строку свода:
+            ws.freeze_panes = "A4"
             
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             fname = f"Реестр_питания_{filter_date or 'все'}_{ts}.xlsx"
@@ -1386,6 +1435,41 @@ class MealOrderPage(tk.Frame):
         self.emp_rows.clear()
         self.add_employee()
         self._update_date_hint()
+
+    def add_department(self):
+        """Добавить всех сотрудников выбранного подразделения в заявку"""
+        dep = (self.cmb_dep.get() or "Все").strip()
+
+        if dep == "Все":
+            candidates = self.emps[:]  # все сотрудники
+        else:
+            candidates = [e for e in self.emps if (e['dep'] or "") == dep]
+
+        if not candidates:
+            messagebox.showinfo("Питание", f"В подразделении «{dep}» нет сотрудников.")
+            return
+
+        # Множество уже добавленных ФИО (чтобы не дублировать)
+        existing_fio = {row.cmb_fio.get().strip() for row in self.emp_rows if row.cmb_fio.get().strip()}
+        added = 0
+
+        for e in candidates:
+            fio = e['fio']
+            if fio in existing_fio:
+                continue
+            # создаем строку
+            row = EmployeeRow(self.rows_holder, len(self.emp_rows) + 1, [], self.meal_types, self.delete_employee)
+            row.grid(len(self.emp_rows))
+            row.apply_zebra(len(self.emp_rows))
+            row.fio_var.set(fio)
+            self.emp_rows.append(row)
+            existing_fio.add(fio)
+            added += 1
+
+        # Обновим списки автодополнения под текущий департамент
+        self._update_emp_list()
+
+        messagebox.showinfo("Питание", f"Добавлено сотрудников: {added}")
 
     def open_orders_dir(self):
         try:
