@@ -414,7 +414,7 @@ class EmployeeRow:
         self.cmb_fio.set_completion_list(emp_names)
         self.cmb_fio.grid(row=0, column=0, padx=2, pady=1, sticky="w")
 
-        # Таб. № (только отображение)
+        # Табельный номер (только отображение)
         self.lbl_tbn = tk.Label(self.frame, text="", width=10, anchor="w", bg=self.ZEBRA_EVEN)
         self.lbl_tbn.grid(row=0, column=1, padx=2, sticky="w")
 
@@ -422,25 +422,19 @@ class EmployeeRow:
         self.lbl_dep = tk.Label(self.frame, text="", width=16, anchor="w", bg=self.ZEBRA_EVEN)
         self.lbl_dep.grid(row=0, column=2, padx=2, sticky="w")
 
-        self.cmb_meal_type = ttk.Combobox(self.frame, values=meal_types, state="readonly", width=18)
+        self.cmb_meal_type = ttk.Combobox(self.frame, values=meal_types, state="readonly", width=16)
         if meal_types:
             self.cmb_meal_type.set(meal_types[0])
         self.cmb_meal_type.grid(row=0, column=3, padx=2)
 
-        self.ent_comment = ttk.Entry(self.frame, width=36)
+        self.ent_comment = ttk.Entry(self.frame, width=32)
         self.ent_comment.grid(row=0, column=4, padx=2, sticky="w")
 
         self.btn_del = ttk.Button(self.frame, text="Удалить", width=9, command=self._delete)
         self.btn_del.grid(row=0, column=5, padx=2)
 
         for i in range(6):
-            self.frame.grid_columnconfigure(i, minsize=[320, 90, 140, 140, 260, 80][i])
-
-    def grid(self, row: int):
-        self.frame.grid(row=row, column=0, sticky="w")
-
-    def destroy(self):
-        self.frame.destroy()
+            self.frame.grid_columnconfigure(i, minsize=[320, 80, 140, 140, 260, 80][i])
 
     def apply_zebra(self, row0: int):
         bg = self.ZEBRA_ODD if (row0 % 2 == 1) else self.ZEBRA_EVEN
@@ -506,6 +500,8 @@ class MealOrderPage(tk.Frame):
     def _load_spr(self):
         employees, objects, meal_types = load_spravochnik_remote_or_local(self.spr_path)
         self.emps = [{'fio': fio, 'tbn': tbn, 'pos': pos, 'dep': dep} for (fio, tbn, pos, dep) in employees]
+        self.emp_by_fio = {fio: {"tbn": tbn, "pos": pos, "dep": dep}
+                           for (fio, tbn, pos, dep) in employees}
         self.objects = objects
         self.meal_types = meal_types if meal_types else ["Одноразовое", "Двухразовое", "Трехразовое"]
         self.deps = ["Все"] + sorted({(r['dep'] or "").strip() for r in self.emps if (r['dep'] or "").strip()})
@@ -533,20 +529,20 @@ class MealOrderPage(tk.Frame):
         self.ent_date.bind("<KeyRelease>", lambda e: self._update_date_hint())
         self.ent_date.bind("<FocusOut>", lambda e: self._update_date_hint())
 
-        # Подразделение — уже
+        # Подразделение 
         tk.Label(top, text="Подразделение*:", bg="#f7f7f7").grid(row=0, column=2, sticky="w")
-        self.cmb_dep = ttk.Combobox(top, state="readonly", values=self.deps, width=30)
+        self.cmb_dep = ttk.Combobox(top, state="readonly", values=self.deps, width=40)
         saved_dep = get_saved_dep()
         self.cmb_dep.set(saved_dep if saved_dep in self.deps else self.deps[0])
-        self.cmb_dep.grid(row=0, column=3, sticky="w", padx=(4, 12))
+        self.cmb_dep.grid(row=0, column=3, columnspan=3, sticky="we", padx=(4, 12))
         self.cmb_dep.bind(
             "<<ComboboxSelected>>",
             lambda e: (set_saved_dep(self.cmb_dep.get()), self._update_emp_list())
         )
 
-        # Адрес объекта — шире, на две колонки
+        # Адрес объекта — средний, на две колонки
         tk.Label(top, text="Адрес объекта*:", bg="#f7f7f7").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self.cmb_address = AutoCompleteCombobox(top, width=50)
+        self.cmb_address = AutoCompleteCombobox(top, width=40)
         self.cmb_address.set_completion_list(self.addresses)
         self.cmb_address.grid(row=1, column=1, columnspan=2, sticky="we", padx=(4, 12), pady=(8, 0))
         self.cmb_address.bind("<<ComboboxSelected>>", lambda e: self._sync_ids_by_address())
@@ -577,11 +573,11 @@ class MealOrderPage(tk.Frame):
 
         hdr = tk.Frame(emp_wrap)
         hdr.pack(fill="x")
-        tk.Label(hdr, text="ФИО сотрудника*", width=42, anchor="w").grid(row=0, column=0, padx=2)
-        tk.Label(hdr, text="Таб. №", width=12, anchor="w").grid(row=0, column=1, padx=2)
+        tk.Label(hdr, text="ФИО сотрудника*", width=40, anchor="w").grid(row=0, column=0, padx=2)
+        tk.Label(hdr, text="Таб. №", width=10, anchor="w").grid(row=0, column=1, padx=2)
         tk.Label(hdr, text="Подразделение", width=18, anchor="w").grid(row=0, column=2, padx=2)
         tk.Label(hdr, text="Тип питания*", width=16, anchor="w").grid(row=0, column=3, padx=2)
-        tk.Label(hdr, text="Комментарий", width=36, anchor="w").grid(row=0, column=4, padx=2)
+        tk.Label(hdr, text="Комментарий", width=32, anchor="w").grid(row=0, column=4, padx=2)
         tk.Label(hdr, text="Действие", width=10, anchor="center").grid(row=0, column=5, padx=2)
 
         wrap = tk.Frame(emp_wrap)
@@ -612,7 +608,7 @@ class MealOrderPage(tk.Frame):
         for c in range(6):
             top.grid_columnconfigure(c, weight=0)
         top.grid_columnconfigure(1, weight=1)  
-        top.grid_columnconfigure(3, weight=0)  
+        top.grid_columnconfigure(3, weight=1)  
         top.grid_columnconfigure(5, weight=0)
 
         self._update_emp_list()
@@ -683,9 +679,11 @@ class MealOrderPage(tk.Frame):
         row = EmployeeRow(self.rows_holder, len(self.emp_rows) + 1, filtered, self.meal_types, self.delete_employee)
         row.grid(len(self.emp_rows))
         row.apply_zebra(len(self.emp_rows))
-        # обновление таб.№ и подразделения при выборе ФИО
+
+        # при выборе ФИО заполняем таб.№ и подразделение
         row.cmb_fio.bind("<<ComboboxSelected>>", lambda e, r=row: self._fill_emp_info(r))
-        row.cmb_fio.bind("<FocusOut>", lambda e, r=row: self._fill_emp_info(r))
+        row.cmb_fio.bind("<FocusOut>",           lambda e, r=row: self._fill_emp_info(r))
+
         self.emp_rows.append(row)
 
     def delete_employee(self, emp_row: EmployeeRow):
@@ -732,13 +730,13 @@ class MealOrderPage(tk.Frame):
 
     def _fill_emp_info(self, row: EmployeeRow):
         fio = row.fio_var.get().strip()
-        emp = self.emp_by_fio.get(fio)
-        if not emp:
+        info = self.emp_by_fio.get(fio)
+        if not info:
             row.lbl_tbn.config(text="")
             row.lbl_dep.config(text="")
             return
-        row.lbl_tbn.config(text=emp.get("tbn", ""))
-        row.lbl_dep.config(text=emp.get("dep", ""))
+        row.lbl_tbn.config(text=info.get("tbn", ""))
+        row.lbl_dep.config(text=info.get("dep", ""))
 
     def _build_order_dict(self) -> Dict:
         created_at = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
