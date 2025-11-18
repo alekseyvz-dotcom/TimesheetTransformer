@@ -493,10 +493,12 @@ class EmployeeRow:
     def get_dict(self) -> Dict:
         return {
             "fio": (self.cmb_fio.get() or "").strip(),
+            # передаём табельный номер и должность прямо из отображаемых полей
+            "tbn": (self.lbl_tbn.cget("text") or "").strip(),
+            "position": (self.lbl_pos.cget("text") or "").strip(),
             "meal_type": (self.cmb_meal_type.get() or "").strip(),
             "comment": (self.ent_comment.get() or "").strip(),
         }
-
 # ========================= СТРАНИЦА СОЗДАНИЯ ЗАЯВКИ =========================
 
 class MealOrderPage(tk.Frame):
