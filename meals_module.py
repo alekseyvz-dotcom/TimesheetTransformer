@@ -436,6 +436,13 @@ class EmployeeRow:
         for i in range(6):
             self.frame.grid_columnconfigure(i, minsize=[320, 80, 140, 140, 260, 80][i])
 
+    def grid(self, row: int):
+        """Размещение строки в контейнере."""
+        self.frame.grid(row=row, column=0, sticky="w")
+
+    def destroy(self):
+        self.frame.destroy()
+
     def apply_zebra(self, row0: int):
         bg = self.ZEBRA_ODD if (row0 % 2 == 1) else self.ZEBRA_EVEN
         for w in (self.cmb_fio, self.cmb_meal_type, self.ent_comment, self.lbl_tbn, self.lbl_dep):
