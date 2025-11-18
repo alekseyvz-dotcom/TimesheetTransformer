@@ -393,7 +393,15 @@ class AutoCompleteCombobox(ttk.Combobox):
             self['values'] = self._all_values
             return
         self['values'] = [x for x in self._all_values if typed.lower() in x.lower()]
-
+# Минимальные ширины колонок блока сотрудников (в пикселях условно)
+EMP_COL_WIDTHS = {
+    0: 320,  # ФИО
+    1: 90,   # Таб.№
+    2: 230,  # Должность
+    3: 140,  # Тип питания
+    4: 260,  # Комментарий
+    5: 80,   # Кнопка "Удалить"
+}
 # ========================= СТРОКА СОТРУДНИКА =========================
 
 class EmployeeRow:
@@ -410,16 +418,16 @@ class EmployeeRow:
         self.frame = tk.Frame(parent)
 
         self.fio_var = tk.StringVar()
-        self.cmb_fio = AutoCompleteCombobox(self.frame, textvariable=self.fio_var, width=38)
+        self.cmb_fio = AutoCompleteCombobox(self.frame, textvariable=self.fio_var, width=40)
         self.cmb_fio.set_completion_list(emp_names)
         self.cmb_fio.grid(row=0, column=0, padx=2, pady=1, sticky="w")
 
         # Табельный номер (только отображение)
-        self.lbl_tbn = tk.Label(self.frame, text="", width=10, anchor="w", bg=self.ZEBRA_EVEN)
+        self.lbl_tbn = tk.Label(self.frame, text="", width=12, anchor="w", bg=self.ZEBRA_EVEN)
         self.lbl_tbn.grid(row=0, column=1, padx=2, sticky="w")
 
         # Должность (только отображение)
-        self.lbl_pos = tk.Label(self.frame, text="", width=24, anchor="w", bg=self.ZEBRA_EVEN)
+        self.lbl_pos = tk.Label(self.frame, text="", width=30, anchor="w", bg=self.ZEBRA_EVEN)
         self.lbl_pos.grid(row=0, column=2, padx=2, sticky="w")
 
         self.cmb_meal_type = ttk.Combobox(self.frame, values=meal_types, state="readonly", width=16)
@@ -427,14 +435,14 @@ class EmployeeRow:
             self.cmb_meal_type.set(meal_types[0])
         self.cmb_meal_type.grid(row=0, column=3, padx=2)
 
-        self.ent_comment = ttk.Entry(self.frame, width=28)
+        self.ent_comment = ttk.Entry(self.frame, width=32)
         self.ent_comment.grid(row=0, column=4, padx=2, sticky="w")
 
         self.btn_del = ttk.Button(self.frame, text="Удалить", width=9, command=self._delete)
         self.btn_del.grid(row=0, column=5, padx=2)
 
         for i in range(6):
-            self.frame.grid_columnconfigure(i, minsize=[320, 80, 200, 120, 220, 80][i])
+            self.frame.grid_columnconfigure(i, minsize=EMP_COL_WIDTHS.get(i, 80))
 
     def grid(self, row: int):
         """Размещение строки в контейнере."""
@@ -580,12 +588,18 @@ class MealOrderPage(tk.Frame):
 
         hdr = tk.Frame(emp_wrap)
         hdr.pack(fill="x")
-        tk.Label(hdr, text="ФИО сотрудника*", width=40, anchor="w").grid(row=0, column=0, padx=2)
-        tk.Label(hdr, text="Таб. №", width=10, anchor="w").grid(row=0, column=1, padx=2)
-        tk.Label(hdr, text="Должность", width=24, anchor="w").grid(row=0, column=2, padx=2)
-        tk.Label(hdr, text="Тип питания*", width=16, anchor="w").grid(row=0, column=3, padx=2)
-        tk.Label(hdr, text="Комментарий", width=28, anchor="w").grid(row=0, column=4, padx=2)
-        tk.Label(hdr, text="Действие", width=10, anchor="center").grid(row=0, column=5, padx=2)
+
+        # те же минимальные ширины колонок, что и в EmployeeRow
+        for i in range(6):
+            hdr.grid_columnconfigure(i, minsize=EMP_COL_WIDTHS.get(i, 80))
+
+        tk.Label(hdr, text="ФИО сотрудника*", anchor="w").grid(row=0, column=0, padx=2)
+        tk.Label(hdr, text="Таб. №",            anchor="w").grid(row=0, column=1, padx=2)
+        tk.Label(hdr, text="Должность",         anchor="w").grid(row=0, column=2, padx=2)
+        tk.Label(hdr, text="Тип питания*",      anchor="w").grid(row=0, column=3, padx=2)
+        tk.Label(hdr, text="Комментарий",       anchor="w").grid(row=0, column=4, padx=2)
+        tk.Label(hdr, text="Действие",          anchor="center").grid(row=0, column=5, padx=2)
+
 
         wrap = tk.Frame(emp_wrap)
         wrap.pack(fill="both", expand=True)
