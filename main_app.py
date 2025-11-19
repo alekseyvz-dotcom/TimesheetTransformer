@@ -29,31 +29,53 @@ try:
 except Exception:
     Image = ImageTk = None
 
+import logging
+
+# Простейшее логирование в файл рядом с программой
+logging.basicConfig(
+    filename="main_app_log.txt",
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    encoding="utf-8",
+)
+logging.debug("=== main_app запущен ===")
+
+
 # Мягкий импорт модулей
 try:
     import BudgetAnalyzer  # должен содержать create_page(parent)
 except Exception:
     BudgetAnalyzer = None
+
 try:
     import assets_logo as _assets_logo
     _LOGO_BASE64 = getattr(_assets_logo, "LOGO_BASE64", None)
 except Exception:
     _LOGO_BASE64 = None
+
 try:
     import SpecialOrders  # должен содержать open_special_orders(parent)
 except Exception:
     SpecialOrders = None
+
+# --- логируем импорт модуля питания ---
+logging.debug("Пробуем импортировать meals_module...")
 try:
     import meals_module  # Модуль питания
+    logging.debug(f"meals_module импортирован: {meals_module}")
+    logging.debug(f"  create_meals_order_page: {hasattr(meals_module, 'create_meals_order_page')}")
+    logging.debug(f"  create_meals_planning_page: {hasattr(meals_module, 'create_meals_planning_page')}")
 except Exception:
+    logging.exception("Ошибка при импорте meals_module")
     meals_module = None
-try:
-    import timesheet_transformer  # должен содержать open_converter(parent)
-except Exception:
-    timesheet_transformer = None
+
+# --- логируем импорт settings_manager ---
+logging.debug("Пробуем импортировать settings_manager...")
 try:
     import settings_manager as Settings
+    logging.debug("settings_manager импортирован успешно")
 except Exception:
+    logging.exception("Ошибка при импорте settings_manager")
     Settings = None
     
 import tkinter as tk
@@ -2235,22 +2257,29 @@ class MainApp(tk.Tk):
         menubar.add_cascade(label="Автотранспорт", menu=m_transport)
 
                 # ========== МЕНЮ ПИТАНИЕ ==========
+        logging.debug(f"Строим меню Питание. meals_module={meals_module}")
+
         m_meals = tk.Menu(menubar, tearoff=0)
         if meals_module and hasattr(meals_module, "create_meals_order_page"):
+            logging.debug("Добавляем пункт 'Создать заявку' из meals_module")
             m_meals.add_command(
                 label="📝 Создать заявку",
                 command=lambda: self._show_page("meals_order", lambda parent: meals_module.create_meals_order_page(parent))
             )
         else:
+            logging.debug("meals_module нет или нет create_meals_order_page — используем run_meals_exe")
             m_meals.add_command(label="📝 Создать заявку", command=self.run_meals_exe)
-        
+
         # Планирование питания (если включено)
         if meals_module and hasattr(meals_module, "create_meals_planning_page"):
+            logging.debug("Добавляем пункт 'Планирование питания' из meals_module")
             m_meals.add_command(
                 label="🍽️ Планирование питания",
                 command=lambda: self._show_page("meals_planning", lambda parent: meals_module.create_meals_planning_page(parent))
             )
-        
+        else:
+            logging.debug("Не добавляем пункт 'Планирование питания' — функции нет или модуль None")
+
         m_meals.add_separator()
         m_meals.add_command(
             label="📂 Открыть папку заявок",
