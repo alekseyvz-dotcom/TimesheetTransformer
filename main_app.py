@@ -2672,26 +2672,45 @@ class MainApp(tk.Tk):
 logging.debug("Модуль main_app импортирован, готов к запуску.")
 
 if __name__ == "__main__":
-    logging.debug("Старт приложения: создаём root и показываем логин.")
+    logging.debug("Старт приложения с авторизацией через simpledialog.")
 
     # Создаём корневое окно
     root = tk.Tk()
-    root.withdraw()  # сразу прячем его, чтобы сначала показать только логин
+    root.withdraw()  # прячем, чтобы сначала показывать только диалоги
 
-    # Показываем модальное окно логина
-    dlg = LoginDialog(master=root)
-    root.wait_window(dlg)
+    # Запрашиваем логин/пароль последовательно
+    from tkinter import simpledialog, messagebox
 
-    user = dlg.user_info
-    if not user:
-        logging.debug("Логин отменён или неуспешен — выходим.")
+    username = simpledialog.askstring("Вход в систему", "Логин:", parent=root)
+    if username is None:
+        logging.debug("Пользователь закрыл диалог логина — выходим.")
         root.destroy()
         sys.exit(0)
 
-    logging.debug(f"Логин успешен, пользователь: {user}")
+    password = simpledialog.askstring("Вход в систему", "Пароль:", show="*", parent=root)
+    if password is None:
+        logging.debug("Пользователь закрыл диалог пароля — выходим.")
+        root.destroy()
+        sys.exit(0)
 
-    # Превращаем существующий root в MainApp
-    # Вариант 1 (проще): уничтожить и создать MainApp
+    try:
+        logging.debug(f"Пробуем авторизовать пользователя {username!r}")
+        user = authenticate_user(username.strip(), password.strip())
+    except Exception as e:
+        logging.exception("Ошибка при обращении к БД в authenticate_user")
+        messagebox.showerror("Вход", f"Ошибка при обращении к БД:\n{e}", parent=root)
+        root.destroy()
+        sys.exit(1)
+
+    if not user:
+        logging.debug("Авторизация неуспешна (неверный логин/пароль).")
+        messagebox.showerror("Вход", "Неверный логин или пароль.", parent=root)
+        root.destroy()
+        sys.exit(1)
+
+    logging.debug(f"Авторизация успешна, пользователь: {user!r}")
+
     root.destroy()
+
     app = MainApp(current_user=user)
     app.mainloop()
