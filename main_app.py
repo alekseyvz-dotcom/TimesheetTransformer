@@ -336,6 +336,7 @@ def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
     Проверяет логин/пароль в таблице app_users.
     При успехе возвращает dict с данными пользователя (без password_hash), иначе None.
     """
+    logging.debug(f"authenticate_user: пытаемся авторизовать {username!r}")
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -403,6 +404,7 @@ class LoginDialog(tk.Toplevel):
 
     def _on_ok(self):
         username = self.ent_login.get().strip()
+        logging.debug(f"LoginDialog: нажали Войти, логин={username!r}")
         password = self.ent_pass.get().strip()
         if not username or not password:
             messagebox.showwarning("Вход", "Укажите логин и пароль.", parent=self)
@@ -2667,20 +2669,29 @@ class MainApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Конвертер", f"Не удалось запустить конвертер:\n{e}")
 
-if __name__ == "__main__":
-    # сначала авторизация
-    root = tk.Tk()
-    root.withdraw()
+logging.debug("Модуль main_app импортирован, готов к запуску.")
 
+if __name__ == "__main__":
+    logging.debug("Старт приложения: создаём root и показываем логин.")
+
+    # Создаём корневое окно
+    root = tk.Tk()
+    root.withdraw()  # сразу прячем его, чтобы сначала показать только логин
+
+    # Показываем модальное окно логина
     dlg = LoginDialog(master=root)
     root.wait_window(dlg)
 
     user = dlg.user_info
     if not user:
+        logging.debug("Логин отменён или неуспешен — выходим.")
         root.destroy()
         sys.exit(0)
 
-    root.destroy()
+    logging.debug(f"Логин успешен, пользователь: {user}")
 
+    # Превращаем существующий root в MainApp
+    # Вариант 1 (проще): уничтожить и создать MainApp
+    root.destroy()
     app = MainApp(current_user=user)
     app.mainloop()
