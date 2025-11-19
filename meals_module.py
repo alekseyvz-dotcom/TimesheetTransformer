@@ -18,6 +18,10 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 from datetime import datetime, date, timedelta
 
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from urllib.parse import urlparse, parse_qs
+
 # ========================= БАЗОВЫЕ КОНСТАНТЫ =========================
 
 APP_TITLE = "Заказ питания"
@@ -219,6 +223,173 @@ def get_meals_webhook_url() -> str:
 def get_meals_webhook_token() -> str:
     cfg = read_config()
     return cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_WEBHOOK_TOKEN, fallback="").strip()
+
+def get_db_connection():
+    """
+    Возвращает подключение к БД на основе настроек из settings_manager.
+    Сейчас нас интересует provider=postgres.
+    DATABASE_URL ожидается вида:
+      postgresql://user:password@host:port/dbname?sslmode=...
+    """
+    if not Settings:
+        raise RuntimeError("settings_manager не доступен, не могу прочитать параметры БД")
+
+    provider = Settings.get_db_provider().strip().lower()
+    if provider != "postgres":
+        raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
+
+    db_url = Settings.get_database_url().strip()
+    if not db_url:
+        raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
+
+    # Парсим URL
+    url = urlparse(db_url)
+    if url.scheme not in ("postgresql", "postgres"):
+        raise RuntimeError(f"Неверная схема в DATABASE_URL: {url.scheme}")
+
+    user = url.username
+    password = url.password
+    host = url.hostname or "localhost"
+    port = url.port or 5432
+    dbname = url.path.lstrip("/")  # /myappdb -> myappdb
+
+    # sslmode можно взять из URL (?sslmode=...) или из настроек
+    q = parse_qs(url.query)
+    sslmode = (q.get("sslmode", [Settings.get_db_sslmode()])[0] or "require")
+
+    conn = psycopg2.connect(
+        host=host,
+        port=port,
+        dbname=dbname,
+        user=user,
+        password=password,
+        sslmode=sslmode,
+    )
+    return conn
+
+def get_or_create_department(cur, name: str):
+    if not name:
+        return None
+    cur.execute("SELECT id FROM departments WHERE name = %s", (name,))
+    row = cur.fetchone()
+    if row:
+        return row[0]
+    cur.execute("INSERT INTO departments (name) VALUES (%s) RETURNING id", (name,))
+    return cur.fetchone()[0]
+
+
+def get_or_create_object(cur, ext_id: str, address: str):
+    ext_id = (ext_id or "").strip()
+    address = (address or "").strip()
+    if ext_id:
+        cur.execute("SELECT id FROM objects WHERE ext_id = %s", (ext_id,))
+        row = cur.fetchone()
+        if row:
+            return row[0]
+        cur.execute(
+            "INSERT INTO objects (ext_id, address) VALUES (%s, %s) RETURNING id",
+            (ext_id, address)
+        )
+        return cur.fetchone()[0]
+    # без ext_id ищем по адресу
+    cur.execute("SELECT id FROM objects WHERE address = %s", (address,))
+    row = cur.fetchone()
+    if row:
+        return row[0]
+    cur.execute(
+        "INSERT INTO objects (ext_id, address) VALUES (NULL, %s) RETURNING id",
+        (address,)
+    )
+    return cur.fetchone()[0]
+
+
+def get_or_create_meal_type(cur, name: str):
+    name = (name or "").strip()
+    if not name:
+        return None
+    cur.execute("SELECT id FROM meal_types WHERE name = %s", (name,))
+    row = cur.fetchone()
+    if row:
+        return row[0]
+    cur.execute("INSERT INTO meal_types (name) VALUES (%s) RETURNING id", (name,))
+    return cur.fetchone()[0]
+
+
+def find_employee(cur, fio: str, tbn: str = None):
+    fio = (fio or "").strip()
+    tbn = (tbn or "").strip()
+    if tbn:
+        cur.execute("SELECT id FROM employees WHERE tbn = %s", (tbn,))
+        row = cur.fetchone()
+        if row:
+            return row[0]
+    if fio:
+        cur.execute("SELECT id FROM employees WHERE fio = %s", (fio,))
+        row = cur.fetchone()
+        if row:
+            return row[0]
+    return None
+
+
+def save_order_to_db(data: dict) -> int:
+    """
+    Сохраняет заявку (dict из _build_order_dict) в PostgreSQL.
+    Возвращает id из таблицы meal_orders.
+    """
+    conn = get_db_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # Подразделение
+                dept_name = (data.get("department") or "").strip()
+                dept_id = get_or_create_department(cur, dept_name) if dept_name else None
+
+                # Объект
+                obj = data.get("object") or {}
+                obj_ext_id = (obj.get("id") or "").strip()
+                obj_address = (obj.get("address") or "").strip()
+                object_id = get_or_create_object(cur, obj_ext_id, obj_address)
+
+                # Шапка заказа
+                created_at = datetime.strptime(data["created_at"], "%Y-%m-%dT%H:%M:%S")
+                order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
+                team_name = (data.get("team_name") or "").strip()
+
+                cur.execute(
+                    """
+                    INSERT INTO meal_orders (created_at, date, department_id, team_name, object_id)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (created_at, order_date, dept_id, team_name, object_id)
+                )
+                order_id = cur.fetchone()[0]
+
+                # Строки заказа
+                for emp in data.get("employees", []):
+                    fio = (emp.get("fio") or "").strip()
+                    tbn = (emp.get("tbn") or "").strip()
+                    position = (emp.get("position") or "").strip()
+                    meal_type_name = (emp.get("meal_type") or "").strip()
+                    comment = (emp.get("comment") or "").strip()
+
+                    meal_type_id = get_or_create_meal_type(cur, meal_type_name)
+                    employee_id = find_employee(cur, fio, tbn)
+
+                    cur.execute(
+                        """
+                        INSERT INTO meal_order_items
+                        (order_id, employee_id, fio_text, tbn_text, position_text,
+                         meal_type_id, meal_type_text, comment)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (order_id, employee_id, fio, tbn, position,
+                         meal_type_id, meal_type_name, comment)
+                    )
+
+        return order_id
+    finally:
+        conn.close()
 
 # ========================= ЗАГРУЗКА СПРАВОЧНИКА =========================
 
@@ -781,6 +952,15 @@ class MealOrderPage(tk.Frame):
         if not self._validate_form():
             return
         data = self._build_order_dict()
+        # Сохранение в БД PostgreSQL
+        try:
+            order_db_id = save_order_to_db(data)
+        except Exception as e:
+            messagebox.showerror(
+                "Сохранение в БД",
+                f"Не удалось сохранить заявку в базу данных:\n{e}"
+            )
+            return
         ts = datetime.now().strftime("%H%M%S")
         id_part = data["object"]["id"] or safe_filename(data["object"]["address"])
         fname = f"Заявка_питание_{data['date']}_{ts}_{id_part or 'NOID'}.xlsx"
