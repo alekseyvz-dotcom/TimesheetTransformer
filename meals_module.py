@@ -205,9 +205,18 @@ else:
 
 
 def get_meals_planning_enabled() -> bool:
+    if Settings and hasattr(Settings, "get_meals_planning_enabled_from_config"):
+        return Settings.get_meals_planning_enabled_from_config()
     cfg = read_config()
     v = cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_PLANNING_ENABLED, fallback="true").strip().lower()
     return v in ("1", "true", "yes", "on")
+
+def get_meals_planning_password() -> str:
+    if Settings and hasattr(Settings, "get_meals_planning_password_from_config"):
+        return Settings.get_meals_planning_password_from_config().strip()
+    cfg = read_config()
+    return cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_PLANNING_PASSWORD, fallback="2025").strip()
+
 
 
 def get_meals_mode() -> str:
