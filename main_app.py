@@ -369,38 +369,81 @@ class LoginDialog(tk.Toplevel):
         self.resizable(False, False)
         self.user_info: Optional[Dict[str, Any]] = None
 
-        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        # Небольшой отступ и рамка
+        container = tk.Frame(self, bg="#f7f7f7", padx=20, pady=20)
+        container.pack(fill="both", expand=True)
 
-        frm = tk.Frame(self, padx=15, pady=15)
-        frm.pack(fill="both", expand=True)
+        tk.Label(
+            container,
+            text="Управление строительством",
+            font=("Segoe UI", 12, "bold"),
+            bg="#f7f7f7",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
-        tk.Label(frm, text="Логин:").grid(row=0, column=0, sticky="e", pady=5)
-        tk.Label(frm, text="Пароль:").grid(row=1, column=0, sticky="e", pady=5)
+        tk.Label(
+            container,
+            text="Введите логин и пароль",
+            font=("Segoe UI", 9),
+            fg="#555",
+            bg="#f7f7f7",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
-        self.ent_login = ttk.Entry(frm, width=25)
-        self.ent_login.grid(row=0, column=1, pady=5)
-        self.ent_pass = ttk.Entry(frm, width=25, show="*")
-        self.ent_pass.grid(row=1, column=1, pady=5)
+        tk.Label(container, text="Логин:", bg="#f7f7f7")\
+            .grid(row=2, column=0, sticky="e", pady=5, padx=(0, 6))
+        tk.Label(container, text="Пароль:", bg="#f7f7f7")\
+            .grid(row=3, column=0, sticky="e", pady=5, padx=(0, 6))
 
-        btns = tk.Frame(frm)
-        btns.grid(row=2, column=0, columnspan=2, pady=(10, 0))
+        self.ent_login = ttk.Entry(container, width=26)
+        self.ent_login.grid(row=2, column=1, pady=5, sticky="w")
+        self.ent_pass = ttk.Entry(container, width=26, show="*")
+        self.ent_pass.grid(row=3, column=1, pady=5, sticky="w")
+
+        # Панель кнопок
+        btns = tk.Frame(container, bg="#f7f7f7")
+        btns.grid(row=4, column=0, columnspan=2, pady=(15, 0), sticky="e")
 
         ttk.Button(btns, text="Войти", command=self._on_ok, width=10)\
             .pack(side="left", padx=5)
         ttk.Button(btns, text="Отмена", command=self._on_cancel, width=10)\
             .pack(side="left", padx=5)
 
+        # Обработчики клавиш
         self.bind("<Return>", lambda e: self._on_ok())
         self.bind("<Escape>", lambda e: self._on_cancel())
 
+        # Центрирование
         self.update_idletasks()
         x = (self.winfo_screenwidth() // 2) - (self.winfo_reqwidth() // 2)
         y = (self.winfo_screenheight() // 2) - (self.winfo_reqheight() // 2)
         self.geometry(f"+{x}+{y}")
 
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         self.transient(master)
         self.grab_set()
         self.ent_login.focus_set()
+
+    def _on_ok(self):
+        username = self.ent_login.get().strip()
+        password = self.ent_pass.get().strip()
+        if not username or not password:
+            messagebox.showwarning("Вход", "Укажите логин и пароль.", parent=self)
+            return
+        try:
+            logging.debug(f"LoginDialog: пытаемся авторизовать {username!r}")
+            user = authenticate_user(username, password)
+        except Exception as e:
+            logging.exception("Ошибка при обращении к БД в authenticate_user")
+            messagebox.showerror("Вход", f"Ошибка при обращении к БД:\n{e}", parent=self)
+            return
+        if not user:
+            messagebox.showerror("Вход", "Неверный логин или пароль.", parent=self)
+            return
+        self.user_info = user
+        self.destroy()
+
+    def _on_cancel(self):
+        self.user_info = None
+        self.destroy()
 
     def _on_ok(self):
         username = self.ent_login.get().strip()
@@ -2672,41 +2715,21 @@ class MainApp(tk.Tk):
 logging.debug("Модуль main_app импортирован, готов к запуску.")
 
 if __name__ == "__main__":
-    logging.debug("Старт приложения с авторизацией через simpledialog.")
+    logging.debug("Старт приложения с авторизацией через LoginDialog.")
 
-    # Создаём корневое окно
+    # Создаём корневое окно и прячем его
     root = tk.Tk()
-    root.withdraw()  # прячем, чтобы сначала показывать только диалоги
+    root.withdraw()
 
-    # Запрашиваем логин/пароль последовательно
-    from tkinter import simpledialog, messagebox
+    # Показываем модальное окно логина
+    dlg = LoginDialog(master=root)
+    root.wait_window(dlg)
 
-    username = simpledialog.askstring("Вход в систему", "Логин:", parent=root)
-    if username is None:
-        logging.debug("Пользователь закрыл диалог логина — выходим.")
-        root.destroy()
-        sys.exit(0)
-
-    password = simpledialog.askstring("Вход в систему", "Пароль:", show="*", parent=root)
-    if password is None:
-        logging.debug("Пользователь закрыл диалог пароля — выходим.")
-        root.destroy()
-        sys.exit(0)
-
-    try:
-        logging.debug(f"Пробуем авторизовать пользователя {username!r}")
-        user = authenticate_user(username.strip(), password.strip())
-    except Exception as e:
-        logging.exception("Ошибка при обращении к БД в authenticate_user")
-        messagebox.showerror("Вход", f"Ошибка при обращении к БД:\n{e}", parent=root)
-        root.destroy()
-        sys.exit(1)
-
+    user = dlg.user_info
     if not user:
-        logging.debug("Авторизация неуспешна (неверный логин/пароль).")
-        messagebox.showerror("Вход", "Неверный логин или пароль.", parent=root)
+        logging.debug("Логин отменён или неуспешен — выходим.")
         root.destroy()
-        sys.exit(1)
+        sys.exit(0)
 
     logging.debug(f"Авторизация успешна, пользователь: {user!r}")
 
