@@ -389,31 +389,45 @@ def save_order_to_db(data: dict) -> int:
                     meal_type_id = get_or_create_meal_type(cur, meal_type_name)
                     employee_id = find_employee(cur, fio, tbn)
 
-                    params = [order_date, object_id]
-                    where_emp = []
-
+                    # Удаляем существующие строки для этого же объекта/даты/сотрудника
                     if tbn:
-                        where_emp.append("(moi.tbn_text = %s OR e.tbn = %s)")
-                        params.extend([tbn, tbn])
+                        cur.execute(
+                            """
+                            DELETE FROM meal_order_items moi
+                            WHERE EXISTS (
+                                SELECT 1
+                                FROM meal_orders mo
+                                LEFT JOIN employees e ON e.id = moi.employee_id
+                                WHERE moi.order_id = mo.id
+                                  AND mo.date = %s
+                                  AND mo.object_id = %s
+                                  AND (
+                                       moi.tbn_text = %s
+                                       OR (e.tbn IS NOT NULL AND e.tbn = %s)
+                                  )
+                            )
+                            """,
+                            (order_date, object_id, tbn, tbn)
+                        )
                     else:
-                        where_emp.append("(moi.fio_text = %s OR e.fio = %s)")
-                        params.extend([fio, fio])
-
-                    where_emp_sql = " AND ".join(where_emp)
-
-                    # Удаляем только строки по этому же объекту и дате
-                    cur.execute(
-                        f"""
-                        DELETE FROM meal_order_items moi
-                        USING meal_orders mo
-                        LEFT JOIN employees e ON e.id = moi.employee_id
-                        WHERE moi.order_id = mo.id
-                          AND mo.date = %s
-                          AND mo.object_id = %s
-                          AND {where_emp_sql}
-                        """,
-                        params
-                    )
+                        cur.execute(
+                            """
+                            DELETE FROM meal_order_items moi
+                            WHERE EXISTS (
+                                SELECT 1
+                                FROM meal_orders mo
+                                LEFT JOIN employees e ON e.id = moi.employee_id
+                                WHERE moi.order_id = mo.id
+                                  AND mo.date = %s
+                                  AND mo.object_id = %s
+                                  AND (
+                                       moi.fio_text = %s
+                                       OR (e.fio IS NOT NULL AND e.fio = %s)
+                                  )
+                            )
+                            """,
+                            (order_date, object_id, fio, fio)
+                        )
 
                     # Вставляем актуальную строку
                     cur.execute(
