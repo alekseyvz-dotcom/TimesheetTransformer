@@ -57,6 +57,10 @@ try:
     import SpecialOrders  # должен содержать open_special_orders(parent)
 except Exception:
     SpecialOrders = None
+try:
+    import timesheet_transformer  # должен содержать open_converter(parent)
+except Exception:
+    timesheet_transformer = None
 
 # --- логируем импорт модуля питания ---
 logging.debug("Пробуем импортировать meals_module...")
