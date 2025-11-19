@@ -1144,7 +1144,12 @@ class MealOrderPage(tk.Frame):
     def save_order(self):
         if not self._validate_form():
             return
+
         data = self._build_order_dict()
+
+        # Кол-во строк в заявке
+        total_items = len(data.get("employees", []))
+
         # Сохранение в БД PostgreSQL
         try:
             order_db_id = save_order_to_db(data)
@@ -1154,11 +1159,14 @@ class MealOrderPage(tk.Frame):
                 f"Не удалось сохранить заявку в базу данных:\n{e}"
             )
             return
+
+        # Имя и путь XLSX
         ts = datetime.now().strftime("%H%M%S")
         id_part = data["object"]["id"] or safe_filename(data["object"]["address"])
         fname = f"Заявка_питание_{data['date']}_{ts}_{id_part or 'NOID'}.xlsx"
         fpath = self.orders_dir / fname
 
+        # Сохранение XLSX
         try:
             wb = Workbook()
             ws = wb.active
@@ -1182,68 +1190,13 @@ class MealOrderPage(tk.Frame):
             messagebox.showerror("Сохранение", f"Не удалось сохранить XLSX:\n{e}")
             return
 
-        csv_path = self.orders_dir / f"Свод_питание_{data['date'][:7].replace('-', '_')}.csv"
-        try:
-            new = not csv_path.exists()
-            with open(csv_path, "a", encoding="utf-8-sig", newline="") as f:
-                w = csv.writer(f, delimiter=";")
-                if new:
-                    w.writerow([
-                        "Создано", "Дата", "Подразделение", "Наименование бригады",
-                        "ID объекта", "Адрес", "ФИО", "Тип питания", "Комментарий"
-                    ])
-                for emp in data["employees"]:
-                    w.writerow([
-                        data["created_at"], data["date"], data["department"], data.get("team_name", ""),
-                        data["object"]["id"], data["object"]["address"],
-                        emp["fio"], emp["meal_type"], emp["comment"]
-                    ])
-        except Exception as e:
-            messagebox.showwarning("Сводный CSV", f"XLSX сохранён, но не удалось добавить в CSV:\n{e}")
-
-        try:
-            mode = get_meals_mode()
-            if mode == 'webhook':
-                url = get_meals_webhook_url()
-                token = get_meals_webhook_token()
-                if url:
-                    ok, info = post_json(url, data, token)
-                    if ok:
-                        messagebox.showinfo(
-                            "Сохранение/Отправка",
-                            f"Заявка сохранена и отправлена онлайн.\n\n"
-                            f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\nОтвет сервера:\n{info}"
-                        )
-                    else:
-                        messagebox.showwarning(
-                            "Сохранение/Отправка",
-                            "Заявка сохранена локально.\n"
-                            "При отправке онлайн возникла ошибка (например, таймаут).\n"
-                            "Записи в реестр могли быть добавлены частично — "
-                            "пожалуйста, проверьте реестр в Google Таблице.\n\n"
-                            f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\nПодробности:\n{info}"
-                        )
-                    return
-                else:
-                    messagebox.showinfo(
-                        "Сохранение",
-                        f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}\n(Онлайн-отправка не настроена)"
-                    )
-                    return
-            else:
-                messagebox.showinfo(
-                    "Сохранение",
-                    f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}"
-                )
-                return
-        except Exception as e:
-            messagebox.showwarning(
-                "Сохранение/Отправка",
-                "Заявка сохранена локально, но при онлайн-отправке возникла ошибка "
-                "(возможно, часть данных уже попала в реестр).\n\n"
-                f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\nОшибка:\n{e}"
-            )
-            return
+        # Итоговое сообщение без CSV и без webhook
+        messagebox.showinfo(
+            "Сохранение",
+            f"Заявка сохранена в реестр.\n"
+            f"Файл:\n{fpath}\n\n"
+            f"Сохранено записей: {total_items}"
+        )
 
     def clear_form(self):
         self.ent_date.delete(0, "end")
