@@ -12,6 +12,11 @@ import urllib.error
 import urllib.parse
 import traceback
 import threading
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from urllib.parse import urlparse, parse_qs
+import hashlib
+import os as _os
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
@@ -245,6 +250,177 @@ def embedded_logo_image(parent, max_w=360, max_h=160):
         return ph
     except Exception:
         return None
+
+# ================= БД: подключение и пользователи =================
+
+def get_db_connection():
+    """
+    Подключение к БД по настройкам из settings_manager.
+    Ожидается provider=postgres и корректный DATABASE_URL.
+    """
+    if not Settings:
+        raise RuntimeError("settings_manager не доступен, не могу прочитать параметры БД")
+
+    provider = Settings.get_db_provider().strip().lower()
+    if provider != "postgres":
+        raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
+
+    db_url = Settings.get_database_url().strip()
+    if not db_url:
+        raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
+
+    url = urlparse(db_url)
+    if url.scheme not in ("postgresql", "postgres"):
+        raise RuntimeError(f"Неверная схема в DATABASE_URL: {url.scheme}")
+
+    user = url.username
+    password = url.password
+    host = url.hostname or "localhost"
+    port = url.port or 5432
+    dbname = url.path.lstrip("/")
+
+    q = parse_qs(url.query)
+    sslmode = (q.get("sslmode", [Settings.get_db_sslmode()])[0] or "require")
+
+    conn = psycopg2.connect(
+        host=host,
+        port=port,
+        dbname=dbname,
+        user=user,
+        password=password,
+        sslmode=sslmode,
+    )
+    return conn
+
+
+def _hash_password(password: str, salt: Optional[bytes] = None) -> str:
+    """
+    pbkdf2_sha256$iterations$salt_hex$hash_hex
+    """
+    if salt is None:
+        salt = _os.urandom(16)
+    iterations = 260000
+    dk = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        iterations,
+    )
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${dk.hex()}"
+
+
+def _verify_password(password: str, stored_hash: str) -> bool:
+    """
+    Проверка пароля. Для старых записей, где пароль хранится в открытую, сравнивает как текст.
+    """
+    try:
+        if stored_hash.startswith("pbkdf2_sha256$"):
+            _, it_str, salt_hex, hash_hex = stored_hash.split("$", 3)
+            iterations = int(it_str)
+            salt = bytes.fromhex(salt_hex)
+            dk = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                salt,
+                iterations,
+            )
+            return dk.hex() == hash_hex
+        else:
+            # fallback: пароль записан в явном виде
+            return password == stored_hash
+    except Exception:
+        return False
+
+def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
+    """
+    Проверяет логин/пароль в таблице app_users.
+    При успехе возвращает dict с данными пользователя (без password_hash), иначе None.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, username, password_hash, is_active, full_name
+                FROM app_users
+                WHERE username = %s
+                """,
+                (username,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            if not row["is_active"]:
+                return None
+            if not _verify_password(password, row["password_hash"]):
+                return None
+            row.pop("password_hash", None)
+            return dict(row)
+    finally:
+        conn.close()
+
+# ================= ОКНО ЛОГИНА =================
+
+class LoginDialog(tk.Toplevel):
+    def __init__(self, master=None):
+        super().__init__(master)
+        self.title("Вход в систему")
+        self.resizable(False, False)
+        self.user_info: Optional[Dict[str, Any]] = None
+
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+        frm = tk.Frame(self, padx=15, pady=15)
+        frm.pack(fill="both", expand=True)
+
+        tk.Label(frm, text="Логин:").grid(row=0, column=0, sticky="e", pady=5)
+        tk.Label(frm, text="Пароль:").grid(row=1, column=0, sticky="e", pady=5)
+
+        self.ent_login = ttk.Entry(frm, width=25)
+        self.ent_login.grid(row=0, column=1, pady=5)
+        self.ent_pass = ttk.Entry(frm, width=25, show="*")
+        self.ent_pass.grid(row=1, column=1, pady=5)
+
+        btns = tk.Frame(frm)
+        btns.grid(row=2, column=0, columnspan=2, pady=(10, 0))
+
+        ttk.Button(btns, text="Войти", command=self._on_ok, width=10)\
+            .pack(side="left", padx=5)
+        ttk.Button(btns, text="Отмена", command=self._on_cancel, width=10)\
+            .pack(side="left", padx=5)
+
+        self.bind("<Return>", lambda e: self._on_ok())
+        self.bind("<Escape>", lambda e: self._on_cancel())
+
+        self.update_idletasks()
+        x = (self.winfo_screenwidth() // 2) - (self.winfo_reqwidth() // 2)
+        y = (self.winfo_screenheight() // 2) - (self.winfo_reqheight() // 2)
+        self.geometry(f"+{x}+{y}")
+
+        self.transient(master)
+        self.grab_set()
+        self.ent_login.focus_set()
+
+    def _on_ok(self):
+        username = self.ent_login.get().strip()
+        password = self.ent_pass.get().strip()
+        if not username or not password:
+            messagebox.showwarning("Вход", "Укажите логин и пароль.", parent=self)
+            return
+        try:
+            user = authenticate_user(username, password)
+        except Exception as e:
+            messagebox.showerror("Вход", f"Ошибка при обращении к БД:\n{e}", parent=self)
+            return
+        if not user:
+            messagebox.showerror("Вход", "Неверный логин или пароль.", parent=self)
+            return
+        self.user_info = user
+        self.destroy()
+
+    def _on_cancel(self):
+        self.user_info = None
+        self.destroy()
 
 # ------------- УДАЛЕННЫЙ СПРАВОЧНИК И ДРУГИЕ УТИЛИТЫ -------------
 
@@ -2218,9 +2394,15 @@ class TimesheetPage(tk.Frame):
         self._fit_job = self.after(150, self._auto_fit_columns)
 
 class MainApp(tk.Tk):
-    def __init__(self):
+    def __init__(self, current_user: Optional[Dict[str, Any]] = None):
         super().__init__()
-        self.title(APP_NAME)
+        self.current_user = current_user or {}
+        user_caption = ""
+        if current_user:
+            fn = current_user.get("full_name") or ""
+            un = current_user.get("username") or ""
+            user_caption = f" — {fn or un}"
+        self.title(APP_NAME + user_caption)
         self.geometry("1024x720")
         self.minsize(980, 640)
         self.resizable(True, True)
@@ -2486,5 +2668,19 @@ class MainApp(tk.Tk):
             messagebox.showerror("Конвертер", f"Не удалось запустить конвертер:\n{e}")
 
 if __name__ == "__main__":
-    app = MainApp()
+    # сначала авторизация
+    root = tk.Tk()
+    root.withdraw()
+
+    dlg = LoginDialog(master=root)
+    root.wait_window(dlg)
+
+    user = dlg.user_info
+    if not user:
+        root.destroy()
+        sys.exit(0)
+
+    root.destroy()
+
+    app = MainApp(current_user=user)
     app.mainloop()
