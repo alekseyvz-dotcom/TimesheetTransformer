@@ -400,6 +400,190 @@ def save_order_to_db(data: dict) -> int:
     finally:
         conn.close()
 
+def get_registry_from_db(
+    filter_date: Optional[str] = None,
+    filter_address: Optional[str] = None,
+    filter_department: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Возвращает агрегированный реестр по объектам:
+      [
+        {
+          "date": "2025-01-01",
+          "address": "ул. Пушкина, д. 1",
+          "total_count": 15,
+          "by_department": {
+             "Монтаж": {
+                "total": 10,
+                "by_meal_type": {"Одноразовое": 4, "Двухразовое": 6}
+             },
+             "Сварка": {
+                "total": 5,
+                "by_meal_type": {"Одноразовое": 5}
+             }
+          }
+        },
+        ...
+      ]
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            params = []
+            where_clauses = []
+
+            if filter_date:
+                where_clauses.append("mo.date = %s")
+                params.append(filter_date)
+
+            if filter_address:
+                where_clauses.append("o.address ILIKE %s")
+                params.append(f"%{filter_address}%")
+
+            if filter_department and filter_department.lower() != "все":
+                where_clauses.append("d.name = %s")
+                params.append(filter_department)
+
+            where_sql = ""
+            if where_clauses:
+                where_sql = "WHERE " + " AND ".join(where_clauses)
+
+            # Базовая выборка всех строк по объекту/дате/подразделению/типу питания
+            sql = f"""
+                SELECT
+                    mo.date::text        AS date,
+                    COALESCE(o.address, '') AS address,
+                    COALESCE(d.name, '')    AS department,
+                    COALESCE(mti.name, moi.meal_type_text, '') AS meal_type
+                FROM meal_orders mo
+                JOIN meal_order_items moi ON moi.order_id = mo.id
+                LEFT JOIN objects o       ON o.id = mo.object_id
+                LEFT JOIN departments d   ON d.id = mo.department_id
+                LEFT JOIN meal_types mti  ON mti.id = moi.meal_type_id
+                {where_sql}
+            """
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+        # Агрегируем в Python
+        result: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+        for date_str, address, dept, meal_type in rows:
+            key = (date_str, address)
+            rec = result.setdefault(key, {
+                "date": date_str,
+                "address": address,
+                "total_count": 0,
+                "by_department": {}
+            })
+            rec["total_count"] += 1
+
+            dept_name = dept or "Без подразделения"
+            by_dep = rec["by_department"].setdefault(dept_name, {
+                "total": 0,
+                "by_meal_type": {}
+            })
+            by_dep["total"] += 1
+
+            mt = meal_type or "Не указан"
+            by_mt = by_dep["by_meal_type"]
+            by_mt[mt] = by_mt.get(mt, 0) + 1
+
+        # Преобразуем словарь в список словарей
+        return list(result.values())
+
+    finally:
+        conn.close()
+
+def get_details_from_db(
+    filter_date: Optional[str] = None,
+    filter_address: Optional[str] = None,
+    filter_department: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Возвращает детализированный список заявок:
+      [
+        {
+          "date": "2025-01-01",
+          "address": "...",
+          "object_id": "OBJ-001",
+          "department": "Монтаж",
+          "team_name": "Бригада 1",
+          "fio": "Иванов И. И.",
+          "tbn": "ST00-00001",
+          "position": "Слесарь",
+          "meal_type": "Одноразовое",
+          "comment": "..."
+        },
+        ...
+      ]
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            params = []
+            where_clauses = []
+
+            if filter_date:
+                where_clauses.append("mo.date = %s")
+                params.append(filter_date)
+
+            if filter_address:
+                where_clauses.append("o.address ILIKE %s")
+                params.append(f"%{filter_address}%")
+
+            if filter_department and filter_department.lower() != "все":
+                where_clauses.append("d.name = %s")
+                params.append(filter_department)
+
+            where_sql = ""
+            if where_clauses:
+                where_sql = "WHERE " + " AND ".join(where_clauses)
+
+            sql = f"""
+                SELECT
+                    mo.date::text        AS date,
+                    COALESCE(o.address, '')       AS address,
+                    COALESCE(o.ext_id, '')        AS object_ext_id,
+                    COALESCE(d.name, '')          AS department,
+                    COALESCE(mo.team_name, '')    AS team_name,
+                    COALESCE(moi.fio_text, '')    AS fio,
+                    COALESCE(moi.tbn_text, '')    AS tbn,
+                    COALESCE(moi.position_text, '') AS position,
+                    COALESCE(mti.name, moi.meal_type_text, '') AS meal_type,
+                    COALESCE(moi.comment, '')     AS comment
+                FROM meal_orders mo
+                JOIN meal_order_items moi ON moi.order_id = mo.id
+                LEFT JOIN objects o       ON o.id = mo.object_id
+                LEFT JOIN departments d   ON d.id = mo.department_id
+                LEFT JOIN meal_types mti  ON mti.id = moi.meal_type_id
+                {where_sql}
+                ORDER BY mo.date, o.address, d.name, mo.team_name, moi.fio_text
+            """
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+        result = []
+        for r in rows:
+            (date_str, address, object_ext_id, department, team_name,
+             fio, tbn, position, meal_type, comment) = r
+            result.append({
+                "date": date_str,
+                "address": address,
+                "object_id": object_ext_id,
+                "department": department,
+                "team_name": team_name,
+                "fio": fio,
+                "tbn": tbn,
+                "position": position,
+                "meal_type": meal_type,
+                "comment": comment,
+            })
+        return result
+
+    finally:
+        conn.close()
+
 # ========================= ЗАГРУЗКА СПРАВОЧНИКА =========================
 
 def ensure_spravochnik(path: Path):
@@ -1220,41 +1404,21 @@ class MealPlanningPage(tk.Frame):
 
     def load_registry(self):
         try:
-            url = get_meals_webhook_url()
-            if not url:
-                messagebox.showwarning("Загрузка", "Не настроен webhook URL в конфигурации")
-                return
-
-            token = get_meals_webhook_token()
+            # Читаем фильтры из полей формы
             filter_date = self.ent_filter_date.get().strip()
             filter_address = self.ent_filter_address.get().strip()
             filter_dep = self.cmb_filter_dep.get().strip()
 
-            params = {'action': 'get_registry'}
-            if filter_date:
-                params['date'] = filter_date
-            if filter_address:
-                params['address'] = filter_address
-            if filter_dep and filter_dep != "Все":
-                params['department'] = filter_dep
-            if token:
-                params['token'] = token
+            registry = get_registry_from_db(
+                filter_date=filter_date or None,
+                filter_address=filter_address or None,
+                filter_department=filter_dep or None,
+            )
 
-            query = urllib.parse.urlencode(params)
-            full_url = f"{url}?{query}"
-
-            with urllib.request.urlopen(full_url, timeout=15) as resp:
-                result = json.loads(resp.read().decode('utf-8'))
-
-            if not result.get('ok'):
-                messagebox.showerror("Ошибка", f"Сервер вернул ошибку:\n{result.get('error', 'Unknown')}")
-                return
-
-            registry = result.get('registry', [])
             self._populate_tree(registry)
             messagebox.showinfo("Загрузка", f"Загружено объектов: {len(registry)}")
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось загрузить реестр:\n{e}")
+            messagebox.showerror("Ошибка", f"Не удалось загрузить реестр из БД:\n{e}")
 
     def _populate_tree(self, registry: List[Dict]):
         for item in self.tree.get_children():
@@ -1358,46 +1522,25 @@ class MealPlanningPage(tk.Frame):
 
     def export_to_excel(self):
         try:
-            url = get_meals_webhook_url()
-            if not url:
-                messagebox.showwarning("Экспорт", "Не настроен webhook URL в конфигурации")
-                return
-
-            token = get_meals_webhook_token()
             filter_date = self.ent_filter_date.get().strip()
             filter_address = self.ent_filter_address.get().strip()
             filter_dep = self.cmb_filter_dep.get().strip()
 
-            params = {'action': 'get_details'}
-            if filter_date:
-                params['date'] = filter_date
-            if filter_address:
-                params['address'] = filter_address
-            if filter_dep and filter_dep != "Все":
-                params['department'] = filter_dep
-            if token:
-                params['token'] = token
+            orders = get_details_from_db(
+                filter_date=filter_date or None,
+                filter_address=filter_address or None,
+                filter_department=filter_dep or None,
+            )
 
-            query = urllib.parse.urlencode(params)
-            full_url = f"{url}?{query}"
-
-            with urllib.request.urlopen(full_url, timeout=15) as resp:
-                result = json.loads(resp.read().decode('utf-8'))
-
-            if not result.get('ok'):
-                messagebox.showerror("Ошибка", f"Сервер вернул ошибку:\n{result.get('error', 'Unknown')}")
-                return
-
-            orders = result.get('orders', [])
             if not orders:
-                messagebox.showinfo("Экспорт", "Нет данных для экспорта")
+                messagebox.showinfo("Экспорт", "Нет данных для экспорта (по заданным фильтрам)")
                 return
 
             wb = Workbook()
             ws = wb.active
             ws.title = "Реестр питания"
 
-            # свод
+            # 1) Свод по объектам и типам питания
             summary: Dict[str, Dict[str, int]] = {}
             for o in orders:
                 addr = o.get('address', '') or ''
@@ -1417,7 +1560,7 @@ class MealPlanningPage(tk.Frame):
 
             ws.append([])
 
-            # детали
+            # 2) Детальный список
             headers = [
                 "Дата", "Адрес", "ID объекта", "Подразделение", "Наименование бригады",
                 "ФИО", "Табельный №", "Должность", "Тип питания", "Комментарий"
@@ -1458,8 +1601,9 @@ class MealPlanningPage(tk.Frame):
                 os.startfile(fpath)
             except Exception:
                 pass
+
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось сформировать реестр:\n{e}")
+            messagebox.showerror("Ошибка", f"Не удалось сформировать реестр из БД:\n{e}")
 
 # ========================= STANDALONE ОКНО =========================
 
