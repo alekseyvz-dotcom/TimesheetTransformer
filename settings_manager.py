@@ -39,6 +39,8 @@ KEY_DRIVER_DEPARTMENTS = "driver_departments"
 KEY_MEALS_MODE = "meals_mode"
 KEY_MEALS_WEBHOOK_URL = "meals_webhook_url"
 KEY_MEALS_WEBHOOK_TOKEN = "meals_webhook_token"
+KEY_MEALS_PLANNING_ENABLED = "meals_planning_enabled"
+KEY_MEALS_PLANNING_PASSWORD = "meals_planning_password"
 
 SETTINGS_FILENAME = "settings.dat"  # зашифрованное хранилище
 
@@ -228,6 +230,8 @@ _defaults: Dict[str, Dict[str, Any]] = {
         KEY_MEALS_MODE: "webhook",
         KEY_MEALS_WEBHOOK_URL: "",
         KEY_MEALS_WEBHOOK_TOKEN: "",
+        KEY_MEALS_PLANNING_ENABLED: "true",   
+        KEY_MEALS_PLANNING_PASSWORD: "2025",  
     },
     "Remote": {
         KEY_REMOTE_USE: "false",
@@ -424,6 +428,36 @@ def get_meals_webhook_token_from_config() -> str:
         )
     )
 
+def get_meals_planning_enabled_from_config() -> bool:
+    ensure_config()
+    v = str(
+        _store["Integrations"].get(
+            KEY_MEALS_PLANNING_ENABLED,
+            _defaults["Integrations"][KEY_MEALS_PLANNING_ENABLED],
+        )
+    ).strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def set_meals_planning_enabled_in_config(enabled: bool):
+    ensure_config()
+    _store["Integrations"][KEY_MEALS_PLANNING_ENABLED] = "true" if enabled else "false"
+    save_settings()
+
+
+def get_meals_planning_password_from_config() -> str:
+    ensure_config()
+    return str(
+        _store["Integrations"].get(
+            KEY_MEALS_PLANNING_PASSWORD,
+            _defaults["Integrations"][KEY_MEALS_PLANNING_PASSWORD],
+        )
+    )
+
+def set_meals_planning_password_in_config(pwd: str):
+    ensure_config()
+    _store["Integrations"][KEY_MEALS_PLANNING_PASSWORD] = pwd or ""
+    save_settings()
 
 def set_meals_webhook_token_in_config(tok: str):
     ensure_config()
@@ -591,6 +625,23 @@ def open_settings_window(parent: tk.Tk):
         KEY_MEALS_WEBHOOK_TOKEN,
         row=8,
         width=32,
+    )
+        # Планирование питания
+    _mk_check(
+        tab_int,
+        "Питание — планирование включено:",
+        "Integrations",
+        KEY_MEALS_PLANNING_ENABLED,
+        row=9,
+    )
+    _mk_entry(
+        tab_int,
+        "Питание — пароль для планирования:",
+        "Integrations",
+        KEY_MEALS_PLANNING_PASSWORD,
+        row=10,
+        width=20,
+        show="*",
     )
 
     # Удаленный справочник (Remote)
