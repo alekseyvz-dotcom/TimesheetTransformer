@@ -343,6 +343,9 @@ def find_employee(cur, fio: str, tbn: str = None):
 def save_order_to_db(data: dict) -> int:
     """
     Сохраняет заявку (dict из _build_order_dict) в PostgreSQL.
+    Логика обновления:
+      - если для того же объекта/даты/бригады уже есть записи по тем же сотрудникам,
+        их строки удаляются и записываются заново (перезапись).
     Возвращает id из таблицы meal_orders.
     """
     conn = get_db_connection()
@@ -364,6 +367,7 @@ def save_order_to_db(data: dict) -> int:
                 order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
                 team_name = (data.get("team_name") or "").strip()
 
+                # Создаём (новый) заголовок заказа
                 cur.execute(
                     """
                     INSERT INTO meal_orders (created_at, date, department_id, team_name, object_id)
@@ -374,7 +378,8 @@ def save_order_to_db(data: dict) -> int:
                 )
                 order_id = cur.fetchone()[0]
 
-                # Строки заказа
+                # --- Перезапись строк по совпадающим сотрудникам ---
+
                 for emp in data.get("employees", []):
                     fio = (emp.get("fio") or "").strip()
                     tbn = (emp.get("tbn") or "").strip()
@@ -385,6 +390,44 @@ def save_order_to_db(data: dict) -> int:
                     meal_type_id = get_or_create_meal_type(cur, meal_type_name)
                     employee_id = find_employee(cur, fio, tbn)
 
+                    # Если у сотрудника есть табельный номер — ищем по нему,
+                    # иначе по ФИО (на тот же объект/дату)
+                    if tbn:
+                        # Удаляем старые строки по этому табельному на том же объекте и дате
+                        cur.execute(
+                            """
+                            DELETE FROM meal_order_items moi
+                            USING meal_orders mo
+                            LEFT JOIN employees e ON e.id = moi.employee_id
+                            WHERE moi.order_id = mo.id
+                              AND mo.date = %s
+                              AND mo.object_id = %s
+                              AND (
+                                   moi.tbn_text = %s
+                                   OR (e.tbn IS NOT NULL AND e.tbn = %s)
+                              )
+                            """,
+                            (order_date, object_id, tbn, tbn)
+                        )
+                    else:
+                        # Без табельного — перезаписываем по ФИО
+                        cur.execute(
+                            """
+                            DELETE FROM meal_order_items moi
+                            USING meal_orders mo
+                            LEFT JOIN employees e ON e.id = moi.employee_id
+                            WHERE moi.order_id = mo.id
+                              AND mo.date = %s
+                              AND mo.object_id = %s
+                              AND (
+                                   moi.fio_text = %s
+                                   OR (e.fio IS NOT NULL AND e.fio = %s)
+                              )
+                            """,
+                            (order_date, object_id, fio, fio)
+                        )
+
+                    # Теперь вставляем актуальную строку
                     cur.execute(
                         """
                         INSERT INTO meal_order_items
@@ -581,6 +624,92 @@ def get_details_from_db(
             })
         return result
 
+    finally:
+        conn.close()
+
+def find_conflicting_meal_orders(
+    data: dict
+) -> List[Dict[str, Any]]:
+    """
+    Ищет в БД записи о том, что на этих же людей уже оформлено питание
+    в тот же день, но на ДРУГОМ объекте.
+
+    Возвращает список конфликтов:
+    [
+      {
+        "fio": "...",
+        "tbn": "...",
+        "date": "2025-01-01",
+        "address": "ул. ...",      # адрес другого объекта
+        "team_name": "Бригада 1",
+        "department": "Монтаж",
+      },
+      ...
+    ]
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
+            obj = data.get("object") or {}
+            obj_ext_id = (obj.get("id") or "").strip()
+            obj_address = (obj.get("address") or "").strip()
+
+            # Находим id текущего объекта (тот же, что используем при сохранении)
+            current_object_id = get_or_create_object(cur, obj_ext_id, obj_address)
+
+            conflicts: List[Dict[str, Any]] = []
+
+            for emp in data.get("employees", []):
+                fio = (emp.get("fio") or "").strip()
+                tbn = (emp.get("tbn") or "").strip()
+                if not fio and not tbn:
+                    continue
+
+                params = [order_date, current_object_id]
+                where_emp = []
+
+                if tbn:
+                    # проверяем по табельному
+                    where_emp.append("(moi.tbn_text = %s OR e.tbn = %s)")
+                    params.extend([tbn, tbn])
+                else:
+                    # если табельного нет — по ФИО
+                    where_emp.append("(moi.fio_text = %s OR e.fio = %s)")
+                    params.extend([fio, fio])
+
+                where_emp_sql = " AND ".join(where_emp)
+
+                sql = f"""
+                    SELECT
+                        mo.date::text,
+                        COALESCE(o.address, '')       AS address,
+                        COALESCE(mo.team_name, '')    AS team_name,
+                        COALESCE(d.name, '')          AS department
+                    FROM meal_orders mo
+                    JOIN meal_order_items moi ON moi.order_id = mo.id
+                    LEFT JOIN employees e    ON e.id = moi.employee_id
+                    LEFT JOIN objects o      ON o.id = mo.object_id
+                    LEFT JOIN departments d  ON d.id = mo.department_id
+                    WHERE mo.date = %s
+                      AND mo.object_id <> %s
+                      AND {where_emp_sql}
+                    LIMIT 5
+                """
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+                for r in rows:
+                    date_str, addr, team_name, dep = r
+                    conflicts.append({
+                        "fio": fio,
+                        "tbn": tbn,
+                        "date": date_str,
+                        "address": addr,
+                        "team_name": team_name,
+                        "department": dep,
+                    })
+
+            return conflicts
     finally:
         conn.close()
 
@@ -1146,11 +1275,50 @@ class MealOrderPage(tk.Frame):
             return
 
         data = self._build_order_dict()
-
-        # Кол-во строк в заявке
         total_items = len(data.get("employees", []))
 
-        # Сохранение в БД PostgreSQL
+        # 1. Проверка на существующие заказы для этих людей на других объектах
+        try:
+            conflicts = find_conflicting_meal_orders(data)
+        except Exception as e:
+            # Если проверка сломалась — лучше показать предупреждение, но не блокировать совсем
+            if not messagebox.askyesno(
+                "Проверка пересечений",
+                f"Не удалось проверить пересечения по БД:\n{e}\n\n"
+                f"Продолжить сохранение заявки?"
+            ):
+                return
+            conflicts = []
+
+        if conflicts:
+            # Группируем конфликты по сотрудникам
+            lines = []
+            for c in conflicts:
+                fio = c.get("fio") or "?"
+                tbn = c.get("tbn") or ""
+                who = f"{fio} ({tbn})" if tbn else fio
+                addr = c.get("address") or "неизвестный адрес"
+                date_str = c.get("date") or ""
+                team = c.get("team_name") or ""
+                dep = c.get("department") or ""
+                extra = f", бригада: {team}" if team else ""
+                if dep:
+                    extra += f", подразделение: {dep}"
+                lines.append(f"- {who}: {date_str}, объект: {addr}{extra}")
+
+            text = (
+                "ВНИМАНИЕ!\n\n"
+                "Для следующих сотрудников уже оформлено питание на ЭТУ ЖЕ дату, "
+                "но на ДРУГОЙ объект:\n\n"
+                + "\n".join(lines[:20]) +
+                ("\n\n(Показаны первые 20 совпадений)" if len(lines) > 20 else "") +
+                "\n\nПродолжить сохранение заявки и ПЕРЕЗАПИСАТЬ их питание на текущий объект?"
+            )
+
+            if not messagebox.askyesno("Пересечение заявок по сотрудникам", text):
+                return
+
+        # 2. Сохранение в БД PostgreSQL (с логикой перезаписи в save_order_to_db)
         try:
             order_db_id = save_order_to_db(data)
         except Exception as e:
@@ -1160,13 +1328,12 @@ class MealOrderPage(tk.Frame):
             )
             return
 
-        # Имя и путь XLSX
+        # 3. Сохранение XLSX
         ts = datetime.now().strftime("%H%M%S")
         id_part = data["object"]["id"] or safe_filename(data["object"]["address"])
         fname = f"Заявка_питание_{data['date']}_{ts}_{id_part or 'NOID'}.xlsx"
         fpath = self.orders_dir / fname
 
-        # Сохранение XLSX
         try:
             wb = Workbook()
             ws = wb.active
@@ -1190,7 +1357,7 @@ class MealOrderPage(tk.Frame):
             messagebox.showerror("Сохранение", f"Не удалось сохранить XLSX:\n{e}")
             return
 
-        # Итоговое сообщение без CSV и без webhook
+        # 4. Итоговое сообщение
         messagebox.showinfo(
             "Сохранение",
             f"Заявка сохранена в реестр.\n"
