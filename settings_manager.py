@@ -13,8 +13,6 @@ from urllib.parse import urlparse, parse_qs
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-DEBUG_SETTINGS = True  # временный флаг отладки
-
 # Константы (совместимые с main_app)
 CONFIG_FILE = "tabel_config.ini"
 CONFIG_SECTION_PATHS = "Paths"
@@ -1129,27 +1127,3 @@ def _save_from_vars(win):
         win.destroy()
     except Exception:
         pass
-
-if DEBUG_SETTINGS and __name__ == "__main__":
-    import json
-    print("=== DEBUG SETTINGS (from exe) ===")
-    print("EXE DIR:", exe_dir())
-    print("SETTINGS_PATH:", SETTINGS_PATH)
-    print("SETTINGS_PATH.exists():", SETTINGS_PATH.exists())
-    if SETTINGS_PATH.exists():
-        raw = SETTINGS_PATH.read_bytes()
-        print("settings.dat size:", len(raw))
-        print("settings.dat prefix:", raw[:16])
-
-    ensure_config()
-    from settings_manager import _store  # type: ignore[attr-defined]
-
-    print("\nSTORE JSON:")
-    print(json.dumps(_store, ensure_ascii=False, indent=2))
-
-    print("\nDB provider:", get_db_provider())
-    print("DATABASE_URL:", get_database_url())
-    print("SPR path:", get_spr_path_from_config())
-    print("Meals orders dir:", get_meals_orders_dir_from_config())
-    print("======================")
-    input("Нажмите Enter для выхода...")
