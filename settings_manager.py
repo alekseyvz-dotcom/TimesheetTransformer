@@ -9,6 +9,10 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse, parse_qs
+
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # Константы (совместимые с main_app)
 CONFIG_FILE = "tabel_config.ini"
@@ -230,8 +234,8 @@ _defaults: Dict[str, Dict[str, Any]] = {
         KEY_MEALS_MODE: "webhook",
         KEY_MEALS_WEBHOOK_URL: "",
         KEY_MEALS_WEBHOOK_TOKEN: "",
-        KEY_MEALS_PLANNING_ENABLED: "true",   
-        KEY_MEALS_PLANNING_PASSWORD: "2025",  
+        KEY_MEALS_PLANNING_ENABLED: "true",
+        KEY_MEALS_PLANNING_PASSWORD: "2025",
     },
     "Remote": {
         KEY_REMOTE_USE: "false",
@@ -428,6 +432,7 @@ def get_meals_webhook_token_from_config() -> str:
         )
     )
 
+
 def get_meals_planning_enabled_from_config() -> bool:
     ensure_config()
     v = str(
@@ -454,10 +459,12 @@ def get_meals_planning_password_from_config() -> str:
         )
     )
 
+
 def set_meals_planning_password_in_config(pwd: str):
     ensure_config()
     _store["Integrations"][KEY_MEALS_PLANNING_PASSWORD] = pwd or ""
     save_settings()
+
 
 def set_meals_webhook_token_in_config(tok: str):
     ensure_config()
@@ -465,7 +472,126 @@ def set_meals_webhook_token_in_config(tok: str):
     save_settings()
 
 
-# ---------------- UI ОКНО НАСТРОЕК ----------------
+# ---------------- РАБОТА С БД ДЛЯ ПОЛЬЗОВАТЕЛЕЙ ----------------
+
+def get_db_connection():
+    """
+    Подключение к БД так же, как в main_app (для Postgres).
+    """
+    provider = get_db_provider().strip().lower()
+    if provider != "postgres":
+        raise RuntimeError(f"Поддерживается только provider=postgres для работы с пользователями, сейчас: {provider!r}")
+
+    db_url = get_database_url().strip()
+    if not db_url:
+        raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
+
+    url = urlparse(db_url)
+    if url.scheme not in ("postgresql", "postgres"):
+        raise RuntimeError(f"Неверная схема в DATABASE_URL: {url.scheme}")
+
+    user = url.username
+    password = url.password
+    host = url.hostname or "localhost"
+    port = url.port or 5432
+    dbname = url.path.lstrip("/")
+
+    q = parse_qs(url.query)
+    sslmode = (q.get("sslmode", [get_db_sslmode()])[0] or "require")
+
+    conn = psycopg2.connect(
+        host=host,
+        port=port,
+        dbname=dbname,
+        user=user,
+        password=password,
+        sslmode=sslmode,
+    )
+    return conn
+
+
+def _hash_password(password: str, salt: bytes | None = None) -> str:
+    """
+    То же форматирование, что и в main_app:
+    pbkdf2_sha256$iterations$salt_hex$hash_hex
+    """
+    if salt is None:
+        salt = os.urandom(16)
+    iterations = 260000
+    dk = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        iterations,
+    )
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${dk.hex()}"
+
+
+def get_roles_list() -> list[dict]:
+    """
+    Возвращает список ролей из таблицы roles: [{'code': 'admin', 'name': 'Администратор'}, ...]
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT code, name FROM roles ORDER BY name;")
+            return list(cur.fetchall())
+    finally:
+        conn.close()
+
+
+def get_app_users() -> list[dict]:
+    """
+    Возвращает список пользователей приложения.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, username, full_name, "role", is_active
+                FROM app_users
+                ORDER BY username;
+                """
+            )
+            return list(cur.fetchall())
+    finally:
+        conn.close()
+
+
+def create_app_user(username: str, password: str, full_name: str, role_code: str, is_active: bool = True):
+    """
+    Создаёт пользователя в app_users.
+    """
+    username = (username or "").strip()
+    full_name = (full_name or "").strip()
+    role_code = (role_code or "").strip().lower()
+
+    if not username:
+        raise ValueError("Логин не может быть пустым")
+    if not password:
+        raise ValueError("Пароль не может быть пустым")
+    if not role_code:
+        raise ValueError("Роль не указана")
+
+    pwd_hash = _hash_password(password)
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO app_users (username, password_hash, is_active, full_name, "role")
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (username, pwd_hash, is_active, full_name, role_code),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------- UI ДЛЯ ПОЛЬЗОВАТЕЛЕЙ ----------------
 
 # Храним Var-переменные для сохранения
 _vars: Dict[str, Dict[str, Any]] = {}
@@ -487,6 +613,138 @@ def _add_context_menu(widget: tk.Widget):
             menu.grab_release()
 
     widget.bind("<Button-3>", show_menu)
+
+
+class CreateUserDialog(simpledialog.Dialog):
+    def __init__(self, parent):
+        self.result = None
+        super().__init__(parent, title="Создать пользователя")
+
+    def body(self, master):
+        tk.Label(master, text="Логин:").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.ent_username = ttk.Entry(master, width=26)
+        self.ent_username.grid(row=0, column=1, sticky="w", pady=4)
+
+        tk.Label(master, text="ФИО:").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.ent_fullname = ttk.Entry(master, width=26)
+        self.ent_fullname.grid(row=1, column=1, sticky="w", pady=4)
+
+        tk.Label(master, text="Пароль:").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.ent_pwd = ttk.Entry(master, width=26, show="*")
+        self.ent_pwd.grid(row=2, column=1, sticky="w", pady=4)
+
+        tk.Label(master, text="Роль:").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=4)
+        try:
+            roles = get_roles_list()
+        except Exception as e:
+            messagebox.showerror("Роли", f"Ошибка чтения списка ролей:\n{e}", parent=self)
+            roles = []
+
+        self.role_map = {f'{r["name"]} ({r["code"]})': r["code"] for r in roles}
+        self.cmb_role = ttk.Combobox(master, state="readonly", width=24,
+                                     values=list(self.role_map.keys()))
+        self.cmb_role.grid(row=3, column=1, sticky="w", pady=4)
+        if self.role_map:
+            self.cmb_role.current(0)
+
+        return self.ent_username
+
+    def validate(self):
+        u = self.ent_username.get().strip()
+        p = self.ent_pwd.get().strip()
+        if not u:
+            messagebox.showwarning("Создать пользователя", "Укажите логин.", parent=self)
+            return False
+        if not p:
+            messagebox.showwarning("Создать пользователя", "Укажите пароль.", parent=self)
+            return False
+        if not self.cmb_role.get():
+            messagebox.showwarning("Создать пользователя", "Выберите роль.", parent=self)
+            return False
+        return True
+
+    def apply(self):
+        self.result = {
+            "username": self.ent_username.get().strip(),
+            "full_name": self.ent_fullname.get().strip(),
+            "password": self.ent_pwd.get().strip(),
+            "role": self.role_map[self.cmb_role.get()],
+        }
+
+
+class UsersPage(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master)
+        self._build_ui()
+        self.reload_users()
+
+    def _build_ui(self):
+        top = tk.Frame(self)
+        top.pack(fill="x", padx=8, pady=8)
+
+        ttk.Button(top, text="Создать пользователя", command=self._on_create_user)\
+            .pack(side="left")
+
+        self.tree = ttk.Treeview(
+            self,
+            columns=("username", "full_name", "role", "is_active"),
+            show="headings",
+            height=12,
+        )
+        self.tree.heading("username", text="Логин")
+        self.tree.heading("full_name", text="ФИО")
+        self.tree.heading("role", text="Роль")
+        self.tree.heading("is_active", text="Активен")
+
+        self.tree.column("username", width=140)
+        self.tree.column("full_name", width=220)
+        self.tree.column("role", width=100)
+        self.tree.column("is_active", width=70, anchor="center")
+
+        self.tree.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    def reload_users(self):
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+        try:
+            users = get_app_users()
+        except Exception as e:
+            messagebox.showerror("Пользователи", f"Ошибка загрузки списка:\n{e}", parent=self)
+            return
+
+        for u in users:
+            self.tree.insert(
+                "",
+                "end",
+                values=(
+                    u["username"],
+                    u.get("full_name") or "",
+                    u.get("role") or "",
+                    "Да" if u.get("is_active") else "Нет",
+                ),
+            )
+
+    def _on_create_user(self):
+        dlg = CreateUserDialog(self)
+        if not dlg.result:
+            return
+        data = dlg.result
+        try:
+            create_app_user(
+                username=data["username"],
+                password=data["password"],
+                full_name=data["full_name"],
+                role_code=data["role"],
+                is_active=True,
+            )
+        except Exception as e:
+            messagebox.showerror("Создать пользователя", f"Ошибка создания пользователя:\n{e}", parent=self)
+            return
+        self.reload_users()
+        messagebox.showinfo("Создать пользователя", "Пользователь создан.", parent=self)
+
+
+# ---------------- UI ОКНО НАСТРОЕК ----------------
 
 
 def open_settings_window(parent: tk.Tk):
@@ -626,7 +884,7 @@ def open_settings_window(parent: tk.Tk):
         row=8,
         width=32,
     )
-        # Планирование питания
+    # Планирование питания
     _mk_check(
         tab_int,
         "Питание — планирование включено:",
@@ -759,6 +1017,12 @@ def open_settings_window(parent: tk.Tk):
 
     provider_var.trace_add("write", _toggle_db_fields)
     _toggle_db_fields()
+
+    # Пользователи (новая вкладка)
+    tab_users = ttk.Frame(nb)
+    nb.add(tab_users, text="Пользователи")
+    users_page = UsersPage(tab_users)
+    users_page.pack(fill="both", expand=True)
 
     # Кнопки
     btns = ttk.Frame(win)
