@@ -2412,6 +2412,7 @@ class MainApp(tk.Tk):
     def __init__(self, current_user: Optional[Dict[str, Any]] = None):
         super().__init__()
         self.current_user: Dict[str, Any] = current_user or {}
+        self.is_authenticated: bool = bool(current_user)  # вошёл ли пользователь
         self.title(APP_NAME)
         self.geometry("1024x720")
         self.minsize(980, 640)
@@ -2538,13 +2539,13 @@ class MainApp(tk.Tk):
     def _set_user(self, user: Optional[Dict[str, Any]]):
         """Устанавливает текущего пользователя и обновляет заголовок окна."""
         self.current_user = user or {}
+        self.is_authenticated = bool(user)
         caption = ""
         if user:
             fn = user.get("full_name") or ""
             un = user.get("username") or ""
             caption = f" — {fn or un}"
         self.title(APP_NAME + caption)
-        # Здесь при желании можно включать/отключать пункты меню в зависимости от ролей
 
     def show_login(self):
         self._show_page("login", lambda parent: LoginPage(parent, app_ref=self))
@@ -2557,20 +2558,35 @@ class MainApp(tk.Tk):
         self.show_home()
 
     def _show_page(self, key: str, builder):
+        # Если пользователь не авторизован — разрешаем только страницу логина
+        if not self.is_authenticated and key not in ("login",):
+            messagebox.showwarning(
+                "Доступ ограничен",
+                "Для доступа к разделу необходимо войти в систему.",
+                parent=self,
+            )
+            # принудительно показываем логин
+            self.show_login()
+            return
+
         # очистить контейнер
         for w in self.content.winfo_children():
             try:
                 w.destroy()
             except Exception:
                 pass
+
         # построить новый
         try:
             page = builder(self.content)
         except Exception as e:
             traceback.print_exc()
             messagebox.showerror("Ошибка", f"Не удалось открыть страницу:\n{e}")
-            # Покажем главную страницу как резерв
-            self.show_home()
+            # Резерв — домашняя страница (если уже есть доступ)
+            if self.is_authenticated:
+                self.show_home()
+            else:
+                self.show_login()
             return
 
         if isinstance(page, tk.Widget) and page.master is self.content:
