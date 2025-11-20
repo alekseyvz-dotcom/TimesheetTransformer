@@ -9,6 +9,9 @@ import configparser
 import urllib.request
 import urllib.error
 import urllib.parse
+from urllib.parse import urlparse, parse_qs
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from io import BytesIO
 from pathlib import Path
 from typing import List, Tuple, Optional, Any, Dict
@@ -39,9 +42,6 @@ CONFIG_SECTION_REMOTE  = "Remote"   # удалённый справочник (�
 KEY_SPR                 = "spravochnik_path"
 KEY_SELECTED_DEP        = "selected_department"
 
-KEY_ORDERS_MODE         = "orders_mode"               # none | webhook
-KEY_ORDERS_WEBHOOK_URL  = "orders_webhook_url"        # https://script.google.com/macros/s/.../exec
-KEY_ORDERS_WEBHOOK_TOKEN= "orders_webhook_token"
 KEY_PLANNING_ENABLED    = "planning_enabled"          # true|false
 KEY_PLANNING_PASSWORD   = "planning_password"
 
@@ -77,6 +77,209 @@ if Settings:
 
 # ------------------------- Утилиты конфигурации -------------------------
 
+# ------------------------- БД: подключение -------------------------
+
+def get_db_connection():
+    """
+    Подключение к БД по настройкам из settings_manager.
+    Ожидается provider=postgres и корректный DATABASE_URL.
+    """
+    if not Settings:
+        raise RuntimeError("settings_manager не доступен, не могу прочитать параметры БД")
+
+    provider = Settings.get_db_provider().strip().lower()
+    if provider != "postgres":
+        raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
+
+    db_url = Settings.get_database_url().strip()
+    if not db_url:
+        raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
+
+    url = urlparse(db_url)
+    if url.scheme not in ("postgresql", "postgres"):
+        raise RuntimeError(f"Неверная схема в DATABASE_URL: {url.scheme}")
+
+    user = url.username
+    password = url.password
+    host = url.hostname or "localhost"
+    port = url.port or 5432
+    dbname = url.path.lstrip("/")
+
+    q = parse_qs(url.query)
+    sslmode = (q.get("sslmode", [Settings.get_db_sslmode()])[0] or "require")
+
+    conn = psycopg2.connect(
+        host=host,
+        port=port,
+        dbname=dbname,
+        user=user,
+        password=password,
+        sslmode=sslmode,
+    )
+    return conn
+
+def get_or_create_object(cur, ext_id: str, address: str) -> Optional[int]:
+    """
+    Переиспользует таблицу objects (совместно с модулем питания).
+    ext_id — ID объекта из справочника (OBJ-001).
+    """
+    ext_id = (ext_id or "").strip()
+    address = (address or "").strip()
+    if not (ext_id or address):
+        return None
+
+    if ext_id:
+        cur.execute("SELECT id FROM objects WHERE ext_id = %s", (ext_id,))
+        row = cur.fetchone()
+        if row:
+            return row[0]
+        cur.execute(
+            "INSERT INTO objects (ext_id, address) VALUES (%s, %s) RETURNING id",
+            (ext_id, address),
+        )
+        return cur.fetchone()[0]
+
+    # без ext_id ищем по адресу
+    cur.execute("SELECT id FROM objects WHERE address = %s", (address,))
+    row = cur.fetchone()
+    if row:
+        return row[0]
+    cur.execute(
+        "INSERT INTO objects (ext_id, address) VALUES (NULL, %s) RETURNING id",
+        (address,),
+    )
+    return cur.fetchone()[0]
+
+def save_transport_order_to_db(data: dict) -> int:
+    """
+    Сохраняет заявку на спецтехнику в PostgreSQL.
+    data — словарь из SpecialOrdersPage._build_order_dict().
+    """
+    conn = get_db_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                obj = data.get("object") or {}
+                obj_ext_id = (obj.get("id") or "").strip()
+                obj_address = (obj.get("address") or "").strip()
+                object_id = get_or_create_object(cur, obj_ext_id, obj_address)
+
+                created_at = datetime.strptime(data["created_at"], "%Y-%m-%dT%H:%M:%S")
+                order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
+
+                cur.execute(
+                    """
+                    INSERT INTO transport_orders
+                        (created_at, date, department, requester_fio, requester_phone,
+                         object_id, object_address, comment)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        created_at,
+                        order_date,
+                        (data.get("department") or "").strip(),
+                        (data.get("requester_fio") or "").strip(),
+                        (data.get("requester_phone") or "").strip(),
+                        object_id,
+                        obj_address,
+                        (data.get("comment") or "").strip(),
+                    ),
+                )
+                order_id = cur.fetchone()[0]
+
+                for p in data.get("positions", []):
+                    tech = (p.get("tech") or "").strip()
+                    qty = int(p.get("qty") or 0)
+                    time_str = (p.get("time") or "").strip()
+                    hours = float(p.get("hours") or 0.0)
+                    note = (p.get("note") or "").strip()
+
+                    tval = None
+                    if time_str:
+                        try:
+                            tval = datetime.strptime(time_str, "%H:%M").time()
+                        except Exception:
+                            tval = None
+
+                    cur.execute(
+                        """
+                        INSERT INTO transport_order_positions
+                            (order_id, tech, qty, time, hours, note, assigned_vehicle, driver, status)
+                        VALUES (%s, %s, %s, %s, %s, %s, NULL, NULL, 'Новая')
+                        """,
+                        (
+                            order_id,
+                            tech,
+                            qty,
+                            tval,
+                            hours,
+                            note,
+                        ),
+                    )
+
+        return order_id
+    finally:
+        conn.close()
+def get_transport_orders_for_planning(
+    filter_date: Optional[str] = None,
+    filter_department: Optional[str] = None,
+    filter_status: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Возвращает список позиций заявок для планирования транспорта.
+    Формат элементов совместим с TransportPlanningPage._populate_tree().
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            params = []
+            where = []
+
+            if filter_date:
+                where.append("o.date = %s")
+                params.append(filter_date)
+
+            if filter_department and filter_department.lower() != "все":
+                where.append("o.department = %s")
+                params.append(filter_department)
+
+            if filter_status and filter_status.lower() != "все":
+                where.append("p.status = %s")
+                params.append(filter_status)
+
+            where_sql = "WHERE " + " AND ".join(where) if where else ""
+
+            sql = f"""
+                SELECT
+                    p.id                                   AS id,
+                    to_char(o.created_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS created_at,
+                    o.date::text                          AS date,
+                    COALESCE(o.department,'')             AS department,
+                    COALESCE(o.requester_fio,'')          AS requester_fio,
+                    COALESCE(o.object_address,'')         AS object_address,
+                    COALESCE(obj.ext_id,'')               AS object_id,
+                    COALESCE(p.tech,'')                   AS tech,
+                    COALESCE(p.qty,0)                     AS qty,
+                    COALESCE(to_char(p.time, 'HH24:MI'),'') AS time,
+                    COALESCE(p.hours,0)                   AS hours,
+                    COALESCE(p.assigned_vehicle,'')       AS assigned_vehicle,
+                    COALESCE(p.driver,'')                 AS driver,
+                    COALESCE(p.status,'Новая')            AS status,
+                    COALESCE(o.comment,'')                AS comment,
+                    COALESCE(p.note,'')                   AS position_note
+                FROM transport_order_positions p
+                JOIN transport_orders o ON o.id = p.order_id
+                LEFT JOIN objects obj ON obj.id = o.object_id
+                {where_sql}
+                ORDER BY o.date, o.created_at, p.id
+            """
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
 def exe_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
@@ -98,6 +301,7 @@ if not Settings:
             cfg.read(cp, encoding="utf-8")
             changed = False
 
+            # --- Paths ---
             if not cfg.has_section(CONFIG_SECTION_PATHS):
                 cfg[CONFIG_SECTION_PATHS] = {}
                 changed = True
@@ -105,6 +309,7 @@ if not Settings:
                 cfg[CONFIG_SECTION_PATHS][KEY_SPR] = str(exe_dir() / SPRAVOCHNIK_FILE)
                 changed = True
 
+            # --- UI ---
             if not cfg.has_section(CONFIG_SECTION_UI):
                 cfg[CONFIG_SECTION_UI] = {}
                 changed = True
@@ -112,28 +317,24 @@ if not Settings:
                 cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = "Все"
                 changed = True
 
+            # --- Integrations (только то, что реально нужно модулю) ---
             if not cfg.has_section(CONFIG_SECTION_INTEGR):
                 cfg[CONFIG_SECTION_INTEGR] = {}
                 changed = True
-            if KEY_ORDERS_MODE not in cfg[CONFIG_SECTION_INTEGR]:
-                cfg[CONFIG_SECTION_INTEGR][KEY_ORDERS_MODE] = "none"
-                changed = True
-            if KEY_ORDERS_WEBHOOK_URL not in cfg[CONFIG_SECTION_INTEGR]:
-                cfg[CONFIG_SECTION_INTEGR][KEY_ORDERS_WEBHOOK_URL] = ""
-                changed = True
-            if KEY_ORDERS_WEBHOOK_TOKEN not in cfg[CONFIG_SECTION_INTEGR]:
-                cfg[CONFIG_SECTION_INTEGR][KEY_ORDERS_WEBHOOK_TOKEN] = ""
-                changed = True
+            # planning_enabled
             if KEY_PLANNING_ENABLED not in cfg[CONFIG_SECTION_INTEGR]:
                 cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_ENABLED] = "false"
                 changed = True
+            # driver_departments
             if KEY_DRIVER_DEPARTMENTS not in cfg[CONFIG_SECTION_INTEGR]:
                 cfg[CONFIG_SECTION_INTEGR][KEY_DRIVER_DEPARTMENTS] = "Служба гаража, Автопарк, Транспортный цех"
                 changed = True
+            # planning_password
             if KEY_PLANNING_PASSWORD not in cfg[CONFIG_SECTION_INTEGR]:
                 cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_PASSWORD] = "2025"
                 changed = True
 
+            # --- Orders (отсечка по времени) ---
             if not cfg.has_section(CONFIG_SECTION_ORDERS):
                 cfg[CONFIG_SECTION_ORDERS] = {}
                 changed = True
@@ -144,6 +345,7 @@ if not Settings:
                 cfg[CONFIG_SECTION_ORDERS][KEY_CUTOFF_HOUR] = "13"
                 changed = True
 
+            # --- Remote (Яндекс.Диск для справочника) ---
             if not cfg.has_section(CONFIG_SECTION_REMOTE):
                 cfg[CONFIG_SECTION_REMOTE] = {}
                 changed = True
@@ -164,27 +366,35 @@ if not Settings:
 
         # создаём ini с нуля (только если нет settings_manager)
         cfg = configparser.ConfigParser()
-        cfg[CONFIG_SECTION_PATHS] = {KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE)}
-        cfg[CONFIG_SECTION_UI] = {KEY_SELECTED_DEP: "Все"}
+
+        cfg[CONFIG_SECTION_PATHS] = {
+            KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE),
+        }
+
+        cfg[CONFIG_SECTION_UI] = {
+            KEY_SELECTED_DEP: "Все",
+        }
+
         cfg[CONFIG_SECTION_INTEGR] = {
-            KEY_ORDERS_MODE: "none",
-            KEY_ORDERS_WEBHOOK_URL: "",
-            KEY_ORDERS_WEBHOOK_TOKEN: "",
             KEY_PLANNING_ENABLED: "false",
             KEY_DRIVER_DEPARTMENTS: "Служба гаража, Автопарк, Транспортный цех",
-            KEY_PLANNING_PASSWORD: "2025"
+            KEY_PLANNING_PASSWORD: "2025",
         }
+
         cfg[CONFIG_SECTION_ORDERS] = {
             KEY_CUTOFF_ENABLED: "true",
-            KEY_CUTOFF_HOUR: "13"
+            KEY_CUTOFF_HOUR: "13",
         }
+
         cfg[CONFIG_SECTION_REMOTE] = {
             KEY_REMOTE_USE: "false",
             KEY_YA_PUBLIC_LINK: "",
-            KEY_YA_PUBLIC_PATH: ""
+            KEY_YA_PUBLIC_PATH: "",
         }
+
         with open(cp, "w", encoding="utf-8") as f:
             cfg.write(f)
+
 
     def read_config() -> configparser.ConfigParser:
         ensure_config()
@@ -222,18 +432,6 @@ def get_planning_enabled() -> bool:
     cfg = read_config()
     v = cfg.get(CONFIG_SECTION_INTEGR, KEY_PLANNING_ENABLED, fallback="false").strip().lower()
     return v in ("1", "true", "yes", "on")
-
-def get_orders_mode() -> str:
-    cfg = read_config()
-    return cfg.get(CONFIG_SECTION_INTEGR, KEY_ORDERS_MODE, fallback="none").strip().lower()
-
-def get_orders_webhook_url() -> str:
-    cfg = read_config()
-    return cfg.get(CONFIG_SECTION_INTEGR, KEY_ORDERS_WEBHOOK_URL, fallback="").strip()
-
-def get_orders_webhook_token() -> str:
-    cfg = read_config()
-    return cfg.get(CONFIG_SECTION_INTEGR, KEY_ORDERS_WEBHOOK_TOKEN, fallback="").strip()
 
 # Настройки отсечки приёма заявок
 def get_cutoff_enabled() -> bool:
@@ -645,34 +843,6 @@ class PositionRow:
             "note": (self.ent_note.get() or "").strip(),
         }
         
-# ------------------------- HTTP -------------------------
-
-def post_json(url: str, payload: dict, token: str = '') -> Tuple[bool, str]:
-    try:
-        body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
-        if token:
-            sep = '&' if ('?' in url) else '?'
-            url = f"{url}{sep}token={urllib.parse.quote(token)}"
-        req = urllib.request.Request(
-            url,
-            data=body,
-            headers={'Content-Type': 'application/json; charset=utf-8'},
-            method='POST'
-        )
-        with urllib.request.urlopen(req, timeout=12) as resp:
-            code = resp.getcode()
-            text = resp.read().decode('utf-8', errors='replace')
-            return (200 <= code < 300, f"{code}: {text}")
-    except urllib.error.HTTPError as e:
-        try:
-            txt = e.read().decode('utf-8', errors='replace')
-        except Exception:
-            txt = str(e)
-        return (False, f"HTTPError {e.code}: {txt}")
-    except Exception as e:
-        return (False, f"Error: {e}")
-
-
 # ------------------------- Встраиваемая страница -------------------------
 
 class SpecialOrdersPage(tk.Frame):
@@ -943,6 +1113,16 @@ class SpecialOrdersPage(tk.Frame):
         
         data = self._build_order_dict()
 
+        # 1. Сохранение в БД
+        order_db_id = None
+        db_error = None
+        try:
+            if Settings:
+                order_db_id = save_transport_order_to_db(data)
+        except Exception as e:
+            db_error = e
+
+        # 2. XLSX
         ts = datetime.now().strftime("%H%M%S")
         id_part = data["object"]["id"] or safe_filename(data["object"]["address"])
         fname = f"Заявка_спецтехники_{data['date']}_{ts}_{id_part or 'NOID'}.xlsx"
@@ -960,6 +1140,8 @@ class SpecialOrdersPage(tk.Frame):
             ws.append(["ID объекта", data["object"]["id"]])
             ws.append(["Адрес", data["object"]["address"]])
             ws.append(["Комментарий", data["comment"]])
+            if order_db_id is not None:
+                ws.append(["ID заявки в БД", order_db_id])
             ws.append([])
             hdr = ["#", "Техника", "Кол-во", "Подача (чч:мм)", "Часы", "Примечание"]
             ws.append(hdr)
@@ -973,6 +1155,7 @@ class SpecialOrdersPage(tk.Frame):
             messagebox.showerror("Сохранение", f"Не удалось сохранить XLSX:\n{e}")
             return
 
+        # 3. CSV (архив)
         csv_path = self.orders_dir / f"Свод_заявок_{data['date'][:7].replace('-', '_')}.csv"
         try:
             new = not csv_path.exists()
@@ -992,35 +1175,16 @@ class SpecialOrdersPage(tk.Frame):
         except Exception as e:
             messagebox.showwarning("Сводный CSV", f"XLSX сохранён, но не удалось добавить в CSV:\n{e}")
 
-        try:
-            mode = get_orders_mode()
-            if mode == 'webhook':
-                url = get_orders_webhook_url()
-                token = get_orders_webhook_token()
-                if url:
-                    ok, info = post_json(url, data, token)
-                    if ok:
-                        messagebox.showinfo("Сохранение/Отправка",
-                                            f"Заявка сохранена и отправлена онлайн.\n\n"
-                                            f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\nОтвет сервера:\n{info}")
-                    else:
-                        messagebox.showwarning("Сохранение/Отправка",
-                                               f"Локально сохранено, но онлайн-отправка не удалась.\n\n"
-                                               f"XLSX:\n{fpath}\nCSV:\n{csv_path}\n\n{info}")
-                    return
-                else:
-                    messagebox.showinfo("Сохранение",
-                                        f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}\n"
-                                        f"(Онлайн-отправка не настроена)")
-                    return
-            else:
-                messagebox.showinfo("Сохранение", f"Заявка сохранена:\n{fpath}\n\nСводный CSV:\n{csv_path}")
-                return
-        except Exception as e:
-            messagebox.showwarning("Сохранение/Отправка",
-                                   f"Локально сохранено, но онлайн-отправка упала с ошибкой:\n{e}\n\n"
-                                   f"XLSX:\n{fpath}\nCSV:\n{csv_path}")
-            return
+        # 4. Итоговое сообщение
+        extra = ""
+        if db_error:
+            extra = f"\n\nВНИМАНИЕ: не удалось сохранить в БД:\n{db_error}"
+        messagebox.showinfo(
+            "Сохранение",
+            f"Заявка сохранена.\n"
+            f"ID в БД: {order_db_id if order_db_id is not None else '—'}\n\n"
+            f"XLSX:\n{fpath}\nCSV:\n{csv_path}{extra}"
+        )
 
     def clear_form(self):
         self.fio_var.set("")
@@ -1218,45 +1382,21 @@ class TransportPlanningPage(tk.Frame):
         self.tree.tag_configure('Выполнена', background='#e2e3e5')
         
     def load_orders(self):
-        """Загрузка заявок из Google Таблиц"""
+        """Загрузка заявок из PostgreSQL"""
         try:
-            url = get_orders_webhook_url()
-            
-            if not url:
-                messagebox.showwarning("Загрузка", "Не настроен webhook URL в конфигурации")
-                return
-            
-            token = get_orders_webhook_token()
             filter_date = self.ent_filter_date.get().strip()
-            filter_dept = self.cmb_filter_dep.get()
-            filter_status = self.cmb_filter_status.get()
-            
-            params = {}
-            if filter_date:
-                params['date'] = filter_date
-            if filter_dept and filter_dept != "Все":
-                params['department'] = filter_dept
-            if filter_status and filter_status != "Все":
-                params['status'] = filter_status
-            if token:
-                params['token'] = token
-                
-            query = urllib.parse.urlencode(params)
-            full_url = f"{url}?{query}" if query else url
-            
-            with urllib.request.urlopen(full_url, timeout=15) as resp:
-                result = json.loads(resp.read().decode('utf-8'))
-            
-            if not result.get('ok'):
-                messagebox.showerror("Ошибка", f"Сервер вернул ошибку:\n{result.get('error', 'Unknown')}")
-                return
-            
-            orders = result.get('orders', [])
+            filter_dept = self.cmb_filter_dep.get().strip()
+            filter_status = self.cmb_filter_status.get().strip()
+
+            orders = get_transport_orders_for_planning(
+                filter_date=filter_date or None,
+                filter_department=filter_dept or None,
+                filter_status=filter_status or None,
+            )
             self._populate_tree(orders)
             messagebox.showinfo("Загрузка", f"Загружено заявок: {len(orders)}")
-            
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось загрузить заявки:\n{e}")
+            messagebox.showerror("Ошибка", f"Не удалось загрузить заявки из БД:\n{e}")
 
     def _check_vehicle_conflict(self, vehicle_full: str, req_date: str, req_time: str, current_id: str) -> List[Dict]:
         """
@@ -1717,35 +1857,51 @@ class TransportPlanningPage(tk.Frame):
         check_conflicts()
 
     def save_assignments(self):
-        """Сохранение назначений в Google Таблицы"""
+        """Сохранение назначений в PostgreSQL"""
         try:
             assignments = []
             for item in self.tree.get_children():
                 values = self.tree.item(item)['values']
                 assignments.append({
-                    'id': values[0],
+                    'id': values[0],             # id позиции (transport_order_positions.id)
                     'assigned_vehicle': values[10],
                     'driver': values[11],
-                    'status': values[12]
+                    'status': values[12],
                 })
-            
+
             if not assignments:
                 messagebox.showwarning("Сохранение", "Нет данных для сохранения")
                 return
-            
-            url = get_orders_webhook_url()
-            token = get_orders_webhook_token()
-            
-            payload = {'action': 'update_assignments', 'assignments': assignments}
-            ok, info = post_json(url, payload, token)
-            
-            if ok:
-                messagebox.showinfo("Сохранение", f"Назначения успешно сохранены!\n\nОбновлено записей: {len(assignments)}")
-            else:
-                messagebox.showerror("Ошибка", f"Не удалось сохранить:\n{info}")
-                
+
+            conn = get_db_connection()
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        for a in assignments:
+                            pos_id = a.get('id')
+                            if not pos_id:
+                                continue
+                            cur.execute(
+                                """
+                                UPDATE transport_order_positions
+                                SET assigned_vehicle = %s,
+                                    driver = %s,
+                                    status = %s
+                                WHERE id = %s
+                                """,
+                                (
+                                    (a.get('assigned_vehicle') or "").strip(),
+                                    (a.get('driver') or "").strip(),
+                                    (a.get('status') or "Новая").strip(),
+                                    pos_id,
+                                ),
+                            )
+                messagebox.showinfo("Сохранение", f"Назначения успешно сохранены.\nОбновлено записей: {len(assignments)}")
+            finally:
+                conn.close()
+
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Ошибка сохранения:\n{e}")
+            messagebox.showerror("Ошибка", f"Ошибка сохранения в БД:\n{e}")
 
 # ------------------------- Вариант standalone-окна -------------------------
 
