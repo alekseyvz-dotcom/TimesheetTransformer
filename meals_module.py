@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
@@ -40,7 +40,6 @@ KEY_MEALS_MODE = "meals_mode"
 KEY_MEALS_WEBHOOK_URL = "meals_webhook_url"
 KEY_MEALS_WEBHOOK_TOKEN = "meals_webhook_token"
 KEY_MEALS_PLANNING_ENABLED = "meals_planning_enabled"
-KEY_MEALS_PLANNING_PASSWORD = "meals_planning_password"
 
 KEY_REMOTE_USE = "use_remote"
 KEY_YA_PUBLIC_LINK = "yadisk_public_link"
@@ -85,10 +84,6 @@ if Settings:
     def set_saved_dep(dep: str):
         return Settings.set_selected_department_in_config(dep)
 
-    def get_meals_planning_password() -> str:
-        cfg = read_config()
-        return cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_PLANNING_PASSWORD, fallback="2025").strip()
-
 else:
     # Локальный (старый) способ хранения настроек в INI
 
@@ -128,9 +123,6 @@ else:
             if KEY_MEALS_PLANNING_ENABLED not in cfg[CONFIG_SECTION_INTEGR]:
                 cfg[CONFIG_SECTION_INTEGR][KEY_MEALS_PLANNING_ENABLED] = "true"
                 changed = True
-            if KEY_MEALS_PLANNING_PASSWORD not in cfg[CONFIG_SECTION_INTEGR]:
-                cfg[CONFIG_SECTION_INTEGR][KEY_MEALS_PLANNING_PASSWORD] = "2025"
-                changed = True
 
             if not cfg.has_section(CONFIG_SECTION_REMOTE):
                 cfg[CONFIG_SECTION_REMOTE] = {}
@@ -159,7 +151,6 @@ else:
             KEY_MEALS_WEBHOOK_URL: "",
             KEY_MEALS_WEBHOOK_TOKEN: "",
             KEY_MEALS_PLANNING_ENABLED: "true",
-            KEY_MEALS_PLANNING_PASSWORD: "2025",
         }
         cfg[CONFIG_SECTION_REMOTE] = {
             KEY_REMOTE_USE: "false",
@@ -199,10 +190,6 @@ else:
         cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = dep or "Все"
         write_config(cfg)
 
-    def get_meals_planning_password() -> str:
-        cfg = read_config()
-        return cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_PLANNING_PASSWORD, fallback="2025").strip()
-
 
 def get_meals_planning_enabled() -> bool:
     if Settings and hasattr(Settings, "get_meals_planning_enabled_from_config"):
@@ -210,13 +197,6 @@ def get_meals_planning_enabled() -> bool:
     cfg = read_config()
     v = cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_PLANNING_ENABLED, fallback="true").strip().lower()
     return v in ("1", "true", "yes", "on")
-
-def get_meals_planning_password() -> str:
-    if Settings and hasattr(Settings, "get_meals_planning_password_from_config"):
-        return Settings.get_meals_planning_password_from_config().strip()
-    cfg = read_config()
-    return cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_PLANNING_PASSWORD, fallback="2025").strip()
-
 
 
 def get_meals_mode() -> str:
@@ -232,6 +212,7 @@ def get_meals_webhook_url() -> str:
 def get_meals_webhook_token() -> str:
     cfg = read_config()
     return cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_WEBHOOK_TOKEN, fallback="").strip()
+
 
 def get_db_connection():
     """
@@ -275,6 +256,7 @@ def get_db_connection():
         sslmode=sslmode,
     )
     return conn
+
 
 def get_or_create_department(cur, name: str):
     if not name:
@@ -445,6 +427,7 @@ def save_order_to_db(data: dict) -> int:
     finally:
         conn.close()
 
+
 def get_registry_from_db(
     filter_date: Optional[str] = None,
     filter_address: Optional[str] = None,
@@ -540,23 +523,11 @@ def get_registry_from_db(
     finally:
         conn.close()
 
+
 def find_conflicting_meal_orders_same_date_other_object(data: dict) -> List[Dict[str, Any]]:
     """
     Ищет в БД записи, что на этих же людей уже оформлено питание
     в ту же дату, но на ДРУГОЙ объект.
-
-    Возвращает список конфликтов:
-    [
-      {
-        "fio": "...",
-        "tbn": "...",
-        "date": "2025-01-01",
-        "address": "ул. ...",      # адрес другого объекта
-        "team_name": "Бригада 1",
-        "department": "Монтаж",
-      },
-      ...
-    ]
     """
     conn = get_db_connection()
     try:
@@ -622,28 +593,14 @@ def find_conflicting_meal_orders_same_date_other_object(data: dict) -> List[Dict
     finally:
         conn.close()
 
+
 def get_details_from_db(
     filter_date: Optional[str] = None,
     filter_address: Optional[str] = None,
     filter_department: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Возвращает детализированный список заявок:
-      [
-        {
-          "date": "2025-01-01",
-          "address": "...",
-          "object_id": "OBJ-001",
-          "department": "Монтаж",
-          "team_name": "Бригада 1",
-          "fio": "Иванов И. И.",
-          "tbn": "ST00-00001",
-          "position": "Слесарь",
-          "meal_type": "Одноразовое",
-          "comment": "..."
-        },
-        ...
-      ]
+    Возвращает детализированный список заявок.
     """
     conn = get_db_connection()
     try:
@@ -711,25 +668,11 @@ def get_details_from_db(
     finally:
         conn.close()
 
-def find_conflicting_meal_orders(
-    data: dict
-) -> List[Dict[str, Any]]:
+
+def find_conflicting_meal_orders(data: dict) -> List[Dict[str, Any]]:
     """
     Ищет в БД записи о том, что на этих же людей уже оформлено питание
     в тот же день, но на ДРУГОМ объекте.
-
-    Возвращает список конфликтов:
-    [
-      {
-        "fio": "...",
-        "tbn": "...",
-        "date": "2025-01-01",
-        "address": "ул. ...",      # адрес другого объекта
-        "team_name": "Бригада 1",
-        "department": "Монтаж",
-      },
-      ...
-    ]
     """
     conn = get_db_connection()
     try:
@@ -797,6 +740,7 @@ def find_conflicting_meal_orders(
     finally:
         conn.close()
 
+
 # ========================= ЗАГРУЗКА СПРАВОЧНИКА =========================
 
 def ensure_spravochnik(path: Path):
@@ -821,6 +765,7 @@ def ensure_spravochnik(path: Path):
     ws3.append(["Трехразовое"])
     wb.save(path)
 
+
 def fetch_yadisk_public_bytes(public_link: str, public_path: str = "") -> bytes:
     if not public_link:
         raise RuntimeError("Не задана публичная ссылка Я.Диска")
@@ -837,12 +782,14 @@ def fetch_yadisk_public_bytes(public_link: str, public_path: str = "") -> bytes:
     with urllib.request.urlopen(href, timeout=60) as f:
         return f.read()
 
+
 def _s(v) -> str:
     if v is None:
         return ""
     if isinstance(v, float) and v.is_integer():
         v = int(v)
     return str(v).strip()
+
 
 def load_spravochnik_from_wb(wb) -> Tuple[List[Tuple[str, str, str, str]], List[Tuple[str, str]], List[str]]:
     employees: List[Tuple[str, str, str, str]] = []
@@ -885,6 +832,7 @@ def load_spravochnik_from_wb(wb) -> Tuple[List[Tuple[str, str, str, str]], List[
 
     return employees, objects, meal_types
 
+
 def load_spravochnik_remote_or_local(local_path: Path):
     cfg = read_config()
     use_remote = cfg.get(CONFIG_SECTION_REMOTE, KEY_REMOTE_USE, fallback="false").strip().lower() in ("1", "true", "yes", "on")
@@ -905,6 +853,7 @@ def load_spravochnik_remote_or_local(local_path: Path):
     wb = load_workbook(local_path, read_only=True, data_only=True)
     return load_spravochnik_from_wb(wb)
 
+
 # ========================= УТИЛИТЫ =========================
 
 def parse_date_any(s: str) -> Optional[date]:
@@ -917,6 +866,7 @@ def parse_date_any(s: str) -> Optional[date]:
         except:
             pass
     return None
+
 
 def post_json(url: str, payload: dict, token: str = '') -> Tuple[bool, str]:
     try:
@@ -938,12 +888,14 @@ def post_json(url: str, payload: dict, token: str = '') -> Tuple[bool, str]:
     except Exception as e:
         return (False, f"Error: {e}")
 
+
 def safe_filename(s: str, maxlen: int = 60) -> str:
     if not s:
         return "NOID"
     s = re.sub(r'[<>:"/\\|?*\n\r\t]+', "_", str(s)).strip()
     s = re.sub(r"_+", "_", s)
     return s[:maxlen] if len(s) > maxlen else s
+
 
 # ========================= ВИДЖЕТЫ =========================
 
@@ -970,6 +922,8 @@ class AutoCompleteCombobox(ttk.Combobox):
             self['values'] = self._all_values
             return
         self['values'] = [x for x in self._all_values if typed.lower() in x.lower()]
+
+
 # Минимальные ширины колонок блока сотрудников (в пикселях условно)
 EMP_COL_WIDTHS = {
     0: 320,  # ФИО
@@ -979,6 +933,8 @@ EMP_COL_WIDTHS = {
     4: 260,  # Комментарий
     5: 80,   # Кнопка "Удалить"
 }
+
+
 # ========================= СТРОКА СОТРУДНИКА =========================
 
 class EmployeeRow:
@@ -1076,6 +1032,8 @@ class EmployeeRow:
             "meal_type": (self.cmb_meal_type.get() or "").strip(),
             "comment": (self.ent_comment.get() or "").strip(),
         }
+
+
 # ========================= СТРАНИЦА СОЗДАНИЯ ЗАЯВКИ =========================
 
 class MealOrderPage(tk.Frame):
@@ -1123,7 +1081,7 @@ class MealOrderPage(tk.Frame):
         self.ent_date.bind("<KeyRelease>", lambda e: self._update_date_hint())
         self.ent_date.bind("<FocusOut>", lambda e: self._update_date_hint())
 
-        # Подразделение 
+        # Подразделение
         tk.Label(top, text="Подразделение*:", bg="#f7f7f7").grid(row=0, column=2, sticky="w")
         self.cmb_dep = ttk.Combobox(top, state="readonly", values=self.deps, width=40)
         saved_dep = get_saved_dep()
@@ -1179,7 +1137,6 @@ class MealOrderPage(tk.Frame):
         tk.Label(hdr, text="Комментарий",       anchor="w").grid(row=0, column=4, padx=2)
         tk.Label(hdr, text="Действие",          anchor="center").grid(row=0, column=5, padx=2)
 
-
         wrap = tk.Frame(emp_wrap)
         wrap.pack(fill="both", expand=True)
         self.cv = tk.Canvas(wrap, borderwidth=0, highlightthickness=0)
@@ -1207,8 +1164,8 @@ class MealOrderPage(tk.Frame):
         # ширины колонок
         for c in range(6):
             top.grid_columnconfigure(c, weight=0)
-        top.grid_columnconfigure(1, weight=1)  
-        top.grid_columnconfigure(3, weight=1)  
+        top.grid_columnconfigure(1, weight=1)
+        top.grid_columnconfigure(3, weight=1)
         top.grid_columnconfigure(5, weight=0)
 
         self._update_emp_list()
@@ -1501,6 +1458,7 @@ class MealOrderPage(tk.Frame):
         except Exception as e:
             messagebox.showerror("Папка", f"Не удалось открыть папку:\n{e}")
 
+
 # ========================= СТРАНИЦА ПЛАНИРОВАНИЯ ПИТАНИЯ =========================
 
 class MealPlanningPage(tk.Frame):
@@ -1509,36 +1467,10 @@ class MealPlanningPage(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
         self.spr_path = get_spr_path()
-        self.authenticated = False
         self.row_meta: Dict[str, Dict[str, Any]] = {}
 
-        if not self._check_password():
-            self._show_access_denied()
-            return
-
-        self.authenticated = True
         self._load_spr()
         self._build_ui()
-
-    def _check_password(self) -> bool:
-        required_password = get_meals_planning_password()
-        if not required_password:
-            return True
-        pwd = simpledialog.askstring("Планирование питания", "Введите пароль для доступа:", show="*", parent=self)
-        if pwd is None:
-            return False
-        if pwd != required_password:
-            messagebox.showerror("Доступ запрещён", "Неверный пароль.", parent=self)
-            return False
-        return True
-
-    def _show_access_denied(self):
-        container = tk.Frame(self, bg="#f7f7f7")
-        container.place(relx=0.5, rely=0.5, anchor="center")
-        tk.Label(container, text="Доступ запрещён", font=("Segoe UI", 18, "bold"),
-                 bg="#f7f7f7", fg="#666").pack(pady=(0, 10))
-        tk.Label(container, text="Для просмотра этого раздела требуется пароль",
-                 font=("Segoe UI", 10), bg="#f7f7f7", fg="#888").pack()
 
     def _load_spr(self):
         employees, objects, meal_types = load_spravochnik_remote_or_local(self.spr_path)
@@ -1788,7 +1720,7 @@ class MealPlanningPage(tk.Frame):
             headers = [
                 "Дата", "Адрес", "ID объекта", "Подразделение", "Наименование бригады",
                 "ФИО", "Табельный №", "Должность", "Тип питания", "Комментарий",
-                "Дубликаты",        # новый столбец
+                "Дубликаты",
             ]
             ws.append(headers)
 
@@ -1833,6 +1765,7 @@ class MealPlanningPage(tk.Frame):
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось сформировать реестр из БД:\n{e}")
 
+
 # ========================= STANDALONE ОКНО =========================
 
 class MealsApp(tk.Tk):
@@ -1854,6 +1787,7 @@ class MealsApp(tk.Tk):
             planning_page = MealPlanningPage(notebook)
             notebook.add(planning_page, text="Планирование питания")
 
+
 # ========================= API ДЛЯ ВСТРАИВАНИЯ =========================
 
 def create_meals_order_page(parent) -> tk.Frame:
@@ -1865,6 +1799,7 @@ def create_meals_order_page(parent) -> tk.Frame:
         messagebox.showerror("Питание — ошибка", traceback.format_exc(), parent=parent)
         return tk.Frame(parent)
 
+
 def create_meals_planning_page(parent) -> tk.Frame:
     ensure_config()
     try:
@@ -1873,6 +1808,7 @@ def create_meals_planning_page(parent) -> tk.Frame:
         import traceback
         messagebox.showerror("Планирование питания — ошибка", traceback.format_exc(), parent=parent)
         return tk.Frame(parent)
+
 
 def open_meals_module(parent=None):
     if parent is None:
@@ -1895,6 +1831,7 @@ def open_meals_module(parent=None):
         notebook.add(planning_page, text="Планирование питания")
 
     return win
+
 
 if __name__ == "__main__":
     ensure_config()
