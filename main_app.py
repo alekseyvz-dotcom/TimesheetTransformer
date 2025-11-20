@@ -2461,14 +2461,17 @@ class MainApp(tk.Tk):
         if SpecialOrders and hasattr(SpecialOrders, "create_planning_page"):
             self._menu_transport_planning_index = 1
             m_transport.add_command(
-                label="🚛 Планирование транспорта",
+                label="🚛Планирование транспорта",
                 command=lambda: self._show_page("planning", lambda parent: SpecialOrders.create_planning_page(parent))
             )
-        m_transport.add_separator()
-        m_transport.add_command(
-            label="📂 Открыть папку заявок",
-            command=self.open_orders_folder
-        )
+
+        # Реестр транспорта
+        if SpecialOrders and hasattr(SpecialOrders, "create_transport_registry_page"):
+            m_transport.add_command(
+                label="🚘Реестр транспорта",
+                command=lambda: self._show_page("transport_registry",
+                    lambda parent: SpecialOrders.create_transport_registry_page(parent))
+            )
         menubar.add_cascade(label="Автотранспорт", menu=m_transport)
 
                 # ========== МЕНЮ ПИТАНИЕ ==========
