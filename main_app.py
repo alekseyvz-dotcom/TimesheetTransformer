@@ -23,6 +23,14 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Any, Dict, NamedTuple
 import base64
 
+import settings_manager as Settings
+
+if os.environ.get("SM_DEBUG") == "1":
+    # Запускаем встроенную отладку и выходим
+    from importlib import reload
+    reload(Settings)  # чтобы отработал отладочный блок в settings_manager
+    raise SystemExit
+
 # --- Импорты сторонних библиотек ---
 try:
     import pandas as pd
