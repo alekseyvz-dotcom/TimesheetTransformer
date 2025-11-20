@@ -2715,25 +2715,40 @@ class MainApp(tk.Tk):
 logging.debug("Модуль main_app импортирован, готов к запуску.")
 
 if __name__ == "__main__":
-    logging.debug("Старт приложения с авторизацией через LoginDialog.")
+    logging.debug("Старт приложения с авторизацией через LoginDialog (единый root).")
 
-    # Создаём корневое окно и прячем его
+    # 1. Создаём ОДНО корневое окно
     root = tk.Tk()
-    root.withdraw()
+    root.withdraw()  # прячем его до успешного логина
 
-    # Показываем модальное окно логина
+    # 2. Показываем модальное окно логина
     dlg = LoginDialog(master=root)
-    root.wait_window(dlg)
+    root.wait_window(dlg)  # ждём закрытия логин-окна
 
     user = dlg.user_info
     if not user:
-        logging.debug("Логин отменён или неуспешен — выходим.")
-        root.destroy()
-        sys.exit(0)
+        logging.debug("Авторизация неуспешна (неверный логин/пароль). Остаёмся на логине.")
+        messagebox.showerror("Вход", "Неверный логин или пароль.", parent=root)
+        # Снова открыть окно логина
+        dlg = LoginDialog(master=root)
+        root.wait_window(dlg)
+        user = dlg.user_info
+        if not user:
+            root.destroy()
+            sys.exit(0)
 
     logging.debug(f"Авторизация успешна, пользователь: {user!r}")
 
+    # 3. Превращаем root в главное окно приложения
+    #   Вместо создания НОВОГО Tk, переиспользуем существующий root.
+    root.deiconify()  # показываем корневое окно
+
+    # Инициализируем MainApp поверх существующего root.
+    # Для этого можно использовать наследование от tk.Tk, но мы уже создали root.
+    # Самый простой и безопасный способ — пересоздать MainApp как отдельный Tk,
+    # но перед этим полностью уничтожить root.
     root.destroy()
 
     app = MainApp(current_user=user)
     app.mainloop()
+
