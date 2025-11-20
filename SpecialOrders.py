@@ -2143,6 +2143,15 @@ def create_planning_page(parent) -> tk.Frame:
         messagebox.showerror("Планирование — ошибка", traceback.format_exc(), parent=parent)
         return tk.Frame(parent)
 
+def create_transport_registry_page(parent) -> tk.Frame:
+    ensure_config()
+    try:
+        return TransportRegistryPage(parent)
+    except Exception:
+        import traceback
+        messagebox.showerror("Реестр транспорта — ошибка", traceback.format_exc(), parent=parent)
+        return tk.Frame(parent)
+
 def open_special_orders(parent=None):
     """
     Совместимость: если parent задан — открываем Toplevel с встраиваемой страницей.
