@@ -422,6 +422,20 @@ class LoginDialog(tk.Toplevel):
         self.grab_set()
         self.ent_login.focus_set()
 
+    def _set_user(self, user: Optional[Dict[str, Any]]):
+        """Устанавливает текущего пользователя и обновляет заголовок/меню."""
+        self.current_user = user or {}
+        caption = ""
+        if user:
+            fn = user.get("full_name") or ""
+            un = user.get("username") or ""
+            caption = f" — {fn or un}"
+        self.title(APP_NAME + caption)
+
+        # Здесь можно при желании блокировать/разблокировать пункты меню.
+        # У вас сейчас меню без ролей, поэтому просто ничего не отключаем.
+        # Но если нужно, можно, например, отключать пункты "Питание" до логина.
+
     def _on_ok(self):
         username = self.ent_login.get().strip()
         password = self.ent_pass.get().strip()
@@ -1268,6 +1282,83 @@ class HomePage(tk.Frame):
             .pack(anchor="center", pady=(4, 6))
         tk.Label(center, text="Выберите раздел в верхнем меню.\nОбъектный табель → Создать — для работы с табелями.",
                  font=("Segoe UI", 10), fg="#444", bg="#f7f7f7", justify="center").pack(anchor="center")
+
+class LoginPage(tk.Frame):
+    def __init__(self, master, app_ref: "MainApp"):
+        super().__init__(master, bg="#f7f7f7")
+        self.app_ref = app_ref
+
+        outer = tk.Frame(self, bg="#f7f7f7")
+        outer.pack(fill="both", expand=True)
+
+        center = tk.Frame(outer, bg="#f7f7f7")
+        center.place(relx=0.5, rely=0.5, anchor="center")
+
+        tk.Label(
+            center,
+            text="Управление строительством",
+            font=("Segoe UI", 16, "bold"),
+            bg="#f7f7f7",
+        ).grid(row=0, column=0, columnspan=2, pady=(0, 10))
+
+        tk.Label(
+            center,
+            text="Вход в систему",
+            font=("Segoe UI", 11),
+            fg="#555",
+            bg="#f7f7f7",
+        ).grid(row=1, column=0, columnspan=2, pady=(0, 15))
+
+        tk.Label(center, text="Логин:", bg="#f7f7f7")\
+            .grid(row=2, column=0, sticky="e", padx=(0, 6), pady=4)
+        tk.Label(center, text="Пароль:", bg="#f7f7f7")\
+            .grid(row=3, column=0, sticky="e", padx=(0, 6), pady=4)
+
+        self.ent_login = ttk.Entry(center, width=26)
+        self.ent_login.grid(row=2, column=1, sticky="w", pady=4)
+        self.ent_pass = ttk.Entry(center, width=26, show="*")
+        self.ent_pass.grid(row=3, column=1, sticky="w", pady=4)
+
+        btns = tk.Frame(center, bg="#f7f7f7")
+        btns.grid(row=4, column=0, columnspan=2, pady=(12, 0), sticky="e")
+
+        ttk.Button(btns, text="Войти", width=12, command=self._on_login)\
+            .pack(side="left", padx=5)
+        ttk.Button(btns, text="Выход", width=10, command=self._on_exit)\
+            .pack(side="left", padx=5)
+
+        self.ent_login.focus_set()
+        self.bind_all("<Return>", self._on_enter)
+
+    def _on_enter(self, event):
+        # чтобы Enter срабатывал только если фокус на логин-странице
+        widget = event.widget
+        if self.winfo_ismapped():
+            self._on_login()
+
+    def _on_login(self):
+        username = self.ent_login.get().strip()
+        password = self.ent_pass.get().strip()
+        if not username or not password:
+            messagebox.showwarning("Вход", "Укажите логин и пароль.", parent=self)
+            return
+        try:
+            logging.debug(f"LoginPage: пробуем авторизовать {username!r}")
+            user = authenticate_user(username, password)
+        except Exception as e:
+            logging.exception("Ошибка при обращении к БД в authenticate_user")
+            messagebox.showerror("Вход", f"Ошибка при обращении к БД:\n{e}", parent=self)
+            return
+
+        if not user:
+            messagebox.showerror("Вход", "Неверный логин или пароль.", parent=self)
+            return
+
+        # Успех: передаём пользователя в MainApp
+        self.app_ref.on_login_success(user)
+
+    def _on_exit(self):
+        self.app_ref.destroy()
 
 class TimesheetPage(tk.Frame):
     COLPX = {"fio": 200, "tbn": 100, "day": 36, "days": 46, "hours": 56, "btn52": 40, "del": 66}
@@ -2441,19 +2532,15 @@ class TimesheetPage(tk.Frame):
 class MainApp(tk.Tk):
     def __init__(self, current_user: Optional[Dict[str, Any]] = None):
         super().__init__()
-        self.current_user = current_user or {}
-        user_caption = ""
-        if current_user:
-            fn = current_user.get("full_name") or ""
-            un = current_user.get("username") or ""
-            user_caption = f" — {fn or un}"
-        self.title(APP_NAME + user_caption)
+        self.current_user: Dict[str, Any] = current_user or {}
+        self.title(APP_NAME)
         self.geometry("1024x720")
         self.minsize(980, 640)
         self.resizable(True, True)
 
         ensure_config()
         self._pages: Dict[str, tk.Widget] = {}
+        self._menubar = None  # сохраним ссылку, чтобы управлять меню
 
         # Меню
         menubar = tk.Menu(self)
@@ -2546,6 +2633,9 @@ class MainApp(tk.Tk):
         menubar.add_cascade(label="Настройки", menu=m_settings)
 
         self.config(menu=menubar)
+        self._menubar = menubar
+        # по умолчанию считаем, что пользователь не вошёл
+        self._set_user(None)
 
         # Шапка
         header = tk.Frame(self)
@@ -2563,7 +2653,17 @@ class MainApp(tk.Tk):
         tk.Label(footer, text="Разработал Алексей Зезюкин, АНО МЛСТ 2025",
                  font=("Segoe UI", 8), fg="#666").pack(side="right")
 
-        # Показать домашнюю страницу при запуске
+        # При первом запуске показываем страницу логина
+        self.show_login()
+
+    def show_login(self):
+        self._show_page("login", lambda parent: LoginPage(parent, app_ref=self))
+
+    def on_login_success(self, user: Dict[str, Any]):
+        """Вызывается LoginPage при успешной авторизации."""
+        logging.debug(f"MainApp.on_login_success: {user!r}")
+        self._set_user(user)
+        # После логина показываем домашнюю страницу
         self.show_home()
 
     def _show_page(self, key: str, builder):
@@ -2715,40 +2815,6 @@ class MainApp(tk.Tk):
 logging.debug("Модуль main_app импортирован, готов к запуску.")
 
 if __name__ == "__main__":
-    logging.debug("Старт приложения с авторизацией через LoginDialog (единый root).")
-
-    # 1. Создаём ОДНО корневое окно
-    root = tk.Tk()
-    root.withdraw()  # прячем его до успешного логина
-
-    # 2. Показываем модальное окно логина
-    dlg = LoginDialog(master=root)
-    root.wait_window(dlg)  # ждём закрытия логин-окна
-
-    user = dlg.user_info
-    if not user:
-        logging.debug("Авторизация неуспешна (неверный логин/пароль). Остаёмся на логине.")
-        messagebox.showerror("Вход", "Неверный логин или пароль.", parent=root)
-        # Снова открыть окно логина
-        dlg = LoginDialog(master=root)
-        root.wait_window(dlg)
-        user = dlg.user_info
-        if not user:
-            root.destroy()
-            sys.exit(0)
-
-    logging.debug(f"Авторизация успешна, пользователь: {user!r}")
-
-    # 3. Превращаем root в главное окно приложения
-    #   Вместо создания НОВОГО Tk, переиспользуем существующий root.
-    root.deiconify()  # показываем корневое окно
-
-    # Инициализируем MainApp поверх существующего root.
-    # Для этого можно использовать наследование от tk.Tk, но мы уже создали root.
-    # Самый простой и безопасный способ — пересоздать MainApp как отдельный Tk,
-    # но перед этим полностью уничтожить root.
-    root.destroy()
-
-    app = MainApp(current_user=user)
+    logging.debug("Старт приложения без внешней авторизации (логин-страница внутри MainApp).")
+    app = MainApp()
     app.mainloop()
-
