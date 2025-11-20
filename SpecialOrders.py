@@ -56,7 +56,6 @@ KEY_YA_PUBLIC_LINK      = "yadisk_public_link"        # публичная сс�
 KEY_YA_PUBLIC_PATH      = "yadisk_public_path"        # если опубликована папка — путь к файлу внутри неё
 
 SPRAVOCHNIK_FILE = "Справочник.xlsx"
-ORDERS_DIR = "Заявки_спецтехники"
 
 # Если доступен settings_manager — подменяем конфиг-функции на зашифрованное хранилище
 if Settings:
@@ -851,8 +850,6 @@ class SpecialOrdersPage(tk.Frame):
         ensure_config()  # из settings_manager, если доступен
         self.base_dir = exe_dir()
         self.spr_path = get_spr_path()
-        self.orders_dir = self.base_dir / ORDERS_DIR
-        self.orders_dir.mkdir(parents=True, exist_ok=True)
 
         self._load_spr()
         self._build_ui()
@@ -972,7 +969,6 @@ class SpecialOrdersPage(tk.Frame):
         bottom.pack(fill="x", padx=10, pady=(0, 10))
         ttk.Button(bottom, text="Сохранить заявку", command=self.save_order).pack(side="left", padx=4)
         ttk.Button(bottom, text="Очистить форму", command=self.clear_form).pack(side="left", padx=4)
-        ttk.Button(bottom, text="Открыть папку заявок", command=self.open_orders_dir).pack(side="left", padx=4)
 
         self._update_fio_list()
         self._update_tomorrow_hint()
@@ -1104,86 +1100,25 @@ class SpecialOrdersPage(tk.Frame):
     def save_order(self):
         if not self._validate_form():
             return
-            
-        req_date = parse_date_any(self.ent_date.get()) or (date.today() + timedelta(days=1))
-        tomorrow = date.today() + timedelta(days=1)
-        if req_date != tomorrow:
-            messagebox.showwarning("Заявка", f"Заявка возможна только на {tomorrow.strftime('%Y-%m-%d')}.")
-            return
-        
+
         data = self._build_order_dict()
 
-        # 1. Сохранение в БД
+        # Сохраняем только в БД
         order_db_id = None
-        db_error = None
         try:
             if Settings:
                 order_db_id = save_transport_order_to_db(data)
         except Exception as e:
-            db_error = e
-
-        # 2. XLSX
-        ts = datetime.now().strftime("%H%M%S")
-        id_part = data["object"]["id"] or safe_filename(data["object"]["address"])
-        fname = f"Заявка_спецтехники_{data['date']}_{ts}_{id_part or 'NOID'}.xlsx"
-        fpath = self.orders_dir / fname
-
-        try:
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Заявка"
-            ws.append(["Создано", data["created_at"]])
-            ws.append(["Дата", data["date"]])
-            ws.append(["Подразделение", data["department"]])
-            ws.append(["Заявитель (ФИО)", data["requester_fio"]])
-            ws.append(["Телефон", data["requester_phone"]])
-            ws.append(["ID объекта", data["object"]["id"]])
-            ws.append(["Адрес", data["object"]["address"]])
-            ws.append(["Комментарий", data["comment"]])
-            if order_db_id is not None:
-                ws.append(["ID заявки в БД", order_db_id])
-            ws.append([])
-            hdr = ["#", "Техника", "Кол-во", "Подача (чч:мм)", "Часы", "Примечание"]
-            ws.append(hdr)
-            for i, p in enumerate(data["positions"], start=1):
-                ws.append([i, p["tech"], p["qty"], (p["time"] or None), p["hours"], p["note"]])
-            for col, w in enumerate([4, 48, 8, 14, 10, 36], start=1):
-                ws.column_dimensions[get_column_letter(col)].width = w
-            ws.freeze_panes = "A12"
-            wb.save(fpath)
-        except Exception as e:
-            messagebox.showerror("Сохранение", f"Не удалось сохранить XLSX:\n{e}")
+            messagebox.showerror(
+                "Сохранение",
+                f"Не удалось сохранить заявку в БД:\n{e}"
+            )
             return
 
-        # 3. CSV (архив)
-        csv_path = self.orders_dir / f"Свод_заявок_{data['date'][:7].replace('-', '_')}.csv"
-        try:
-            new = not csv_path.exists()
-            with open(csv_path, "a", encoding="utf-8-sig", newline="") as f:
-                w = csv.writer(f, delimiter=";")
-                if new:
-                    w.writerow([
-                        "Создано","Дата","Подразделение","ФИО","Телефон","ID объекта","Адрес",
-                        "Техника","Кол-во","Подача","Часы","Примечание","Комментарий заявки"
-                    ])
-                for p in data["positions"]:
-                    w.writerow([
-                        data["created_at"], data["date"], data["department"], data["requester_fio"],
-                        data["requester_phone"], data["object"]["id"], data["object"]["address"],
-                        p["tech"], p["qty"], p["time"], p["hours"], p["note"], data["comment"]
-                    ])
-        except Exception as e:
-            messagebox.showwarning("Сводный CSV", f"XLSX сохранён, но не удалось добавить в CSV:\n{e}")
-
-        # 4. Итоговое сообщение
-        extra = ""
-        if db_error:
-            extra = f"\n\nВНИМАНИЕ: не удалось сохранить в БД:\n{db_error}"
+        # Краткое подтверждение без путей к файлам
         messagebox.showinfo(
             "Сохранение",
-            f"Заявка сохранена.\n"
-            f"ID в БД: {order_db_id if order_db_id is not None else '—'}\n\n"
-            f"XLSX:\n{fpath}\nCSV:\n{csv_path}{extra}"
+            f"Заявка сохранена в БД.\nID: {order_db_id if order_db_id is not None else '—'}"
         )
 
     def clear_form(self):
@@ -1201,12 +1136,6 @@ class SpecialOrdersPage(tk.Frame):
         self.add_position()
         self._update_tomorrow_hint()
 
-    def open_orders_dir(self):
-        try:
-            os.startfile(self.orders_dir)
-        except Exception as e:
-            messagebox.showerror("Папка", f"Не удалось открыть папку:\n{e}")
-
 # ------------------------- Планирование транспорта -------------------------
 
 class TransportPlanningPage(tk.Frame):
@@ -1218,60 +1147,8 @@ class TransportPlanningPage(tk.Frame):
         self.authenticated = False
         self.row_meta: Dict[str, Dict[str, str]] = {} 
 
-        # ПРОВЕРКА ПАРОЛЯ
-        if not self._check_password():
-            self._show_access_denied()
-            return
-
-        self.authenticated = True
         self._load_spr()
         self._build_ui()
-
-    def _check_password(self) -> bool:
-        """Проверка пароля (аналогично summary_export)"""
-        required_password = get_planning_password()
-        
-        # Если пароль пустой - доступ без авторизации
-        if not required_password:
-            return True
-        
-        # Запрос пароля через стандартный диалог
-        pwd = simpledialog.askstring(
-            "Планирование транспорта", 
-            "Введите пароль для доступа:", 
-            show="*", 
-            parent=self
-        )
-        
-        if pwd is None:
-            return False
-        
-        if pwd != required_password:
-            messagebox.showerror("Доступ запрещён", "Неверный пароль.", parent=self)
-            return False
-        
-        return True
-
-    def _show_access_denied(self):
-        """Экран отказа в доступе"""
-        container = tk.Frame(self, bg="#f7f7f7")
-        container.place(relx=0.5, rely=0.5, anchor="center")
-        
-        tk.Label(
-            container,
-            text="Доступ запрещён",
-            font=("Segoe UI", 18, "bold"),
-            bg="#f7f7f7",
-            fg="#666"
-        ).pack(pady=(0, 10))
-        
-        tk.Label(
-            container,
-            text="Для просмотра этого раздела требуется пароль",
-            font=("Segoe UI", 10),
-            bg="#f7f7f7",
-            fg="#888"
-        ).pack()
         
     def _load_spr(self):
         """Загрузка справочника"""
