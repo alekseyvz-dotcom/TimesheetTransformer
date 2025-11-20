@@ -360,127 +360,6 @@ def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
     finally:
         conn.close()
 
-# ================= ОКНО ЛОГИНА =================
-
-class LoginDialog(tk.Toplevel):
-    def __init__(self, master=None):
-        super().__init__(master)
-        self.title("Вход в систему")
-        self.resizable(False, False)
-        self.user_info: Optional[Dict[str, Any]] = None
-
-        # Небольшой отступ и рамка
-        container = tk.Frame(self, bg="#f7f7f7", padx=20, pady=20)
-        container.pack(fill="both", expand=True)
-
-        tk.Label(
-            container,
-            text="Управление строительством",
-            font=("Segoe UI", 12, "bold"),
-            bg="#f7f7f7",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
-
-        tk.Label(
-            container,
-            text="Введите логин и пароль",
-            font=("Segoe UI", 9),
-            fg="#555",
-            bg="#f7f7f7",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 10))
-
-        tk.Label(container, text="Логин:", bg="#f7f7f7")\
-            .grid(row=2, column=0, sticky="e", pady=5, padx=(0, 6))
-        tk.Label(container, text="Пароль:", bg="#f7f7f7")\
-            .grid(row=3, column=0, sticky="e", pady=5, padx=(0, 6))
-
-        self.ent_login = ttk.Entry(container, width=26)
-        self.ent_login.grid(row=2, column=1, pady=5, sticky="w")
-        self.ent_pass = ttk.Entry(container, width=26, show="*")
-        self.ent_pass.grid(row=3, column=1, pady=5, sticky="w")
-
-        # Панель кнопок
-        btns = tk.Frame(container, bg="#f7f7f7")
-        btns.grid(row=4, column=0, columnspan=2, pady=(15, 0), sticky="e")
-
-        ttk.Button(btns, text="Войти", command=self._on_ok, width=10)\
-            .pack(side="left", padx=5)
-        ttk.Button(btns, text="Отмена", command=self._on_cancel, width=10)\
-            .pack(side="left", padx=5)
-
-        # Обработчики клавиш
-        self.bind("<Return>", lambda e: self._on_ok())
-        self.bind("<Escape>", lambda e: self._on_cancel())
-
-        # Центрирование
-        self.update_idletasks()
-        x = (self.winfo_screenwidth() // 2) - (self.winfo_reqwidth() // 2)
-        y = (self.winfo_screenheight() // 2) - (self.winfo_reqheight() // 2)
-        self.geometry(f"+{x}+{y}")
-
-        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
-        self.transient(master)
-        self.grab_set()
-        self.ent_login.focus_set()
-
-    def _set_user(self, user: Optional[Dict[str, Any]]):
-        """Устанавливает текущего пользователя и обновляет заголовок/меню."""
-        self.current_user = user or {}
-        caption = ""
-        if user:
-            fn = user.get("full_name") or ""
-            un = user.get("username") or ""
-            caption = f" — {fn or un}"
-        self.title(APP_NAME + caption)
-
-        # Здесь можно при желании блокировать/разблокировать пункты меню.
-        # У вас сейчас меню без ролей, поэтому просто ничего не отключаем.
-        # Но если нужно, можно, например, отключать пункты "Питание" до логина.
-
-    def _on_ok(self):
-        username = self.ent_login.get().strip()
-        password = self.ent_pass.get().strip()
-        if not username or not password:
-            messagebox.showwarning("Вход", "Укажите логин и пароль.", parent=self)
-            return
-        try:
-            logging.debug(f"LoginDialog: пытаемся авторизовать {username!r}")
-            user = authenticate_user(username, password)
-        except Exception as e:
-            logging.exception("Ошибка при обращении к БД в authenticate_user")
-            messagebox.showerror("Вход", f"Ошибка при обращении к БД:\n{e}", parent=self)
-            return
-        if not user:
-            messagebox.showerror("Вход", "Неверный логин или пароль.", parent=self)
-            return
-        self.user_info = user
-        self.destroy()
-
-    def _on_cancel(self):
-        self.user_info = None
-        self.destroy()
-
-    def _on_ok(self):
-        username = self.ent_login.get().strip()
-        logging.debug(f"LoginDialog: нажали Войти, логин={username!r}")
-        password = self.ent_pass.get().strip()
-        if not username or not password:
-            messagebox.showwarning("Вход", "Укажите логин и пароль.", parent=self)
-            return
-        try:
-            user = authenticate_user(username, password)
-        except Exception as e:
-            messagebox.showerror("Вход", f"Ошибка при обращении к БД:\n{e}", parent=self)
-            return
-        if not user:
-            messagebox.showerror("Вход", "Неверный логин или пароль.", parent=self)
-            return
-        self.user_info = user
-        self.destroy()
-
-    def _on_cancel(self):
-        self.user_info = None
-        self.destroy()
-
 # ------------- УДАЛЕННЫЙ СПРАВОЧНИК И ДРУГИЕ УТИЛИТЫ -------------
 
 def fetch_yadisk_public_bytes(public_link: str, public_path: str = "") -> bytes:
@@ -2655,6 +2534,17 @@ class MainApp(tk.Tk):
 
         # При первом запуске показываем страницу логина
         self.show_login()
+
+    def _set_user(self, user: Optional[Dict[str, Any]]):
+        """Устанавливает текущего пользователя и обновляет заголовок окна."""
+        self.current_user = user or {}
+        caption = ""
+        if user:
+            fn = user.get("full_name") or ""
+            un = user.get("username") or ""
+            caption = f" — {fn or un}"
+        self.title(APP_NAME + caption)
+        # Здесь при желании можно включать/отключать пункты меню в зависимости от ролей
 
     def show_login(self):
         self._show_page("login", lambda parent: LoginPage(parent, app_ref=self))
