@@ -2431,6 +2431,7 @@ class MainApp(tk.Tk):
         self._menu_transport = None
         self._menu_meals_planning_index = None
         self._menu_transport_planning_index = None
+        self._menu_settings_index = None
 
         # Меню
         menubar = tk.Menu(self)
@@ -2531,6 +2532,7 @@ class MainApp(tk.Tk):
         m_settings = tk.Menu(menubar, tearoff=0)
         m_settings.add_command(label="Открыть настройки", command=lambda: Settings.open_settings_window(self) if Settings else messagebox.showwarning("Настройки", "Модуль settings_manager не найден."))
         menubar.add_cascade(label="Настройки", menu=m_settings)
+        self._menu_settings_index = menubar.index("end")
 
         self.config(menu=menubar)
         self._menubar = menubar
@@ -2628,40 +2630,40 @@ class MainApp(tk.Tk):
         """Включает/выключает пункты меню в зависимости от роли пользователя."""
         role = (self.current_user or {}).get("role") or "specialist"
 
-        # По умолчанию всё выключено (но сами меню остаются)
-        # Настраиваем меню Питание
+        # --- Питание ---
         if self._menu_meals is not None:
             try:
-                # Всегда разрешаем "Создать заявку" (индекс 0)
+                # "Создать заявку" (индекс 0) — всегда активен
                 self._menu_meals.entryconfig(0, state="normal")
-
-                # Планирование питания (индекс 1)
+                # Планирование (индекс 1, если есть)
                 if self._menu_meals_planning_index is not None:
                     st = "normal" if role in ("admin", "planner") else "disabled"
                     self._menu_meals.entryconfig(self._menu_meals_planning_index, state=st)
             except Exception:
                 pass
 
-        # Меню Автотранспорт
+        # --- Автотранспорт ---
         if self._menu_transport is not None:
             try:
-                # "Создать заявку" (индекс 0) — всегда разрешаем для специалиста / выше
                 self._menu_transport.entryconfig(0, state="normal")
-
-                # Планирование транспорта (индекс 1)
                 if self._menu_transport_planning_index is not None:
                     st = "normal" if role in ("admin", "planner") else "disabled"
                     self._menu_transport.entryconfig(self._menu_transport_planning_index, state=st)
             except Exception:
                 pass
 
-        # При необходимости можно аналогично ограничивать другие меню (Аналитика, Настройки и т.п.).
-        # Например, запретить аналитку для 'specialist':
-        if hasattr(self, "_menubar") and self._menubar is not None:
-            # Пример: пункт "Аналитика" разрешён только admin/manager/planner
-            # Индекс вкладки "Аналитика" в менюбара сейчас у вас: Главная, Объектный табель, Автотранспорт, Питание, Справочник, Аналитика, Инструменты, Настройки
-            # То есть "Аналитика" примерно 5-я (индекс 5), но безопаснее не трогать, пока это не нужно явно.
-            pass
+        # --- Верхнее меню "Настройки" только для admin ---
+        if self._menubar is not None and self._menu_settings_index is not None:
+            try:
+                # Получаем текущее состояние пункта
+                label = self._menubar.entrycget(self._menu_settings_index, "label")
+                # Если роль не admin — "Прячем" пункт: делаем его "disabled"
+                # (Tkinter не умеет полностью скрыть, только отключить. Если нужно
+                # именно убрать пункт, можно перестраивать меню целиком.)
+                state = "normal" if role == "admin" else "disabled"
+                self._menubar.entryconfig(self._menu_settings_index, state=state)
+            except Exception:
+                pass
 
     # --- Справочник ---
     def open_spravochnik(self):
