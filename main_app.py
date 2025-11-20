@@ -342,7 +342,12 @@ def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT id, username, password_hash, is_active, full_name
+                SELECT id,
+                       username,
+                       password_hash,
+                       is_active,
+                       full_name,
+                       role
                 FROM app_users
                 WHERE username = %s
                 """,
@@ -2421,6 +2426,11 @@ class MainApp(tk.Tk):
         ensure_config()
         self._pages: Dict[str, tk.Widget] = {}
         self._menubar = None  # сохраним ссылку, чтобы управлять меню
+        # ссылки на важные пункты меню для управления ролями
+        self._menu_meals = None
+        self._menu_transport = None
+        self._menu_meals_planning_index = None
+        self._menu_transport_planning_index = None
 
         # Меню
         menubar = tk.Menu(self)
@@ -2434,6 +2444,9 @@ class MainApp(tk.Tk):
 
         # ========== ОБНОВЛЕННОЕ МЕНЮ АВТОТРАНСПОРТ ==========
         m_transport = tk.Menu(menubar, tearoff=0)
+        self._menu_transport = m_transport
+
+        # Создать заявку (индекс 0)
         if SpecialOrders and hasattr(SpecialOrders, "create_page"):
             m_transport.add_command(
                 label="📝 Создать заявку",
@@ -2441,8 +2454,11 @@ class MainApp(tk.Tk):
             )
         else:
             m_transport.add_command(label="📝 Создать заявку", command=self.run_special_orders_exe)
-        # Добавляем планирование (если включено в конфиге)
+
+        # Планирование транспорта (индекс 1, если добавится)
+        self._menu_transport_planning_index = None
         if SpecialOrders and hasattr(SpecialOrders, "create_planning_page"):
+            self._menu_transport_planning_index = 1
             m_transport.add_command(
                 label="🚛 Планирование транспорта",
                 command=lambda: self._show_page("planning", lambda parent: SpecialOrders.create_planning_page(parent))
@@ -2458,6 +2474,9 @@ class MainApp(tk.Tk):
         logging.debug(f"Строим меню Питание. meals_module={meals_module}")
 
         m_meals = tk.Menu(menubar, tearoff=0)
+        self._menu_meals = m_meals
+
+        # Создать заявку (индекс 0)
         if meals_module and hasattr(meals_module, "create_meals_order_page"):
             logging.debug("Добавляем пункт 'Создать заявку' из meals_module")
             m_meals.add_command(
@@ -2468,11 +2487,13 @@ class MainApp(tk.Tk):
             logging.debug("meals_module нет или нет create_meals_order_page — используем run_meals_exe")
             m_meals.add_command(label="📝 Создать заявку", command=self.run_meals_exe)
 
-        # Планирование питания (если включено)
+        # Планирование питания (индекс 1, если есть функция)
+        self._menu_meals_planning_index = None
         if meals_module and hasattr(meals_module, "create_meals_planning_page"):
             logging.debug("Добавляем пункт 'Планирование питания' из meals_module")
+            self._menu_meals_planning_index = 1
             m_meals.add_command(
-                label="🍽️ Планирование питания",
+                label="🍽️Планирование питания",
                 command=lambda: self._show_page("meals_planning", lambda parent: meals_module.create_meals_planning_page(parent))
             )
         else:
@@ -2485,7 +2506,6 @@ class MainApp(tk.Tk):
         )
         menubar.add_cascade(label="Питание", menu=m_meals)
         # ==================================
-
 
         m_spr = tk.Menu(menubar, tearoff=0)
         m_spr.add_command(label="Открыть справочник", command=self.open_spravochnik)
@@ -2546,6 +2566,7 @@ class MainApp(tk.Tk):
             un = user.get("username") or ""
             caption = f" — {fn or un}"
         self.title(APP_NAME + caption)
+        self._apply_role_visibility()
 
     def show_login(self):
         self._show_page("login", lambda parent: LoginPage(parent, app_ref=self))
@@ -2603,6 +2624,45 @@ class MainApp(tk.Tk):
     def show_home(self):
         self._show_page("home", lambda parent: HomePage(parent))
 
+    def _apply_role_visibility(self):
+        """Включает/выключает пункты меню в зависимости от роли пользователя."""
+        role = (self.current_user or {}).get("role") or "specialist"
+
+        # По умолчанию всё выключено (но сами меню остаются)
+        # Настраиваем меню Питание
+        if self._menu_meals is not None:
+            try:
+                # Всегда разрешаем "Создать заявку" (индекс 0)
+                self._menu_meals.entryconfig(0, state="normal")
+
+                # Планирование питания (индекс 1)
+                if self._menu_meals_planning_index is not None:
+                    st = "normal" if role in ("admin", "planner") else "disabled"
+                    self._menu_meals.entryconfig(self._menu_meals_planning_index, state=st)
+            except Exception:
+                pass
+
+        # Меню Автотранспорт
+        if self._menu_transport is not None:
+            try:
+                # "Создать заявку" (индекс 0) — всегда разрешаем для специалиста / выше
+                self._menu_transport.entryconfig(0, state="normal")
+
+                # Планирование транспорта (индекс 1)
+                if self._menu_transport_planning_index is not None:
+                    st = "normal" if role in ("admin", "planner") else "disabled"
+                    self._menu_transport.entryconfig(self._menu_transport_planning_index, state=st)
+            except Exception:
+                pass
+
+        # При необходимости можно аналогично ограничивать другие меню (Аналитика, Настройки и т.п.).
+        # Например, запретить аналитку для 'specialist':
+        if hasattr(self, "_menubar") and self._menubar is not None:
+            # Пример: пункт "Аналитика" разрешён только admin/manager/planner
+            # Индекс вкладки "Аналитика" в менюбара сейчас у вас: Главная, Объектный табель, Автотранспорт, Питание, Справочник, Аналитика, Инструменты, Настройки
+            # То есть "Аналитика" примерно 5-я (индекс 5), но безопаснее не трогать, пока это не нужно явно.
+            pass
+
     # --- Справочник ---
     def open_spravochnik(self):
         path = get_spr_path_from_config()
@@ -2637,7 +2697,6 @@ class MainApp(tk.Tk):
             f"Локальный путь: {path}\n\n"
             "В окнах используйте «Обновить справочник» для перечтения."
         )
-
 
     # ========== НОВЫЙ МЕТОД: Открыть папку заявок ==========
     def open_orders_folder(self):
