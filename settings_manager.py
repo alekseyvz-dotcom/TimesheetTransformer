@@ -1,4 +1,3 @@
-# settings_manager.py
 import os
 import json
 import hmac
@@ -48,9 +47,9 @@ KEY_MEALS_PLANNING_PASSWORD = "meals_planning_password"
 
 SETTINGS_FILENAME = "settings.dat"  # зашифрованное хранилище
 
-# ПАРОЛЬ ДОСТУПА К ОКНУ «НАСТРОЙКИ»
-SETTINGS_ACCESS_PASSWORD = "2025"
-
+# Секрет для fallback‑шифрования (одинаков на всех машинах вашей установки)
+# Сгенерируйте что‑нибудь случайное и длинное один раз и не меняйте.
+APP_SECRET = "KIwcVIWqzrPoBzrlTdN1lvnTcpX7sikf"
 
 def exe_dir() -> Path:
     if getattr(__import__("sys"), "frozen", False):
@@ -158,10 +157,10 @@ def _dpapi_unprotect(data: bytes) -> bytes:
 
 
 def _fallback_key() -> bytes:
-    user = os.environ.get("USERNAME") or os.environ.get("USER") or "user"
-    root = str(exe_dir())
-    payload = (user + "|" + root).encode("utf-8")
-    return hashlib.sha256(payload).digest()
+    """
+    Единый ключ для всех установок (привязан к APP_SECRET, а не к ПК/пользователю).
+    """
+    return hashlib.sha256(APP_SECRET.encode("utf-8")).digest()
 
 
 def _fallback_encrypt(data: bytes) -> bytes:
@@ -198,13 +197,18 @@ def _encrypt_dict(d: Dict[str, Any]) -> bytes:
 def _decrypt_dict(blob: bytes) -> Dict[str, Any]:
     if not blob:
         return {}
-    if blob.startswith(b"WDP1"):
-        data = _dpapi_unprotect(blob[4:])
-        return json.loads(data.decode("utf-8"))
-    if blob.startswith(b"FBK1"):
-        data = _fallback_decrypt(blob[4:])
-        return json.loads(data.decode("utf-8"))
-    return json.loads(blob.decode("utf-8", errors="replace"))
+    try:
+        if blob.startswith(b"WDP1"):
+            data = _dpapi_unprotect(blob[4:])
+            return json.loads(data.decode("utf-8"))
+        if blob.startswith(b"FBK1"):
+            data = _fallback_decrypt(blob[4:])
+            return json.loads(data.decode("utf-8"))
+        return json.loads(blob.decode("utf-8", errors="replace"))
+    except Exception:
+        # если не смогли расшифровать (например, старый формат) — вернём пустой словарь,
+        # и дальше загрузятся _defaults
+        return {}
 
 
 # ---------------- ХРАНИЛИЩЕ НАСТРОЕК ----------------
@@ -217,7 +221,7 @@ _defaults: Dict[str, Dict[str, Any]] = {
     },
     "DB": {
         "provider": "sqlite",  # sqlite | postgres | mysql
-        "database_url": "",
+        "database_url": "",    # можно сюда сразу вписать боевой DATABASE_URL, если он общий
         "sqlite_path": str(exe_dir() / "app_data.sqlite3"),
         "sslmode": "require",
     },
@@ -261,11 +265,16 @@ def load_settings():
         try:
             raw = SETTINGS_PATH.read_bytes()
             _store = _decrypt_dict(raw)
-            _ensure_sections()
-            return
+            if not isinstance(_store, dict):
+                _store = {}
         except Exception:
-            pass
-    migrate_from_ini_or_create()
+            _store = {}
+    else:
+        _store = {}
+    _ensure_sections()
+    # если файл не существовал или не читался — сразу сохраняем новый
+    if not SETTINGS_PATH.exists():
+        save_settings()
 
 
 def save_settings():
@@ -750,16 +759,7 @@ class UsersPage(tk.Frame):
 def open_settings_window(parent: tk.Tk):
     ensure_config()
 
-    # Запрос пароля
-    pwd = simpledialog.askstring(
-        "Доступ к настройкам", "Введите пароль:", show="*", parent=parent
-    )
-    if pwd is None:
-        return
-    if pwd != SETTINGS_ACCESS_PASSWORD:
-        messagebox.showerror("Доступ", "Неверный пароль.")
-        return
-
+    # Локальный пароль доступа убран: окно настроек открывается сразу.
     win = tk.Toplevel(parent)
     win.title("Настройки")
     win.resizable(False, False)
