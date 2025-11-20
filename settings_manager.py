@@ -221,7 +221,7 @@ _defaults: Dict[str, Dict[str, Any]] = {
     },
     "DB": {
         "provider": "sqlite",  # sqlite | postgres | mysql
-        "database_url": "",    # можно сюда сразу вписать боевой DATABASE_URL, если он общий
+        "database_url": "postgresql://myappuser:QweRty123!change@185.55.58.31:5432/myappdb?sslmode=disable",    # можно сюда сразу вписать боевой DATABASE_URL, если он общий
         "sqlite_path": str(exe_dir() / "app_data.sqlite3"),
         "sslmode": "require",
     },
