@@ -220,6 +220,69 @@ def save_transport_order_to_db(data: dict) -> int:
         return order_id
     finally:
         conn.close()
+
+# ------------------------- БД: реестр транспорта -------------------------
+
+def fetch_all_vehicles() -> List[Dict[str, Any]]:
+    """
+    Возвращает список всех транспортных средств из таблицы vehicles.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, type, name, plate, department, note
+                FROM vehicles
+                ORDER BY type, name, plate
+                """
+            )
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def insert_vehicle(
+    v_type: str,
+    name: str,
+    plate: str,
+    department: str = "",
+    note: str = "",
+) -> int:
+    """
+    Добавляет транспортное средство в таблицу vehicles.
+    Возвращает id.
+    """
+    conn = get_db_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO vehicles (type, name, plate, department, note)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (v_type.strip(), name.strip(), plate.strip(), department.strip(), note.strip()),
+                )
+                return cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def delete_vehicle(vehicle_id: int) -> None:
+    """
+    Удаляет транспортное средство по id.
+    (Проверку на использование в заявках можно добавить позже.)
+    """
+    conn = get_db_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM vehicles WHERE id = %s", (vehicle_id,))
+    finally:
+        conn.close()
+
 def get_transport_orders_for_planning(
     filter_date: Optional[str] = None,
     filter_department: Optional[str] = None,
@@ -840,6 +903,60 @@ class PositionRow:
             "time": (parse_time_str(self.ent_time.get()) or ""),
             "hours": float(parse_hours_value(self.ent_hours.get()) or 0.0),
             "note": (self.ent_note.get() or "").strip(),
+        }
+
+# ------------------------- Диалог добавления транспорта -------------------------
+
+class AddVehicleDialog(simpledialog.Dialog):
+    def __init__(self, parent, title="Добавить транспортное средство"):
+        self.result = None
+        super().__init__(parent, title=title)
+
+    def body(self, master):
+        tk.Label(master, text="Тип:*").grid(row=0, column=0, sticky="e", padx=4, pady=4)
+        tk.Label(master, text="Наименование:*").grid(row=1, column=0, sticky="e", padx=4, pady=4)
+        tk.Label(master, text="Гос№:*").grid(row=2, column=0, sticky="e", padx=4, pady=4)
+        tk.Label(master, text="Подразделение:").grid(row=3, column=0, sticky="e", padx=4, pady=4)
+        tk.Label(master, text="Примечание:").grid(row=4, column=0, sticky="ne", padx=4, pady=4)
+
+        self.ent_type = ttk.Entry(master, width=40)
+        self.ent_type.grid(row=0, column=1, sticky="w", pady=4)
+
+        self.ent_name = ttk.Entry(master, width=40)
+        self.ent_name.grid(row=1, column=1, sticky="w", pady=4)
+
+        self.ent_plate = ttk.Entry(master, width=20)
+        self.ent_plate.grid(row=2, column=1, sticky="w", pady=4)
+
+        self.ent_dep = ttk.Entry(master, width=40)
+        self.ent_dep.grid(row=3, column=1, sticky="w", pady=4)
+
+        self.txt_note = tk.Text(master, width=40, height=3)
+        self.txt_note.grid(row=4, column=1, sticky="w", pady=4)
+
+        return self.ent_type
+
+    def validate(self):
+        v_type = self.ent_type.get().strip()
+        name = self.ent_name.get().strip()
+        plate = self.ent_plate.get().strip()
+
+        if not v_type or not name or not plate:
+            messagebox.showwarning(
+                "Добавление транспорта",
+                "Поля Тип, Наименование и Гос№ обязательны.",
+                parent=self,
+            )
+            return False
+        return True
+
+    def apply(self):
+        self.result = {
+            "type": self.ent_type.get().strip(),
+            "name": self.ent_name.get().strip(),
+            "plate": self.ent_plate.get().strip(),
+            "department": self.ent_dep.get().strip(),
+            "note": self.txt_note.get("1.0", "end").strip(),
         }
         
 # ------------------------- Встраиваемая страница -------------------------
@@ -1779,6 +1896,220 @@ class TransportPlanningPage(tk.Frame):
 
         except Exception as e:
             messagebox.showerror("Ошибка", f"Ошибка сохранения в БД:\n{e}")
+
+# ------------------------- Реестр транспорта -------------------------
+
+class TransportRegistryPage(tk.Frame):
+    """
+    Реестр транспортных средств (vehicles):
+    Тип - Наименование - Гос№ - Подразделение - Примечание.
+    """
+
+    def __init__(self, master):
+        super().__init__(master, bg="#f7f7f7")
+
+        # Верхняя панель с кнопками
+        top = tk.Frame(self, bg="#f7f7f7")
+        top.pack(fill="x", padx=10, pady=8)
+
+        ttk.Button(top, text="Добавить транспортное средство", command=self.add_vehicle)\
+            .pack(side="left", padx=(0, 8))
+        ttk.Button(top, text="Загрузить из Excel", command=self.import_from_excel)\
+            .pack(side="left", padx=(0, 8))
+        ttk.Button(top, text="Обновить", command=self.reload_data)\
+            .pack(side="left", padx=(0, 8))
+
+        # Таблица
+        table_frame = tk.Frame(self)
+        table_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        columns = ("id", "type", "name", "plate", "department", "note")
+        self.tree = ttk.Treeview(
+            table_frame,
+            columns=columns,
+            show="headings",
+            height=20,
+        )
+
+        headers = {
+            "id": "ID",
+            "type": "Тип",
+            "name": "Наименование",
+            "plate": "Гос№",
+            "department": "Подразделение",
+            "note": "Примечание",
+        }
+        widths = {
+            "id": 60,
+            "type": 120,
+            "name": 180,
+            "plate": 100,
+            "department": 160,
+            "note": 260,
+        }
+
+        for col in columns:
+            self.tree.heading(col, text=headers[col])
+            self.tree.column(col, width=widths[col], anchor="w")
+
+        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
+
+        # Контекстное меню (удаление)
+        self.menu = tk.Menu(self, tearoff=0)
+        self.menu.add_command(label="Удалить", command=self.delete_selected)
+
+        self.tree.bind("<Button-3>", self._on_right_click)
+        self.tree.bind("<Delete>", lambda e: self.delete_selected())
+
+        self.reload_data()
+
+    def reload_data(self):
+        """Обновить список из БД."""
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        try:
+            vehicles = fetch_all_vehicles()
+        except Exception as e:
+            messagebox.showerror("Реестр транспорта", f"Ошибка загрузки из БД:\n{e}", parent=self)
+            return
+
+        for v in vehicles:
+            self.tree.insert(
+                "",
+                "end",
+                values=(
+                    v["id"],
+                    v["type"],
+                    v["name"],
+                    v["plate"],
+                    v.get("department", ""),
+                    v.get("note", ""),
+                ),
+            )
+
+    def add_vehicle(self):
+        """Открыть диалог добавления и записать в БД."""
+        dlg = AddVehicleDialog(self)
+        if not dlg.result:
+            return
+
+        data = dlg.result
+        try:
+            insert_vehicle(
+                v_type=data["type"],
+                name=data["name"],
+                plate=data["plate"],
+                department=data.get("department", ""),
+                note=data.get("note", ""),
+            )
+            self.reload_data()
+        except Exception as e:
+            messagebox.showerror("Добавление транспорта", f"Ошибка записи в БД:\n{e}", parent=self)
+
+    def delete_selected(self):
+        """Удалить выбранное ТС."""
+        sel = self.tree.selection()
+        if not sel:
+            return
+
+        ids = []
+        for item in sel:
+            vals = self.tree.item(item)["values"]
+            if vals:
+                ids.append(int(vals[0]))
+
+        if not ids:
+            return
+
+        if not messagebox.askyesno(
+            "Удаление транспорта",
+            f"Удалить выбранные транспортные средства ({len(ids)} шт.)?",
+            parent=self,
+        ):
+            return
+
+        try:
+            for vid in ids:
+                delete_vehicle(vid)
+            self.reload_data()
+        except Exception as e:
+            messagebox.showerror("Удаление транспорта", f"Ошибка при удалении из БД:\n{e}", parent=self)
+
+    def _on_right_click(self, event):
+        """Показать контекстное меню при ПКМ."""
+        row_id = self.tree.identify_row(event.y)
+        if row_id:
+            self.tree.selection_set(row_id)
+            self.menu.tk_popup(event.x_root, event.y_root)
+
+    def import_from_excel(self):
+        """Пакетная загрузка транспорта из Excel."""
+        from tkinter import filedialog
+
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Выберите Excel-файл с транспортом",
+            filetypes=[("Excel файлы", "*.xlsx *.xlsm *.xltx *.xltm"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            wb = load_workbook(path, read_only=True, data_only=True)
+        except Exception as e:
+            messagebox.showerror("Импорт из Excel", f"Не удалось открыть файл:\n{e}", parent=self)
+            return
+
+        # Ожидаем лист "Техника" с колонками:
+        # Тип - Наименование - Гос№ - Подразделение - Примечание
+        sheet_name = "Техника"
+        if sheet_name not in wb.sheetnames:
+            messagebox.showerror("Импорт из Excel", f"В файле нет листа '{sheet_name}'.", parent=self)
+            return
+
+        ws = wb[sheet_name]
+
+        added = 0
+        errors = 0
+
+        # Пропускаем первую строку (заголовок)
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            v_type = (row[0] or "").strip() if row and len(row) > 0 else ""
+            name = (row[1] or "").strip() if row and len(row) > 1 else ""
+            plate = (row[2] or "").strip() if row and len(row) > 2 else ""
+            dep = (row[3] or "").strip() if row and len(row) > 3 else ""
+            note = (row[4] or "").strip() if row and len(row) > 4 else ""
+
+            if not v_type and not name and not plate:
+                continue  # пустая строка
+
+            if not v_type or not name or not plate:
+                errors += 1
+                continue
+
+            try:
+                insert_vehicle(v_type=v_type, name=name, plate=plate, department=dep, note=note)
+                added += 1
+            except Exception:
+                errors += 1
+
+        self.reload_data()
+
+        messagebox.showinfo(
+            "Импорт из Excel",
+            f"Загружено записей: {added}\nОшибок: {errors}",
+            parent=self,
+        )
 
 # ------------------------- Вариант standalone-окна -------------------------
 
