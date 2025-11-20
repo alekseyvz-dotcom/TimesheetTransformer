@@ -2431,8 +2431,9 @@ class MainApp(tk.Tk):
         self._menu_transport = None
         self._menu_meals_planning_index = None
         self._menu_transport_planning_index = None
+        self._menu_transport_registry_index = None
         self._menu_settings_index = None
-
+        
         # Меню
         menubar = tk.Menu(self)
 
@@ -2465,14 +2466,21 @@ class MainApp(tk.Tk):
                 command=lambda: self._show_page("planning", lambda parent: SpecialOrders.create_planning_page(parent))
             )
 
-        # Реестр транспорта
+        # Реестр транспорта (запоминаем индекс пункта)
+        self._menu_transport_registry_index = None
         if SpecialOrders and hasattr(SpecialOrders, "create_transport_registry_page"):
+            # индекс следующего добавляемого пункта
+            self._menu_transport_registry_index = m_transport.index("end") + 1 if m_transport.index("end") is not None else 0
             m_transport.add_command(
                 label="🚘Реестр транспорта",
-                command=lambda: self._show_page("transport_registry",
-                    lambda parent: SpecialOrders.create_transport_registry_page(parent))
+                command=lambda: self._show_page(
+                    "transport_registry",
+                    lambda parent: SpecialOrders.create_transport_registry_page(parent)
+                )
             )
+
         menubar.add_cascade(label="Автотранспорт", menu=m_transport)
+
 
                 # ========== МЕНЮ ПИТАНИЕ ==========
         logging.debug(f"Строим меню Питание. meals_module={meals_module}")
@@ -2648,12 +2656,21 @@ class MainApp(tk.Tk):
         # --- Автотранспорт ---
         if self._menu_transport is not None:
             try:
+                # "Создать заявку" (индекс 0) — всегда доступен
                 self._menu_transport.entryconfig(0, state="normal")
+
+                # Планирование — только admin/planner
                 if self._menu_transport_planning_index is not None:
                     st = "normal" if role in ("admin", "planner") else "disabled"
                     self._menu_transport.entryconfig(self._menu_transport_planning_index, state=st)
+
+                # Реестр транспорта — admin, planner, head
+                if self._menu_transport_registry_index is not None:
+                    st = "normal" if role in ("admin", "planner", "head") else "disabled"
+                    self._menu_transport.entryconfig(self._menu_transport_registry_index, state=st)
             except Exception:
                 pass
+
 
         # --- Верхнее меню "Настройки" только для admin ---
         if self._menubar is not None and self._menu_settings_index is not None:
