@@ -117,34 +117,37 @@ def get_db_connection():
     )
     return conn
 
-def get_or_create_object(cur, ext_id: str, address: str) -> Optional[int]:
+def get_or_create_object(cur, excel_id: str, address: str) -> Optional[int]:
     """
     Переиспользует таблицу objects (совместно с модулем питания).
-    ext_id — ID объекта из справочника (OBJ-001).
+    excel_id — ID объекта из справочника (код из Excel).
     """
-    ext_id = (ext_id or "").strip()
+    excel_id = (excel_id or "").strip()
     address = (address or "").strip()
-    if not (ext_id or address):
+    if not (excel_id or address):
         return None
 
-    if ext_id:
-        cur.execute("SELECT id FROM objects WHERE ext_id = %s", (ext_id,))
+    if excel_id:
+        # ищем по excel_id
+        cur.execute("SELECT id FROM objects WHERE excel_id = %s", (excel_id,))
         row = cur.fetchone()
         if row:
             return row[0]
+        # если не нашли — создаём новую запись
         cur.execute(
-            "INSERT INTO objects (ext_id, address) VALUES (%s, %s) RETURNING id",
-            (ext_id, address),
+            "INSERT INTO objects (excel_id, address) VALUES (%s, %s) RETURNING id",
+            (excel_id, address),
         )
         return cur.fetchone()[0]
 
-    # без ext_id ищем по адресу
+    # без excel_id ищем по адресу
     cur.execute("SELECT id FROM objects WHERE address = %s", (address,))
     row = cur.fetchone()
     if row:
         return row[0]
+
     cur.execute(
-        "INSERT INTO objects (ext_id, address) VALUES (NULL, %s) RETURNING id",
+        "INSERT INTO objects (excel_id, address) VALUES (NULL, %s) RETURNING id",
         (address,),
     )
     return cur.fetchone()[0]
@@ -159,9 +162,9 @@ def save_transport_order_to_db(data: dict) -> int:
         with conn:
             with conn.cursor() as cur:
                 obj = data.get("object") or {}
-                obj_ext_id = (obj.get("id") or "").strip()
+                obj_excel_id = (obj.get("id") or "").strip()
                 obj_address = (obj.get("address") or "").strip()
-                object_id = get_or_create_object(cur, obj_ext_id, obj_address)
+                object_id = get_or_create_object(cur, obj_excel_id, obj_address)
 
                 created_at = datetime.strptime(data["created_at"], "%Y-%m-%dT%H:%M:%S")
                 order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
@@ -283,6 +286,77 @@ def delete_vehicle(vehicle_id: int) -> None:
     finally:
         conn.close()
 
+def load_employees_for_transport() -> List[Dict[str, Any]]:
+    """
+    Возвращает сотрудников для модуля транспорта:
+      [{'fio': ..., 'tbn': ..., 'pos': ..., 'dep': ...}, ...]
+    Берём только неуволенных (is_fired = false), как в питании.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT e.fio, e.tbn, e.position, d.name AS dep
+                  FROM employees e
+                  LEFT JOIN departments d ON d.id = e.department_id
+                 WHERE COALESCE(e.is_fired, FALSE) = FALSE
+              ORDER BY e.fio
+                """
+            )
+            res: List[Dict[str, Any]] = []
+            for fio, tbn, pos, dep in cur.fetchall():
+                res.append({
+                    "fio": fio or "",
+                    "tbn": tbn or "",
+                    "pos": pos or "",
+                    "dep": dep or "",
+                })
+            return res
+    finally:
+        conn.close()
+
+def load_objects_for_transport() -> List[Tuple[str, str]]:
+    """
+    Возвращает объекты [(code, address)].
+    code = excel_id (или excel_id, если вы туда перенесли код объекта).
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(NULLIF(excel_id, ''), '') AS code,
+                    address
+                  FROM objects
+                 ORDER BY address
+                """
+            )
+            rows = cur.fetchall()
+            return [(code or "", addr or "") for code, addr in rows]
+    finally:
+        conn.close()
+
+def load_vehicles_for_transport() -> List[Dict[str, Any]]:
+    """
+    Возвращает транспортные средства для заявки/планирования:
+      [{'type': ..., 'name': ..., 'plate': ..., 'dep': ..., 'note': ...}, ...]
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT type, name, plate, department AS dep, note
+                  FROM vehicles
+              ORDER BY type, name, plate
+                """
+            )
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
 def get_transport_orders_for_planning(
     filter_date: Optional[str] = None,
     filter_department: Optional[str] = None,
@@ -320,7 +394,7 @@ def get_transport_orders_for_planning(
                     COALESCE(o.department,'')             AS department,
                     COALESCE(o.requester_fio,'')          AS requester_fio,
                     COALESCE(o.object_address,'')         AS object_address,
-                    COALESCE(obj.ext_id,'')               AS object_id,
+                    COALESCE(obj.excel_id,'')             AS object_id,
                     COALESCE(p.tech,'')                   AS tech,
                     COALESCE(p.qty,0)                     AS qty,
                     COALESCE(to_char(p.time, 'HH24:MI'),'') AS time,
@@ -515,134 +589,6 @@ def is_past_cutoff_for_date(req_date: date, cutoff_hour: int) -> bool:
         return False
     cutoff = now.replace(hour=cutoff_hour, minute=0, second=0, microsecond=0)
     return now >= cutoff
-
-
-# ------------------------- Справочник: локально/Я.Диск -------------------------
-
-def ensure_spravochnik(path: Path):
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-    if path.exists():
-        return
-    wb = Workbook()
-    # Сотрудники
-    ws1 = wb.active
-    ws1.title = "Сотрудники"
-    ws1.append(["ФИО", "Табельный №", "Должность", "Подразделение"])
-    ws1.append(["Иванов И. И.", "ST00-00001", "Слесарь", "Монтаж"])
-    ws1.append(["Петров П. П.", "ST00-00002", "Электромонтер", "Электрика"])
-    ws1.append(["Сидорова А. А.", "ST00-00003", "Инженер", "ИТ"])
-    # Объекты
-    ws2 = wb.create_sheet("Объекты")
-    ws2.append(["ID объекта", "Адрес"])
-    ws2.append(["OBJ-001", "ул. Пушкина, д. 1"])
-    ws2.append(["OBJ-002", "пр. Строителей, 25"])
-    # Техника
-    ws3 = wb.create_sheet("Техника")
-    ws3.append(["Тип", "Наименование", "Гос№", "Подразделение", "Примечание"])
-    ws3.append(["Автокран", "КС-45717", "А123ВС77", "", "25 т."])
-    ws3.append(["Манипулятор", "Isuzu Giga", "М456ОР77", "", "Борт 7 т."])
-    ws3.append(["Экскаватор", "JCB 3CX", "Е789КУ77", "", ""])
-    wb.save(path)
-
-def fetch_yadisk_public_bytes(public_link: str, public_path: str = "") -> bytes:
-    if not public_link:
-        raise RuntimeError("Не задана публичная ссылка Я.Диска")
-    api = "https://cloud-api.yandex.net/v1/disk/public/resources/download"
-    params = {"public_key": public_link}
-    if public_path:
-        params["path"] = public_path
-    url = api + "?" + urllib.parse.urlencode(params, safe="/")
-    with urllib.request.urlopen(url, timeout=15) as r:
-        meta = json.loads(r.read().decode("utf-8", errors="replace"))
-    href = meta.get("href")
-    if not href:
-        raise RuntimeError(f"Я.Диск не вернул href: {meta}")
-    with urllib.request.urlopen(href, timeout=60) as f:
-        return f.read()
-
-def _s(v) -> str:
-    if v is None:
-        return ""
-    if isinstance(v, float) and v.is_integer():
-        v = int(v)
-    return str(v).strip()
-
-def load_spravochnik_from_wb(wb) -> Tuple[
-    List[Tuple[str,str,str,str]],
-    List[Tuple[str,str]],
-    List[Tuple[str,str,str,str,str]]
-]:
-    employees: List[Tuple[str,str,str,str]] = []
-    objects:   List[Tuple[str,str]] = []
-    tech:      List[Tuple[str,str,str,str,str]] = []
-
-    if "Сотрудники" in wb.sheetnames:
-        ws = wb["Сотрудники"]
-        hdr = [_s(c).lower() for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
-        have_pos = ("должность" in hdr) or (len(hdr) >= 3)
-        have_dep = ("подразделение" in hdr) or (len(hdr) >= 4)
-        for r in ws.iter_rows(min_row=2, values_only=True):
-            fio = _s(r[0] if r and len(r)>0 else "")
-            tbn = _s(r[1] if r and len(r)>1 else "")
-            pos = _s(r[2] if have_pos and r and len(r)>2 else "")
-            dep = _s(r[3] if have_dep and r and len(r)>3 else "")
-            if fio:
-                employees.append((fio, tbn, pos, dep))
-
-    if "Объекты" in wb.sheetnames:
-        ws = wb["Объекты"]
-        hdr = [_s(c).lower() for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
-        have_two = ("id объекта" in hdr) or (len(hdr) >= 2)
-        for r in ws.iter_rows(min_row=2, values_only=True):
-            if have_two:
-                oid = _s(r[0] if r and len(r)>0 else "")
-                addr = _s(r[1] if r and len(r)>1 else "")
-            else:
-                oid = ""
-                addr = _s(r[0] if r and len(r)>0 else "")
-            if oid or addr:
-                objects.append((oid, addr))
-
-    if "Техника" in wb.sheetnames:
-        ws = wb["Техника"]
-        hdr = [_s(c).lower() for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
-        for r in ws.iter_rows(min_row=2, values_only=True):
-            tp  = _s(r[0] if r and len(r)>0 else "")
-            nm  = _s(r[1] if r and len(r)>1 else "")
-            pl  = _s(r[2] if r and len(r)>2 else "")
-            dep = _s(r[3] if r and len(r)>3 else "")
-            note= _s(r[4] if r and len(r)>4 else "")
-            if tp or nm or pl:
-                tech.append((tp, nm, pl, dep, note))
-
-    return employees, objects, tech
-
-def load_spravochnik_remote_or_local(local_path: Path):
-    cfg = read_config()
-    use_remote = cfg.get(CONFIG_SECTION_REMOTE, KEY_REMOTE_USE, fallback="false").strip().lower() in ("1","true","yes","on")
-    if use_remote:
-        try:
-            public_link = cfg.get(CONFIG_SECTION_REMOTE, KEY_YA_PUBLIC_LINK, fallback="").strip()
-            public_path = cfg.get(CONFIG_SECTION_REMOTE, KEY_YA_PUBLIC_PATH, fallback="").strip()
-            raw = fetch_yadisk_public_bytes(public_link, public_path)
-            wb = load_workbook(BytesIO(raw), read_only=True, data_only=True)
-            return load_spravochnik_from_wb(wb)
-        except Exception as e:
-            print(f"[Remote YaDisk] ошибка: {e} — локальный справочник используем только если существует")
-            if local_path.exists():
-                wb = load_workbook(local_path, read_only=True, data_only=True)
-                return load_spravochnik_from_wb(wb)
-            # НЕ создаём локальный файл при удаленном режиме — пустые данные
-            return [], [], []
-
-    # Локальный режим — допускаем автосоздание
-    ensure_spravochnik(local_path)
-    wb = load_workbook(local_path, read_only=True, data_only=True)
-    return load_spravochnik_from_wb(wb)
-
 
 # ------------------------- Парсинг значений -------------------------
 
@@ -973,26 +919,35 @@ class SpecialOrdersPage(tk.Frame):
 
     # Ниже — те же методы, что использует standalone-окно, но работают в рамках Frame
     def _load_spr(self):
-        employees, objects, tech = load_spravochnik_remote_or_local(self.spr_path)
-        self.emps = [{'fio': fio, 'tbn': tbn, 'pos': pos, 'dep': dep} for (fio, tbn, pos, dep) in employees]
-        self.objects = objects
+        """
+        Загружает сотрудников, объекты и технику из БД,
+        вместо Excel/Яндекс-диска.
+        """
+        # сотрудники
+        employees = load_employees_for_transport()
+        self.emps = employees
 
-        # ========== ТЕХНИКА: ТОЛЬКО УНИКАЛЬНЫЕ ТИПЫ ДЛЯ ЗАЯВКИ ==========
-        self.techs = []
-        tech_types = set()
-    
-        for tp, nm, pl, dep, note in tech:
+        # объекты
+        self.objects = load_objects_for_transport()
+
+        # техника из таблицы vehicles
+        vehicles = load_vehicles_for_transport()
+        self.techs = vehicles
+
+        tech_types: set[str] = set()
+        for v in vehicles:
+            tp = (v.get("type") or "").strip()
             if tp:
                 tech_types.add(tp)
-            self.techs.append({'type': tp, 'name': nm, 'plate': pl, 'dep': dep, 'note': note})
-    
-        self.tech_values = sorted(list(tech_types))
-        # ================================================================
 
-        self.deps = ["Все"] + sorted({(r['dep'] or "").strip() for r in self.emps if (r['dep'] or "").strip()})
-        self.emp_names_all = [r['fio'] for r in self.emps]
+        self.tech_values = sorted(tech_types)
 
-        self.addr_to_ids = {}
+        self.deps = ["Все"] + sorted(
+            {(r["dep"] or "").strip() for r in self.emps if (r["dep"] or "").strip()}
+        )
+        self.emp_names_all = [r["fio"] for r in self.emps]
+
+        self.addr_to_ids: Dict[str, List[str]] = {}
         for oid, addr in self.objects:
             if not addr:
                 continue
@@ -1268,34 +1223,33 @@ class TransportPlanningPage(tk.Frame):
         self._build_ui()
         
     def _load_spr(self):
-        """Загрузка справочника"""
-        employees, objects, tech = load_spravochnik_remote_or_local(self.spr_path)
-    
-        # ========== ТРАНСПОРТ: полная структура ==========
-        self.vehicles = []
-        self.vehicle_types = set()
-    
-        for tp, nm, pl, dep, note in tech:
-            self.vehicles.append({'type': tp, 'name': nm, 'plate': pl, 'dep': dep, 'note': note})
-            if tp:
-                self.vehicle_types.add(tp)
+        """Загрузка справочников из БД."""
+        # техника
+        self.vehicles = load_vehicles_for_transport()
+        self.vehicle_types = sorted(
+            { (v.get("type") or "").strip() for v in self.vehicles if (v.get("type") or "").strip() }
+        )
+
+        # сотрудники-водители
+        employees_raw = load_employees_for_transport()
+        cfg = read_config()
+        driver_depts_str = cfg.get(
+            CONFIG_SECTION_INTEGR, KEY_DRIVER_DEPARTMENTS, fallback="Служба гаража"
+        )
+        DRIVER_DEPARTMENTS = [d.strip() for d in driver_depts_str.split(",") if d.strip()]
+
+        self.drivers = []
+        for e in employees_raw:
+            dep = e.get("dep") or ""
+            if dep in DRIVER_DEPARTMENTS:
+                self.drivers.append(e)
+
+        self.drivers.sort(key=lambda x: x["fio"])
+        self.departments = ["Все"] + sorted(
+            { (e.get("dep") or "") for e in employees_raw if e.get("dep") }
+        )
     
         self.vehicle_types = sorted(list(self.vehicle_types))
-        # ======================================================================
-    
-        # Водители
-        cfg = read_config()
-        driver_depts_str = cfg.get(CONFIG_SECTION_INTEGR, KEY_DRIVER_DEPARTMENTS, fallback="Служба гаража")
-        DRIVER_DEPARTMENTS = [d.strip() for d in driver_depts_str.split(",") if d.strip()]
-    
-        self.drivers = []
-        for fio, tbn, pos, dep in employees:
-            is_driver_dept = dep in DRIVER_DEPARTMENTS
-            if is_driver_dept:  # ✅ Только из настроенных подразделений
-                self.drivers.append({'fio': fio, 'tbn': tbn, 'pos': pos, 'dep': dep})
-    
-        self.drivers.sort(key=lambda x: x['fio'])
-        self.departments = ["Все"] + sorted({dep for _, _, _, dep in employees if dep})
         
     def _build_ui(self):
         """Построение интерфейса"""
