@@ -1024,6 +1024,60 @@ def open_settings_window(parent: tk.Tk):
     users_page = UsersPage(tab_users)
     users_page.pack(fill="both", expand=True)
 
+    # --- Вкладка "Сотрудники" ---
+    tab_emps = ttk.Frame(nb)
+    nb.add(tab_emps, text="Сотрудники")
+
+    ttk.Label(tab_emps,
+              text="Загрузка сотрудников из Excel в базу данных:\n"
+                   "Ожидается файл с колонками:\n"
+                   "  - 'Табельный номер (с префиксами)'\n"
+                   "  - 'Сотрудник'\n"
+                   "  - 'Должность'\n"
+                   "  - 'Подразделение'\n"
+                   "  - 'Дата увольнения' (опционально)").grid(
+        row=0, column=0, columnspan=3, sticky="w", padx=6, pady=(6, 4)
+    )
+
+    def on_import_employees():
+        from tkinter import filedialog, messagebox
+        from pathlib import Path
+
+        file_path = filedialog.askopenfilename(
+            parent=win,
+            title="Выберите файл со штатным расписанием",
+            filetypes=[("Excel", "*.xlsx;*.xls"), ("Все файлы", "*.*")]
+        )
+        if not file_path:
+            return
+
+        try:
+            from employees_sync import import_employees_from_excel  # если вынесли функцию в отдельный модуль
+        except ImportError:
+            # если вы разместили функцию в этом же файле settings_manager, импорт не нужен,
+            # можно просто вызвать import_employees_from_excel напрямую
+            from .employees_sync import import_employees_from_excel  # подправьте под вашу структуру пакетов
+
+        try:
+            cnt = import_employees_from_excel(Path(file_path))
+            messagebox.showinfo(
+                "Импорт сотрудников",
+                f"Импорт завершён.\nОбработано записей: {cnt}",
+                parent=win
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Импорт сотрудников",
+                f"Ошибка при импорте:\n{e}",
+                parent=win
+            )
+
+    ttk.Button(
+        tab_emps,
+        text="Загрузить сотрудников из Excel...",
+        command=on_import_employees
+    ).grid(row=1, column=0, sticky="w", padx=6, pady=(4, 8))
+
     # Кнопки
     btns = ttk.Frame(win)
     btns.pack(fill="x", padx=10, pady=(0, 10))
