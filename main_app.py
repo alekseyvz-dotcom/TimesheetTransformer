@@ -367,7 +367,8 @@ def load_employees_from_db() -> List[Tuple[str, str, str, str]]:
 
 def load_objects_from_db() -> List[Tuple[str, str]]:
     """
-    Возвращает список объектов [(code, address)], где code — excel_id/ext_id.
+    Возвращает список объектов [(code, address)].
+    code = excel_id (если есть) или пустая строка.
     """
     conn = get_db_connection()
     try:
@@ -375,7 +376,7 @@ def load_objects_from_db() -> List[Tuple[str, str]]:
             cur.execute(
                 """
                 SELECT
-                    COALESCE(NULLIF(excel_id, ''), NULLIF(ext_id, '')) AS code,
+                    COALESCE(NULLIF(excel_id, ''), '') AS code,
                     address
                   FROM objects
                  ORDER BY address
@@ -385,7 +386,6 @@ def load_objects_from_db() -> List[Tuple[str, str]]:
             return [(code or "", addr or "") for code, addr in rows]
     finally:
         conn.close()
-
 
 # ------------- Утилиты для времени и табеля -------------
 
