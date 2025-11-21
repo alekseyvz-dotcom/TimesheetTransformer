@@ -9,6 +9,7 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse, parse_qs
+from employees_sync import import_employees_from_excel
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -1052,11 +1053,14 @@ def open_settings_window(parent: tk.Tk):
             return
 
         try:
-            from employees_sync import import_employees_from_excel  # если вынесли функцию в отдельный модуль
-        except ImportError:
-            # если вы разместили функцию в этом же файле settings_manager, импорт не нужен,
-            # можно просто вызвать import_employees_from_excel напрямую
-            from .employees_sync import import_employees_from_excel  # подправьте под вашу структуру пакетов
+            # Модуль employees_sync.py лежит рядом с settings_manager.py
+        except Exception as e:
+            messagebox.showerror(
+                "Импорт сотрудников",
+                f"Не удалось импортировать модуль employees_sync:\n{e}",
+                parent=win,
+            )
+            return
 
         try:
             cnt = import_employees_from_excel(Path(file_path))
@@ -1071,7 +1075,6 @@ def open_settings_window(parent: tk.Tk):
                 f"Ошибка при импорте:\n{e}",
                 parent=win
             )
-
     ttk.Button(
         tab_emps,
         text="Загрузить сотрудников из Excel...",
