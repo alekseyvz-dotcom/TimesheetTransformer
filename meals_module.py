@@ -186,23 +186,23 @@ def get_or_create_department(cur, name: str):
     return cur.fetchone()[0]
 
 
-def get_or_create_object(cur, ext_id: str, address: str):
+def get_or_create_object(cur, excel_id: str, address: str):
     """
-    Поддержка схемы с excel_id/ ext_id.
+    Поддержка схемы с excel_id/ excel_id.
     """
-    ext_id = (ext_id or "").strip()
+    excel_id = (excel_id or "").strip()
     address = (address or "").strip()
-    if ext_id:
+    if excel_id:
         # новая схема
         try:
-            cur.execute("SELECT id FROM objects WHERE excel_id = %s", (ext_id,))
+            cur.execute("SELECT id FROM objects WHERE excel_id = %s", (excel_id,))
             row = cur.fetchone()
             if row:
                 return row[0]
         except Exception:
             pass
-        # старая схема ext_id
-        cur.execute("SELECT id FROM objects WHERE ext_id = %s", (ext_id,))
+
+        cur.execute("SELECT id FROM objects WHERE excel_id = %s", (excel_id,))
         row = cur.fetchone()
         if row:
             return row[0]
@@ -210,12 +210,12 @@ def get_or_create_object(cur, ext_id: str, address: str):
         try:
             cur.execute(
                 "INSERT INTO objects (excel_id, address) VALUES (%s, %s) RETURNING id",
-                (ext_id, address),
+                (excel_id, address),
             )
         except Exception:
             cur.execute(
-                "INSERT INTO objects (ext_id, address) VALUES (%s, %s) RETURNING id",
-                (ext_id, address),
+                "INSERT INTO objects (excel_id, address) VALUES (%s, %s) RETURNING id",
+                (excel_id, address),
             )
         return cur.fetchone()[0]
 
@@ -231,7 +231,7 @@ def get_or_create_object(cur, ext_id: str, address: str):
         )
     except Exception:
         cur.execute(
-            "INSERT INTO objects (ext_id, address) VALUES (NULL, %s) RETURNING id",
+            "INSERT INTO objects (excel_id, address) VALUES (NULL, %s) RETURNING id",
             (address,),
         )
     return cur.fetchone()[0]
@@ -387,9 +387,9 @@ def save_order_to_db(data: dict) -> int:
                 dept_id = get_or_create_department(cur, dept_name) if dept_name else None
 
                 obj = data.get("object") or {}
-                obj_ext_id = (obj.get("id") or "").strip()
+                obj_excel_id = (obj.get("id") or "").strip()
                 obj_address = (obj.get("address") or "").strip()
-                object_id = get_or_create_object(cur, obj_ext_id, obj_address)
+                object_id = get_or_create_object(cur, obj_excel_id, obj_address)
 
                 created_at = datetime.strptime(data["created_at"], "%Y-%m-%dT%H:%M:%S")
                 order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
@@ -594,7 +594,7 @@ def get_details_from_db(
                 SELECT
                     mo.date::text        AS date,
                     COALESCE(o.address, '')       AS address,
-                    COALESCE(o.excel_id, o.ext_id, '')        AS object_ext_id,
+                    COALESCE(o.excel_id, '')        AS object_excel_id,
                     COALESCE(d.name, '')          AS department,
                     COALESCE(mo.team_name, '')    AS team_name,
                     COALESCE(moi.fio_text, '')    AS fio,
@@ -618,7 +618,7 @@ def get_details_from_db(
             (
                 date_str,
                 address,
-                object_ext_id,
+                object_excel_id,
                 department,
                 team_name,
                 fio,
@@ -631,7 +631,7 @@ def get_details_from_db(
                 {
                     "date": date_str,
                     "address": address,
-                    "object_id": object_ext_id,
+                    "object_id": object_excel_id,
                     "department": department,
                     "team_name": team_name,
                     "fio": fio,
@@ -657,10 +657,10 @@ def find_conflicting_meal_orders_same_date_other_object(data: dict) -> List[Dict
         with conn.cursor() as cur:
             order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
             obj = data.get("object") or {}
-            obj_ext_id = (obj.get("id") or "").strip()
+            obj_excel_id = (obj.get("id") or "").strip()
             obj_address = (obj.get("address") or "").strip()
 
-            current_object_id = get_or_create_object(cur, obj_ext_id, obj_address)
+            current_object_id = get_or_create_object(cur, obj_excel_id, obj_address)
 
             conflicts: List[Dict[str, Any]] = []
 
