@@ -9,8 +9,6 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse, parse_qs
-from employees_sync import import_employees_from_excel
-
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
@@ -1053,7 +1051,8 @@ def open_settings_window(parent: tk.Tk):
             return
 
         try:
-            # Модуль employees_sync.py лежит рядом с settings_manager.py
+            # Ленивая загрузка модуля, чтобы не ломать импорт settings_manager при старте
+            from employees_sync import import_employees_from_excel
         except Exception as e:
             messagebox.showerror(
                 "Импорт сотрудников",
@@ -1075,6 +1074,7 @@ def open_settings_window(parent: tk.Tk):
                 f"Ошибка при импорте:\n{e}",
                 parent=win
             )
+            
     ttk.Button(
         tab_emps,
         text="Загрузить сотрудников из Excel...",
@@ -1103,7 +1103,6 @@ def open_settings_window(parent: tk.Tk):
         win.geometry(f"+{px + (pw - sw) // 2}+{py + (ph - sh) // 2}")
     except Exception:
         pass
-
 
 def _mk_entry(parent, label, section, key, row, width=30, show=None):
     ttk.Label(parent, text=label).grid(
