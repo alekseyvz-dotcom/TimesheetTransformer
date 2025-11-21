@@ -299,7 +299,7 @@ def load_employees_from_db() -> List[Dict[str, Any]]:
 
 def load_objects_from_db() -> List[Tuple[str, str]]:
     """
-    Возвращает список объектов: [(excel_id_or_ext_id, address), ...]
+    Возвращает список объектов: [(excel_id, address), ...]
     """
     conn = get_db_connection()
     try:
@@ -307,7 +307,7 @@ def load_objects_from_db() -> List[Tuple[str, str]]:
             cur.execute(
                 """
                 SELECT
-                    COALESCE(NULLIF(excel_id, ''), NULLIF(ext_id, '')) AS code,
+                    COALESCE(NULLIF(excel_id, ''), '') AS code,
                     address
                   FROM objects
                  ORDER BY address
@@ -319,7 +319,6 @@ def load_objects_from_db() -> List[Tuple[str, str]]:
             return res
     finally:
         conn.close()
-
 
 def load_meal_types_from_db() -> List[Dict[str, Any]]:
     """
