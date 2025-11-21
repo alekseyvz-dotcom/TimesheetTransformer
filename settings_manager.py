@@ -517,7 +517,6 @@ def get_db_connection():
     )
     return conn
 
-```python
 # ---------------- ИМПОРТ СОТРУДНИКОВ ИЗ EXCEL ----------------
 
 from openpyxl import load_workbook
