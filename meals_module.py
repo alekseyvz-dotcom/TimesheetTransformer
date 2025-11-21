@@ -350,6 +350,23 @@ def load_meal_types_from_db() -> List[Dict[str, Any]]:
     finally:
         conn.close()
 
+def get_meal_type_price_map() -> Dict[str, float]:
+    """
+    Возвращает словарь: {имя_типа_питания: цена}.
+    Если в meal_types нет записи, цена считается 0.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT name, COALESCE(price, 0) FROM meal_types"
+            )
+            return {
+                (name or "").strip(): float(price or 0)
+                for name, price in cur.fetchall()
+            }
+    finally:
+        conn.close()
 
 # ---------------- Сохранение заказов, реестры, проверки ----------------
 
@@ -1569,10 +1586,15 @@ class MealPlanningPage(tk.Frame):
 
             if not orders:
                 messagebox.showinfo(
-                    "Экспорт", "Нет данных для экспорта (по заданным фильтрам)"
+                    "Экспорт",
+                    "Нет данных для экспорта (по заданным фильтрам)",
                 )
                 return
 
+            # цены типов питания
+            price_map = get_meal_type_price_map()
+
+            # ---------- определяем дубликаты по (ФИО, Таб.№) ----------
             freq: Dict[tuple, int] = {}
             for o in orders:
                 fio = (o.get("fio") or "").strip()
@@ -1589,29 +1611,43 @@ class MealPlanningPage(tk.Frame):
                 mark = "дубль" if (fio or tbn) and freq.get(key, 0) > 1 else ""
                 duplicates_mark.append(mark)
 
+            # ---------- формируем Excel ----------
             wb = Workbook()
             ws = wb.active
             ws.title = "Реестр питания"
 
-            summary: Dict[str, Dict[str, int]] = {}
+            # 1) Свод по объектам и типам питания: считаем и людей, и сумму
+            summary: Dict[str, Dict[str, Dict[str, float]]] = {}
+            # summary[addr][meal_type] = {"count": N, "amount": S}
+
             for o in orders:
                 addr = o.get("address", "") or ""
-                mt = o.get("meal_type", "") or ""
+                mt = (o.get("meal_type", "") or "").strip()
                 if not addr or not mt:
                     continue
-                summary.setdefault(addr, {})
-                summary[addr][mt] = summary[addr].get(mt, 0) + 1
+                price = price_map.get(mt, 0.0)
 
-            ws.append(["Свод по объектам и типам питания"])
-            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=3)
-            ws.append(["Адрес", "Тип питания", "Общее количество"])
+                addr_dict = summary.setdefault(addr, {})
+                mt_dict = addr_dict.setdefault(mt, {"count": 0.0, "amount": 0.0})
+                mt_dict["count"] += 1.0
+                mt_dict["amount"] += price
+
+            ws.append(["Свод по объектам, типам питания и стоимости"])
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=4)
+            ws.append(["Адрес", "Тип питания", "Кол-во человек", "Сумма, руб."])
 
             for addr, by_type in summary.items():
-                for mt, cnt in by_type.items():
-                    ws.append([addr, mt, cnt])
+                for mt, agg in by_type.items():
+                    ws.append([
+                        addr,
+                        mt,
+                        agg["count"],
+                        agg["amount"],
+                    ])
 
             ws.append([])
 
+            # 2) Детальный список
             headers = [
                 "Дата",
                 "Адрес",
@@ -1622,33 +1658,58 @@ class MealPlanningPage(tk.Frame):
                 "Табельный №",
                 "Должность",
                 "Тип питания",
+                "Цена, руб.",
+                "Сумма, руб.",
                 "Комментарий",
                 "Дубликаты",
             ]
             ws.append(headers)
 
             for order, mark in zip(orders, duplicates_mark):
-                ws.append(
-                    [
-                        order.get("date", ""),
-                        order.get("address", ""),
-                        order.get("object_id", ""),
-                        order.get("department", ""),
-                        order.get("team_name", ""),
-                        order.get("fio", ""),
-                        order.get("tbn", ""),
-                        order.get("position", ""),
-                        order.get("meal_type", ""),
-                        order.get("comment", ""),
-                        mark,
-                    ]
-                )
+                mt = (order.get("meal_type") or "").strip()
+                price = float(price_map.get(mt, 0.0))
+                amount = price  # если когда-нибудь появится поле "количество", можно перемножить
 
-            widths = [12, 40, 15, 25, 25, 30, 15, 25, 18, 40, 12]
+                ws.append([
+                    order.get("date", ""),
+                    order.get("address", ""),
+                    order.get("object_id", ""),
+                    order.get("department", ""),
+                    order.get("team_name", ""),
+                    order.get("fio", ""),
+                    order.get("tbn", ""),
+                    order.get("position", ""),
+                    mt,
+                    price,
+                    amount,
+                    order.get("comment", ""),
+                    mark,
+                ])
+
+            # подстроим ширины с учётом новых двух столбцов цены/суммы
+            widths = [
+                12,  # Дата
+                40,  # Адрес
+                15,  # ID объекта
+                25,  # Подразделение
+                25,  # Наименование бригады
+                30,  # ФИО
+                15,  # Табельный №
+                25,  # Должность
+                18,  # Тип питания
+                12,  # Цена, руб.
+                14,  # Сумма, руб.
+                40,  # Комментарий
+                12,  # Дубликаты
+            ]
             for col, width in enumerate(widths, start=1):
                 ws.column_dimensions[get_column_letter(col)].width = width
 
-            ws.freeze_panes = "A4"
+            # заморозим строки до шапки детальной таблицы
+            # сейчас: 1 — заголовок свода, 2 — заголовки свода, 3..N — свод, потом пустая строка, потом шапка детально.
+            # Чтобы не вычислять динамически, можно заморозить произвольную строку выше детальной шапки.
+            # Предположим ограниченно, что свод небольшой — замораживаем всегда строку 5 (будет работать приемлемо).
+            ws.freeze_panes = "A5"
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             fname = f"Реестр_питания_{filter_date or 'все'}_{ts}.xlsx"
@@ -1668,9 +1729,9 @@ class MealPlanningPage(tk.Frame):
 
         except Exception as e:
             messagebox.showerror(
-                "Ошибка", f"Не удалось сформировать реестр из БД:\n{e}"
+                "Ошибка",
+                f"Не удалось сформировать реестр из БД:\n{e}",
             )
-
 
 # ========================= СТРАНИЦА НАСТРОЕК ТИПОВ ПИТАНИЯ =========================
 
