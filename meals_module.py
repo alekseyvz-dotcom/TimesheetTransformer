@@ -1776,18 +1776,40 @@ class MealsSettingsPage(tk.Frame):
         conn = get_db_connection()
         try:
             with conn:
-                with conn.cursor() as cur:
-                    cur.execute("DELETE FROM meal_types;")
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    # читаем текущие типы
+                    cur.execute("SELECT id, name, price FROM meal_types;")
+                    existing = list(cur.fetchall())
+
+                    # индекс по имени (в нижнем регистре, чтобы не было проблем с регистром)
+                    by_name: Dict[str, Dict[str, Any]] = {
+                        (row["name"] or "").strip().lower(): row for row in existing
+                    }
+
                     for name, price in data:
-                        cur.execute(
-                            "INSERT INTO meal_types (name, price) VALUES (%s, %s)",
-                            (name, price),
-                        )
+                        key = name.strip().lower()
+                        row = by_name.get(key)
+                        if row:
+                            # обновляем цену у существующей записи
+                            cur.execute(
+                                "UPDATE meal_types SET price = %s WHERE id = %s",
+                                (price, row["id"]),
+                            )
+                        else:
+                            # создаём новую запись
+                            cur.execute(
+                                "INSERT INTO meal_types (name, price) VALUES (%s, %s)",
+                                (name, price),
+                            )
+
             messagebox.showinfo(
                 "Настройки питания",
                 "Типы питания и цены сохранены.",
                 parent=self,
             )
+            # перечитаем и отобразим сохранённые значения
+            self.load_meal_types()
+
         except Exception as e:
             messagebox.showerror(
                 "Настройки питания",
@@ -1796,7 +1818,6 @@ class MealsSettingsPage(tk.Frame):
             )
         finally:
             conn.close()
-
 
 # ========================= STANDALONE ОКНО =========================
 
