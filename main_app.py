@@ -581,6 +581,429 @@ class LoginPage(tk.Frame):
     def _on_exit(self):
         self.app_ref.destroy()
 
+# ================= ДОПОЛНИТЕЛЬНЫЕ ВИДЖЕТЫ И ДИАЛОГИ ДЛЯ ТАБЕЛЕЙ =================
+
+class CopyFromDialog(simpledialog.Dialog):
+    def __init__(self, parent, init_year: int, init_month: int):
+        self.init_year = init_year
+        self.init_month = init_month
+        self.result = None
+        super().__init__(parent, title="Копировать сотрудников из месяца")
+
+    def body(self, master):
+        tk.Label(master, text="Источник").grid(row=0, column=0, sticky="w", pady=(2, 6), columnspan=4)
+
+        tk.Label(master, text="Месяц:").grid(row=1, column=0, sticky="e")
+        self.cmb_month = ttk.Combobox(master, state="readonly", width=18,
+                                      values=[month_name_ru(i) for i in range(1, 13)])
+        self.cmb_month.grid(row=1, column=1, sticky="w")
+        self.cmb_month.current(max(0, min(11, self.init_month - 1)))
+
+        tk.Label(master, text="Год:").grid(row=1, column=2, sticky="e", padx=(10, 4))
+        self.spn_year = tk.Spinbox(master, from_=2000, to=2100, width=6)
+        self.spn_year.grid(row=1, column=3, sticky="w")
+        self.spn_year.delete(0, "end")
+        self.spn_year.insert(0, str(self.init_year))
+
+        self.var_copy_hours = tk.BooleanVar(value=False)
+        ttk.Checkbutton(master, text="Копировать часы", variable=self.var_copy_hours)\
+            .grid(row=2, column=1, sticky="w", pady=(8, 2))
+
+        tk.Label(master, text="Режим:").grid(row=3, column=0, sticky="e", pady=(6, 2))
+        self.var_mode = tk.StringVar(value="replace")
+        frame_mode = tk.Frame(master)
+        frame_mode.grid(row=3, column=1, columnspan=3, sticky="w", pady=(6, 2))
+        ttk.Radiobutton(frame_mode, text="Заменить текущий список",
+                        value="replace", variable=self.var_mode).pack(anchor="w")
+        ttk.Radiobutton(frame_mode, text="Объединить (добавить недостающих)",
+                        value="merge", variable=self.var_mode).pack(anchor="w")
+        return self.cmb_month
+
+    def validate(self):
+        try:
+            y = int(self.spn_year.get())
+            if not (2000 <= y <= 2100):
+                raise ValueError
+            return True
+        except Exception:
+            messagebox.showwarning("Копирование", "Введите корректный год (2000–2100).")
+            return False
+
+    def apply(self):
+        self.result = {
+            "year": int(self.spn_year.get()),
+            "month": self.cmb_month.current() + 1,
+            "with_hours": bool(self.var_copy_hours.get()),
+            "mode": self.var_mode.get(),
+        }
+
+
+class BatchAddDialog(tk.Toplevel):
+    def __init__(self, parent, total: int, title: str = "Добавление сотрудников"):
+        super().__init__(parent)
+        self.parent = parent
+        self.total = max(1, int(total))
+        self.done = 0
+        self.cancelled = False
+        self.title(title)
+        self.resizable(False, False)
+        self.grab_set()
+
+        frm = tk.Frame(self, padx=12, pady=12)
+        frm.pack(fill="both", expand=True)
+
+        self.lbl = tk.Label(frm, text=f"Добавлено: 0 из {self.total}")
+        self.lbl.pack(fill="x")
+
+        self.pb = ttk.Progressbar(frm, mode="determinate",
+                                  maximum=self.total, length=420)
+        self.pb.pack(fill="x", pady=(8, 8))
+
+        self.btn_cancel = ttk.Button(frm, text="Отмена", command=self._on_cancel)
+        self.btn_cancel.pack(anchor="e", pady=(6, 0))
+
+        try:
+            self.update_idletasks()
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            sw = self.winfo_width()
+            sh = self.winfo_height()
+            self.geometry(f"+{px + (pw - sw)//2}+{py + (ph - sh)//2}")
+        except Exception:
+            pass
+
+    def step(self, n: int = 1):
+        if self.cancelled:
+            return
+        self.done += n
+        if self.done > self.total:
+            self.done = self.total
+        self.pb["value"] = self.done
+        self.lbl.config(text=f"Добавлено: {self.done} из {self.total}")
+        self.update_idletasks()
+
+    def _on_cancel(self):
+        self.cancelled = True
+
+    def close(self):
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+
+
+class HoursFillDialog(simpledialog.Dialog):
+    def __init__(self, parent, max_day: int):
+        self.max_day = max_day
+        self.result = None
+        super().__init__(parent, title="Проставить часы всем")
+
+    def body(self, master):
+        tk.Label(master, text=f"В текущем месяце дней: {self.max_day}")\
+            .grid(row=0, column=0, columnspan=3, sticky="w", pady=(2, 6))
+        tk.Label(master, text="День:").grid(row=1, column=0, sticky="e")
+        self.spn_day = tk.Spinbox(master, from_=1, to=31, width=4)
+        self.spn_day.grid(row=1, column=1, sticky="w")
+        self.spn_day.delete(0, "end")
+        self.spn_day.insert(0, "1")
+
+        self.var_clear = tk.BooleanVar(value=False)
+        ttk.Checkbutton(master, text="Очистить день (пусто)",
+                        variable=self.var_clear,
+                        command=self._on_toggle_clear)\
+            .grid(row=2, column=1, sticky="w", pady=(6, 2))
+
+        tk.Label(master, text="Часы:").grid(row=3, column=0, sticky="e", pady=(6, 0))
+        self.ent_hours = ttk.Entry(master, width=12)
+        self.ent_hours.grid(row=3, column=1, sticky="w", pady=(6, 0))
+        self.ent_hours.insert(0, "8")
+
+        tk.Label(master, text="Форматы: 8 | 8,25 | 8:30 | 1/7")\
+            .grid(row=4, column=0, columnspan=3, sticky="w", pady=(6, 2))
+        return self.spn_day
+
+    def _on_toggle_clear(self):
+        if self.var_clear.get():
+            self.ent_hours.configure(state="disabled")
+        else:
+            self.ent_hours.configure(state="normal")
+
+    def validate(self):
+        try:
+            d = int(self.spn_day.get())
+            if not (1 <= d <= 31):
+                raise ValueError
+        except Exception:
+            messagebox.showwarning(
+                "Проставить часы",
+                "День должен быть числом от 1 до 31.",
+            )
+            return False
+
+        if self.var_clear.get():
+            self._d = d
+            self._h = 0.0
+            self._clear = True
+            return True
+
+        hv = parse_hours_value(self.ent_hours.get().strip())
+        if hv is None or hv < 0:
+            messagebox.showwarning(
+                "Проставить часы",
+                "Введите корректное значение часов (например, 8, 8:30, 1/7).",
+            )
+            return False
+        self._d = d
+        self._h = float(hv)
+        self._clear = False
+        return True
+
+    def apply(self):
+        self.result = {
+            "day": self._d,
+            "hours": self._h,
+            "clear": self._clear,
+        }
+
+
+class AutoCompleteCombobox(ttk.Combobox):
+    def __init__(self, master=None, **kw):
+        super().__init__(master, **kw)
+        self._all_values: List[str] = []
+        self.bind("<KeyRelease>", self._on_keyrelease)
+        self.bind("<Control-BackSpace>", self._clear_all)
+
+    def set_completion_list(self, values: List[str]):
+        self._all_values = list(values)
+        self["values"] = self._all_values
+
+    def _clear_all(self, _=None):
+        self.delete(0, tk.END)
+        self["values"] = self._all_values
+
+    def _on_keyrelease(self, event):
+        if event.keysym in (
+            "Up", "Down", "Left", "Right", "Home",
+            "End", "Return", "Escape", "Tab"
+        ):
+            return
+        typed = self.get().strip()
+        if not typed:
+            self["values"] = self._all_values
+            return
+        self["values"] = [x for x in self._all_values if typed.lower() in x.lower()]
+
+
+class RowWidget:
+    WEEK_BG_SAT = "#fff8e1"
+    WEEK_BG_SUN = "#ffebee"
+    ZEBRA_EVEN = "#ffffff"
+    ZEBRA_ODD = "#f6f8fa"
+    ERR_BG = "#ffccbc"
+    DISABLED_BG = "#f0f0f0"
+
+    def __init__(self, table: tk.Frame, row_index: int, fio: str, tbn: str,
+                 get_year_month_callable, on_delete_callable):
+        self.table = table
+        self.row = row_index
+        self.get_year_month = get_year_month_callable
+        self.on_delete = on_delete_callable
+        self._suspend_sync = False
+
+        zebra_bg = self.ZEBRA_EVEN if (row_index % 2 == 0) else self.ZEBRA_ODD
+        self.widgets: List[tk.Widget] = []
+
+        # ФИО
+        self.lbl_fio = tk.Label(self.table, text=fio, anchor="w", bg=zebra_bg)
+        self.lbl_fio.grid(row=self.row, column=0, padx=0, pady=1, sticky="nsew")
+        self.widgets.append(self.lbl_fio)
+
+        # Таб.№
+        self.lbl_tbn = tk.Label(self.table, text=tbn, anchor="center", bg=zebra_bg)
+        self.lbl_tbn.grid(row=self.row, column=1, padx=0, pady=1, sticky="nsew")
+        self.widgets.append(self.lbl_tbn)
+
+        # Дни месяца (col 2..32)
+        self.day_entries: List[tk.Entry] = []
+        for d in range(1, 32):
+            e = tk.Entry(self.table, width=4, justify="center", relief="solid", bd=1)
+            e.grid(row=self.row, column=1 + d, padx=0, pady=1, sticky="nsew")
+            e.bind("<FocusOut>", lambda ev, _d=d: self.update_total())
+            e.bind("<Button-2>", lambda ev: "break")
+            e.bind("<ButtonRelease-2>", lambda ev: "break")
+            self.day_entries.append(e)
+            self.widgets.append(e)
+
+        # Итоги
+        self.lbl_days = tk.Label(self.table, text="0", anchor="e", bg=zebra_bg)
+        self.lbl_days.grid(row=self.row, column=33, padx=(4, 1), pady=1, sticky="nsew")
+        self.widgets.append(self.lbl_days)
+
+        self.lbl_total = tk.Label(self.table, text="0", anchor="e", bg=zebra_bg)
+        self.lbl_total.grid(row=self.row, column=34, padx=(4, 1), pady=1, sticky="nsew")
+        self.widgets.append(self.lbl_total)
+
+        self.lbl_overtime_day = tk.Label(self.table, text="0", anchor="e", bg=zebra_bg)
+        self.lbl_overtime_day.grid(row=self.row, column=35, padx=(4, 1), pady=1, sticky="nsew")
+        self.widgets.append(self.lbl_overtime_day)
+
+        self.lbl_overtime_night = tk.Label(self.table, text="0", anchor="e", bg=zebra_bg)
+        self.lbl_overtime_night.grid(row=self.row, column=36, padx=(4, 1), pady=1, sticky="nsew")
+        self.widgets.append(self.lbl_overtime_night)
+
+        # 5/2
+        self.btn_52 = ttk.Button(self.table, text="5/2", width=4, command=self.fill_52)
+        self.btn_52.grid(row=self.row, column=37, padx=1, pady=0, sticky="nsew")
+        self.widgets.append(self.btn_52)
+
+        # Удалить
+        self.btn_del = ttk.Button(self.table, text="Удалить", width=7, command=self.delete_row)
+        self.btn_del.grid(row=self.row, column=38, padx=1, pady=0, sticky="nsew")
+        self.widgets.append(self.btn_del)
+
+    def set_day_font(self, font_tuple):
+        for e in self.day_entries:
+            e.configure(font=font_tuple)
+
+    def regrid_to(self, new_row: int):
+        self.row = new_row
+        self.lbl_fio.grid_configure(row=new_row, column=0)
+        self.lbl_tbn.grid_configure(row=new_row, column=1)
+        for i, e in enumerate(self.day_entries, start=2):
+            e.grid_configure(row=new_row, column=i)
+        self.lbl_days.grid_configure(row=new_row, column=33)
+        self.lbl_total.grid_configure(row=new_row, column=34)
+        self.lbl_overtime_day.grid_configure(row=new_row, column=35)
+        self.lbl_overtime_night.grid_configure(row=new_row, column=36)
+        self.btn_52.grid_configure(row=new_row, column=37)
+        self.btn_del.grid_configure(row=new_row, column=38)
+
+    def destroy(self):
+        for w in self.widgets:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        self.widgets.clear()
+
+    def fio(self) -> str:
+        return self.lbl_fio.cget("text")
+
+    def tbn(self) -> str:
+        return self.lbl_tbn.cget("text")
+
+    def set_hours(self, arr: List[Optional[str]]):
+        days = len(arr)
+        for i in range(31):
+            self.day_entries[i].delete(0, "end")
+            if i < days and arr[i]:
+                self.day_entries[i].insert(0, str(arr[i]))
+        self.update_total()
+
+    def get_hours_with_overtime(self) -> List[Tuple[Optional[float], Optional[float], Optional[float]]]:
+        result = []
+        for e in self.day_entries:
+            raw = e.get().strip()
+            hours = parse_hours_value(raw) if raw else None
+            day_ot, night_ot = parse_overtime(raw) if raw else (None, None)
+            result.append((hours, day_ot, night_ot))
+        return result
+
+    def _bg_for_day(self, year: int, month: int, day: int) -> str:
+        from datetime import datetime as _dt
+        wd = _dt(year, month, day).weekday()
+        if wd == 5:
+            return self.WEEK_BG_SAT
+        if wd == 6:
+            return self.WEEK_BG_SUN
+        return "white"
+
+    def _repaint_day_cell(self, i0: int, year: int, month: int):
+        from datetime import datetime as _dt
+        day = i0 + 1
+        e = self.day_entries[i0]
+        days = month_days(year, month)
+
+        if day > days:
+            e.configure(state="disabled", disabledbackground=self.DISABLED_BG)
+            e.delete(0, "end")
+            return
+
+        e.configure(state="normal")
+        raw = e.get().strip()
+
+        invalid = False
+        if raw:
+            val = parse_hours_value(raw)
+            if val is None or val < 0 or val > 24:
+                invalid = True
+            if "(" in raw:
+                day_ot, night_ot = parse_overtime(raw)
+                if day_ot is None and night_ot is None:
+                    invalid = True
+
+        if invalid:
+            e.configure(bg=self.ERR_BG)
+        else:
+            e.configure(bg=self._bg_for_day(year, month, day))
+
+    def update_days_enabled(self, year: int, month: int):
+        for i in range(31):
+            self._repaint_day_cell(i, year, month)
+        self.update_total()
+
+    def update_total(self):
+        total_hours = 0.0
+        total_days = 0
+        total_overtime_day = 0.0
+        total_overtime_night = 0.0
+
+        y, m = self.get_year_month()
+        days_in_m = month_days(y, m)
+
+        for i, e in enumerate(self.day_entries, start=1):
+            raw = e.get().strip()
+            self._repaint_day_cell(i - 1, y, m)
+            if i <= days_in_m and raw:
+                hours = parse_hours_value(raw)
+                day_ot, night_ot = parse_overtime(raw)
+                if isinstance(hours, (int, float)) and hours > 1e-12:
+                    total_hours += float(hours)
+                    total_days += 1
+                if isinstance(day_ot, (int, float)):
+                    total_overtime_day += float(day_ot)
+                if isinstance(night_ot, (int, float)):
+                    total_overtime_night += float(night_ot)
+
+        self.lbl_days.config(text=str(total_days))
+        sh = f"{total_hours:.2f}".rstrip("0").rstrip(".")
+        self.lbl_total.config(text=sh)
+        sod = f"{total_overtime_day:.2f}".rstrip("0").rstrip(".")
+        self.lbl_overtime_day.config(text=sod)
+        son = f"{total_overtime_night:.2f}".rstrip("0").rstrip(".")
+        self.lbl_overtime_night.config(text=son)
+
+    def fill_52(self):
+        y, m = self.get_year_month()
+        days = month_days(y, m)
+        for d in range(1, days + 1):
+            wd = datetime(y, m, d).weekday()
+            e = self.day_entries[d - 1]
+            e.delete(0, "end")
+            if wd < 4:
+                e.insert(0, "8,25")
+            elif wd == 4:
+                e.insert(0, "7")
+        for d in range(days + 1, 32):
+            self.day_entries[d - 1].delete(0, "end")
+        self.update_total()
+
+    def delete_row(self):
+        self.on_delete(self)
+        
 # ================= СТРАНИЦА ТАБЕЛЕЙ (ИСПОЛЬЗУЕТ БАЗУ) =================
 
 class TimesheetPage(tk.Frame):
