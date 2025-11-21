@@ -97,7 +97,8 @@ jobs:
           # и включил их как модули, доступные для импорта в main_app.py
           $args += @("--hidden-import=BudgetAnalyzer", 
                     "--hidden-import=SpecialOrders", 
-                    "--hidden-import=timesheet_transformer")
+                    "--hidden-import=timesheet_transformer",
+                    "--hidden-import=settings_manager")
           
           # Добавляем иконку и основной скрипт
           if (Test-Path "icon.ico") {
