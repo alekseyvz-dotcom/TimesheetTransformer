@@ -9,15 +9,19 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse, parse_qs
+
 import psycopg2
 from psycopg2.extras import RealDictCursor
+
+from openpyxl import load_workbook
+from datetime import datetime, date
+from typing import Optional as Opt  # чтобы не путаться с уже использованным Optional
 
 # Константы (совместимые с main_app)
 CONFIG_FILE = "tabel_config.ini"
 CONFIG_SECTION_PATHS = "Paths"
 CONFIG_SECTION_UI = "UI"
 CONFIG_SECTION_INTEGR = "Integrations"
-CONFIG_SECTION_REMOTE = "Remote"
 
 KEY_SPR = "spravochnik_path"
 KEY_OUTPUT_DIR = "output_dir"
@@ -26,10 +30,6 @@ KEY_MEALS_ORDERS_DIR = "meals_orders_dir"      # Папка заявок на п
 KEY_EXPORT_PWD = "export_password"
 KEY_PLANNING_PASSWORD = "planning_password"
 KEY_SELECTED_DEP = "selected_department"
-
-KEY_REMOTE_USE = "use_remote"
-KEY_YA_PUBLIC_LINK = "yadisk_public_link"
-KEY_YA_PUBLIC_PATH = "yadisk_public_path"
 
 # Интеграции: автотранспорт
 KEY_ORDERS_MODE = "orders_mode"
@@ -47,8 +47,8 @@ KEY_MEALS_PLANNING_PASSWORD = "meals_planning_password"
 SETTINGS_FILENAME = "settings.dat"  # зашифрованное хранилище
 
 # Секрет для fallback‑шифрования (одинаков на всех машинах вашей установки)
-# Сгенерируйте что‑нибудь случайное и длинное один раз и не меняйте.
 APP_SECRET = "KIwcVIWqzrPoBzrlTdN1lvnTcpX7sikf"
+
 
 def exe_dir() -> Path:
     if getattr(__import__("sys"), "frozen", False):
@@ -156,9 +156,6 @@ def _dpapi_unprotect(data: bytes) -> bytes:
 
 
 def _fallback_key() -> bytes:
-    """
-    Единый ключ для всех установок (привязан к APP_SECRET, а не к ПК/пользователю).
-    """
     return hashlib.sha256(APP_SECRET.encode("utf-8")).digest()
 
 
@@ -173,9 +170,7 @@ def _fallback_decrypt(packed: bytes) -> bytes:
     key = _fallback_key()
     mac = raw[:32]
     data = raw[32:]
-    if not hmac.compare_digest(
-        mac, hmac.new(key, data, hashlib.sha256).digest()
-    ):
+    if not hmac.compare_digest(mac, hmac.new(key, data, hashlib.sha256).digest()):
         raise RuntimeError("Settings integrity check failed")
     return data
 
@@ -205,8 +200,6 @@ def _decrypt_dict(blob: bytes) -> Dict[str, Any]:
             return json.loads(data.decode("utf-8"))
         return json.loads(blob.decode("utf-8", errors="replace"))
     except Exception:
-        # если не смогли расшифровать (например, старый формат) — вернём пустой словарь,
-        # и дальше загрузятся _defaults
         return {}
 
 
@@ -219,8 +212,8 @@ _defaults: Dict[str, Dict[str, Any]] = {
         KEY_MEALS_ORDERS_DIR: str(exe_dir() / "Заявки_питание"),
     },
     "DB": {
-        "provider": "postgres",  # sqlite | postgres | mysql
-        "database_url": "postgresql://myappuser:QweRty123!change@185.55.58.31:5432/myappdb?sslmode=disable",    # можно сюда сразу вписать боевой DATABASE_URL, если он общий
+        "provider": "postgres",
+        "database_url": "postgresql://myappuser:QweRty123!change@185.55.58.31:5432/myappdb?sslmode=disable",
         "sqlite_path": str(exe_dir() / "app_data.sqlite3"),
         "sslmode": "require",
     },
@@ -239,11 +232,6 @@ _defaults: Dict[str, Dict[str, Any]] = {
         KEY_MEALS_WEBHOOK_TOKEN: "",
         KEY_MEALS_PLANNING_ENABLED: "true",
         KEY_MEALS_PLANNING_PASSWORD: "2025",
-    },
-    "Remote": {
-        KEY_REMOTE_USE: "false",
-        KEY_YA_PUBLIC_LINK: "",
-        KEY_YA_PUBLIC_PATH: "",
     },
 }
 
@@ -271,7 +259,6 @@ def load_settings():
     else:
         _store = {}
     _ensure_sections()
-    # если файл не существовал или не читался — сразу сохраняем новый
     if not SETTINGS_PATH.exists():
         save_settings()
 
@@ -306,7 +293,7 @@ def ensure_config():
 
 
 class _ProxyConfig:
-    def get(self, section: str, key: str, fallback: Optional[str] = None) -> str:
+    def get(self, section: str, key: str, fallback: Opt[str] = None) -> str:
         try:
             v = _store.get(section, {}).get(key, None)
             if v is None or v == "":
@@ -338,7 +325,6 @@ def get_output_dir_from_config() -> Path:
 
 
 def get_meals_orders_dir_from_config() -> Path:
-    """Папка для заявок по питанию"""
     ensure_config()
     raw = _store["Paths"].get(KEY_MEALS_ORDERS_DIR) or _defaults["Paths"][KEY_MEALS_ORDERS_DIR]
     return Path(os.path.expandvars(str(raw)))
@@ -346,40 +332,18 @@ def get_meals_orders_dir_from_config() -> Path:
 
 def get_export_password_from_config() -> str:
     ensure_config()
-    return str(
-        _store["Integrations"].get(
-            KEY_EXPORT_PWD, _defaults["Integrations"][KEY_EXPORT_PWD]
-        )
-    )
+    return str(_store["Integrations"].get(KEY_EXPORT_PWD, _defaults["Integrations"][KEY_EXPORT_PWD]))
 
 
 def get_selected_department_from_config() -> str:
     ensure_config()
-    return str(
-        _store["UI"].get(KEY_SELECTED_DEP, _defaults["UI"][KEY_SELECTED_DEP])
-    )
+    return str(_store["UI"].get(KEY_SELECTED_DEP, _defaults["UI"][KEY_SELECTED_DEP]))
 
 
 def set_selected_department_in_config(dep: str):
     ensure_config()
     _store["UI"][KEY_SELECTED_DEP] = dep or "Все"
     save_settings()
-
-
-def get_remote_use() -> bool:
-    ensure_config()
-    v = str(_store["Remote"].get(KEY_REMOTE_USE, "false")).strip().lower()
-    return v in ("1", "true", "yes", "on")
-
-
-def get_yadisk_public_link() -> str:
-    ensure_config()
-    return str(_store["Remote"].get(KEY_YA_PUBLIC_LINK, ""))
-
-
-def get_yadisk_public_path() -> str:
-    ensure_config()
-    return str(_store["Remote"].get(KEY_YA_PUBLIC_PATH, ""))
 
 
 def get_db_provider() -> str:
@@ -405,9 +369,7 @@ def get_db_sslmode() -> str:
 def get_meals_mode_from_config() -> str:
     ensure_config()
     return str(
-        _store["Integrations"].get(
-            KEY_MEALS_MODE, _defaults["Integrations"][KEY_MEALS_MODE]
-        )
+        _store["Integrations"].get(KEY_MEALS_MODE, _defaults["Integrations"][KEY_MEALS_MODE])
     ).strip().lower()
 
 
@@ -419,11 +381,7 @@ def set_meals_mode_in_config(mode: str):
 
 def get_meals_webhook_url_from_config() -> str:
     ensure_config()
-    return str(
-        _store["Integrations"].get(
-            KEY_MEALS_WEBHOOK_URL, _defaults["Integrations"][KEY_MEALS_WEBHOOK_URL]
-        )
-    )
+    return str(_store["Integrations"].get(KEY_MEALS_WEBHOOK_URL, _defaults["Integrations"][KEY_MEALS_WEBHOOK_URL]))
 
 
 def set_meals_webhook_url_in_config(url: str):
@@ -434,11 +392,7 @@ def set_meals_webhook_url_in_config(url: str):
 
 def get_meals_webhook_token_from_config() -> str:
     ensure_config()
-    return str(
-        _store["Integrations"].get(
-            KEY_MEALS_WEBHOOK_TOKEN, _defaults["Integrations"][KEY_MEALS_WEBHOOK_TOKEN]
-        )
-    )
+    return str(_store["Integrations"].get(KEY_MEALS_WEBHOOK_TOKEN, _defaults["Integrations"][KEY_MEALS_WEBHOOK_TOKEN]))
 
 
 def get_meals_planning_enabled_from_config() -> bool:
@@ -483,12 +437,11 @@ def set_meals_webhook_token_in_config(tok: str):
 # ---------------- РАБОТА С БД ДЛЯ ПОЛЬЗОВАТЕЛЕЙ ----------------
 
 def get_db_connection():
-    """
-    Подключение к БД так же, как в main_app (для Postgres).
-    """
     provider = get_db_provider().strip().lower()
     if provider != "postgres":
-        raise RuntimeError(f"Поддерживается только provider=postgres для работы с пользователями, сейчас: {provider!r}")
+        raise RuntimeError(
+            f"Поддерживается только provider=postgres для работы с пользователями, сейчас: {provider!r}"
+        )
 
     db_url = get_database_url().strip()
     if not db_url:
@@ -517,11 +470,8 @@ def get_db_connection():
     )
     return conn
 
-# ---------------- ИМПОРТ СОТРУДНИКОВ ИЗ EXCEL ----------------
 
-from openpyxl import load_workbook
-from datetime import datetime, date
-from typing import Optional, List, Tuple
+# ---------------- ИМПОРТ СОТРУДНИКОВ/ОБЪЕКТОВ ИЗ EXCEL ----------------
 
 
 def _s_val(val) -> str:
@@ -537,7 +487,6 @@ def import_employees_from_excel(path: Path) -> int:
     """
     Импортирует сотрудников из Excel-файла (как 'ШТАТ на ...').
     Обновляет таблицы departments и employees.
-    Возвращает количество обработанных строк.
     """
     if not path.exists():
         raise FileNotFoundError(f"Файл не найден: {path}")
@@ -545,11 +494,10 @@ def import_employees_from_excel(path: Path) -> int:
     wb = load_workbook(path, read_only=True, data_only=True)
     ws = wb.active
 
-    # Заголовок
     header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
     hdr = [_s_val(c).lower() for c in header_row]
 
-    def col_idx(substr: str) -> Optional[int]:
+    def col_idx(substr: str) -> Opt[int]:
         substr = substr.lower()
         for i, h in enumerate(hdr):
             if substr in h:
@@ -560,10 +508,12 @@ def import_employees_from_excel(path: Path) -> int:
     idx_fio = col_idx("сотрудник")
     idx_pos = col_idx("должность")
     idx_dep = col_idx("подразделение")
-    idx_dismissal = col_idx("увольн")  # "Дата увольнения"
+    idx_dismissal = col_idx("увольн")
 
     if idx_fio is None or idx_tbn is None:
-        raise RuntimeError("Не найдены обязательные колонки 'Табельный номер' и/или 'Сотрудник' в первой строке")
+        raise RuntimeError(
+            "Не найдены обязательные колонки 'Табельный номер' и/или 'Сотрудник' в первой строке"
+        )
 
     conn = get_db_connection()
     processed = 0
@@ -571,7 +521,6 @@ def import_employees_from_excel(path: Path) -> int:
     try:
         with conn:
             with conn.cursor() as cur:
-                # Строки с 2‑й
                 for row in ws.iter_rows(min_row=2, values_only=True):
                     if not row:
                         continue
@@ -580,12 +529,15 @@ def import_employees_from_excel(path: Path) -> int:
                     tbn = _s_val(row[idx_tbn]) if idx_tbn < len(row) else ""
                     pos = _s_val(row[idx_pos]) if idx_pos is not None and idx_pos < len(row) else ""
                     dep_name = _s_val(row[idx_dep]) if idx_dep is not None and idx_dep < len(row) else ""
-                    dismissal_raw = row[idx_dismissal] if idx_dismissal is not None and idx_dismissal < len(row) else None
+                    dismissal_raw = (
+                        row[idx_dismissal]
+                        if idx_dismissal is not None and idx_dismissal < len(row)
+                        else None
+                    )
 
                     if not fio and not tbn:
                         continue
 
-                    # определяем увольнение по дате
                     is_fired = False
                     if dismissal_raw:
                         if isinstance(dismissal_raw, (datetime, date)):
@@ -595,7 +547,6 @@ def import_employees_from_excel(path: Path) -> int:
                             if s:
                                 is_fired = True
 
-                    # --- подразделение ---
                     department_id = None
                     if dep_name:
                         cur.execute("SELECT id FROM departments WHERE name = %s", (dep_name,))
@@ -605,11 +556,10 @@ def import_employees_from_excel(path: Path) -> int:
                         else:
                             cur.execute(
                                 "INSERT INTO departments (name) VALUES (%s) RETURNING id",
-                                (dep_name,)
+                                (dep_name,),
                             )
                             department_id = cur.fetchone()[0]
 
-                    # --- сотрудник ---
                     if tbn:
                         cur.execute("SELECT id FROM employees WHERE tbn = %s", (tbn,))
                         r = cur.fetchone()
@@ -629,12 +579,14 @@ def import_employees_from_excel(path: Path) -> int:
                                    is_fired = %s
                              WHERE id = %s
                             """,
-                            (fio or None,
-                             tbn or None,
-                             pos or None,
-                             department_id,
-                             is_fired,
-                             emp_id)
+                            (
+                                fio or None,
+                                tbn or None,
+                                pos or None,
+                                department_id,
+                                is_fired,
+                                emp_id,
+                            ),
                         )
                     else:
                         cur.execute(
@@ -642,11 +594,13 @@ def import_employees_from_excel(path: Path) -> int:
                             INSERT INTO employees (fio, tbn, position, department_id, is_fired)
                             VALUES (%s, %s, %s, %s, %s)
                             """,
-                            (fio or None,
-                             tbn or None,
-                             pos or None,
-                             department_id,
-                             is_fired)
+                            (
+                                fio or None,
+                                tbn or None,
+                                pos or None,
+                                department_id,
+                                is_fired,
+                            ),
                         )
 
                     processed += 1
@@ -655,15 +609,13 @@ def import_employees_from_excel(path: Path) -> int:
 
     return processed
 
+
 def import_objects_from_excel(path: Path) -> int:
     """
     Импортирует объекты из Excel 'Справочник программ и объектов (3).xlsx'
-    в таблицу objects с полями:
-      excel_id, year, program_name, customer_name,
-      address, contract_number, contract_date,
-      short_name, executor_department, contract_type.
-    Столбец status НЕ трогаем.
-    Upsert по excel_id (если есть), иначе по адресу.
+    в таблицу objects (excel_id, year, program_name, customer_name,
+    address, contract_number, contract_date, short_name,
+    executor_department, contract_type). Статус не трогаем.
     """
     if not path.exists():
         raise FileNotFoundError(f"Файл не найден: {path}")
@@ -671,7 +623,6 @@ def import_objects_from_excel(path: Path) -> int:
     wb = load_workbook(path, read_only=True, data_only=True)
     ws = wb.active
 
-    # Ищем строку с заголовками (где есть 'ID (код) номер объекта')
     header_row_idx = None
     header_row = None
     for i, row in enumerate(ws.iter_rows(min_row=1, max_row=40, values_only=True), start=1):
@@ -686,7 +637,7 @@ def import_objects_from_excel(path: Path) -> int:
     if header_row_idx is None:
         raise RuntimeError("Не найдена строка заголовка с колонкой 'ID (код) номер объекта'")
 
-    def col_idx(substr: str) -> int | None:
+    def col_idx(substr: str) -> Opt[int]:
         substr = substr.lower()
         for i, h in enumerate(header_row):
             if substr in h:
@@ -705,7 +656,9 @@ def import_objects_from_excel(path: Path) -> int:
     idx_type = col_idx("тип договора")
 
     if idx_excel_id is None or idx_addr is None:
-        raise RuntimeError("Не найдены обязательные колонки 'ID (код) номер объекта' и/или 'Адрес объекта'")
+        raise RuntimeError(
+            "Не найдены обязательные колонки 'ID (код) номер объекта' и/или 'Адрес объекта'"
+        )
 
     conn = get_db_connection()
     processed = 0
@@ -721,7 +674,7 @@ def import_objects_from_excel(path: Path) -> int:
                     address = _s_val(row[idx_addr]) if idx_addr < len(row) else ""
 
                     if not excel_id and not address:
-                        continue  # пустая строка
+                        continue
 
                     year = _s_val(row[idx_year]) if idx_year is not None and idx_year < len(row) else ""
                     program_name = _s_val(row[idx_prog]) if idx_prog is not None and idx_prog < len(row) else ""
@@ -731,28 +684,17 @@ def import_objects_from_excel(path: Path) -> int:
                     executor_department = _s_val(row[idx_exec_dep]) if idx_exec_dep is not None and idx_exec_dep < len(row) else ""
                     contract_type = _s_val(row[idx_type]) if idx_type is not None and idx_type < len(row) else ""
 
-                    # Дата договора
                     contract_date = None
                     if idx_contract_date is not None and idx_contract_date < len(row):
                         raw_date = row[idx_contract_date]
                         if isinstance(raw_date, (datetime, date)):
                             contract_date = raw_date.date() if isinstance(raw_date, datetime) else raw_date
-                        else:
-                            s = _s_val(raw_date)
-                            # При необходимости можно распарсить строку, но пока оставим None
 
-                    # --- ищем существующий объект ---
                     if excel_id:
-                        cur.execute(
-                            "SELECT id FROM objects WHERE excel_id = %s",
-                            (excel_id,)
-                        )
+                        cur.execute("SELECT id FROM objects WHERE excel_id = %s", (excel_id,))
                         r = cur.fetchone()
                     else:
-                        cur.execute(
-                            "SELECT id FROM objects WHERE address = %s",
-                            (address,)
-                        )
+                        cur.execute("SELECT id FROM objects WHERE address = %s", (address,))
                         r = cur.fetchone()
 
                     if r:
@@ -784,7 +726,7 @@ def import_objects_from_excel(path: Path) -> int:
                                 executor_department or None,
                                 contract_type or None,
                                 obj_id,
-                            )
+                            ),
                         )
                     else:
                         cur.execute(
@@ -807,37 +749,25 @@ def import_objects_from_excel(path: Path) -> int:
                                 short_name or None,
                                 executor_department or None,
                                 contract_type or None,
-                            )
+                            ),
                         )
 
                     processed += 1
-
     finally:
         conn.close()
 
     return processed
 
+
 def _hash_password(password: str, salt: bytes | None = None) -> str:
-    """
-    То же форматирование, что и в main_app:
-    pbkdf2_sha256$iterations$salt_hex$hash_hex
-    """
     if salt is None:
         salt = os.urandom(16)
     iterations = 260000
-    dk = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt,
-        iterations,
-    )
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
     return f"pbkdf2_sha256${iterations}${salt.hex()}${dk.hex()}"
 
 
 def get_roles_list() -> list[dict]:
-    """
-    Возвращает список ролей из таблицы roles: [{'code': 'admin', 'name': 'Администратор'}, ...]
-    """
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -848,17 +778,14 @@ def get_roles_list() -> list[dict]:
 
 
 def get_app_users() -> list[dict]:
-    """
-    Возвращает список пользователей приложения.
-    """
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
                 SELECT id, username, full_name, "role", is_active
-                FROM app_users
-                ORDER BY username;
+                  FROM app_users
+              ORDER BY username;
                 """
             )
             return list(cur.fetchall())
@@ -867,9 +794,6 @@ def get_app_users() -> list[dict]:
 
 
 def create_app_user(username: str, password: str, full_name: str, role_code: str, is_active: bool = True):
-    """
-    Создаёт пользователя в app_users.
-    """
     username = (username or "").strip()
     full_name = (full_name or "").strip()
     role_code = (role_code or "").strip().lower()
@@ -900,12 +824,10 @@ def create_app_user(username: str, password: str, full_name: str, role_code: str
 
 # ---------------- UI ДЛЯ ПОЛЬЗОВАТЕЛЕЙ ----------------
 
-# Храним Var-переменные для сохранения
 _vars: Dict[str, Dict[str, Any]] = {}
 
 
 def _add_context_menu(widget: tk.Widget):
-    """Добавляет контекстное меню (ПКМ) для копирования/вставки."""
     menu = tk.Menu(widget, tearoff=0)
     menu.add_command(label="Вырезать", command=lambda: widget.event_generate("<<Cut>>"))
     menu.add_command(label="Копировать", command=lambda: widget.event_generate("<<Copy>>"))
@@ -948,8 +870,7 @@ class CreateUserDialog(simpledialog.Dialog):
             roles = []
 
         self.role_map = {f'{r["name"]} ({r["code"]})': r["code"] for r in roles}
-        self.cmb_role = ttk.Combobox(master, state="readonly", width=24,
-                                     values=list(self.role_map.keys()))
+        self.cmb_role = ttk.Combobox(master, state="readonly", width=24, values=list(self.role_map.keys()))
         self.cmb_role.grid(row=3, column=1, sticky="w", pady=4)
         if self.role_map:
             self.cmb_role.current(0)
@@ -989,8 +910,7 @@ class UsersPage(tk.Frame):
         top = tk.Frame(self)
         top.pack(fill="x", padx=8, pady=8)
 
-        ttk.Button(top, text="Создать пользователя", command=self._on_create_user)\
-            .pack(side="left")
+        ttk.Button(top, text="Создать пользователя", command=self._on_create_user).pack(side="left")
 
         self.tree = ttk.Treeview(
             self,
@@ -1057,216 +977,55 @@ class UsersPage(tk.Frame):
 def open_settings_window(parent: tk.Tk):
     ensure_config()
 
-    # Локальный пароль доступа убран: окно настроек открывается сразу.
     win = tk.Toplevel(parent)
     win.title("Настройки")
     win.resizable(False, False)
     nb = ttk.Notebook(win)
     nb.pack(fill="both", expand=True, padx=10, pady=10)
 
-    # Настройки папок (Paths)
+    # Настройки папок
     tab_paths = ttk.Frame(nb)
     nb.add(tab_paths, text="Настройки папок")
-    _mk_entry_with_btn(
-        tab_paths,
-        "Справочник (xlsx):",
-        "Paths",
-        KEY_SPR,
-        is_dir=False,
-        row=0,
-    )
-    _mk_entry_with_btn(
-        tab_paths,
-        "Папка табелей:",
-        "Paths",
-        KEY_OUTPUT_DIR,
-        is_dir=True,
-        row=1,
-    )
-    _mk_entry_with_btn(
-        tab_paths,
-        "Папка заявок на питание:",
-        "Paths",
-        KEY_MEALS_ORDERS_DIR,
-        is_dir=True,
-        row=2,
-    )
+    _mk_entry_with_btn(tab_paths, "Справочник (xlsx):", "Paths", KEY_SPR, is_dir=False, row=0)
+    _mk_entry_with_btn(tab_paths, "Папка табелей:", "Paths", KEY_OUTPUT_DIR, is_dir=True, row=1)
+    _mk_entry_with_btn(tab_paths, "Папка заявок на питание:", "Paths", KEY_MEALS_ORDERS_DIR, is_dir=True, row=2)
 
-    # Основное (UI)
+    # Основное
     tab_ui = ttk.Frame(nb)
     nb.add(tab_ui, text="Основное")
+    _mk_entry(tab_ui, "Подразделение по умолчанию:", "UI", KEY_SELECTED_DEP, row=0, width=40)
     _mk_entry(
         tab_ui,
-        "Подразделение по умолчанию:",
-        "UI",
-        KEY_SELECTED_DEP,
-        row=0,
-        width=40,
-    )
-
-    # Интеграции (Integrations)
-    tab_int = ttk.Frame(nb)
-    nb.add(tab_int, text="Интеграции")
-    _mk_entry(
-        tab_int,
-        "Экспорт (пароль):",
-        "Integrations",
-        KEY_EXPORT_PWD,
-        row=0,
-        width=20,
-        show="*",
-    )
-    _mk_entry(
-        tab_int,
-        "Планирование (пароль):",
-        "Integrations",
-        KEY_PLANNING_PASSWORD,
-        row=1,
-        width=20,
-        show="*",
-    )
-    _mk_entry(
-        tab_int,
-        "Настройка реестра (автотранспорт, режим):",
-        "Integrations",
-        KEY_ORDERS_MODE,
-        row=2,
-        width=20,
-    )
-    _mk_entry(
-        tab_int,
-        "URL скрипта реестра (автотранспорт):",
-        "Integrations",
-        KEY_ORDERS_WEBHOOK_URL,
-        row=3,
-        width=64,
-    )
-    _mk_check(
-        tab_int,
-        "planning_enabled:",
-        "Integrations",
-        KEY_PLANNING_ENABLED,
-        row=4,
-    )
-    _mk_entry(
-        tab_int,
         "Подразделения водителей:",
         "Integrations",
         KEY_DRIVER_DEPARTMENTS,
-        row=5,
-        width=64,
-    )
-
-    # Блок интеграции "Питание"
-    _mk_entry(
-        tab_int,
-        "Питание — режим (none/webhook):",
-        "Integrations",
-        KEY_MEALS_MODE,
-        row=6,
-        width=20,
-    )
-    _mk_entry(
-        tab_int,
-        "Питание — URL скрипта:",
-        "Integrations",
-        KEY_MEALS_WEBHOOK_URL,
-        row=7,
-        width=64,
-    )
-    _mk_entry(
-        tab_int,
-        "Питание — token:",
-        "Integrations",
-        KEY_MEALS_WEBHOOK_TOKEN,
-        row=8,
-        width=32,
-    )
-    # Планирование питания
-    _mk_check(
-        tab_int,
-        "Питание — планирование включено:",
-        "Integrations",
-        KEY_MEALS_PLANNING_ENABLED,
-        row=9,
-    )
-    _mk_entry(
-        tab_int,
-        "Питание — пароль для планирования:",
-        "Integrations",
-        KEY_MEALS_PLANNING_PASSWORD,
-        row=10,
-        width=20,
-        show="*",
-    )
-
-    # Удаленный справочник (Remote)
-    tab_rem = ttk.Frame(nb)
-    nb.add(tab_rem, text="Удаленный справочник")
-    _mk_check(
-        tab_rem,
-        "Включить удаленный справочник:",
-        "Remote",
-        KEY_REMOTE_USE,
-        row=0,
-    )
-    _mk_entry(
-        tab_rem,
-        "Публичная ссылка Я.Диска:",
-        "Remote",
-        KEY_YA_PUBLIC_LINK,
         row=1,
         width=64,
     )
-    _mk_entry(
-        tab_rem,
-        "Путь внутри публичной папки:",
-        "Remote",
-        KEY_YA_PUBLIC_PATH,
-        row=2,
-        width=40,
-    )
 
-    # База данных (DB)
+    # База данных
     tab_db = ttk.Frame(nb)
     nb.add(tab_db, text="База данных")
 
-    # Провайдер
-    ttk.Label(tab_db, text="Провайдер:").grid(
-        row=0, column=0, sticky="e", padx=(6, 6), pady=4
-    )
+    ttk.Label(tab_db, text="Провайдер:").grid(row=0, column=0, sticky="e", padx=(6, 6), pady=4)
     provider_var = tk.StringVar(value=str(_store["DB"].get("provider", "sqlite")))
     cmb_provider = ttk.Combobox(
-        tab_db,
-        textvariable=provider_var,
-        state="readonly",
-        width=18,
-        values=["sqlite", "postgres", "mysql"],
+        tab_db, textvariable=provider_var, state="readonly", width=18, values=["sqlite", "postgres", "mysql"]
     )
     cmb_provider.grid(row=0, column=1, sticky="w", padx=(0, 6), pady=4)
     _vars.setdefault("DB", {})["provider"] = provider_var
 
-    # DATABASE_URL
     ttk.Label(tab_db, text="Строка подключения (DATABASE_URL):").grid(
         row=1, column=0, sticky="e", padx=(6, 6), pady=4
     )
     v_url = tk.StringVar(value=str(_store["DB"].get("database_url", "")))
     ent_url = ttk.Entry(tab_db, textvariable=v_url, width=64)
-    ent_url.grid(
-        row=1, column=1, sticky="w", padx=(0, 6), pady=4, columnspan=2
-    )
+    ent_url.grid(row=1, column=1, sticky="w", padx=(0, 6), pady=4, columnspan=2)
     _add_context_menu(ent_url)
     _vars.setdefault("DB", {})["database_url"] = v_url
 
-    # SQLite путь
-    ttk.Label(tab_db, text="SQLite файл:").grid(
-        row=2, column=0, sticky="e", padx=(6, 6), pady=4
-    )
-    v_sqlite = tk.StringVar(
-        value=str(
-            _store["DB"].get("sqlite_path", _defaults["DB"]["sqlite_path"])
-        )
-    )
+    ttk.Label(tab_db, text="SQLite файл:").grid(row=2, column=0, sticky="e", padx=(6, 6), pady=4)
+    v_sqlite = tk.StringVar(value=str(_store["DB"].get("sqlite_path", _defaults["DB"]["sqlite_path"])))
     ent_sqlite = ttk.Entry(tab_db, textvariable=v_sqlite, width=56)
     ent_sqlite.grid(row=2, column=1, sticky="w", padx=(0, 6), pady=4)
     _add_context_menu(ent_sqlite)
@@ -1275,35 +1034,22 @@ def open_settings_window(parent: tk.Tk):
         p = filedialog.asksaveasfilename(
             title="Файл SQLite",
             defaultextension=".sqlite3",
-            filetypes=[
-                ("SQLite DB", "*.sqlite3 *.db"),
-                ("Все файлы", "*.*"),
-            ],
+            filetypes=[("SQLite DB", "*.sqlite3 *.db"), ("Все файлы", "*.*")],
         )
         if p:
             v_sqlite.set(p)
 
-    ttk.Button(
-        tab_db, text="...", width=3, command=browse_sqlite
-    ).grid(row=2, column=2, sticky="w")
+    ttk.Button(tab_db, text="...", width=3, command=browse_sqlite).grid(row=2, column=2, sticky="w")
     _vars.setdefault("DB", {})["sqlite_path"] = v_sqlite
 
-    # SSL mode (для Postgres)
-    ttk.Label(tab_db, text="SSL mode (Postgres):").grid(
-        row=3, column=0, sticky="e", padx=(6, 6), pady=4
-    )
+    ttk.Label(tab_db, text="SSL mode (Postgres):").grid(row=3, column=0, sticky="e", padx=(6, 6), pady=4)
     v_ssl = tk.StringVar(value=str(_store["DB"].get("sslmode", "require")))
     cmb_ssl = ttk.Combobox(
-        tab_db,
-        textvariable=v_ssl,
-        state="readonly",
-        width=18,
-        values=["require", "verify-full", "prefer", "disable"],
+        tab_db, textvariable=v_ssl, state="readonly", width=18, values=["require", "verify-full", "prefer", "disable"]
     )
     cmb_ssl.grid(row=3, column=1, sticky="w", padx=(0, 6), pady=4)
     _vars.setdefault("DB", {})["sslmode"] = v_ssl
 
-    # Автоматическое включение/выключение полей
     def _toggle_db_fields(*_):
         prov = provider_var.get()
         if prov == "sqlite":
@@ -1316,58 +1062,47 @@ def open_settings_window(parent: tk.Tk):
     provider_var.trace_add("write", _toggle_db_fields)
     _toggle_db_fields()
 
-    # Пользователи (новая вкладка)
+    # Пользователи
     tab_users = ttk.Frame(nb)
     nb.add(tab_users, text="Пользователи")
     users_page = UsersPage(tab_users)
     users_page.pack(fill="both", expand=True)
 
-    # --- Вкладка "Данные" ---
+    # Данные (импорт)
     tab_data = ttk.Frame(nb)
     nb.add(tab_data, text="Данные")
 
     row_idx = 0
-
     ttk.Label(
         tab_data,
         text="Загрузка сотрудников из Excel в базу данных:\n"
-             "Ожидается файл со штатным расписанием\n"
-             "(колонки: 'Табельный номер (с префиксами)', 'Сотрудник', "
-             "'Должность', 'Подразделение', 'Дата увольнения')."
+        "Ожидается файл со штатным расписанием\n"
+        "(колонки: 'Табельный номер (с префиксами)', 'Сотрудник', "
+        "'Должность', 'Подразделение', 'Дата увольнения').",
     ).grid(row=row_idx, column=0, columnspan=3, sticky="w", padx=6, pady=(6, 4))
     row_idx += 1
 
     def on_import_employees():
-        from tkinter import filedialog, messagebox
-        from pathlib import Path
-
         file_path = filedialog.askopenfilename(
             parent=win,
             title="Выберите файл со штатным расписанием",
-            filetypes=[("Excel", "*.xlsx;*.xls"), ("Все файлы", "*.*")]
+            filetypes=[("Excel", "*.xlsx;*.xls"), ("Все файлы", "*.*")],
         )
         if not file_path:
             return
-
         try:
             cnt = import_employees_from_excel(Path(file_path))
             messagebox.showinfo(
                 "Импорт сотрудников",
                 f"Импорт завершён.\nОбработано записей: {cnt}",
-                parent=win
+                parent=win,
             )
         except Exception as e:
-            messagebox.showerror(
-                "Импорт сотрудников",
-                f"Ошибка при импорте:\n{e}",
-                parent=win
-            )
+            messagebox.showerror("Импорт сотрудников", f"Ошибка при импорте:\n{e}", parent=win)
 
-    ttk.Button(
-        tab_data,
-        text="Загрузить сотрудников из Excel...",
-        command=on_import_employees
-    ).grid(row=row_idx, column=0, sticky="w", padx=6, pady=(0, 8))
+    ttk.Button(tab_data, text="Загрузить сотрудников из Excel...", command=on_import_employees).grid(
+        row=row_idx, column=0, sticky="w", padx=6, pady=(0, 8)
+    )
     row_idx += 1
 
     ttk.Separator(tab_data, orient="horizontal").grid(
@@ -1378,43 +1113,33 @@ def open_settings_window(parent: tk.Tk):
     ttk.Label(
         tab_data,
         text="Загрузка объектов из Excel в базу данных:\n"
-             "Ожидается файл 'Справочник программ и объектов' "
-             "(колонки: ID объекта, год, программа, заказчик, адрес, № договора,\n"
-             "дата договора, сокращённое наименование объекта, подразделение исполнителя, тип договора)."
+        "Ожидается файл 'Справочник программ и объектов' "
+        "(колонки: ID объекта, год, программа, заказчик, адрес, № договора,\n"
+        "дата договора, сокращённое наименование объекта, подразделение исполнителя, тип договора).",
     ).grid(row=row_idx, column=0, columnspan=3, sticky="w", padx=6, pady=(6, 4))
     row_idx += 1
 
     def on_import_objects():
-        from tkinter import filedialog, messagebox
-        from pathlib import Path
-
         file_path = filedialog.askopenfilename(
             parent=win,
             title="Выберите файл справочника объектов",
-            filetypes=[("Excel", "*.xlsx;*.xls"), ("Все файлы", "*.*")]
+            filetypes=[("Excel", "*.xlsx;*.xls"), ("Все файлы", "*.*")],
         )
         if not file_path:
             return
-
         try:
             cnt = import_objects_from_excel(Path(file_path))
             messagebox.showinfo(
                 "Импорт объектов",
                 f"Импорт завершён.\nОбработано записей: {cnt}",
-                parent=win
+                parent=win,
             )
         except Exception as e:
-            messagebox.showerror(
-                "Импорт объектов",
-                f"Ошибка при импорте:\n{e}",
-                parent=win
-            )
+            messagebox.showerror("Импорт объектов", f"Ошибка при импорте:\n{e}", parent=win)
 
-    ttk.Button(
-        tab_data,
-        text="Загрузить объекты из Excel...",
-        command=on_import_objects
-    ).grid(row=row_idx, column=0, sticky="w", padx=6, pady=(0, 8))
+    ttk.Button(tab_data, text="Загрузить объекты из Excel...", command=on_import_objects).grid(
+        row=row_idx, column=0, sticky="w", padx=6, pady=(0, 8)
+    )
 
     # Кнопки
     btns = ttk.Frame(win)
@@ -1422,10 +1147,7 @@ def open_settings_window(parent: tk.Tk):
     ttk.Button(
         btns,
         text="Сохранить",
-        command=lambda: (
-            _save_from_vars(win),
-            messagebox.showinfo("Настройки", "Сохранено"),
-        ),
+        command=lambda: (_save_from_vars(win), messagebox.showinfo("Настройки", "Сохранено")),
     ).pack(side="right", padx=4)
     ttk.Button(btns, text="Отмена", command=win.destroy).pack(side="right")
 
@@ -1439,15 +1161,10 @@ def open_settings_window(parent: tk.Tk):
     except Exception:
         pass
 
+
 def _mk_entry(parent, label, section, key, row, width=30, show=None):
-    ttk.Label(parent, text=label).grid(
-        row=row, column=0, sticky="e", padx=(6, 6), pady=4
-    )
-    v = tk.StringVar(
-        value=str(
-            _store.get(section, {}).get(key, _defaults[section][key])
-        )
-    )
+    ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", padx=(6, 6), pady=4)
+    v = tk.StringVar(value=str(_store.get(section, {}).get(key, _defaults[section][key])))
     ent = ttk.Entry(parent, textvariable=v, width=width, show=show)
     ent.grid(row=row, column=1, sticky="w", padx=(0, 6), pady=4)
     _add_context_menu(ent)
@@ -1455,15 +1172,9 @@ def _mk_entry(parent, label, section, key, row, width=30, show=None):
 
 
 def _mk_check(parent, label, section, key, row):
-    ttk.Label(parent, text=label).grid(
-        row=row, column=0, sticky="e", padx=(6, 6), pady=4
-    )
+    ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", padx=(6, 6), pady=4)
     cur = (
-        str(
-            _store.get(section, {}).get(
-                key, _defaults[section][key]
-            )
-        )
+        str(_store.get(section, {}).get(key, _defaults[section][key]))
         .strip()
         .lower()
         in ("1", "true", "yes", "on")
@@ -1475,14 +1186,8 @@ def _mk_check(parent, label, section, key, row):
 
 
 def _mk_entry_with_btn(parent, label, section, key, is_dir, row):
-    ttk.Label(parent, text=label).grid(
-        row=row, column=0, sticky="e", padx=(6, 6), pady=4
-    )
-    v = tk.StringVar(
-        value=str(
-            _store.get(section, {}).get(key, _defaults[section][key])
-        )
-    )
+    ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", padx=(6, 6), pady=4)
+    v = tk.StringVar(value=str(_store.get(section, {}).get(key, _defaults[section][key])))
     ent = ttk.Entry(parent, textvariable=v, width=60)
     ent.grid(row=row, column=1, sticky="w", padx=(0, 6), pady=4)
     _add_context_menu(ent)
@@ -1500,9 +1205,7 @@ def _mk_entry_with_btn(parent, label, section, key, is_dir, row):
             if p:
                 v.set(p)
 
-    ttk.Button(parent, text="...", width=3, command=browse).grid(
-        row=row, column=2, sticky="w"
-    )
+    ttk.Button(parent, text="...", width=3, command=browse).grid(row=row, column=2, sticky="w")
     _vars.setdefault(section, {})[key] = v
 
 
