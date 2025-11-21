@@ -655,6 +655,168 @@ def import_employees_from_excel(path: Path) -> int:
 
     return processed
 
+def import_objects_from_excel(path: Path) -> int:
+    """
+    Импортирует объекты из Excel 'Справочник программ и объектов (3).xlsx'
+    в таблицу objects с полями:
+      excel_id, year, program_name, customer_name,
+      address, contract_number, contract_date,
+      short_name, executor_department, contract_type.
+    Столбец status НЕ трогаем.
+    Upsert по excel_id (если есть), иначе по адресу.
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"Файл не найден: {path}")
+
+    wb = load_workbook(path, read_only=True, data_only=True)
+    ws = wb.active
+
+    # Ищем строку с заголовками (где есть 'ID (код) номер объекта')
+    header_row_idx = None
+    header_row = None
+    for i, row in enumerate(ws.iter_rows(min_row=1, max_row=40, values_only=True), start=1):
+        if not row:
+            continue
+        cells = [_s_val(c).lower() for c in row]
+        if any("id (код) номер объекта" in c for c in cells):
+            header_row_idx = i
+            header_row = cells
+            break
+
+    if header_row_idx is None:
+        raise RuntimeError("Не найдена строка заголовка с колонкой 'ID (код) номер объекта'")
+
+    def col_idx(substr: str) -> int | None:
+        substr = substr.lower()
+        for i, h in enumerate(header_row):
+            if substr in h:
+                return i
+        return None
+
+    idx_excel_id = col_idx("id (код) номер объекта")
+    idx_year = col_idx("год реализации программы")
+    idx_prog = col_idx("наименование программы")
+    idx_cust = col_idx("наименование заказчика")
+    idx_addr = col_idx("адрес")
+    idx_contract_num = col_idx("№ договора")
+    idx_contract_date = col_idx("дата договора")
+    idx_short = col_idx("сокращенное наименование объекта")
+    idx_exec_dep = col_idx("сокращенное наименование подразделения исполнителя")
+    idx_type = col_idx("тип договора")
+
+    if idx_excel_id is None or idx_addr is None:
+        raise RuntimeError("Не найдены обязательные колонки 'ID (код) номер объекта' и/или 'Адрес объекта'")
+
+    conn = get_db_connection()
+    processed = 0
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                for row in ws.iter_rows(min_row=header_row_idx + 1, values_only=True):
+                    if not row:
+                        continue
+
+                    excel_id = _s_val(row[idx_excel_id]) if idx_excel_id < len(row) else ""
+                    address = _s_val(row[idx_addr]) if idx_addr < len(row) else ""
+
+                    if not excel_id and not address:
+                        continue  # пустая строка
+
+                    year = _s_val(row[idx_year]) if idx_year is not None and idx_year < len(row) else ""
+                    program_name = _s_val(row[idx_prog]) if idx_prog is not None and idx_prog < len(row) else ""
+                    customer_name = _s_val(row[idx_cust]) if idx_cust is not None and idx_cust < len(row) else ""
+                    contract_number = _s_val(row[idx_contract_num]) if idx_contract_num is not None and idx_contract_num < len(row) else ""
+                    short_name = _s_val(row[idx_short]) if idx_short is not None and idx_short < len(row) else ""
+                    executor_department = _s_val(row[idx_exec_dep]) if idx_exec_dep is not None and idx_exec_dep < len(row) else ""
+                    contract_type = _s_val(row[idx_type]) if idx_type is not None and idx_type < len(row) else ""
+
+                    # Дата договора
+                    contract_date = None
+                    if idx_contract_date is not None and idx_contract_date < len(row):
+                        raw_date = row[idx_contract_date]
+                        if isinstance(raw_date, (datetime, date)):
+                            contract_date = raw_date.date() if isinstance(raw_date, datetime) else raw_date
+                        else:
+                            s = _s_val(raw_date)
+                            # При необходимости можно распарсить строку, но пока оставим None
+
+                    # --- ищем существующий объект ---
+                    if excel_id:
+                        cur.execute(
+                            "SELECT id FROM objects WHERE excel_id = %s",
+                            (excel_id,)
+                        )
+                        r = cur.fetchone()
+                    else:
+                        cur.execute(
+                            "SELECT id FROM objects WHERE address = %s",
+                            (address,)
+                        )
+                        r = cur.fetchone()
+
+                    if r:
+                        obj_id = r[0]
+                        cur.execute(
+                            """
+                            UPDATE objects
+                               SET excel_id = %s,
+                                   year = %s,
+                                   program_name = %s,
+                                   customer_name = %s,
+                                   address = %s,
+                                   contract_number = %s,
+                                   contract_date = %s,
+                                   short_name = %s,
+                                   executor_department = %s,
+                                   contract_type = %s
+                             WHERE id = %s
+                            """,
+                            (
+                                excel_id or None,
+                                year or None,
+                                program_name or None,
+                                customer_name or None,
+                                address or None,
+                                contract_number or None,
+                                contract_date,
+                                short_name or None,
+                                executor_department or None,
+                                contract_type or None,
+                                obj_id,
+                            )
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            INSERT INTO objects (
+                                excel_id, year, program_name, customer_name,
+                                address, contract_number, contract_date,
+                                short_name, executor_department, contract_type
+                            )
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                            """,
+                            (
+                                excel_id or None,
+                                year or None,
+                                program_name or None,
+                                customer_name or None,
+                                address or None,
+                                contract_number or None,
+                                contract_date,
+                                short_name or None,
+                                executor_department or None,
+                                contract_type or None,
+                            )
+                        )
+
+                    processed += 1
+
+    finally:
+        conn.close()
+
+    return processed
+
 def _hash_password(password: str, salt: bytes | None = None) -> str:
     """
     То же форматирование, что и в main_app:
@@ -1160,20 +1322,20 @@ def open_settings_window(parent: tk.Tk):
     users_page = UsersPage(tab_users)
     users_page.pack(fill="both", expand=True)
 
-    # --- Вкладка "Сотрудники" ---
-    tab_emps = ttk.Frame(nb)
-    nb.add(tab_emps, text="Сотрудники")
+    # --- Вкладка "Данные" ---
+    tab_data = ttk.Frame(nb)
+    nb.add(tab_data, text="Данные")
 
-    ttk.Label(tab_emps,
-              text="Загрузка сотрудников из Excel в базу данных:\n"
-                   "Ожидается файл с колонками:\n"
-                   "  - 'Табельный номер (с префиксами)'\n"
-                   "  - 'Сотрудник'\n"
-                   "  - 'Должность'\n"
-                   "  - 'Подразделение'\n"
-                   "  - 'Дата увольнения' (опционально)").grid(
-        row=0, column=0, columnspan=3, sticky="w", padx=6, pady=(6, 4)
-    )
+    row_idx = 0
+
+    ttk.Label(
+        tab_data,
+        text="Загрузка сотрудников из Excel в базу данных:\n"
+             "Ожидается файл со штатным расписанием\n"
+             "(колонки: 'Табельный номер (с префиксами)', 'Сотрудник', "
+             "'Должность', 'Подразделение', 'Дата увольнения')."
+    ).grid(row=row_idx, column=0, columnspan=3, sticky="w", padx=6, pady=(6, 4))
+    row_idx += 1
 
     def on_import_employees():
         from tkinter import filedialog, messagebox
@@ -1200,12 +1362,59 @@ def open_settings_window(parent: tk.Tk):
                 f"Ошибка при импорте:\n{e}",
                 parent=win
             )
-            
+
     ttk.Button(
-        tab_emps,
+        tab_data,
         text="Загрузить сотрудников из Excel...",
         command=on_import_employees
-    ).grid(row=1, column=0, sticky="w", padx=6, pady=(4, 8))
+    ).grid(row=row_idx, column=0, sticky="w", padx=6, pady=(0, 8))
+    row_idx += 1
+
+    ttk.Separator(tab_data, orient="horizontal").grid(
+        row=row_idx, column=0, columnspan=3, sticky="ew", padx=6, pady=4
+    )
+    row_idx += 1
+
+    ttk.Label(
+        tab_data,
+        text="Загрузка объектов из Excel в базу данных:\n"
+             "Ожидается файл 'Справочник программ и объектов' "
+             "(колонки: ID объекта, год, программа, заказчик, адрес, № договора,\n"
+             "дата договора, сокращённое наименование объекта, подразделение исполнителя, тип договора)."
+    ).grid(row=row_idx, column=0, columnspan=3, sticky="w", padx=6, pady=(6, 4))
+    row_idx += 1
+
+    def on_import_objects():
+        from tkinter import filedialog, messagebox
+        from pathlib import Path
+
+        file_path = filedialog.askopenfilename(
+            parent=win,
+            title="Выберите файл справочника объектов",
+            filetypes=[("Excel", "*.xlsx;*.xls"), ("Все файлы", "*.*")]
+        )
+        if not file_path:
+            return
+
+        try:
+            cnt = import_objects_from_excel(Path(file_path))
+            messagebox.showinfo(
+                "Импорт объектов",
+                f"Импорт завершён.\nОбработано записей: {cnt}",
+                parent=win
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Импорт объектов",
+                f"Ошибка при импорте:\n{e}",
+                parent=win
+            )
+
+    ttk.Button(
+        tab_data,
+        text="Загрузить объекты из Excel...",
+        command=on_import_objects
+    ).grid(row=row_idx, column=0, sticky="w", padx=6, pady=(0, 8))
 
     # Кнопки
     btns = ttk.Frame(win)
