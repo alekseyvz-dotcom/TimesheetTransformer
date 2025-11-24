@@ -387,6 +387,160 @@ def load_objects_from_db() -> List[Tuple[str, str]]:
     finally:
         conn.close()
 
+def upsert_timesheet_header(
+    object_id: str,
+    object_addr: str,
+    department: str,
+    year: int,
+    month: int,
+    user_id: int,
+) -> int:
+    """
+    Находит или создаёт заголовок табеля и возвращает его id.
+    Привязан к конкретному user_id.
+    """
+    conn = get_db_connection()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO timesheet_headers (
+                    object_id, object_addr, department, year, month, user_id
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (object_id, object_addr, department, year, month, user_id)
+                DO UPDATE SET updated_at = now()
+                RETURNING id;
+                """,
+                (object_id or None, object_addr, department or None, year, month, user_id),
+            )
+            ts_id = cur.fetchone()[0]
+        return ts_id
+    finally:
+        conn.close()
+
+
+def replace_timesheet_rows(
+    header_id: int,
+    rows: List[Dict[str, Any]],
+):
+    """
+    Полностью заменяет строки табеля для заданного header_id.
+    rows: [{'fio': str, 'tbn': str, 'hours': [str|None x31]}, ...]
+    """
+    conn = get_db_connection()
+    try:
+        with conn, conn.cursor() as cur:
+            # Удаляем старые строки
+            cur.execute("DELETE FROM timesheet_rows WHERE header_id = %s", (header_id,))
+
+            # Вставляем новые
+            for rec in rows:
+                fio = rec["fio"]
+                tbn = rec.get("tbn") or None
+                hours_list = rec.get("hours") or [None] * 31
+                if len(hours_list) != 31:
+                    hours_list = (hours_list + [None] * 31)[:31]
+
+                # Подсчёты такие же, как в save_all
+                total_hours = 0.0
+                total_days = 0
+                total_ot_day = 0.0
+                total_ot_night = 0.0
+
+                for raw in hours_list:
+                    if not raw:
+                        continue
+                    hrs = parse_hours_value(raw)
+                    d_ot, n_ot = parse_overtime(raw)
+                    if isinstance(hrs, (int, float)) and hrs > 1e-12:
+                        total_hours += hrs
+                        total_days += 1
+                    if isinstance(d_ot, (int, float)):
+                        total_ot_day += float(d_ot)
+                    if isinstance(n_ot, (int, float)):
+                        total_ot_night += float(n_ot)
+
+                cur.execute(
+                    """
+                    INSERT INTO timesheet_rows (
+                        header_id, fio, tbn, hours_raw,
+                        total_days, total_hours, overtime_day, overtime_night
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        header_id,
+                        fio,
+                        tbn,
+                        hours_list,
+                        total_days if total_days else None,
+                        None if abs(total_hours) < 1e-12 else total_hours,
+                        None if abs(total_ot_day) < 1e-12 else total_ot_day,
+                        None if abs(total_ot_night) < 1e-12 else total_ot_night,
+                    ),
+                )
+    finally:
+        conn.close()
+
+def load_timesheet_rows_from_db(
+    object_id: str,
+    object_addr: str,
+    department: str,
+    year: int,
+    month: int,
+    user_id: int,
+) -> List[Dict[str, Any]]:
+    """
+    Загружает строки табеля для конкретного пользователя и контекста
+    (объект, подразделение, период).
+    Возвращает список dict: {'fio', 'tbn', 'hours': [str|None x31]}
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT h.id
+                  FROM timesheet_headers h
+                 WHERE COALESCE(h.object_id, '') = COALESCE(%s, '')
+                   AND h.object_addr = %s
+                   AND COALESCE(h.department, '') = COALESCE(%s, '')
+                   AND h.year = %s
+                   AND h.month = %s
+                   AND h.user_id = %s
+                """,
+                (object_id or None, object_addr, department or None, year, month, user_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                return []
+            header_id = row[0]
+
+            cur.execute(
+                """
+                SELECT fio, tbn, hours_raw
+                  FROM timesheet_rows
+                 WHERE header_id = %s
+                 ORDER BY fio, tbn
+                """,
+                (header_id,),
+            )
+            result = []
+            for fio, tbn, hours_raw in cur.fetchall():
+                # hours_raw приходит как list/tuple из psycopg2
+                hrs = list(hours_raw) if hours_raw is not None else [None] * 31
+                if len(hrs) != 31:
+                    hrs = (hrs + [None] * 31)[:31]
+                result.append({
+                    "fio": fio or "",
+                    "tbn": tbn or "",
+                    "hours": [h if h is not None else None for h in hrs],
+                })
+            return result
+    finally:
+        conn.close()
+
 # ------------- Утилиты для времени и табеля -------------
 
 def month_days(year: int, month: int) -> int:
@@ -1014,6 +1168,7 @@ class TimesheetPage(tk.Frame):
 
     def __init__(self, master):
         super().__init__(master)
+        self.app_ref = app_ref  # <-- ссылка на приложение, чтобы взять current_user
         self.base_dir = exe_dir()
         self.out_dir = get_output_dir_from_config()
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -1799,62 +1954,53 @@ class TimesheetPage(tk.Frame):
         return ws2
 
     def _load_existing_rows(self):
-        fpath = self._current_file_path()
+        """
+        Загружает существующие строки табеля из БД для текущих:
+        - адреса / ID объекта
+        - месяца / года
+        - подразделения
+        - пользователя (current_user.id)
+        """
         # Очистим модель
         self.model_rows.clear()
 
-        if not fpath or not fpath.exists():
+        addr = self.cmb_address.get().strip()
+        oid = self.cmb_object_id.get().strip()
+        y, m = self.get_year_month()
+        current_dep = self.cmb_department.get().strip()
+        if current_dep == "Все":
+            # В БД храним конкретное подразделение, а "Все" — это
+            # объединение, которого пока не будет. Можно здесь
+            # просто не грузить ничего или придумать отдельную логику.
+            self._render_page(1)
+            return
+
+        # Достаём текущего пользователя
+        user = getattr(self.app_ref, "current_user", None) if hasattr(self, "app_ref") else None
+        user_id = (user or {}).get("id")
+        if not user_id:
+            # На всякий случай
             self._render_page(1)
             return
 
         try:
-            wb = load_workbook(fpath, data_only=True)
-            ws = self._ensure_sheet(wb)
-            y, m = self.get_year_month()
-            addr = self.cmb_address.get().strip()
-            oid = self.cmb_object_id.get().strip()
-            current_dep = self.cmb_department.get().strip()
-
-            for r in range(2, ws.max_row + 1):
-                row_oid = (ws.cell(r, 1).value or "")
-                row_addr = (ws.cell(r, 2).value or "")
-                row_m = int(ws.cell(r, 3).value or 0)
-                row_y = int(ws.cell(r, 4).value or 0)
-                fio = (ws.cell(r, 5).value or "")
-                tbn = (ws.cell(r, 6).value or "")
-                row_department = (ws.cell(r, 7).value or "")
-
-                if row_m != m or row_y != y:
-                    continue
-                if oid:
-                    if row_oid != oid:
-                        continue
-                else:
-                    if row_addr != addr:
-                        continue
-                if current_dep != "Все" and row_department != current_dep:
-                    continue
-
-                hours_raw: List[Optional[str]] = []
-                for c in range(8, 8 + 31):
-                    v = ws.cell(r, c).value
-                    hours_raw.append(str(v) if v else None)
-
-                self.model_rows.append({"fio": fio, "tbn": tbn, "hours": hours_raw})
-
+            rows = load_timesheet_rows_from_db(
+                object_id=oid or None,
+                object_addr=addr,
+                department=current_dep,
+                year=y,
+                month=m,
+                user_id=user_id,
+            )
+            self.model_rows.extend(rows)
             self._render_page(1)
-
         except Exception as e:
-            messagebox.showerror("Загрузка", f"Не удалось загрузить существующие строки:\n{e}")
+            logging.exception("Ошибка загрузки табеля из БД")
+            messagebox.showerror("Загрузка", f"Не удалось загрузить табель из БД:\n{e}")
             self._render_page(1)
 
     def save_all(self):
-        fpath = self._current_file_path()
-        if not fpath:
-            messagebox.showwarning("Сохранение", "Укажите адрес и/или ID объекта, а также период.")
-            return
-
-        # Сохраним правки с текущей страницы
+        # Сохраним правки с текущей страницы в модель
         self._sync_visible_to_model()
 
         addr = self.cmb_address.get().strip()
@@ -1862,98 +2008,153 @@ class TimesheetPage(tk.Frame):
         y, m = self.get_year_month()
         current_dep = self.cmb_department.get().strip()
 
+        if not addr and not oid:
+            messagebox.showwarning("Сохранение", "Укажите адрес и/или ID объекта, а также период.")
+            return
+
+        if current_dep == "Все":
+            messagebox.showwarning(
+                "Сохранение",
+                "Для сохранения в БД выберите конкретное подразделение (не «Все»).",
+            )
+            return
+
+        # Текущий пользователь из MainApp
+        user = getattr(self.app_ref, "current_user", None) if hasattr(self, "app_ref") else None
+        user_id = (user or {}).get("id")
+        if not user_id:
+            messagebox.showerror(
+                "Сохранение",
+                "Не удалось определить текущего пользователя. Повторите вход в систему.",
+            )
+            return
+
+        # Сохранение в БД
         try:
-            if fpath.exists():
-                wb = load_workbook(fpath)
-            else:
-                fpath.parent.mkdir(parents=True, exist_ok=True)
-                wb = Workbook()
-                if wb.active:
-                    wb.remove(wb.active)
-
-            ws = self._ensure_sheet(wb)
-
-            # Удаляем старые записи ТЕКУЩЕГО подразделения
-            to_del = []
-            for r in range(2, ws.max_row + 1):
-                row_oid = (ws.cell(r, 1).value or "")
-                row_addr = (ws.cell(r, 2).value or "")
-                row_m = int(ws.cell(r, 3).value or 0)
-                row_y = int(ws.cell(r, 4).value or 0)
-                row_dep = (ws.cell(r, 7).value or "")
-
-                match_obj = (oid and row_oid == oid) or (not oid and row_addr == addr)
-                match_period = (row_m == m and row_y == y)
-                match_dep = (current_dep == "Все" or row_dep == current_dep)
-
-                if match_obj and match_period and match_dep:
-                    to_del.append(r)
-
-            for r in reversed(to_del):
-                ws.delete_rows(r, 1)
-
-            # Записываем модель
-            for rec in self.model_rows:
-                fio = rec["fio"]
-                tbn = rec["tbn"]
-                hours_list = rec.get("hours") or [None] * 31
-
-                # Определяем подразделение
-                department = current_dep if current_dep != "Все" else ""
-                for emp_fio, emp_tbn, emp_pos, emp_dep in self.employees:
-                    if emp_fio == fio:
-                        if emp_dep:
-                            department = emp_dep
-                        break
-
-                # Рассчеты итогов из строковых значений
-                total_hours = 0.0
-                total_days = 0
-                total_ot_day = 0.0
-                total_ot_night = 0.0
-
-                day_values = []
-                for raw in hours_list:
-                    if not raw:
-                        day_values.append(None)
-                        continue
-                    hrs = parse_hours_value(raw)
-                    d_ot, n_ot = parse_overtime(raw)
-
-                    if isinstance(hrs, (int, float)) and hrs > 1e-12:
-                        total_hours += hrs
-                        total_days += 1
-
-                    # Нормализуем запись в ячейку (сохраняем исходное, если корректно)
-                    cell_str = None
-                    try:
-                        base = f"{hrs:.2f}".rstrip("0").rstrip(".") if hrs is not None else None
-                        if base:
-                            if d_ot or n_ot:
-                                d_ot_val = d_ot if d_ot else 0
-                                n_ot_val = n_ot if n_ot else 0
-                                cell_str = f"{base}({d_ot_val:.0f}/{n_ot_val:.0f})"
-                                total_ot_day += d_ot_val
-                                total_ot_night += n_ot_val
-                            else:
-                                cell_str = base
-                    except Exception:
-                        cell_str = str(raw)
-
-                    day_values.append(cell_str)
-
-                row_values = [oid, addr, m, y, fio, tbn, department] + day_values + [
-                    total_days if total_days else None,
-                    None if abs(total_hours) < 1e-12 else total_hours,
-                    None if abs(total_ot_day) < 1e-12 else total_ot_day,
-                    None if abs(total_ot_night) < 1e-12 else total_ot_night
-                ]
-                ws.append(row_values)
-
-            wb.save(fpath)
-            messagebox.showinfo("Сохранение", f"Сохранено:\n{fpath}")
+            header_id = upsert_timesheet_header(
+                object_id=oid or None,
+                object_addr=addr,
+                department=current_dep,
+                year=y,
+                month=m,
+                user_id=user_id,
+            )
+            replace_timesheet_rows(header_id, self.model_rows)
         except Exception as e:
-            messagebox.showerror("Сохранение", f"Ошибка сохранения:\n{e}")
+            logging.exception("Ошибка сохранения табеля в БД")
+            messagebox.showerror("Сохранение", f"Ошибка сохранения в БД:\n{e}")
+            return
+
+        # Если хочешь оставить Excel как резервную копию — можно вызвать старый код.
+        # Если нет необходимости — блок ниже можно удалить.
+        try:
+            fpath = self._current_file_path()
+            if fpath:
+                addr_local = addr
+                oid_local = oid
+                y_local, m_local = y, m
+                current_dep_local = current_dep
+
+                if fpath.exists():
+                    wb = load_workbook(fpath)
+                else:
+                    fpath.parent.mkdir(parents=True, exist_ok=True)
+                    wb = Workbook()
+                    if wb.active:
+                        wb.remove(wb.active)
+
+                ws = self._ensure_sheet(wb)
+
+                # Удаляем старые записи ТЕКУЩЕГО подразделения
+                to_del = []
+                for r in range(2, ws.max_row + 1):
+                    row_oid = (ws.cell(r, 1).value or "")
+                    row_addr = (ws.cell(r, 2).value or "")
+                    row_m = int(ws.cell(r, 3).value or 0)
+                    row_y = int(ws.cell(r, 4).value or 0)
+                    row_dep = (ws.cell(r, 7).value or "")
+
+                    match_obj = (oid_local and row_oid == oid_local) or (not oid_local and row_addr == addr_local)
+                    match_period = (row_m == m_local and row_y == y_local)
+                    match_dep = (current_dep_local == "Все" or row_dep == current_dep_local)
+
+                    if match_obj and match_period and match_dep:
+                        to_del.append(r)
+
+                for r in reversed(to_del):
+                    ws.delete_rows(r, 1)
+
+                # Записываем модель (логика как раньше)
+                for rec in self.model_rows:
+                    fio = rec["fio"]
+                    tbn = rec["tbn"]
+                    hours_list = rec.get("hours") or [None] * 31
+
+                    department = current_dep_local if current_dep_local != "Все" else ""
+                    for emp_fio, emp_tbn, emp_pos, emp_dep in self.employees:
+                        if emp_fio == fio:
+                            if emp_dep:
+                                department = emp_dep
+                            break
+
+                    total_hours = 0.0
+                    total_days = 0
+                    total_ot_day = 0.0
+                    total_ot_night = 0.0
+
+                    day_values = []
+                    for raw in hours_list:
+                        if not raw:
+                            day_values.append(None)
+                            continue
+                        hrs = parse_hours_value(raw)
+                        d_ot, n_ot = parse_overtime(raw)
+
+                        if isinstance(hrs, (int, float)) and hrs > 1e-12:
+                            total_hours += hrs
+                            total_days += 1
+
+                        cell_str = None
+                        try:
+                            base = f"{hrs:.2f}".rstrip("0").rstrip(".") if hrs is not None else None
+                            if base:
+                                if d_ot or n_ot:
+                                    d_ot_val = d_ot if d_ot else 0
+                                    n_ot_val = n_ot if n_ot else 0
+                                    cell_str = f"{base}({d_ot_val:.0f}/{n_ot_val:.0f})"
+                                    total_ot_day += d_ot_val
+                                    total_ot_night += n_ot_val
+                                else:
+                                    cell_str = base
+                        except Exception:
+                            cell_str = str(raw)
+
+                        day_values.append(cell_str)
+
+                    row_values = [oid_local, addr_local, m_local, y_local, fio, tbn, department] + day_values + [
+                        total_days if total_days else None,
+                        None if abs(total_hours) < 1e-12 else total_hours,
+                        None if abs(total_ot_day) < 1e-12 else total_ot_day,
+                        None if abs(total_ot_night) < 1e-12 else total_ot_night
+                    ]
+                    ws.append(row_values)
+
+                wb.save(fpath)
+                messagebox.showinfo(
+                    "Сохранение",
+                    f"Сохранено в БД (user_id={user_id}) и в файл:\n{fpath}",
+                )
+            else:
+                messagebox.showinfo(
+                    "Сохранение",
+                    f"Сохранено в БД (user_id={user_id}). Локальный файл не создан (нет адреса/ID).",
+                )
+        except Exception as e:
+            logging.exception("Ошибка резервного сохранения в Excel")
+            messagebox.showwarning(
+                "Сохранение",
+                f"В БД табель сохранён, но резервное сохранение в Excel завершилось ошибкой:\n{e}",
+            )
 
     def _on_department_select(self):
         """Обработчик смены подразделения"""
@@ -2198,7 +2399,7 @@ class MainApp(tk.Tk):
         m_ts = tk.Menu(menubar, tearoff=0)
         m_ts.add_command(
             label="Создать",
-            command=lambda: self._show_page("timesheet", lambda parent: TimesheetPage(parent)),
+            command=lambda: self._show_page("timesheet", lambda parent: TimesheetPage(parent, app_ref=self)),
         )
         menubar.add_cascade(label="Объектный табель", menu=m_ts)
 
