@@ -1296,10 +1296,13 @@ class TimesheetPage(tk.Frame):
         init_year: Optional[int] = None,
         init_month: Optional[int] = None,
         read_only: bool = False,
+        owner_user_id: Optional[int] = None,
     ):
         super().__init__(master)
         self.app_ref = app_ref  # ссылка на MainApp, чтобы брать current_user
         self.read_only = bool(read_only)
+        # ВЛАДЕЛЕЦ ТАБЕЛЯ (для загрузки строк)
+        self.owner_user_id: Optional[int] = owner_user_id
         # Параметры инициализации (могут быть None)
         self._init_object_id = init_object_id
         self._init_object_addr = init_object_addr
@@ -2169,11 +2172,16 @@ class TimesheetPage(tk.Frame):
             self._render_page(1)
             return
 
-        # Достаём текущего пользователя
-        user = getattr(self.app_ref, "current_user", None) if hasattr(self, "app_ref") else None
-        user_id = (user or {}).get("id")
+        # user_id владельца табеля:
+        # если передан явно (например, из реестра) — используем его,
+        # иначе берём текущего пользователя
+        if self.owner_user_id is not None:
+            user_id = self.owner_user_id
+        else:
+            user = getattr(self.app_ref, "current_user", None) if hasattr(self, "app_ref") else None
+            user_id = (user or {}).get("id")
+
         if not user_id:
-            # На всякий случай
             self._render_page(1)
             return
 
@@ -2186,6 +2194,7 @@ class TimesheetPage(tk.Frame):
                 month=m,
                 user_id=user_id,
             )
+
             self.model_rows.extend(rows)
             self._render_page(1)
         except Exception as e:
@@ -2712,14 +2721,19 @@ class MyTimesheetsPage(tk.Frame):
         if not h:
             return
 
-        # Открываем TimesheetPage с параметрами выбранного заголовка
         object_id = h.get("object_id") or None
         object_addr = h.get("object_addr") or ""
         department = h.get("department") or ""
         year = int(h.get("year") or 0)
         month = int(h.get("month") or 0)
 
-        # Используем существующий механизм _show_page в MainApp
+        owner_user_id = h.get("user_id")  # владелец табеля в БД
+
+        # роль текущего пользователя
+        role = (self.app_ref.current_user or {}).get("role") or "specialist"
+        # только admin может редактировать, остальные — только просмотр
+        read_only = (role != "admin")
+
         self.app_ref._show_page(
             "timesheet",
             lambda parent: TimesheetPage(
@@ -2730,6 +2744,8 @@ class MyTimesheetsPage(tk.Frame):
                 init_department=department,
                 init_year=year,
                 init_month=month,
+                read_only=read_only,
+                owner_user_id=owner_user_id,   # <-- передаём id автора
             ),
         )
 
@@ -2952,6 +2968,8 @@ class TimesheetRegistryPage(tk.Frame):
         year = int(h.get("year") or 0)
         month = int(h.get("month") or 0)
 
+        owner_user_id = h.get("user_id")  # владелец табеля в БД
+
         # роль текущего пользователя
         role = (self.app_ref.current_user or {}).get("role") or "specialist"
         # только admin может редактировать, остальные — только просмотр
@@ -2968,6 +2986,7 @@ class TimesheetRegistryPage(tk.Frame):
                 init_year=year,
                 init_month=month,
                 read_only=read_only,
+                owner_user_id=owner_user_id,   # <-- передаём id автора
             ),
         )
 
