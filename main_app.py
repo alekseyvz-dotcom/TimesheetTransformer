@@ -3287,7 +3287,7 @@ class MainApp(tk.Tk):
         if self._menu_timesheets is not None and self._menu_timesheets_registry_index is not None:
             try:
                 # разрешаем для ролей admin, head, planner (можно сузить список)
-                st = "normal" if role in ("admin", "head") else "disabled"
+                st = "normal" if role in ("admin", "manager") else "disabled"
                 self._menu_timesheets.entryconfig(self._menu_timesheets_registry_index, state=st)
             except Exception:
                 pass
@@ -3297,7 +3297,7 @@ class MainApp(tk.Tk):
             try:
                 self._menu_meals.entryconfig(0, state="normal")  # Создать
                 if self._menu_meals_planning_index is not None:
-                    st = "normal" if role in ("admin", "planner") else "disabled"
+                    st = "normal" if role in ("admin", "planner", "manager") else "disabled"
                     self._menu_meals.entryconfig(self._menu_meals_planning_index, state=st)
                 if self._menu_meals_settings_index is not None:
                     st = "normal" if role == "admin" else "disabled"
@@ -3310,10 +3310,10 @@ class MainApp(tk.Tk):
             try:
                 self._menu_transport.entryconfig(0, state="normal")
                 if self._menu_transport_planning_index is not None:
-                    st = "normal" if role in ("admin", "planner") else "disabled"
+                    st = "normal" if role in ("admin", "planner", "manager") else "disabled"
                     self._menu_transport.entryconfig(self._menu_transport_planning_index, state=st)
                 if self._menu_transport_registry_index is not None:
-                    st = "normal" if role in ("admin", "planner", "head") else "disabled"
+                    st = "normal" if role in ("admin", "planner", "manager") else "disabled"
                     self._menu_transport.entryconfig(self._menu_transport_registry_index, state=st)
             except Exception:
                 pass
@@ -3321,7 +3321,7 @@ class MainApp(tk.Tk):
         # Объекты: пункт "Создать" только для admin, head, planner
         if self._menu_objects is not None and self._menu_objects_create_index is not None:
             try:
-                st = "normal" if role in ("admin", "head", "planner") else "disabled"
+                st = "normal" if role in ("admin", "manager", "planner") else "disabled"
                 self._menu_objects.entryconfig(self._menu_objects_create_index, state=st)
             except Exception:
                 pass
