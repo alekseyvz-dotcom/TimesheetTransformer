@@ -541,6 +541,45 @@ def load_timesheet_rows_from_db(
     finally:
         conn.close()
 
+def load_user_timesheet_headers(user_id: int) -> List[Dict[str, Any]]:
+    """
+    Возвращает список заголовков табелей, созданных пользователем.
+    Каждый элемент:
+      {
+        'id': int,
+        'object_id': str|None,
+        'object_addr': str,
+        'department': str|None,
+        'year': int,
+        'month': int,
+        'created_at': datetime,
+        'updated_at': datetime
+      }
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id,
+                       object_id,
+                       object_addr,
+                       department,
+                       year,
+                       month,
+                       created_at,
+                       updated_at
+                  FROM timesheet_headers
+                 WHERE user_id = %s
+                 ORDER BY year DESC, month DESC, object_addr, COALESCE(department, '')
+                """,
+                (user_id,),
+            )
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
 # ------------- Утилиты для времени и табеля -------------
 
 def month_days(year: int, month: int) -> int:
@@ -1166,9 +1205,26 @@ class TimesheetPage(tk.Frame):
     MAX_FIO_PX = 260
     HEADER_BG = "#d0d0d0"
 
-    def __init__(self, master, app_ref):
+    def __init__(
+        self,
+        master,
+        app_ref,
+        init_object_id: Optional[str] = None,
+        init_object_addr: Optional[str] = None,
+        init_department: Optional[str] = None,
+        init_year: Optional[int] = None,
+        init_month: Optional[int] = None,
+    ):
         super().__init__(master)
         self.app_ref = app_ref  # ссылка на MainApp, чтобы брать current_user
+
+        # Параметры инициализации (могут быть None)
+        self._init_object_id = init_object_id
+        self._init_object_addr = init_object_addr
+        self._init_department = init_department
+        self._init_year = init_year
+        self._init_month = init_month
+
         self.base_dir = exe_dir()
         self.out_dir = get_output_dir_from_config()
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -1361,6 +1417,30 @@ class TimesheetPage(tk.Frame):
         self.lbl_page = ttk.Label(pag, text="Стр. 1 / 1")
         self.lbl_page.pack(side="left")
         ttk.Button(pag, text="⟩", width=3, command=lambda: self._render_page(self.current_page + 1)).pack(side="left", padx=4)
+
+        # Применяем переданные значения (если открываем существующий табель)
+        # Подразделение
+        if self._init_department:
+            if self._init_department in deps:
+                self.cmb_department.set(self._init_department)
+
+        # Период
+        if self._init_year:
+            self.spn_year.delete(0, "end")
+            self.spn_year.insert(0, str(self._init_year))
+        if self._init_month:
+            if 1 <= self._init_month <= 12:
+                self.cmb_month.current(self._init_month - 1)
+
+        # Адрес и ID объекта
+        if self._init_object_addr:
+            if self._init_object_addr in self.address_options:
+                self.cmb_address.set(self._init_object_addr)
+        if self._init_object_id:
+            # сначала заполним ID для текущего адреса
+            self._on_address_change()
+            if self._init_object_id in (self.cmb_object_id.cget("values") or []):
+                self.cmb_object_id.set(self._init_object_id)
 
         self._on_department_select()
 
@@ -2371,6 +2451,166 @@ class TimesheetPage(tk.Frame):
             pass
         self._fit_job = self.after(150, self._auto_fit_columns)
 
+class MyTimesheetsPage(tk.Frame):
+    """
+    Реестр табелей текущего пользователя.
+    """
+    def __init__(self, master, app_ref: "MainApp"):
+        super().__init__(master)
+        self.app_ref = app_ref
+
+        self.tree = None
+        self._headers: List[Dict[str, Any]] = []
+
+        self._build_ui()
+        self._load_data()
+
+    def _build_ui(self):
+        top = tk.Frame(self)
+        top.pack(fill="x", padx=8, pady=(8, 4))
+
+        tk.Label(
+            top,
+            text="Мои табели",
+            font=("Segoe UI", 12, "bold"),
+        ).pack(side="left")
+
+        ttk.Button(
+            top,
+            text="Обновить",
+            command=self._load_data,
+        ).pack(side="right", padx=4)
+
+        # Таблица
+        frame = tk.Frame(self)
+        frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+
+        cols = ("year", "month", "object", "department", "updated_at")
+        self.tree = ttk.Treeview(
+            frame,
+            columns=cols,
+            show="headings",
+            selectmode="browse",
+        )
+
+        self.tree.heading("year", text="Год")
+        self.tree.heading("month", text="Месяц")
+        self.tree.heading("object", text="Объект")
+        self.tree.heading("department", text="Подразделение")
+        self.tree.heading("updated_at", text="Обновлён")
+
+        self.tree.column("year", width=60, anchor="center")
+        self.tree.column("month", width=80, anchor="center")
+        self.tree.column("object", width=260, anchor="w")
+        self.tree.column("department", width=180, anchor="w")
+        self.tree.column("updated_at", width=140, anchor="center")
+
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        # Двойной клик — открыть табель
+        self.tree.bind("<Double-1>", self._on_open)
+        # Enter — тоже открыть
+        self.tree.bind("<Return>", self._on_open)
+
+        # Нижняя панель с подсказкой
+        bottom = tk.Frame(self)
+        bottom.pack(fill="x", padx=8, pady=(0, 8))
+        tk.Label(
+            bottom,
+            text="Двойной щелчок или Enter по строке — открыть табель для редактирования.",
+            font=("Segoe UI", 9),
+            fg="#555",
+        ).pack(side="left")
+
+    def _load_data(self):
+        self.tree.delete(*self.tree.get_children())
+        self._headers.clear()
+
+        user = getattr(self.app_ref, "current_user", None) if hasattr(self, "app_ref") else None
+        user_id = (user or {}).get("id")
+        if not user_id:
+            messagebox.showwarning("Мои табели", "Не определён текущий пользователь.")
+            return
+
+        try:
+            headers = load_user_timesheet_headers(user_id)
+        except Exception as e:
+            logging.exception("Ошибка загрузки списка табелей пользователя")
+            messagebox.showerror("Мои табели", f"Ошибка загрузки списка табелей из БД:\n{e}")
+            return
+
+        self._headers = headers
+
+        for h in headers:
+            year = h["year"]
+            month = h["month"]
+            addr = h["object_addr"] or ""
+            obj_id = h.get("object_id") or ""
+            dep = h.get("department") or ""
+            upd = h.get("updated_at")
+
+            month_ru = month_name_ru(month) if 1 <= month <= 12 else str(month)
+            obj_display = addr
+            if obj_id:
+                obj_display = f"[{obj_id}] {addr}"
+
+            if isinstance(upd, datetime):
+                upd_str = upd.strftime("%d.%m.%Y %H:%M")
+            else:
+                upd_str = str(upd or "")
+
+            iid = str(h["id"])
+            self.tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(year, month_ru, obj_display, dep, upd_str),
+            )
+
+    def _get_selected_header(self) -> Optional[Dict[str, Any]]:
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        iid = sel[0]
+        try:
+            hid = int(iid)
+        except Exception:
+            return None
+        for h in self._headers:
+            if int(h["id"]) == hid:
+                return h
+        return None
+
+    def _on_open(self, event=None):
+        h = self._get_selected_header()
+        if not h:
+            return
+
+        # Открываем TimesheetPage с параметрами выбранного заголовка
+        object_id = h.get("object_id") or None
+        object_addr = h.get("object_addr") or ""
+        department = h.get("department") or ""
+        year = int(h.get("year") or 0)
+        month = int(h.get("month") or 0)
+
+        # Используем существующий механизм _show_page в MainApp
+        self.app_ref._show_page(
+            "timesheet",
+            lambda parent: TimesheetPage(
+                parent,
+                app_ref=self.app_ref,
+                init_object_id=object_id,
+                init_object_addr=object_addr,
+                init_department=department,
+                init_year=year,
+                init_month=month,
+            ),
+        )
+
 class MainApp(tk.Tk):
     def __init__(self, current_user: Optional[Dict[str, Any]] = None):
         super().__init__()
@@ -2402,6 +2642,13 @@ class MainApp(tk.Tk):
             command=lambda: self._show_page(
                 "timesheet",
                 lambda parent: TimesheetPage(parent, app_ref=self),
+            ),
+        )
+        m_ts.add_command(
+            label="Мои табели",
+            command=lambda: self._show_page(
+                "my_timesheets",
+                lambda parent: MyTimesheetsPage(parent, app_ref=self),
             ),
         )
         menubar.add_cascade(label="Объектный табель", menu=m_ts)
