@@ -2727,13 +2727,7 @@ class MyTimesheetsPage(tk.Frame):
         year = int(h.get("year") or 0)
         month = int(h.get("month") or 0)
 
-        owner_user_id = h.get("user_id")  # владелец табеля в БД
-
-        # роль текущего пользователя
-        role = (self.app_ref.current_user or {}).get("role") or "specialist"
-        # только admin может редактировать, остальные — только просмотр
-        read_only = (role != "admin")
-
+        # Табель из "Моих табелей" всегда редактируемый для владельца
         self.app_ref._show_page(
             "timesheet",
             lambda parent: TimesheetPage(
@@ -2744,10 +2738,11 @@ class MyTimesheetsPage(tk.Frame):
                 init_department=department,
                 init_year=year,
                 init_month=month,
-                read_only=read_only,
-                owner_user_id=owner_user_id,   # <-- передаём id автора
+                read_only=False,
+                owner_user_id=None,
             ),
         )
+
 
 class TimesheetRegistryPage(tk.Frame):
     """
