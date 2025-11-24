@@ -1722,7 +1722,7 @@ class TimesheetPage(tk.Frame):
             cur_id = (self.cmb_object_id.get() or "").strip()
             cur_fio = (self.fio_var.get() or "").strip()
 
-            self._load_spr_data()
+            self._load_spr_data_from_db()
 
             self.cmb_department.config(values=self.departments)
             if cur_dep in self.departments:
