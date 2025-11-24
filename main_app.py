@@ -1295,10 +1295,11 @@ class TimesheetPage(tk.Frame):
         init_department: Optional[str] = None,
         init_year: Optional[int] = None,
         init_month: Optional[int] = None,
+        read_only: bool = False,
     ):
         super().__init__(master)
         self.app_ref = app_ref  # ссылка на MainApp, чтобы брать current_user
-
+        self.read_only = bool(read_only)
         # Параметры инициализации (могут быть None)
         self._init_object_id = init_object_id
         self._init_object_addr = init_object_addr
@@ -1524,6 +1525,26 @@ class TimesheetPage(tk.Frame):
                 self.cmb_object_id.set(self._init_object_id)
 
         self._on_department_select()
+
+        # Если страница в режиме "только просмотр" — блокируем редактирование
+        if self.read_only:
+            # Отключаем верхние кнопки действий
+            try:
+                for child in btns.winfo_children():
+                    child.configure(state="disabled")
+            except Exception:
+                pass
+
+            # Сохраняем ссылку на панель кнопок, чтобы при надобности ещё обращаться
+            self._btns_frame = btns
+
+            # Чуть меняем подсказку внизу
+            try:
+                self.lbl_object_total.config(
+                    text=self.lbl_object_total.cget("text") + " (режим просмотра)"
+                )
+            except Exception:
+                pass
 
     def _build_header_row(self, parent):
         hb = self.HEADER_BG
@@ -1794,6 +1815,8 @@ class TimesheetPage(tk.Frame):
         )
 
     def add_row(self):
+        if self.read_only:
+            return
         fio = self.fio_var.get().strip()
         tbn = self.ent_tbn.get().strip()
         if not fio:
@@ -1811,6 +1834,8 @@ class TimesheetPage(tk.Frame):
         self._render_page(self.current_page)
 
     def add_department_all(self):
+        if self.read_only:
+            return
         dep_sel = (self.cmb_department.get() or "Все").strip()
 
         # Подбор списка сотрудников по подразделению
@@ -1925,6 +1950,8 @@ class TimesheetPage(tk.Frame):
             messagebox.showerror("Справочник", f"Ошибка перечтения справочника:\n{e}")
 
     def fill_52_all(self):
+        if self.read_only:
+            return
         if not self.model_rows:
             messagebox.showinfo("5/2 всем", "Список сотрудников пуст.")
             return
@@ -1954,6 +1981,8 @@ class TimesheetPage(tk.Frame):
         messagebox.showinfo("5/2 всем", "Режим 5/2 установлен всем сотрудникам текущего реестра.")
 
     def fill_hours_all(self):
+        if self.read_only:
+            return
         if not self.model_rows:
             messagebox.showinfo("Проставить часы", "Список сотрудников пуст.")
             return
@@ -1998,6 +2027,8 @@ class TimesheetPage(tk.Frame):
 
 
     def delete_row(self, roww: RowWidget):
+        if self.read_only:
+            return
         # Синхронизируем видимые правки
         self._sync_visible_to_model()
         try:
@@ -2027,6 +2058,8 @@ class TimesheetPage(tk.Frame):
         self._render_page(self.current_page)
 
     def clear_all_rows(self):
+        if self.read_only:
+            return
         if not self.model_rows:
             return
         if not messagebox.askyesno("Объектный табель", "Очистить все строки?"):
@@ -2161,6 +2194,12 @@ class TimesheetPage(tk.Frame):
             self._render_page(1)
 
     def save_all(self):
+        if self.read_only:
+            messagebox.showinfo(
+                "Объектный табель",
+                "Табель открыт в режиме только просмотра. Сохранение недоступно."
+            )
+            return
         # Сохраним правки с текущей страницы в модель
         self._sync_visible_to_model()
 
@@ -2352,6 +2391,8 @@ class TimesheetPage(tk.Frame):
         self._load_existing_rows()
 
     def copy_from_month(self):
+        if self.read_only:
+            return
         """Копирование с учетом подразделения (в модель с пагинацией)"""
         addr = self.cmb_address.get().strip()
         oid = self.cmb_object_id.get().strip()
@@ -2911,7 +2952,11 @@ class TimesheetRegistryPage(tk.Frame):
         year = int(h.get("year") or 0)
         month = int(h.get("month") or 0)
 
-        # Используем уже существующий механизм _show_page
+        # роль текущего пользователя
+        role = (self.app_ref.current_user or {}).get("role") or "specialist"
+        # только admin может редактировать, остальные — только просмотр
+        read_only = (role != "admin")
+
         self.app_ref._show_page(
             "timesheet",
             lambda parent: TimesheetPage(
@@ -2922,6 +2967,7 @@ class TimesheetRegistryPage(tk.Frame):
                 init_department=department,
                 init_year=year,
                 init_month=month,
+                read_only=read_only,
             ),
         )
 
