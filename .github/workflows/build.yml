@@ -9,6 +9,7 @@ on:
       - SpecialOrders.py
       - assets_logo.py
       - BudgetAnalyzer.py
+      - objects.py
       - requirements.txt
       - icon.ico
       - icon2.ico
