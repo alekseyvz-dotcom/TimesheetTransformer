@@ -126,93 +126,201 @@ def create_or_update_object(
     finally:
         conn.close()
 
+def get_next_excel_id() -> str:
+    """
+    Возвращает следующий числовой excel_id как строку.
+    Берём MAX(excel_id::bigint), игнорируя нечисловые значения.
+    Если нет ни одного — вернём '1'.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT MAX((NULLIF(excel_id, '')::bigint))
+                  FROM objects
+                 WHERE excel_id ~ '^[0-9]+$'
+                """
+            )
+            row = cur.fetchone()
+            max_id = row[0] if row else None
+            if max_id is None:
+                return "1"
+            return str(max_id + 1)
+    except Exception:
+        # на всякий случай
+        return "1"
+    finally:
+        conn.close()
 
 # ---------- UI: страница создания/редактирования объекта ----------
 
 class ObjectCreatePage(tk.Frame):
     """
     Страница создания/редактирования одного объекта.
-    Пока используется для создания новых объектов из меню.
     """
     def __init__(self, master, app_ref: "MainApp", obj_data: Optional[Dict[str, Any]] = None):
-        super().__init__(master)
+        super().__init__(master, bg="#f7f7f7")
         self.app_ref = app_ref
         self.obj_data = obj_data or {}
         self._build_ui()
-        self._fill_from_data()
+        self._fill_from_data_or_default()
 
     def _build_ui(self):
-        top = tk.Frame(self)
-        top.pack(fill="x", padx=8, pady=8)
+        # Заголовок
+        header = tk.Frame(self, bg="#f7f7f7")
+        header.pack(fill="x", padx=12, pady=(10, 4))
 
-        tk.Label(top, text="Создание объекта", font=("Segoe UI", 12, "bold")).pack(side="left")
+        tk.Label(
+            header,
+            text="Создание объекта",
+            font=("Segoe UI", 14, "bold"),
+            bg="#f7f7f7",
+        ).pack(side="left")
 
-        body = tk.Frame(self)
-        body.pack(fill="both", expand=True, padx=12, pady=8)
+        tk.Label(
+            header,
+            text="Укажите основные данные по объекту, затем нажмите «Сохранить»",
+            font=("Segoe UI", 9),
+            fg="#555",
+            bg="#f7f7f7",
+        ).pack(side="right")
 
-        lbl_w = 26
-        row = 0
+        # Основная область
+        body_outer = tk.Frame(self, bg="#f7f7f7")
+        body_outer.pack(fill="both", expand=True, padx=12, pady=8)
 
-        def add_row(label: str, var_name: str, width: int = 40):
-            nonlocal row
-            tk.Label(body, text=label, anchor="e", width=lbl_w).grid(
-                row=row, column=0, sticky="e", padx=(0, 6), pady=3
+        body = tk.Frame(body_outer)
+        body.pack(fill="both", expand=True)
+
+        # Левая и правая колонка
+        left = tk.LabelFrame(body, text="Общие сведения", padx=10, pady=8)
+        right = tk.LabelFrame(body, text="Договор", padx=10, pady=8)
+
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=0)
+        right.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=0)
+
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, weight=1)
+
+        # ---------- Левая колонка: общие сведения ----------
+        row_l = 0
+
+        def add_left(label: str, var_name: str, width: int = 40, note: str = ""):
+            nonlocal row_l
+            tk.Label(left, text=label, anchor="e").grid(
+                row=row_l, column=0, sticky="e", padx=(0, 6), pady=3
             )
             var = tk.StringVar()
-            ent = ttk.Entry(body, textvariable=var, width=width)
-            ent.grid(row=row, column=1, sticky="w", pady=3)
+            ent = ttk.Entry(left, textvariable=var, width=width)
+            ent.grid(row=row_l, column=1, sticky="w", pady=3)
+            if note:
+                tk.Label(left, text=note, fg="#777", font=("Segoe UI", 8)).grid(
+                    row=row_l, column=2, sticky="w", padx=(6, 0)
+                )
             setattr(self, f"var_{var_name}", var)
             setattr(self, f"ent_{var_name}", ent)
-            row += 1
+            row_l += 1
 
-        add_row("ID (excel_id):", "excel_id", width=20)
-        add_row("Год реализации программы:", "year", width=10)
-        add_row("Наименование программы:", "program_name", width=50)
-        add_row("Наименование заказчика:", "customer_name", width=50)
-        add_row("Адрес объекта:", "address", width=60)
-        add_row("№ договора:", "contract_number", width=20)
-        add_row("Дата договора (ДД.ММ.ГГГГ):", "contract_date", width=16)
-        add_row("Сокращённое наименование объекта:", "short_name", width=50)
-        add_row("Подразделение исполнителя:", "executor_department", width=40)
-        add_row("Тип договора:", "contract_type", width=30)
+        add_left("ID объекта (excel_id):", "excel_id", width=16, note="числовой, подставляется автоматически")
+        add_left("Год реализации программы:", "year", width=8)
+        add_left("Наименование программы:", "program_name", width=46)
+        add_left("Наименование заказчика:", "customer_name", width=46)
+        add_left("Адрес объекта:", "address", width=52)
 
-        btns = tk.Frame(self)
+        # ---------- Правая колонка: договор ----------
+        row_r = 0
+
+        def add_right(label: str, var_name: str, width: int = 32, note: str = ""):
+            nonlocal row_r
+            tk.Label(right, text=label, anchor="e").grid(
+                row=row_r, column=0, sticky="e", padx=(0, 6), pady=3
+            )
+            var = tk.StringVar()
+            ent = ttk.Entry(right, textvariable=var, width=width)
+            ent.grid(row=row_r, column=1, sticky="w", pady=3)
+            if note:
+                tk.Label(right, text=note, fg="#777", font=("Segoe UI", 8)).grid(
+                    row=row_r, column=2, sticky="w", padx=(6, 0)
+                )
+            setattr(self, f"var_{var_name}", var)
+            setattr(self, f"ent_{var_name}", ent)
+            row_r += 1
+
+        add_right("№ договора:", "contract_number", width=20)
+        add_right("Дата договора:", "contract_date", width=12, note="ДД.ММ.ГГГГ")
+        add_right("Сокращённое наименование:", "short_name", width=40)
+        add_right("Подразделение исполнителя:", "executor_department", width=34)
+        add_right("Тип договора:", "contract_type", width=26)
+
+        # Нижняя панель с кнопками
+        btns = tk.Frame(self, bg="#f7f7f7")
         btns.pack(fill="x", padx=12, pady=(4, 10))
+
         ttk.Button(btns, text="Сохранить", command=self._on_save).pack(side="right", padx=4)
         ttk.Button(btns, text="Очистить", command=self._on_clear).pack(side="right", padx=4)
 
-    def _fill_from_data(self):
+    # ---------- заполнение полей ----------
+
+    def _fill_from_data_or_default(self):
         d = self.obj_data
-        if not d:
-            return
-        self.var_excel_id.set(d.get("excel_id") or "")
-        self.var_year.set(d.get("year") or "")
-        self.var_program_name.set(d.get("program_name") or "")
-        self.var_customer_name.set(d.get("customer_name") or "")
-        self.var_address.set(d.get("address") or "")
-        self.var_contract_number.set(d.get("contract_number") or "")
-        cd = d.get("contract_date")
-        if isinstance(cd, (datetime, date)):
-            self.var_contract_date.set(cd.strftime("%d.%m.%Y"))
-        elif cd:
-            self.var_contract_date.set(str(cd))
-        self.var_short_name.set(d.get("short_name") or "")
-        self.var_executor_department.set(d.get("executor_department") or "")
-        self.var_contract_type.set(d.get("contract_type") or "")
+        if d:
+            # режим редактирования (на будущее)
+            self.var_excel_id.set(d.get("excel_id") or "")
+            self.var_year.set(d.get("year") or "")
+            self.var_program_name.set(d.get("program_name") or "")
+            self.var_customer_name.set(d.get("customer_name") or "")
+            self.var_address.set(d.get("address") or "")
+            self.var_contract_number.set(d.get("contract_number") or "")
+            cd = d.get("contract_date")
+            if isinstance(cd, (datetime, date)):
+                self.var_contract_date.set(cd.strftime("%d.%m.%Y"))
+            elif cd:
+                self.var_contract_date.set(str(cd))
+            self.var_short_name.set(d.get("short_name") or "")
+            self.var_executor_department.set(d.get("executor_department") or "")
+            self.var_contract_type.set(d.get("contract_type") or "")
+        else:
+            # новый объект — подставляем следующий excel_id
+            try:
+                next_id = get_next_excel_id()
+            except Exception:
+                next_id = "1"
+            self.var_excel_id.set(next_id)
+
+    # ---------- действия ----------
 
     def _on_clear(self):
+        # при очистке excel_id тоже можно пересчитать
+        try:
+            next_id = get_next_excel_id()
+        except Exception:
+            next_id = ""
         for name in (
             "excel_id", "year", "program_name", "customer_name", "address",
             "contract_number", "contract_date", "short_name",
             "executor_department", "contract_type",
         ):
             getattr(self, f"var_{name}").set("")
+        if next_id:
+            self.var_excel_id.set(next_id)
 
     def _on_save(self):
         addr = self.var_address.get().strip()
         if not addr:
             messagebox.showwarning("Объект", "Адрес объекта обязателен.")
             return
+
+        # excel_id: проверим, что это число (по твоей логике)
+        excel_id_raw = self.var_excel_id.get().strip()
+        if excel_id_raw:
+            if not excel_id_raw.isdigit():
+                if not messagebox.askyesno(
+                    "ID объекта",
+                    "ID (excel_id) не является числом.\n"
+                    "Продолжить сохранение с таким значением?",
+                ):
+                    return
 
         cd_raw = self.var_contract_date.get().strip()
         cd_val: Optional[date] = None
@@ -234,7 +342,7 @@ class ObjectCreatePage(tk.Frame):
         try:
             new_id = create_or_update_object(
                 obj_id=obj_id,
-                excel_id=self.var_excel_id.get().strip() or None,
+                excel_id=excel_id_raw or None,
                 year=self.var_year.get().strip() or None,
                 program_name=self.var_program_name.get().strip() or None,
                 customer_name=self.var_customer_name.get().strip() or None,
@@ -252,7 +360,6 @@ class ObjectCreatePage(tk.Frame):
 
         self.obj_data["id"] = new_id
         messagebox.showinfo("Объект", "Объект сохранён в базе данных.")
-
 
 # ---------- UI: реестр объектов ----------
 
