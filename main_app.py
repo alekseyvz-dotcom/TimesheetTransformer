@@ -1166,9 +1166,9 @@ class TimesheetPage(tk.Frame):
     MAX_FIO_PX = 260
     HEADER_BG = "#d0d0d0"
 
-    def __init__(self, master):
+    def __init__(self, master, app_ref):
         super().__init__(master)
-        self.app_ref = app_ref  # <-- ссылка на приложение, чтобы взять current_user
+        self.app_ref = app_ref  # ссылка на MainApp, чтобы брать current_user
         self.base_dir = exe_dir()
         self.out_dir = get_output_dir_from_config()
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -2399,7 +2399,10 @@ class MainApp(tk.Tk):
         m_ts = tk.Menu(menubar, tearoff=0)
         m_ts.add_command(
             label="Создать",
-            command=lambda: self._show_page("timesheet", lambda parent: TimesheetPage(parent, app_ref=self)),
+            command=lambda: self._show_page(
+                "timesheet",
+                lambda parent: TimesheetPage(parent, app_ref=self),
+            ),
         )
         menubar.add_cascade(label="Объектный табель", menu=m_ts)
 
