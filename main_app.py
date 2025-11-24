@@ -76,6 +76,12 @@ except Exception:
     logging.exception("Ошибка при импорте meals_module")
     meals_module = None
 
+try:
+    import objects  # наш новый модуль
+except Exception:
+    logging.exception("Ошибка при импорте модуля objects")
+    objects = None
+
 # --- логируем импорт settings_manager ---
 logging.debug("Пробуем импортировать settings_manager...")
 try:
@@ -2940,6 +2946,8 @@ class MainApp(tk.Tk):
         self._menu_transport = None
         self._menu_transport_planning_index = None
         self._menu_transport_registry_index = None
+        self._menu_objects = None
+        self._menu_objects_create_index = None
         self._menu_settings_index = None
 
         menubar = tk.Menu(self)
@@ -3052,6 +3060,45 @@ class MainApp(tk.Tk):
         m_meals.add_separator()
         m_meals.add_command(label="📂 Открыть папку заявок", command=self.open_meals_folder)
         menubar.add_cascade(label="Питание", menu=m_meals)
+
+        # Объекты
+        m_objects = tk.Menu(menubar, tearoff=0)
+        self._menu_objects = m_objects
+
+        if objects and hasattr(objects, "ObjectCreatePage"):
+            m_objects.add_command(
+                label="Создать",
+                command=lambda: self._show_page(
+                    "object_create",
+                    lambda parent: objects.ObjectCreatePage(parent, app_ref=self),
+                ),
+            )
+        else:
+            m_objects.add_command(
+                label="Создать",
+                command=lambda: messagebox.showwarning(
+                    "Объекты", "Модуль objects.py не найден или некорректен."
+                ),
+            )
+        self._menu_objects_create_index = 0  # первый пункт
+
+        if objects and hasattr(objects, "ObjectsRegistryPage"):
+            m_objects.add_command(
+                label="Реестр",
+                command=lambda: self._show_page(
+                    "objects_registry",
+                    lambda parent: objects.ObjectsRegistryPage(parent, app_ref=self),
+                ),
+            )
+        else:
+            m_objects.add_command(
+                label="Реестр",
+                command=lambda: messagebox.showwarning(
+                    "Объекты", "Модуль objects.py не найден или некорректен."
+                ),
+            )
+
+        menubar.add_cascade(label="Объекты", menu=m_objects)
 
         # Аналитика
         m_analytics = tk.Menu(menubar, tearoff=0)
@@ -3224,6 +3271,15 @@ class MainApp(tk.Tk):
                     self._menu_transport.entryconfig(self._menu_transport_registry_index, state=st)
             except Exception:
                 pass
+
+        # Объекты: пункт "Создать" только для admin, head, planner
+        if self._menu_objects is not None and self._menu_objects_create_index is not None:
+            try:
+                st = "normal" if role in ("admin", "head", "planner") else "disabled"
+                self._menu_objects.entryconfig(self._menu_objects_create_index, state=st)
+            except Exception:
+                pass
+
 
         # Верхнее "Настройки" только для admin (отключаем для остальных)
         if self._menubar is not None and self._menu_settings_index is not None:
