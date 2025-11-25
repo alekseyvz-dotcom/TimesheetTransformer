@@ -984,10 +984,15 @@ class MealOrderPage(tk.Frame):
         saved_dep = get_saved_dep()
         self.cmb_dep.set(saved_dep if saved_dep in self.deps else self.deps[0])
         self.cmb_dep.grid(row=0, column=3, columnspan=3, sticky="we", padx=(4, 12))
-        self.cmb_dep.bind(
-            "<<ComboboxSelected>>",
-            lambda e: (set_saved_dep(self.cmb_dep.get()), self._update_emp_list()),
-        )
+
+        def on_dep_changed(event=None):
+            set_saved_dep(self.cmb_dep.get())
+            for r in self.emp_rows:
+                r.destroy()
+            self.emp_rows.clear()
+            self.add_employee()
+
+        self.cmb_dep.bind("<<ComboboxSelected>>", on_dep_changed)
 
         tk.Label(top, text="Адрес объекта*:", bg="#f7f7f7").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.cmb_address = AutoCompleteCombobox(top, width=40)
@@ -1164,7 +1169,7 @@ class MealOrderPage(tk.Frame):
         if dep == "Все":
             names = [r["fio"] for r in self.emps]
         else:
-            names = [r["fio"] for r in self.emps if (r["dep"] or "") == dep]
+            names = [r["fio"] for r in self.emps if (r["dep"] or "").strip() == dep]
         seen, filtered = set(), []
         for n in names:
             if n not in seen:
@@ -1214,7 +1219,7 @@ class MealOrderPage(tk.Frame):
         if dep == "Все":
             names = [r["fio"] for r in self.emps]
         else:
-            names = [r["fio"] for r in self.emps if (r["dep"] or "") == dep]
+            names = [r["fio"] for r in self.emps if (r["dep"] or "").strip() == dep]
         seen, filtered = set(), []
         for n in names:
             if n not in seen:
@@ -1480,7 +1485,7 @@ class MealOrderPage(tk.Frame):
         if dep == "Все":
             candidates = self.emps[:]
         else:
-            candidates = [e for e in self.emps if (e["dep"] or "") == dep]
+            candidates = [e for e in self.emps if (e["dep"] or "").strip() == dep]
 
         if not candidates:
             messagebox.showinfo("Питание", f"В подразделении «{dep}» нет сотрудников.")
