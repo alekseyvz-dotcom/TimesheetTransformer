@@ -777,7 +777,7 @@ class HomePage(tk.Frame):
         ).pack(anchor="center", pady=(4, 6))
         tk.Label(
             center,
-            text="Выберите раздел в верхнем меню.\nОбъектный табель → Создать — для работы с табелями.",
+            text="Выберите раздел в верхнем меню.",
             font=("Segoe UI", 10),
             fg="#444",
             bg="#f7f7f7",
@@ -3225,7 +3225,7 @@ class MainApp(tk.Tk):
         footer.pack(fill="x", padx=12, pady=(0, 10))
         tk.Label(
             footer,
-            text="Разработал Алексей Зезюкин, АНО МЛСТ 2025",
+            text="Разработал Алексей Зезюкин, 2025",
             font=("Segoe UI", 8),
             fg="#666",
         ).pack(side="right")
