@@ -1097,7 +1097,6 @@ class RowWidget:
             anchor="w",
             bg=zebra_bg,
             width=35,          # подбери по вкусу
-            wraplength=1       # принудительно не даём растягиваться по ширине
         )
         self.lbl_fio.grid(row=self.row, column=0, padx=0, pady=1, sticky="nsew")
         self.widgets.append(self.lbl_fio)
