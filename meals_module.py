@@ -1605,9 +1605,9 @@ class MealPlanningPage(tk.Frame):
         """
         Формирует Excel:
           Заголовок: "Заявка питания на <дата>"
-          Далее итоги по видам питания (Одноразовое, Двухразовое, ...).
+          Далее итоги по видам питания.
           Ниже таблица:
-            Объект (адрес) | Бригада | Тип питания | Количество
+            Объект (адрес) | Бригада | <Тип1> | <Тип2> | ...  (каждая пара Адрес+Бригада в одной строке)
         """
         try:
             filter_date = self.ent_filter_date.get().strip()
@@ -1637,8 +1637,7 @@ class MealPlanningPage(tk.Frame):
                 mt = (o.get("meal_type") or "").strip() or "Не указан"
                 addr = (o.get("address") or "").strip()
                 team = (o.get("team_name") or "").strip()
-                key_global = mt
-                total_by_type[key_global] = total_by_type.get(key_global, 0) + 1
+                total_by_type[mt] = total_by_type.get(mt, 0) + 1
 
                 key_row = (addr, team, mt)
                 per_object_team_type[key_row] = per_object_team_type.get(key_row, 0) + 1
@@ -1650,28 +1649,49 @@ class MealPlanningPage(tk.Frame):
 
             # Заголовок
             ws.append([f"Заявка питания на {filter_date}"])
-            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=4)
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=10)
 
             ws.append([])  # пустая строка
 
             # Итоги по типам питания
             ws.append(["Итоги по видам питания"])
-            ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=4)
+            ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=10)
             ws.append(["Тип питания", "Кол-во человек"])
-            for mt, cnt in sorted(total_by_type.items()):
-                ws.append([mt, cnt])
+            for mt in sorted(total_by_type.keys()):
+                ws.append([mt, total_by_type[mt]])
 
             ws.append([])
 
-            # Таблица с разбивкой по объектам/бригадам/типам
-            ws.append(["Объект (адрес)", "Бригада", "Тип питания", "Кол-во человек"])
-            for (addr, team, mt), cnt in sorted(per_object_team_type.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])):
-                ws.append([addr, team, mt, cnt])
+            # ---------- Поворот таблицы: типы питания -> столбцы ----------
 
-            # ширины колонок
-            widths = [40, 30, 20, 18]
-            for col, width in enumerate(widths, start=1):
-                ws.column_dimensions[get_column_letter(col)].width = width
+            # множество всех типов питания
+            all_meal_types = sorted({mt for _, _, mt in per_object_team_type.keys()})
+
+            # шапка таблицы: Адрес | Бригада | <тип1> | <тип2> | ...
+            header = ["Объект (адрес)", "Бригада"] + all_meal_types
+            ws.append(header)
+
+            # собираем строки по ключу (адрес, бригада)
+            # row_data[(addr, team)][mt] = count
+            row_data: Dict[tuple, Dict[str, int]] = {}
+            for (addr, team, mt), cnt in per_object_team_type.items():
+                key = (addr, team)
+                mt_map = row_data.setdefault(key, {})
+                mt_map[mt] = mt_map.get(mt, 0) + cnt
+
+            # выводим по одной строке на (адрес, бригада)
+            for (addr, team) in sorted(row_data.keys(), key=lambda x: (x[0], x[1])):
+                mt_map = row_data[(addr, team)]
+                row = [addr, team]
+                for mt in all_meal_types:
+                    row.append(mt_map.get(mt, 0))
+                ws.append(row)
+
+            # ширины колонок: первая пошире, вторая средняя, остальные узкие
+            ws.column_dimensions[get_column_letter(1)].width = 40  # Объект
+            ws.column_dimensions[get_column_letter(2)].width = 30  # Бригада
+            for col in range(3, 3 + len(all_meal_types)):
+                ws.column_dimensions[get_column_letter(col)].width = 15
 
             ws.freeze_panes = "A8"
 
