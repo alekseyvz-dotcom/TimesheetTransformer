@@ -384,6 +384,9 @@ class ObjectsRegistryPage(tk.Frame):
     def __init__(self, master, app_ref: "MainApp"):
         super().__init__(master)
         self.app_ref = app_ref
+        # роль текущего пользователя
+        self.current_role = (self.app_ref.current_user or {}).get("role") or "specialist"
+
         self.tree = None
         self._objects: List[Dict[str, Any]] = []
         self.var_filter_addr = tk.StringVar()
@@ -420,20 +423,33 @@ class ObjectsRegistryPage(tk.Frame):
         tk.Label(status_frame, text="Статус выбранного объекта:").pack(side="left", padx=(0, 4))
 
         self.var_status = tk.StringVar(value="Новый")
-        cmb_status = ttk.Combobox(
+        self.cmb_status = ttk.Combobox(
             status_frame,
             textvariable=self.var_status,
             values=["Новый", "В работе", "Закрыт"],
             width=12,
             state="readonly",
         )
-        cmb_status.pack(side="left", padx=(0, 4))
+        self.cmb_status.pack(side="left", padx=(0, 4))
 
-        ttk.Button(
+        self.btn_set_status = ttk.Button(
             status_frame,
             text="Установить статус",
             command=self._on_change_status
-        ).pack(side="left", padx=(4, 0))
+        )
+        self.btn_set_status.pack(side="left", padx=(4, 0))
+
+        # Разрешаем редактирование статуса только ролям admin и manager
+        if self.current_role not in ("admin", "manager"):
+            # Можно просто заблокировать элементы:
+            self.cmb_status.configure(state="disabled")
+            self.btn_set_status.configure(state="disabled")
+            # И добавить пояснение
+            tk.Label(
+                status_frame,
+                text="(Изменение статуса доступно только руководителю и администратору)",
+                fg="#777"
+            ).pack(side="left", padx=(8, 0))
 
         frame = tk.Frame(self)
         frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
@@ -614,6 +630,14 @@ class ObjectsRegistryPage(tk.Frame):
 
     def _on_change_status(self):
         """Установить новый статус для выбранной строки."""
+        # Проверка прав: только admin и manager могут менять статус
+        if self.current_role not in ("admin", "manager"):
+            messagebox.showwarning(
+                "Статус",
+                "Изменение статуса доступно только руководителю и администратору."
+            )
+            return
+
         selected = self.tree.selection()
         if not selected:
             messagebox.showwarning("Статус", "Выберите объект в списке.")
