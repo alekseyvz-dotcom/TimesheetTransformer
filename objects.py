@@ -1,4 +1,7 @@
 # objects.py
+import os
+import pandas as pd
+from tkinter import filedialog
 import logging
 from datetime import datetime, date
 from typing import List, Dict, Any, Optional
@@ -408,6 +411,7 @@ class ObjectsRegistryPage(tk.Frame):
         btns.grid(row=1, column=4, sticky="w", padx=(8, 0), pady=(4, 0))
         ttk.Button(btns, text="Применить", command=self._load_data).pack(side="left", padx=2)
         ttk.Button(btns, text="Сброс", command=self._reset_filters).pack(side="left", padx=2)
+        ttk.Button(btns, text="Выгрузить в Excel", command=self._export_to_excel).pack(side="left", padx=2)
 
         # Панель смены статуса
         status_frame = tk.Frame(top)
@@ -554,6 +558,60 @@ class ObjectsRegistryPage(tk.Frame):
                 tags=tags,
             )
 
+    def _export_to_excel(self):
+        """Выгрузка текущего списка (self._objects) в Excel."""
+        if not self._objects:
+            messagebox.showinfo("Выгрузка в Excel", "Нет данных для выгрузки.")
+            return
+
+        # Выбор файла пользователем
+        default_name = f"objects_registry_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        file_path = filedialog.asksaveasfilename(
+            title="Сохранить как",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Excel файлы", "*.xlsx"), ("Все файлы", "*.*")],
+        )
+        if not file_path:
+            return  # пользователь нажал Отмена
+
+        # Формируем DataFrame из self._objects
+        # Оставим те же поля, что и в дереве, плюс id для удобства
+        rows = []
+        for o in self._objects:
+            cd = o.get("contract_date")
+            if isinstance(cd, (datetime, date)):
+                cd_str = cd.strftime("%d.%m.%Y")
+            else:
+                cd_str = str(cd or "")
+
+            rows.append({
+                "ID в БД": o.get("id"),
+                "ID объекта (excel_id)": o.get("excel_id") or "",
+                "Адрес": (o.get("address") or "").strip(),
+                "Год": o.get("year") or "",
+                "Программа": o.get("program_name") or "",
+                "Заказчик": o.get("customer_name") or "",
+                "Краткое имя": o.get("short_name") or "",
+                "Подразделение исполнителя": o.get("executor_department") or "",
+                "№ договора": o.get("contract_number") or "",
+                "Дата договора": cd_str,
+                "Тип договора": o.get("contract_type") or "",
+                "Статус": o.get("status") or "Новый",
+            })
+
+        try:
+            df = pd.DataFrame(rows)
+            # Создаём директорию, если пользователь указал путь, которого нет
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            df.to_excel(file_path, index=False)
+        except Exception as e:
+            logging.exception("Ошибка выгрузки в Excel")
+            messagebox.showerror("Выгрузка в Excel", f"Ошибка при сохранении файла:\n{e}")
+            return
+
+        messagebox.showinfo("Выгрузка в Excel", f"Файл успешно сохранён:\n{file_path}")
+
     def _on_change_status(self):
         """Установить новый статус для выбранной строки."""
         selected = self.tree.selection()
@@ -597,4 +655,6 @@ class ObjectsRegistryPage(tk.Frame):
         # Обновляем локальный объект и перерисовываем реестр
         obj["status"] = new_status
         self._load_data()
+
+
 
