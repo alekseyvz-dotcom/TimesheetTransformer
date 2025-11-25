@@ -486,6 +486,10 @@ def get_registry_from_db(
 ) -> List[Dict[str, Any]]:
     """
     Возвращает агрегированный реестр по объектам.
+    Ключ: (date, address), внутри:
+      - total_count
+      - by_department
+      - order_ids: список id заявок (по этому объекту и дате)
     """
     conn = get_db_connection()
     try:
@@ -511,9 +515,10 @@ def get_registry_from_db(
 
             sql = f"""
                 SELECT
-                    mo.date::text        AS date,
-                    COALESCE(o.address, '') AS address,
-                    COALESCE(d.name, '')    AS department,
+                    mo.id                    AS order_id,
+                    mo.date::text            AS date,
+                    COALESCE(o.address, '')  AS address,
+                    COALESCE(d.name, '')     AS department,
                     COALESCE(mti.name, moi.meal_type_text, '') AS meal_type
                 FROM meal_orders mo
                 JOIN meal_order_items moi ON moi.order_id = mo.id
@@ -527,7 +532,7 @@ def get_registry_from_db(
 
         result: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
-        for date_str, address, dept, meal_type in rows:
+        for order_id, date_str, address, dept, meal_type in rows:
             key = (date_str, address)
             rec = result.setdefault(
                 key,
@@ -536,9 +541,11 @@ def get_registry_from_db(
                     "address": address,
                     "total_count": 0,
                     "by_department": {},
+                    "order_ids": set(),  # множество id заявок
                 },
             )
             rec["total_count"] += 1
+            rec["order_ids"].add(order_id)
 
             dept_name = dept or "Без подразделения"
             by_dep = rec["by_department"].setdefault(
@@ -554,11 +561,14 @@ def get_registry_from_db(
             by_mt = by_dep["by_meal_type"]
             by_mt[mt] = by_mt.get(mt, 0) + 1
 
+        # приводим order_ids к списку для сериализации
+        for rec in result.values():
+            rec["order_ids"] = list(rec["order_ids"])
+
         return list(result.values())
 
     finally:
         conn.close()
-
 
 def get_details_from_db(
     filter_date: Optional[str] = None,
@@ -911,17 +921,23 @@ class EmployeeRow:
 # ========================= СТРАНИЦА СОЗДАНИЯ ЗАЯВКИ =========================
 
 class MealOrderPage(tk.Frame):
-    """Страница для создания заявок на питание"""
+    """Страница для создания/редактирования заявок на питание"""
 
-    def __init__(self, master):
+    def __init__(self, master, existing_data: dict = None, order_id: int = None, on_saved=None):
         super().__init__(master, bg="#f7f7f7")
         ensure_config()
         self.base_dir = exe_dir()
         self.orders_dir = self.base_dir / ORDERS_DIR
         self.orders_dir.mkdir(parents=True, exist_ok=True)
 
+        self.edit_order_id = order_id       # id редактируемой заявки (или None)
+        self.on_saved = on_saved            # callback для обновления реестра
+
         self._load_refs_from_db()
         self._build_ui()
+
+        if existing_data:
+            self._fill_from_existing(existing_data)
 
     def _load_refs_from_db(self):
         emps = load_employees_from_db()
@@ -1066,6 +1082,83 @@ class MealOrderPage(tk.Frame):
         self._update_date_hint()
         self.add_employee()
 
+    def _fill_from_existing(self, data: dict):
+        # дата
+        self.ent_date.delete(0, "end")
+        self.ent_date.insert(0, data.get("date", ""))
+        # подразделение
+        dep = data.get("department", "") or "Все"
+        if dep not in self.deps:
+            self.deps.append(dep)
+            self.cmb_dep["values"] = self.deps
+        self.cmb_dep.set(dep)
+        # адрес и ID объекта
+        obj = data.get("object") or {}
+        addr = obj.get("address", "") or ""
+        oid = obj.get("id", "") or ""
+        if addr and addr not in self.addresses:
+            self.addresses.append(addr)
+            self.addresses.sort()
+            self.cmb_address.set_completion_list(self.addresses)
+        self.cmb_address.set(addr)
+        self._sync_ids_by_address()
+        if oid:
+            # добавить id в список, если его там нет
+            ids = list(self.cmb_object_id["values"])
+            if oid and oid not in ids:
+                ids.append(oid)
+                self.cmb_object_id["values"] = ids
+            self.cmb_object_id.set(oid)
+
+        # бригада
+        self.ent_team.delete(0, "end")
+        self.ent_team.insert(0, data.get("team_name", ""))
+
+        # сотрудники
+        for r in self.emp_rows:
+            r.destroy()
+        self.emp_rows.clear()
+
+        for emp in data.get("employees", []):
+            self.add_employee()
+            row = self.emp_rows[-1]
+            row.fio_var.set(emp.get("fio", ""))
+            self._fill_emp_info(row)
+            # тип питания
+            mt = (emp.get("meal_type") or "").strip()
+            if mt and mt not in self.meal_types:
+                self.meal_types.append(mt)
+                for r in self.emp_rows:
+                    r.cmb_meal_type["values"] = self.meal_types
+            row.cmb_meal_type.set(mt or self.meal_types[0])
+            # комментарий
+            row.ent_comment.delete(0, "end")
+            row.ent_comment.insert(0, emp.get("comment", ""))
+
+        self._update_date_hint()
+
+    def _build_order_dict_core(self) -> Dict:
+        req_date = parse_date_any(self.ent_date.get()) or date.today()
+        addr = (self.cmb_address.get() or "").strip()
+        oid = (self.cmb_object_id.get() or "").strip()
+        employees = [r.get_dict() for r in self.emp_rows]
+        return {
+            "date": req_date.strftime("%Y-%m-%d"),
+            "department": (self.cmb_dep.get() or "").strip(),
+            "team_name": (self.ent_team.get() or "").strip(),
+            "object": {"id": oid, "address": addr},
+            "employees": employees,
+        }
+
+    def _build_order_dict(self) -> Dict:
+        core = self._build_order_dict_core()
+        if self.edit_order_id:
+            # при редактировании created_at можно не менять
+            core["created_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        else:
+            core["created_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        return core
+
     def _update_emp_list(self):
         dep = (self.cmb_dep.get() or "Все").strip()
         if dep == "Все":
@@ -1199,21 +1292,6 @@ class MealOrderPage(tk.Frame):
         row.lbl_tbn.config(text=info.get("tbn", ""))
         row.lbl_pos.config(text=info.get("pos", ""))
 
-    def _build_order_dict(self) -> Dict:
-        created_at = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-        req_date = parse_date_any(self.ent_date.get()) or date.today()
-        addr = (self.cmb_address.get() or "").strip()
-        oid = (self.cmb_object_id.get() or "").strip()
-        employees = [r.get_dict() for r in self.emp_rows]
-        return {
-            "created_at": created_at,
-            "date": req_date.strftime("%Y-%m-%d"),
-            "department": (self.cmb_dep.get() or "").strip(),
-            "team_name": (self.ent_team.get() or "").strip(),
-            "object": {"id": oid, "address": addr},
-            "employees": employees,
-        }
-
     def save_order(self):
         if not self._validate_form():
             return
@@ -1221,6 +1299,7 @@ class MealOrderPage(tk.Frame):
         data = self._build_order_dict()
         total_items = len(data.get("employees", []))
 
+        # проверка пересечений как было
         try:
             conflicts = find_conflicting_meal_orders_same_date_other_object(data)
         except Exception as e:
@@ -1234,6 +1313,7 @@ class MealOrderPage(tk.Frame):
             conflicts = []
 
         if conflicts:
+            # ... блок с текстом остался без изменений ...
             lines = []
             for c in conflicts:
                 fio = c.get("fio") or "?"
@@ -1263,7 +1343,76 @@ class MealOrderPage(tk.Frame):
                 return
 
         try:
-            order_db_id = save_order_to_db(data)
+            if self.edit_order_id:
+                # редактирование: удаляем старые строки, перезаписываем items,
+                # при желании можно также обновить заголовок заявки (date, dep, object ...)
+                delete_order_items_from_db(self.edit_order_id)
+
+                # сохраняем только строки сотрудников, используя уже существующий order_id
+                conn = get_db_connection()
+                try:
+                    with conn:
+                        with conn.cursor() as cur:
+                            dept_name = (data.get("department") or "").strip()
+                            dept_id = get_or_create_department(cur, dept_name) if dept_name else None
+
+                            obj = data.get("object") or {}
+                            obj_excel_id = (obj.get("id") or "").strip()
+                            obj_address = (obj.get("address") or "").strip()
+                            object_id = get_or_create_object(cur, obj_excel_id, obj_address)
+
+                            order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
+                            team_name = (data.get("team_name") or "").strip()
+
+                            # обновляем заголовок заявки
+                            cur.execute(
+                                """
+                                UPDATE meal_orders
+                                   SET date = %s,
+                                       department_id = %s,
+                                       team_name = %s,
+                                       object_id = %s
+                                 WHERE id = %s
+                                """,
+                                (order_date, dept_id, team_name, object_id, self.edit_order_id),
+                            )
+
+                            # вставляем новые строки сотрудников
+                            for emp in data.get("employees", []):
+                                fio = (emp.get("fio") or "").strip()
+                                tbn = (emp.get("tbn") or "").strip()
+                                position = (emp.get("position") or "").strip()
+                                meal_type_name = (emp.get("meal_type") or "").strip()
+                                comment = (emp.get("comment") or "").strip()
+
+                                meal_type_id = get_or_create_meal_type(cur, meal_type_name)
+                                employee_id = find_employee(cur, fio, tbn)
+
+                                cur.execute(
+                                    """
+                                    INSERT INTO meal_order_items
+                                    (order_id, employee_id, fio_text, tbn_text, position_text,
+                                     meal_type_id, meal_type_text, comment)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                    """,
+                                    (
+                                        self.edit_order_id,
+                                        employee_id,
+                                        fio,
+                                        tbn,
+                                        position,
+                                        meal_type_id,
+                                        meal_type_name,
+                                        comment,
+                                    ),
+                                )
+                finally:
+                    conn.close()
+                order_db_id = self.edit_order_id
+            else:
+                # создание новой заявки — старое поведение
+                order_db_id = save_order_to_db(data)
+
         except Exception as e:
             messagebox.showerror(
                 "Сохранение в БД",
@@ -1271,6 +1420,9 @@ class MealOrderPage(tk.Frame):
             )
             return
 
+        # формирование XLSX можно оставить как есть при создании,
+        # при редактировании можно либо не создавать новый файл, либо оставить поведение
+        # ниже – без изменений
         ts = datetime.now().strftime("%H%M%S")
         id_part = data["object"]["id"] or safe_filename(data["object"]["address"])
         fname = f"Заявка_питание_{data['date']}_{ts}_{id_part or 'NOID'}.xlsx"
@@ -1305,6 +1457,9 @@ class MealOrderPage(tk.Frame):
             f"Файл:\n{fpath}\n\n"
             f"Сохранено записей: {total_items}",
         )
+
+        if self.on_saved:
+            self.on_saved()
 
     def clear_form(self):
         self.ent_date.delete(0, "end")
@@ -1408,6 +1563,10 @@ class MealPlanningPage(tk.Frame):
             row=0, column=7, padx=4
         )
 
+        ttk.Button(top, text="Заявка поставщика", command=self.export_supplier_order).grid(
+            row=0, column=8, padx=4
+        )
+
         table_frame = tk.LabelFrame(self, text="Реестр заказа питания по объектам")
         table_frame.pack(fill="both", expand=True, padx=10, pady=8)
 
@@ -1438,6 +1597,102 @@ class MealPlanningPage(tk.Frame):
         table_frame.grid_columnconfigure(0, weight=1)
 
         self.tree.bind("<Double-1>", self.on_row_double_click)
+
+    def export_supplier_order(self):
+        """
+        Формирует Excel:
+          Заголовок: "Заявка питания на <дата>"
+          Далее итоги по видам питания (Одноразовое, Двухразовое, ...).
+          Ниже таблица:
+            Объект (адрес) | Бригада | Тип питания | Количество
+        """
+        try:
+            filter_date = self.ent_filter_date.get().strip()
+            if not filter_date:
+                messagebox.showwarning("Заявка поставщика", "Укажите дату фильтра.")
+                return
+
+            orders = get_details_from_db(
+                filter_date=filter_date or None,
+                filter_address=None,
+                filter_department=None,
+            )
+
+            if not orders:
+                messagebox.showinfo(
+                    "Заявка поставщика",
+                    "Нет данных по указанной дате.",
+                )
+                return
+
+            # агрегируем по видам питания (для шапки)
+            total_by_type: Dict[str, int] = {}
+            # агрегируем для таблицы: (адрес, бригада, тип) -> количество
+            per_object_team_type: Dict[tuple, int] = {}
+
+            for o in orders:
+                mt = (o.get("meal_type") or "").strip() or "Не указан"
+                addr = (o.get("address") or "").strip()
+                team = (o.get("team_name") or "").strip()
+                key_global = mt
+                total_by_type[key_global] = total_by_type.get(key_global, 0) + 1
+
+                key_row = (addr, team, mt)
+                per_object_team_type[key_row] = per_object_team_type.get(key_row, 0) + 1
+
+            # формируем Excel
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Заявка поставщика"
+
+            # Заголовок
+            ws.append([f"Заявка питания на {filter_date}"])
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=4)
+
+            ws.append([])  # пустая строка
+
+            # Итоги по типам питания
+            ws.append(["Итоги по видам питания"])
+            ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=4)
+            ws.append(["Тип питания", "Кол-во человек"])
+            for mt, cnt in sorted(total_by_type.items()):
+                ws.append([mt, cnt])
+
+            ws.append([])
+
+            # Таблица с разбивкой по объектам/бригадам/типам
+            ws.append(["Объект (адрес)", "Бригада", "Тип питания", "Кол-во человек"])
+            for (addr, team, mt), cnt in sorted(per_object_team_type.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])):
+                ws.append([addr, team, mt, cnt])
+
+            # ширины колонок
+            widths = [40, 30, 20, 18]
+            for col, width in enumerate(widths, start=1):
+                ws.column_dimensions[get_column_letter(col)].width = width
+
+            ws.freeze_panes = "A8"
+
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            fname = f"Заявка_поставщика_{filter_date}_{ts}.xlsx"
+            fpath = exe_dir() / ORDERS_DIR / fname
+            fpath.parent.mkdir(parents=True, exist_ok=True)
+            wb.save(fpath)
+
+            messagebox.showinfo(
+                "Заявка поставщика",
+                f"Файл сформирован:\n{fpath}",
+            )
+
+            try:
+                os.startfile(fpath)
+            except Exception:
+                pass
+
+        except Exception as e:
+            messagebox.showerror(
+                "Заявка поставщика",
+                f"Ошибка формирования Excel:\n{e}",
+            )
 
     def load_registry(self):
         try:
@@ -1490,7 +1745,38 @@ class MealPlanningPage(tk.Frame):
         entry = self.row_meta.get(item_id)
         if not entry:
             return
-        self._show_details_dialog(entry)
+
+        order_ids = entry.get("order_ids") or []
+        if not order_ids:
+            messagebox.showinfo("Заявка", "Для этого объекта нет связанных заявок.")
+            return
+
+        # Если на объекте несколько заявок, пока откроем первую.
+        # При необходимости можно сделать выбор конкретной.
+        order_id = order_ids[0]
+
+        try:
+            order_data = get_order_with_items_from_db(order_id)
+        except Exception as e:
+            messagebox.showerror(
+                "Загрузка заявки",
+                f"Не удалось загрузить заявку id={order_id}:\n{e}",
+                parent=self,
+            )
+            return
+
+        # Окно с формой заявки
+        win = tk.Toplevel(self)
+        win.title(f"Редактирование заявки #{order_id}")
+        win.geometry("1100x720")
+
+        def on_saved_callback():
+            # после сохранения перезагружаем реестр
+            self.load_registry()
+
+        page = MealOrderPage(win, existing_data=order_data, order_id=order_id, on_saved=on_saved_callback)
+        page.pack(fill="both", expand=True)
+
 
     def _show_details_dialog(self, entry: Dict):
         dialog = tk.Toplevel(self)
@@ -1908,6 +2194,89 @@ class MealsApp(tk.Tk):
 
 # ========================= API ДЛЯ ВСТРАИВАНИЯ =========================
 
+def get_order_with_items_from_db(order_id: int) -> Dict[str, Any]:
+    """
+    Возвращает заявку с сотрудниками по id:
+    {
+        'id': ...,
+        'created_at': 'YYYY-MM-DDTHH:MM:SS',
+        'date': 'YYYY-MM-DD',
+        'department': '...',
+        'team_name': '...',
+        'object': {'id': excel_id, 'address': '...'},
+        'employees': [
+            {'fio': ..., 'tbn': ..., 'position': ..., 'meal_type': ..., 'comment': ...},
+            ...
+        ]
+    }
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    mo.id,
+                    mo.created_at,
+                    mo.date::text,
+                    COALESCE(d.name, '') AS department,
+                    COALESCE(mo.team_name, '') AS team_name,
+                    COALESCE(o.excel_id, '') AS object_excel_id,
+                    COALESCE(o.address, '') AS object_address
+                FROM meal_orders mo
+                LEFT JOIN departments d ON d.id = mo.department_id
+                LEFT JOIN objects o     ON o.id = mo.object_id
+                WHERE mo.id = %s
+                """,
+                (order_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise ValueError(f"Заявка id={order_id} не найдена")
+
+            (oid, created_at, date_str,
+             department, team_name, obj_excel_id, obj_address) = row
+
+            # сотрудники
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(moi.fio_text, '')      AS fio,
+                    COALESCE(moi.tbn_text, '')      AS tbn,
+                    COALESCE(moi.position_text, '') AS position,
+                    COALESCE(mti.name, moi.meal_type_text, '') AS meal_type,
+                    COALESCE(moi.comment, '')       AS comment
+                FROM meal_order_items moi
+                LEFT JOIN meal_types mti ON mti.id = moi.meal_type_id
+                WHERE moi.order_id = %s
+                ORDER BY moi.fio_text
+                """,
+                (order_id,),
+            )
+            emps = []
+            for fio, tbn, position, meal_type, comment in cur.fetchall():
+                emps.append(
+                    {
+                        "fio": fio,
+                        "tbn": tbn,
+                        "position": position,
+                        "meal_type": meal_type,
+                        "comment": comment,
+                    }
+                )
+
+        return {
+            "id": oid,
+            "created_at": created_at.strftime("%Y-%m-%dT%H:%M:%S"),
+            "date": date_str,
+            "department": department,
+            "team_name": team_name,
+            "object": {"id": obj_excel_id, "address": obj_address},
+            "employees": emps,
+        }
+    finally:
+        conn.close()
+
 def create_meals_order_page(parent) -> tk.Frame:
     ensure_config()
     try:
@@ -1931,6 +2300,15 @@ def create_meals_planning_page(parent) -> tk.Frame:
         )
         return tk.Frame(parent)
 
+def delete_order_items_from_db(order_id: int):
+    """Удаляет все строки сотрудников по заявке (оставляя сам заголовок заявки)."""
+    conn = get_db_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM meal_order_items WHERE order_id = %s", (order_id,))
+    finally:
+        conn.close()
 
 def create_meals_settings_page(parent, current_user_role: str) -> Optional[tk.Frame]:
     """
