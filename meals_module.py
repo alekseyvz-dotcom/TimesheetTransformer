@@ -1080,9 +1080,10 @@ class MealOrderPage(tk.Frame):
         top.grid_columnconfigure(3, weight=1)
         top.grid_columnconfigure(5, weight=0)
 
+        # при открытии формы только обновляем списки, но НЕ добавляем строку сотрудника
         self._update_emp_list()
         self._update_date_hint()
-        self.add_employee()
+        # строка сотрудника появится только после нажатия «Добавить сотрудника» или «Добавить подразделение»
 
     def _fill_from_existing(self, data: dict):
         # дата
@@ -1473,7 +1474,7 @@ class MealOrderPage(tk.Frame):
         for r in self.emp_rows:
             r.destroy()
         self.emp_rows.clear()
-        self.add_employee()
+        self._update_emp_list()
         self._update_date_hint()
 
     def add_department(self):
