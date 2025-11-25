@@ -3208,15 +3208,23 @@ class MainApp(tk.Tk):
 
         self._set_user(None)
 
-        header = tk.Frame(self)
-        header.pack(fill="x", padx=12, pady=(10, 4))
-        tk.Label(header, text="Управление строительством", font=("Segoe UI", 16, "bold")).pack(side="left")
-        tk.Label(
-            header,
+        self.header = tk.Frame(self)
+        self.header.pack(fill="x", padx=12, pady=(10, 4))
+
+        self.lbl_header_title = tk.Label(
+            self.header,
+            text="Управление строительством",
+            font=("Segoe UI", 16, "bold"),
+        )
+        self.lbl_header_title.pack(side="left")
+
+        self.lbl_header_hint = tk.Label(
+            self.header,
             text="Выберите раздел в верхнем меню",
             font=("Segoe UI", 10),
             fg="#555",
-        ).pack(side="right")
+        )
+        self.lbl_header_hint.pack(side="right")
 
         self.content = tk.Frame(self, bg="#f7f7f7")
         self.content.pack(fill="both", expand=True)
@@ -3245,6 +3253,13 @@ class MainApp(tk.Tk):
         self.title(APP_NAME + caption)
         self._apply_role_visibility()
 
+    def _set_header(self, title: str, hint: str = ""):
+        """Обновляет заголовок над содержимым."""
+        if hasattr(self, "lbl_header_title"):
+            self.lbl_header_title.config(text=title)
+        if hasattr(self, "lbl_header_hint"):
+            self.lbl_header_hint.config(text=hint or "")
+
     def show_login(self):
         self._show_page("login", lambda parent: LoginPage(parent, app_ref=self))
 
@@ -3263,12 +3278,44 @@ class MainApp(tk.Tk):
             self.show_login()
             return
 
+        # --- устанавливаем заголовок в зависимости от раздела ---
+        if key == "home":
+            self._set_header("Управление строительством", "Выберите раздел в верхнем меню")
+        elif key == "timesheet":
+            self._set_header("Объектный табель", "")
+        elif key == "my_timesheets":
+            self._set_header("Мои табели", "")
+        elif key == "timesheet_registry":
+            self._set_header("Реестр табелей", "")
+        elif key == "transport":
+            self._set_header("Заявка на спецтехнику", "")
+        elif key == "planning":
+            self._set_header("Планирование транспорта", "")
+        elif key == "transport_registry":
+            self._set_header("Реестр транспорта", "")
+        elif key == "meals_order":
+            self._set_header("Заказ питания", "")
+        elif key == "meals_planning":
+            self._set_header("Планирование питания", "")
+        elif key == "meals_settings":
+            self._set_header("Настройки питания", "")
+        elif key == "object_create":
+            self._set_header("Объекты — создание/редактирование", "")
+        elif key == "objects_registry":
+            self._set_header("Объекты — реестр", "")
+        elif key == "budget":
+            self._set_header("Анализ смет", "")
+        elif key == "login":
+            self._set_header("Управление строительством", "Вход в систему")
+        else:
+            # по умолчанию — просто ключ
+            self._set_header(key, "")
+
         for w in self.content.winfo_children():
             try:
                 w.destroy()
             except Exception:
                 pass
-
         try:
             page = builder(self.content)
         except Exception as e:
@@ -3292,7 +3339,10 @@ class MainApp(tk.Tk):
         self._pages[key] = page
 
     def show_home(self):
+        # Главная страница — основной заголовок
+        self._set_header("Управление строительством", "Выберите раздел в верхнем меню")
         self._show_page("home", lambda parent: HomePage(parent))
+
 
     def _apply_role_visibility(self):
         role = (self.current_user or {}).get("role") or "specialist"
