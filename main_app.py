@@ -2704,7 +2704,8 @@ class TimesheetPage(tk.Frame):
     def _auto_fit_columns(self):
         """
         Автоматически подгоняет ширину колонки ФИО под текущую ширину окна.
-        После изменения ширины колонок синхронизирует шапку с телом.
+        ВАЖНО: при сужении окна ниже минимальной ширины таблицы
+        ширина колонки ФИО больше НЕ уменьшается — включается горизонтальный скролл.
         """
         try:
             viewport = self.main_canvas.winfo_width()
@@ -2719,14 +2720,14 @@ class TimesheetPage(tk.Frame):
         total = self._content_total_width()
         new_fio = self.COLPX["fio"]
 
-        if total > viewport:
-            # Не помещаемся – уменьшаем ФИО
-            deficit = total - viewport
-            new_fio = max(self.MIN_FIO_PX, self.COLPX["fio"] - deficit)
-        elif total < viewport:
-            # Есть запас – чуть расширим ФИО до MAX_FIO_PX
+        if total < viewport:
+            # Есть запас по ширине — можно немного расширить ФИО
             surplus = viewport - total
             new_fio = min(self.MAX_FIO_PX, self.COLPX["fio"] + surplus)
+        else:
+            # Контент уже не помещается — НЕ уменьшаем ФИО,
+            # чтобы не ломать выравнивание, просто оставляем горизонтальный скролл
+            new_fio = self.COLPX["fio"]
 
         if int(new_fio) != int(self.COLPX["fio"]):
             self.COLPX["fio"] = int(new_fio)
