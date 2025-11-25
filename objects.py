@@ -37,7 +37,8 @@ def load_objects_full_from_db() -> List[Dict[str, Any]]:
                        contract_date,
                        short_name,
                        executor_department,
-                       contract_type
+                       contract_type,
+                       status
                   FROM objects
               ORDER BY address
                 """
@@ -59,6 +60,7 @@ def create_or_update_object(
     short_name: Optional[str],
     executor_department: Optional[str],
     contract_type: Optional[str],
+    status: Optional[str] = None,
 ) -> int:
     """
     Создаёт новый объект или обновляет существующий.
@@ -80,7 +82,8 @@ def create_or_update_object(
                            contract_date = %s,
                            short_name = %s,
                            executor_department = %s,
-                           contract_type = %s
+                           contract_type = %s,
+                           status = %s
                      WHERE id = %s
                     """,
                     (
@@ -94,19 +97,25 @@ def create_or_update_object(
                         short_name or None,
                         executor_department or None,
                         contract_type or None,
+                        status or None,
                         obj_id,
                     ),
                 )
                 return obj_id
             else:
+                # если статус не задан явно, считаем новый объект "Новый"
+                if not status:
+                    status = "Новый"
+
                 cur.execute(
                     """
                     INSERT INTO objects (
                         excel_id, year, program_name, customer_name,
                         address, contract_number, contract_date,
-                        short_name, executor_department, contract_type
+                        short_name, executor_department, contract_type,
+                        status
                     )
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     RETURNING id
                     """,
                     (
@@ -120,6 +129,7 @@ def create_or_update_object(
                         short_name or None,
                         executor_department or None,
                         contract_type or None,
+                        status or None,
                     ),
                 )
                 return cur.fetchone()[0]
@@ -333,7 +343,6 @@ class ObjectCreatePage(tk.Frame):
                     "Дата договора должна быть в формате ДД.ММ.ГГГГ или оставьте поле пустым.",
                 )
                 return
-
         try:
             obj_id = self.obj_data.get("id") if self.obj_data else None
         except Exception:
@@ -352,7 +361,9 @@ class ObjectCreatePage(tk.Frame):
                 short_name=self.var_short_name.get().strip() or None,
                 executor_department=self.var_executor_department.get().strip() or None,
                 contract_type=self.var_contract_type.get().strip() or None,
+                status = self.obj_data.get("status") or "Новый"
             )
+
         except Exception as e:
             logging.exception("Ошибка сохранения объекта")
             messagebox.showerror("Объект", f"Ошибка сохранения в БД:\n{e}")
@@ -398,6 +409,28 @@ class ObjectsRegistryPage(tk.Frame):
         ttk.Button(btns, text="Применить", command=self._load_data).pack(side="left", padx=2)
         ttk.Button(btns, text="Сброс", command=self._reset_filters).pack(side="left", padx=2)
 
+        # Панель смены статуса
+        status_frame = tk.Frame(top)
+        status_frame.grid(row=2, column=0, columnspan=5, sticky="w", pady=(6, 0))
+
+        tk.Label(status_frame, text="Статус выбранного объекта:").pack(side="left", padx=(0, 4))
+
+        self.var_status = tk.StringVar(value="Новый")
+        cmb_status = ttk.Combobox(
+            status_frame,
+            textvariable=self.var_status,
+            values=["Новый", "В работе", "Закрыт"],
+            width=12,
+            state="readonly",
+        )
+        cmb_status.pack(side="left", padx=(0, 4))
+
+        ttk.Button(
+            status_frame,
+            text="Установить статус",
+            command=self._on_change_status
+        ).pack(side="left", padx=(4, 0))
+
         frame = tk.Frame(self)
         frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
@@ -412,8 +445,15 @@ class ObjectsRegistryPage(tk.Frame):
             "contract_number",
             "contract_date",
             "contract_type",
+            "status",
         )
         self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="browse")
+
+        # Настройка цветов по статусам
+        # Цвета можете подобрать другие
+        self.tree.tag_configure("status_new", background="#e0ffe0")       # светло-зелёный
+        self.tree.tag_configure("status_inwork", background="#fff8dc")    # светло-жёлтый
+        self.tree.tag_configure("status_closed", background="#ffe4e1")    # светло-розовый
 
         self.tree.heading("excel_id", text="ID объекта")
         self.tree.heading("address", text="Адрес")
@@ -425,6 +465,7 @@ class ObjectsRegistryPage(tk.Frame):
         self.tree.heading("contract_number", text="№ договора")
         self.tree.heading("contract_date", text="Дата договора")
         self.tree.heading("contract_type", text="Тип договора")
+        self.tree.heading("status", text="Статус")
 
         self.tree.column("excel_id", width=90, anchor="w")
         self.tree.column("address", width=260, anchor="w")
@@ -436,6 +477,8 @@ class ObjectsRegistryPage(tk.Frame):
         self.tree.column("contract_number", width=110, anchor="w")
         self.tree.column("contract_date", width=100, anchor="center")
         self.tree.column("contract_type", width=120, anchor="w")
+        self.tree.column("status", width=90, anchor="center")
+
 
         vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
@@ -480,6 +523,18 @@ class ObjectsRegistryPage(tk.Frame):
             else:
                 cd_str = str(cd or "")
 
+            status = o.get("status") or "Новый"
+
+            # определяем тег по статусу
+            if status == "Новый":
+                tags = ("status_new",)
+            elif status == "В работе":
+                tags = ("status_inwork",)
+            elif status == "Закрыт":
+                tags = ("status_closed",)
+            else:
+                tags = ()
+
             self.tree.insert(
                 "",
                 "end",
@@ -494,5 +549,52 @@ class ObjectsRegistryPage(tk.Frame):
                     o.get("contract_number") or "",
                     cd_str,
                     o.get("contract_type") or "",
+                    status,
                 ),
+                tags=tags,
             )
+
+    def _on_change_status(self):
+        """Установить новый статус для выбранной строки."""
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("Статус", "Выберите объект в списке.")
+            return
+
+        item_id = selected[0]
+        # индекс выбранной строки в self._objects
+        index = self.tree.index(item_id)
+        if index < 0 or index >= len(self._objects):
+            messagebox.showerror("Статус", "Не удалось определить объект.")
+            return
+
+        obj = self._objects[index]
+        obj_db_id = obj.get("id")
+        if not obj_db_id:
+            messagebox.showerror("Статус", "У объекта нет ID в базе.")
+            return
+
+        new_status = self.var_status.get()
+        if new_status not in ("Новый", "В работе", "Закрыт"):
+            messagebox.showerror("Статус", "Недопустимое значение статуса.")
+            return
+
+        # Обновляем статус в БД
+        conn = get_db_connection()
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE objects SET status = %s WHERE id = %s",
+                    (new_status, obj_db_id),
+                )
+        except Exception as e:
+            logging.exception("Ошибка смены статуса объекта")
+            messagebox.showerror("Статус", f"Ошибка обновления статуса в БД:\n{e}")
+            return
+        finally:
+            conn.close()
+
+        # Обновляем локальный объект и перерисовываем реестр
+        obj["status"] = new_status
+        self._load_data()
+
