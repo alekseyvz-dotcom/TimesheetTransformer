@@ -987,10 +987,7 @@ class MealOrderPage(tk.Frame):
 
         def on_dep_changed(event=None):
             set_saved_dep(self.cmb_dep.get())
-            for r in self.emp_rows:
-                r.destroy()
-            self.emp_rows.clear()
-            self.add_employee()
+            self._update_emp_list()
 
         self.cmb_dep.bind("<<ComboboxSelected>>", on_dep_changed)
 
