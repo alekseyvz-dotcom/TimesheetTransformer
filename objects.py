@@ -273,6 +273,12 @@ class ObjectCreatePage(tk.Frame):
         ttk.Button(btns, text="Сохранить", command=self._on_save).pack(side="right", padx=4)
         ttk.Button(btns, text="Очистить", command=self._on_clear).pack(side="right", padx=4)
 
+        # Поле ID объекта (excel_id) делаем только для чтения
+        try:
+            self.ent_excel_id.configure(state="readonly")
+        except Exception:
+            pass
+
     # ---------- заполнение полей ----------
 
     def _fill_from_data_or_default(self):
@@ -304,19 +310,32 @@ class ObjectCreatePage(tk.Frame):
     # ---------- действия ----------
 
     def _on_clear(self):
-        # при очистке excel_id тоже можно пересчитать
-        try:
-            next_id = get_next_excel_id()
-        except Exception:
-            next_id = ""
+        # при очистке: для нового объекта можно заново сгенерировать excel_id,
+        # для существующего — не трогаем его
+        is_new = not bool(self.obj_data.get("id")) if self.obj_data else True
+
+        next_id = None
+        if is_new:
+            try:
+                next_id = get_next_excel_id()
+            except Exception:
+                next_id = ""
+
         for name in (
             "excel_id", "year", "program_name", "customer_name", "address",
             "contract_number", "contract_date", "short_name",
             "executor_department", "contract_type",
         ):
             getattr(self, f"var_{name}").set("")
-        if next_id:
+
+        if is_new and next_id:
             self.var_excel_id.set(next_id)
+
+        # возвращаем readonly
+        try:
+            self.ent_excel_id.configure(state="readonly")
+        except Exception:
+            pass
 
     def _on_save(self):
         addr = self.var_address.get().strip()
@@ -375,6 +394,131 @@ class ObjectCreatePage(tk.Frame):
         self.obj_data["id"] = new_id
         messagebox.showinfo("Объект", "Объект сохранён в базе данных.")
 
+class ObjectEditDialog(tk.Toplevel):
+    """Диалог редактирования объекта из реестра (без изменения ID и статуса)."""
+    def __init__(self, parent, obj_data: Dict[str, Any]):
+        super().__init__(parent)
+        self.title("Редактирование объекта")
+        self.obj_data = obj_data
+        self.result = None
+
+        self.transient(parent)
+        self.grab_set()
+
+        frm = tk.Frame(self, padx=10, pady=10)
+        frm.pack(fill="both", expand=True)
+
+        row = 0
+
+        def add_row(label, key, width=40):
+            nonlocal row
+            tk.Label(frm, text=label + ":", anchor="e").grid(
+                row=row, column=0, sticky="e", padx=(0, 6), pady=3
+            )
+            var = tk.StringVar(value=str(obj_data.get(key) or ""))
+            ent = ttk.Entry(frm, textvariable=var, width=width)
+            ent.grid(row=row, column=1, sticky="w", pady=3)
+            row += 1
+            return var, ent
+
+        # Показываем ID объектa (excel_id) и статус как нередактируемые
+        tk.Label(frm, text="ID объекта (excel_id):", anchor="e").grid(
+            row=row, column=0, sticky="e", padx=(0, 6), pady=3
+        )
+        tk.Label(frm, text=str(obj_data.get("excel_id") or ""), anchor="w").grid(
+            row=row, column=1, sticky="w", pady=3
+        )
+        row += 1
+
+        # Статус (не редактируется здесь)
+        tk.Label(frm, text="Статус:", anchor="e").grid(
+            row=row, column=0, sticky="e", padx=(0, 6), pady=3
+        )
+        tk.Label(frm, text=str(obj_data.get("status") or "Новый"), anchor="w").grid(
+            row=row, column=1, sticky="w", pady=3
+        )
+        row += 1
+
+        # Редактируемые поля
+        self.var_year, _ = add_row("Год реализации программы", "year", width=10)
+        self.var_program_name, _ = add_row("Наименование программы", "program_name", width=46)
+        self.var_customer_name, _ = add_row("Наименование заказчика", "customer_name", width=46)
+        self.var_address, _ = add_row("Адрес объекта", "address", width=52)
+        self.var_short_name, _ = add_row("Сокращённое наименование", "short_name", width=46)
+        self.var_executor_department, _ = add_row("Подразделение исполнителя", "executor_department", width=46)
+        self.var_contract_number, _ = add_row("№ договора", "contract_number", width=20)
+
+        # Дата договора
+        tk.Label(frm, text="Дата договора:", anchor="e").grid(
+            row=row, column=0, sticky="e", padx=(0, 6), pady=3
+        )
+        cd_val = obj_data.get("contract_date")
+        if isinstance(cd_val, (datetime, date)):
+            cd_str = cd_val.strftime("%d.%m.%Y")
+        else:
+            cd_str = str(cd_val or "")
+        self.var_contract_date = tk.StringVar(value=cd_str)
+        ttk.Entry(frm, textvariable=self.var_contract_date, width=14).grid(
+            row=row, column=1, sticky="w", pady=3
+        )
+        row += 1
+
+        self.var_contract_type, _ = add_row("Тип договора", "contract_type", width=26)
+
+        # Кнопки
+        btns = tk.Frame(frm)
+        btns.grid(row=row, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(btns, text="Сохранить", command=self._on_ok).pack(side="left", padx=4)
+        ttk.Button(btns, text="Отмена", command=self._on_cancel).pack(side="left", padx=4)
+
+        self.bind("<Return>", lambda e: self._on_ok())
+        self.bind("<Escape>", lambda e: self._on_cancel())
+
+        # Центровка
+        self.update_idletasks()
+        try:
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            sw = self.winfo_width()
+            sh = self.winfo_height()
+            self.geometry(f"+{px + (pw - sw)//2}+{py + (ph - sh)//2}")
+        except Exception:
+            pass
+
+    def _on_ok(self):
+        # Валидация даты
+        cd_raw = self.var_contract_date.get().strip()
+        cd_val: Optional[date] = None
+        if cd_raw:
+            try:
+                cd_val = datetime.strptime(cd_raw, "%d.%m.%Y").date()
+            except Exception:
+                messagebox.showwarning(
+                    "Объект",
+                    "Дата договора должна быть в формате ДД.ММ.ГГГГ или оставьте поле пустым.",
+                    parent=self,
+                )
+                return
+
+        self.result = {
+            "year": self.var_year.get().strip() or None,
+            "program_name": self.var_program_name.get().strip() or None,
+            "customer_name": self.var_customer_name.get().strip() or None,
+            "address": self.var_address.get().strip() or None,
+            "short_name": self.var_short_name.get().strip() or None,
+            "executor_department": self.var_executor_department.get().strip() or None,
+            "contract_number": self.var_contract_number.get().strip() or None,
+            "contract_date": cd_val,
+            "contract_type": self.var_contract_type.get().strip() or None,
+        }
+        self.destroy()
+
+    def _on_cancel(self):
+        self.result = None
+        self.destroy()
+        
 # ---------- UI: реестр объектов ----------
 
 class ObjectsRegistryPage(tk.Frame):
@@ -505,6 +649,8 @@ class ObjectsRegistryPage(tk.Frame):
 
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
+        # Двойной щелчок по строке — редактирование объекта (для admin/manager)
+        self.tree.bind("<Double-1>", self._on_row_double_click)
 
     def _reset_filters(self):
         self.var_filter_addr.set("")
@@ -574,6 +720,64 @@ class ObjectsRegistryPage(tk.Frame):
                 tags=tags,
             )
 
+    def _get_selected_object(self) -> Optional[Dict[str, Any]]:
+        """Возвращает dict объекта из self._objects по текущему выделению в tree."""
+        selected = self.tree.selection()
+        if not selected:
+            return None
+        item_id = selected[0]
+        index = self.tree.index(item_id)
+        if index < 0 or index >= len(self._objects):
+            return None
+        return self._objects[index]
+
+    def _on_row_double_click(self, event=None):
+        """Открыть диалог редактирования объекта по двойному щелчку (для admin/manager)."""
+        if self.current_role not in ("admin", "manager"):
+            # Просто игнорируем или можно показать подсказку
+            messagebox.showinfo(
+                "Редактирование объекта",
+                "Редактирование доступно только руководителю и администратору.",
+            )
+            return
+
+        obj = self._get_selected_object()
+        if not obj:
+            return
+
+        # Открываем диалог
+        dlg = ObjectEditDialog(self, obj)
+        self.wait_window(dlg)
+
+        if not dlg.result:
+            return  # отмена
+
+        # Обновляем в БД
+        try:
+            updated = dlg.result
+            create_or_update_object(
+                obj_id=obj.get("id"),
+                excel_id=obj.get("excel_id"),
+                year=updated["year"],
+                program_name=updated["program_name"],
+                customer_name=updated["customer_name"],
+                address=updated["address"] or "",
+                contract_number=updated["contract_number"],
+                contract_date=updated["contract_date"],
+                short_name=updated["short_name"],
+                executor_department=updated["executor_department"],
+                contract_type=updated["contract_type"],
+                status=obj.get("status"),  # статус не меняем здесь
+            )
+        except Exception as e:
+            logging.exception("Ошибка обновления объекта из реестра")
+            messagebox.showerror("Редактирование объекта", f"Ошибка сохранения в БД:\n{e}")
+            return
+
+        # Обновляем локальную копию и перезагружаем реестр
+        obj.update(updated)
+        self._load_data()
+
     def _export_to_excel(self):
         """Выгрузка текущего списка (self._objects) в Excel."""
         if not self._objects:
@@ -638,19 +842,11 @@ class ObjectsRegistryPage(tk.Frame):
             )
             return
 
-        selected = self.tree.selection()
-        if not selected:
+        obj = self._get_selected_object()
+        if not obj:
             messagebox.showwarning("Статус", "Выберите объект в списке.")
             return
 
-        item_id = selected[0]
-        # индекс выбранной строки в self._objects
-        index = self.tree.index(item_id)
-        if index < 0 or index >= len(self._objects):
-            messagebox.showerror("Статус", "Не удалось определить объект.")
-            return
-
-        obj = self._objects[index]
         obj_db_id = obj.get("id")
         if not obj_db_id:
             messagebox.showerror("Статус", "У объекта нет ID в базе.")
@@ -679,6 +875,3 @@ class ObjectsRegistryPage(tk.Frame):
         # Обновляем локальный объект и перерисовываем реестр
         obj["status"] = new_status
         self._load_data()
-
-
-
