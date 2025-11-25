@@ -1422,9 +1422,10 @@ class TimesheetPage(tk.Frame):
         ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=3, padx=4)
         ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=4, padx=4)
         ttk.Button(btns, text="Загрузить из Excel", command=self.import_from_excel).grid(row=0, column=5, padx=4)
-        ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=5, padx=4)
-        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=6, padx=4)
-        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=7, padx=4)
+        ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=6, padx=4)
+        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=7, padx=4)
+        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=8, padx=4)
+
 
         # Основной контейнер с прокруткой
         main_frame = tk.Frame(self)
