@@ -1421,6 +1421,7 @@ class TimesheetPage(tk.Frame):
         ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=2, padx=4)
         ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=3, padx=4)
         ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=4, padx=4)
+        ttk.Button(btns, text="Загрузить из Excel", command=self.import_from_excel).grid(row=0, column=5, padx=4)
         ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=5, padx=4)
         ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=6, padx=4)
         ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=7, padx=4)
@@ -1651,7 +1652,6 @@ class TimesheetPage(tk.Frame):
             self.header_canvas.xview_moveto(first)
         except Exception:
             pass
-
 
     def _on_period_change(self):
         self._update_rows_days_enabled()
@@ -2070,8 +2070,6 @@ class TimesheetPage(tk.Frame):
         self.model_rows.clear()
         self._render_page(1)
 
-    # ========== ИСПРАВЛЕННЫЕ МЕТОДЫ ==========
-
     def _current_file_path(self) -> Optional[Path]:
         """Генерирует путь к файлу с учетом подразделения"""
         addr = self.cmb_address.get().strip()
@@ -2399,6 +2397,167 @@ class TimesheetPage(tk.Frame):
         # Загружаем сохраненные данные для выбранного подразделения
         self._load_existing_rows()
 
+    def import_from_excel(self):
+        """
+        Загрузка сотрудников и часов из старого Excel-файла табеля в текущий реестр (в модель/память).
+        Файл должен иметь лист 'Табель' со структурой, как в _ensure_sheet.
+        Фильтрация по:
+          - текущему объекту (ID/Адрес),
+          - месяцу/году,
+          - подразделению (если не 'Все').
+        """
+        if self.read_only:
+            messagebox.showinfo("Импорт из Excel", "Табель открыт в режиме только просмотра.")
+            return
+
+        from tkinter import filedialog
+
+        addr = self.cmb_address.get().strip()
+        oid = self.cmb_object_id.get().strip()
+        current_dep = self.cmb_department.get().strip()
+        y, m = self.get_year_month()
+
+        if not addr and not oid:
+            messagebox.showwarning(
+                "Импорт из Excel",
+                "Укажите адрес и/или ID объекта, а также период (месяц и год) перед импортом.",
+            )
+            return
+
+        # выбор файла
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Выберите Excel-файл табеля",
+            filetypes=[
+                ("Excel файлы", "*.xlsx *.xlsm *.xltx *.xltm"),
+                ("Все файлы", "*.*"),
+            ],
+        )
+        if not path:
+            return
+
+        try:
+            wb = load_workbook(path, data_only=True)
+        except Exception as e:
+            messagebox.showerror("Импорт из Excel", f"Не удалось открыть файл:\n{e}", parent=self)
+            return
+
+        try:
+            ws = self._ensure_sheet(wb)
+        except Exception as e:
+            messagebox.showerror("Импорт из Excel", f"Не удалось подготовить лист 'Табель':\n{e}", parent=self)
+            return
+
+        imported: List[Dict[str, Any]] = []
+
+        try:
+            for r in range(2, ws.max_row + 1):
+                row_oid = (ws.cell(r, 1).value or "")
+                row_addr = (ws.cell(r, 2).value or "")
+                row_m = int(ws.cell(r, 3).value or 0)
+                row_y = int(ws.cell(r, 4).value or 0)
+                fio = str(ws.cell(r, 5).value or "").strip()
+                tbn = str(ws.cell(r, 6).value or "").strip()
+                row_dep = str(ws.cell(r, 7).value or "").strip()
+
+                # фильтр по периоду
+                if row_m != m or row_y != y:
+                    continue
+
+                # фильтр по объекту
+                if oid:
+                    if row_oid != oid:
+                        continue
+                else:
+                    if row_addr != addr:
+                        continue
+
+                # фильтр по подразделению
+                if current_dep != "Все" and row_dep != current_dep:
+                    continue
+
+                # читаем часы по дням (столбцы 8..8+31-1)
+                hours_raw: List[Optional[str]] = []
+                for c in range(8, 8 + 31):
+                    v = ws.cell(r, c).value
+                    if v is None or str(v).strip() == "":
+                        hours_raw.append(None)
+                    else:
+                        hours_raw.append(str(v).strip())
+
+                if fio:
+                    imported.append({
+                        "fio": fio,
+                        "tbn": tbn,
+                        "hours": hours_raw,
+                    })
+
+        except Exception as e:
+            messagebox.showerror("Импорт из Excel", f"Ошибка чтения данных с листа 'Табель':\n{e}", parent=self)
+            return
+
+        if not imported:
+            messagebox.showinfo(
+                "Импорт из Excel",
+                "В выбранном файле не найдено подходящих строк для текущего объекта/периода/подразделения.",
+                parent=self,
+            )
+            return
+
+        # убираем дубликаты внутри файла
+        uniq: Dict[tuple, Dict[str, Any]] = {}
+        for rec in imported:
+            key = (rec["fio"].strip().lower(), rec["tbn"].strip())
+            if key not in uniq:
+                uniq[key] = rec
+        imported = list(uniq.values())
+
+        # спросим режим: заменить или объединить
+        if self.model_rows:
+            mode = messagebox.askyesno(
+                "Импорт из Excel",
+                "Заменить текущий список сотрудников на импортированный?\n"
+                "Да — заменить полностью\n"
+                "Нет — объединить (добавить недостающих)",
+                parent=self,
+            )
+            replace_mode = mode  # True = заменить, False = merge
+        else:
+            replace_mode = True
+
+        # сохраняем текущую страницу в модель
+        self._sync_visible_to_model()
+
+        if replace_mode:
+            self.model_rows.clear()
+
+        existing = {(r["fio"].strip().lower(), r["tbn"].strip()) for r in self.model_rows}
+        added = 0
+        for rec in imported:
+            key = (rec["fio"].strip().lower(), rec["tbn"].strip())
+            if not replace_mode and key in existing:
+                continue
+            self.model_rows.append({
+                "fio": rec["fio"],
+                "tbn": rec["tbn"],
+                "hours": rec.get("hours") or [None] * 31,
+            })
+            existing.add(key)
+            added += 1
+
+        # перерисовываем без лишней синхронизации
+        self._suspend_sync = True
+        try:
+            self._render_page(1)
+        finally:
+            self._suspend_sync = False
+
+        messagebox.showinfo(
+            "Импорт из Excel",
+            f"Импортировано сотрудников: {added}\n\nТеперь можно нажать «Сохранить», чтобы записать табель в БД.",
+            parent=self,
+        )
+
     def copy_from_month(self):
         if self.read_only:
             return
@@ -2512,8 +2671,6 @@ class TimesheetPage(tk.Frame):
 
         except Exception as e:
             messagebox.showerror("Копирование", f"Ошибка копирования:\n{e}")
-
-
 
     def _content_total_width(self, fio_px: Optional[int] = None) -> int:
         """
