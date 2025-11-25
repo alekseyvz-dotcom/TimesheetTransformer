@@ -1091,7 +1091,14 @@ class RowWidget:
         self.widgets: List[tk.Widget] = []
 
         # ФИО
-        self.lbl_fio = tk.Label(self.table, text=fio, anchor="w", bg=zebra_bg)
+        self.lbl_fio = tk.Label(
+            self.table,
+            text=fio,
+            anchor="w",
+            bg=zebra_bg,
+            width=35,          # подбери по вкусу
+            wraplength=1       # принудительно не даём растягиваться по ширине
+        )
         self.lbl_fio.grid(row=self.row, column=0, padx=0, pady=1, sticky="nsew")
         self.widgets.append(self.lbl_fio)
 
@@ -2725,6 +2732,8 @@ class TimesheetPage(tk.Frame):
         if int(new_fio) != int(self.COLPX["fio"]):
             self.COLPX["fio"] = int(new_fio)
             self._configure_table_columns()
+            # перегрид строк, чтобы они подстроились под новую ширину
+            self._regrid_rows()
             self._on_scroll_frame_configure()
         else:
             # Даже если ширина не изменилась, синхронизируем ширину шапки
