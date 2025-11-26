@@ -345,6 +345,45 @@ def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
     finally:
         conn.close()
 
+def find_object_db_id_by_excel_or_address(
+    excel_id: Optional[str],
+    address: str,
+) -> Optional[int]:
+    """
+    Ищет объект в таблице objects:
+      - сначала по excel_id (если задан),
+      - если не найдено — по точному адресу.
+    Возвращает id объекта или None.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            if excel_id:
+                cur.execute(
+                    """
+                    SELECT id
+                      FROM objects
+                     WHERE COALESCE(NULLIF(excel_id, ''), '') = %s
+                    """,
+                    (excel_id,),
+                )
+                row = cur.fetchone()
+                if row:
+                    return row[0]
+
+            # По адресу (если по excel_id не нашли / не задан)
+            cur.execute(
+                """
+                SELECT id
+                  FROM objects
+                 WHERE address = %s
+                """,
+                (address,),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+    finally:
+        conn.close()
 
 # ---------- Справочники из БД ----------
 
@@ -404,27 +443,55 @@ def upsert_timesheet_header(
     """
     Находит или создаёт заголовок табеля и возвращает его id.
     Привязан к конкретному user_id.
+    object_db_id (FK на objects.id) берётся из таблицы objects.
     """
+    # Находим объект в БД
+    object_db_id = find_object_db_id_by_excel_or_address(
+        object_id or None,
+        object_addr,
+    )
+    if object_db_id is None:
+        # Можно вернуть None, но лучше сразу понятная ошибка
+        raise RuntimeError(
+            f"В БД не найден объект (excel_id={object_id!r}, address={object_addr!r}). "
+            f"Сначала создайте объект в разделе «Объекты»."
+        )
+
     conn = get_db_connection()
     try:
         with conn, conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO timesheet_headers (
-                    object_id, object_addr, department, year, month, user_id
+                    object_id,
+                    object_addr,
+                    department,
+                    year,
+                    month,
+                    user_id,
+                    object_db_id
                 )
-                VALUES (%s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (object_id, object_addr, department, year, month, user_id)
-                DO UPDATE SET updated_at = now()
+                DO UPDATE SET
+                    updated_at = now(),
+                    object_db_id = EXCLUDED.object_db_id
                 RETURNING id;
                 """,
-                (object_id or None, object_addr, department or None, year, month, user_id),
+                (
+                    object_id or None,
+                    object_addr,
+                    department or None,
+                    year,
+                    month,
+                    user_id,
+                    object_db_id,
+                ),
             )
             ts_id = cur.fetchone()[0]
         return ts_id
     finally:
         conn.close()
-
 
 def replace_timesheet_rows(
     header_id: int,
