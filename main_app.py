@@ -2929,129 +2929,6 @@ class MyTimesheetsPage(tk.Frame):
                 return h
         return None
 
-    def _export_to_excel(self):
-        """
-        Выгружает все табели, показанные в реестре (с учётом фильтров),
-        в один Excel-файл.
-        Формат строк:
-          Год, Месяц, Адрес, ID объекта, Подразделение, Пользователь,
-          ФИО, Таб.№, D1..D31, Итого_дней, Итого_часов, Переработка_день, Переработка_ночь
-        """
-        if not self._headers:
-            messagebox.showinfo("Экспорт в Excel", "Нет данных для выгрузки.")
-            return
-
-        from tkinter import filedialog
-
-        # Выбор файла для сохранения
-        default_name = f"Реестр_табелей_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        path = filedialog.asksaveasfilename(
-            parent=self,
-            title="Сохранить реестр табелей в Excel",
-            defaultextension=".xlsx",
-            initialfile=default_name,
-            filetypes=[("Excel файлы", "*.xlsx"), ("Все файлы", "*.*")],
-        )
-        if not path:
-            return
-
-        try:
-            # Создаём новую рабочую книгу
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Реестр табелей"
-
-            # Заголовок
-            header_row = [
-                "Год",
-                "Месяц",
-                "Адрес",
-                "ID объекта",
-                "Подразделение",
-                "Пользователь",
-                "ФИО",
-                "Табельный №",
-            ] + [f"{i}" for i in range(1, 32)] + [
-                "Итого_дней",
-                "Итого_часов",
-                "Переработка_день",
-                "Переработка_ночь",
-            ]
-            ws.append(header_row)
-
-            # Немного ширин столбцов
-            ws.column_dimensions["A"].width = 6   # Год
-            ws.column_dimensions["B"].width = 10  # Месяц
-            ws.column_dimensions["C"].width = 40  # Адрес
-            ws.column_dimensions["D"].width = 14  # ID объекта
-            ws.column_dimensions["E"].width = 22  # Подразделение
-            ws.column_dimensions["F"].width = 22  # Пользователь
-            ws.column_dimensions["G"].width = 28  # ФИО
-            ws.column_dimensions["H"].width = 12  # Таб.№
-            for col_idx in range(9, 9 + 31):      # дни
-                ws.column_dimensions[get_column_letter(col_idx)].width = 6
-            # Итоги
-            base = 9 + 31
-            ws.column_dimensions[get_column_letter(base)].width = 10   # Итого_дней
-            ws.column_dimensions[get_column_letter(base + 1)].width = 14  # Итого_часов
-            ws.column_dimensions[get_column_letter(base + 2)].width = 16  # Переработка_день
-            ws.column_dimensions[get_column_letter(base + 3)].width = 16  # Переработка_ночь
-
-            # Заполняем данные
-            total_rows = 0
-            for h in self._headers:
-                header_id = int(h["id"])
-                year = int(h["year"])
-                month = int(h["month"])
-                addr = h.get("object_addr") or ""
-                obj_id = h.get("object_id") or ""
-                dep = h.get("department") or ""
-                user_display = h.get("full_name") or h.get("username") or ""
-
-                rows = load_timesheet_rows_by_header_id(header_id)
-
-                for row in rows:
-                    fio = row["fio"]
-                    tbn = row["tbn"]
-                    hours_raw = row.get("hours_raw") or [None] * 31
-                    total_days = row.get("total_days")
-                    total_hours = row.get("total_hours")
-                    ot_day = row.get("overtime_day")
-                    ot_night = row.get("overtime_night")
-
-                    excel_row = [
-                        year,
-                        month,
-                        addr,
-                        obj_id,
-                        dep,
-                        user_display,
-                        fio,
-                        tbn,
-                    ]
-
-                    # 1..31 дни (как в БД/табеле — строковые значения)
-                    for v in hours_raw:
-                        excel_row.append(v if v is not None else None)
-
-                    excel_row.append(total_days if total_days is not None else None)
-                    excel_row.append(total_hours if total_hours is not None else None)
-                    excel_row.append(ot_day if ot_day is not None else None)
-                    excel_row.append(ot_night if ot_night is not None else None)
-
-                    ws.append(excel_row)
-                    total_rows += 1
-
-            wb.save(path)
-            messagebox.showinfo(
-                "Экспорт в Excel",
-                f"Выгрузка завершена.\nФайл: {path}\nСтрок табеля: {total_rows}",
-                parent=self,
-            )
-        except Exception as e:
-            logging.exception("Ошибка экспорта реестра табелей в Excel")
-            messagebox.showerror("Экспорт в Excel", f"Ошибка при выгрузке:\n{e}", parent=self)
-
     def _on_open(self, event=None):
         h = self._get_selected_header()
         if not h:
@@ -3202,6 +3079,129 @@ class TimesheetRegistryPage(tk.Frame):
         self.var_obj_addr.set("")
         self.var_obj_id.set("")
         self._load_data()
+
+    def _export_to_excel(self):
+        """
+        Выгружает все табели, показанные в реестре (с учётом фильтров),
+        в один Excel-файл.
+        Формат строк:
+          Год, Месяц, Адрес, ID объекта, Подразделение, Пользователь,
+          ФИО, Таб.№, D1..D31, Итого_дней, Итого_часов, Переработка_день, Переработка_ночь
+        """
+        if not self._headers:
+            messagebox.showinfo("Экспорт в Excel", "Нет данных для выгрузки.")
+            return
+
+        from tkinter import filedialog
+
+        # Выбор файла для сохранения
+        default_name = f"Реестр_табелей_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Сохранить реестр табелей в Excel",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Excel файлы", "*.xlsx"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            # Создаём новую рабочую книгу
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Реестр табелей"
+
+            # Заголовок
+            header_row = [
+                "Год",
+                "Месяц",
+                "Адрес",
+                "ID объекта",
+                "Подразделение",
+                "Пользователь",
+                "ФИО",
+                "Табельный №",
+            ] + [f"{i}" for i in range(1, 32)] + [
+                "Итого_дней",
+                "Итого_часов",
+                "Переработка_день",
+                "Переработка_ночь",
+            ]
+            ws.append(header_row)
+
+            # Немного ширин столбцов
+            ws.column_dimensions["A"].width = 6   # Год
+            ws.column_dimensions["B"].width = 10  # Месяц
+            ws.column_dimensions["C"].width = 40  # Адрес
+            ws.column_dimensions["D"].width = 14  # ID объекта
+            ws.column_dimensions["E"].width = 22  # Подразделение
+            ws.column_dimensions["F"].width = 22  # Пользователь
+            ws.column_dimensions["G"].width = 28  # ФИО
+            ws.column_dimensions["H"].width = 12  # Таб.№
+            for col_idx in range(9, 9 + 31):      # дни
+                ws.column_dimensions[get_column_letter(col_idx)].width = 6
+            # Итоги
+            base = 9 + 31
+            ws.column_dimensions[get_column_letter(base)].width = 10   # Итого_дней
+            ws.column_dimensions[get_column_letter(base + 1)].width = 14  # Итого_часов
+            ws.column_dimensions[get_column_letter(base + 2)].width = 16  # Переработка_день
+            ws.column_dimensions[get_column_letter(base + 3)].width = 16  # Переработка_ночь
+
+            # Заполняем данные
+            total_rows = 0
+            for h in self._headers:
+                header_id = int(h["id"])
+                year = int(h["year"])
+                month = int(h["month"])
+                addr = h.get("object_addr") or ""
+                obj_id = h.get("object_id") or ""
+                dep = h.get("department") or ""
+                user_display = h.get("full_name") or h.get("username") or ""
+
+                rows = load_timesheet_rows_by_header_id(header_id)
+
+                for row in rows:
+                    fio = row["fio"]
+                    tbn = row["tbn"]
+                    hours_raw = row.get("hours_raw") or [None] * 31
+                    total_days = row.get("total_days")
+                    total_hours = row.get("total_hours")
+                    ot_day = row.get("overtime_day")
+                    ot_night = row.get("overtime_night")
+
+                    excel_row = [
+                        year,
+                        month,
+                        addr,
+                        obj_id,
+                        dep,
+                        user_display,
+                        fio,
+                        tbn,
+                    ]
+
+                    # 1..31 дни (как в БД/табеле — строковые значения)
+                    for v in hours_raw:
+                        excel_row.append(v if v is not None else None)
+
+                    excel_row.append(total_days if total_days is not None else None)
+                    excel_row.append(total_hours if total_hours is not None else None)
+                    excel_row.append(ot_day if ot_day is not None else None)
+                    excel_row.append(ot_night if ot_night is not None else None)
+
+                    ws.append(excel_row)
+                    total_rows += 1
+
+            wb.save(path)
+            messagebox.showinfo(
+                "Экспорт в Excel",
+                f"Выгрузка завершена.\nФайл: {path}\nСтрок табеля: {total_rows}",
+                parent=self,
+            )
+        except Exception as e:
+            logging.exception("Ошибка экспорта реестра табелей в Excel")
+            messagebox.showerror("Экспорт в Excel", f"Ошибка при выгрузке:\n{e}", parent=self)
 
     def _load_data(self):
         self.tree.delete(*self.tree.get_children())
