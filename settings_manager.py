@@ -821,6 +821,72 @@ def create_app_user(username: str, password: str, full_name: str, role_code: str
     finally:
         conn.close()
 
+def update_app_user(
+    user_id: int,
+    username: str,
+    full_name: str,
+    role_code: str,
+    is_active: bool,
+    new_password: Optional[str] = None,
+):
+    """
+    Обновляет данные пользователя. Если new_password не None и не пустой —
+    обновляем пароль.
+    """
+    username = (username or "").strip()
+    full_name = (full_name or "").strip()
+    role_code = (role_code or "").strip().lower()
+
+    if not username:
+        raise ValueError("Логин не может быть пустым")
+    if not role_code:
+        raise ValueError("Роль не указана")
+
+    pwd_hash = None
+    if new_password:
+        pwd_hash = _hash_password(new_password)
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            if pwd_hash:
+                cur.execute(
+                    """
+                    UPDATE app_users
+                       SET username = %s,
+                           full_name = %s,
+                           "role" = %s,
+                           is_active = %s,
+                           password_hash = %s
+                     WHERE id = %s
+                    """,
+                    (username, full_name, role_code, is_active, pwd_hash, user_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE app_users
+                       SET username = %s,
+                           full_name = %s,
+                           "role" = %s,
+                           is_active = %s
+                     WHERE id = %s
+                    """,
+                    (username, full_name, role_code, is_active, user_id),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_app_user(user_id: int):
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM app_users WHERE id = %s", (user_id,))
+        conn.commit()
+    finally:
+        conn.close()
 
 # ---------------- UI ДЛЯ ПОЛЬЗОВАТЕЛЕЙ ----------------
 
@@ -899,6 +965,76 @@ class CreateUserDialog(simpledialog.Dialog):
             "role": self.role_map[self.cmb_role.get()],
         }
 
+class EditUserDialog(simpledialog.Dialog):
+    def __init__(self, parent, user: dict):
+        self.user = user
+        self.result = None
+        super().__init__(parent, title=f"Редактировать пользователя: {user.get('username', '')}")
+
+    def body(self, master):
+        tk.Label(master, text="Логин:").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.ent_username = ttk.Entry(master, width=26)
+        self.ent_username.grid(row=0, column=1, sticky="w", pady=4)
+        self.ent_username.insert(0, self.user.get("username", ""))
+
+        tk.Label(master, text="ФИО:").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.ent_fullname = ttk.Entry(master, width=26)
+        self.ent_fullname.grid(row=1, column=1, sticky="w", pady=4)
+        self.ent_fullname.insert(0, self.user.get("full_name") or "")
+
+        tk.Label(master, text="Новый пароль (оставьте пустым, чтобы не менять):").grid(
+            row=2, column=0, sticky="e", padx=(0, 6), pady=4
+        )
+        self.ent_pwd = ttk.Entry(master, width=26, show="*")
+        self.ent_pwd.grid(row=2, column=1, sticky="w", pady=4)
+
+        tk.Label(master, text="Роль:").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=4)
+        try:
+            roles = get_roles_list()
+        except Exception as e:
+            messagebox.showerror("Роли", f"Ошибка чтения списка ролей:\n{e}", parent=self)
+            roles = []
+
+        self.role_map = {f'{r["name"]} ({r["code"]})': r["code"] for r in roles}
+        self.cmb_role = ttk.Combobox(master, state="readonly", width=24, values=list(self.role_map.keys()))
+        self.cmb_role.grid(row=3, column=1, sticky="w", pady=4)
+
+        # выберем текущую роль
+        current_role_code = (self.user.get("role") or "").lower()
+        idx = 0
+        for i, (label, code) in enumerate(self.role_map.items()):
+            if code.lower() == current_role_code:
+                idx = i
+                break
+        if self.role_map:
+            self.cmb_role.current(idx)
+
+        tk.Label(master, text="Активен:").grid(row=4, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.var_active = tk.BooleanVar(value=bool(self.user.get("is_active")))
+        self.cb_active = ttk.Checkbutton(master, variable=self.var_active)
+        self.cb_active.grid(row=4, column=1, sticky="w", pady=4)
+
+        return self.ent_username
+
+    def validate(self):
+        u = self.ent_username.get().strip()
+        if not u:
+            messagebox.showwarning("Редактировать пользователя", "Укажите логин.", parent=self)
+            return False
+        if not self.cmb_role.get():
+            messagebox.showwarning("Редактировать пользователя", "Выберите роль.", parent=self)
+            return False
+        return True
+
+    def apply(self):
+        self.result = {
+            "id": self.user["id"],
+            "username": self.ent_username.get().strip(),
+            "full_name": self.ent_fullname.get().strip(),
+            "password": self.ent_pwd.get().strip(),  # может быть пустым
+            "role": self.role_map[self.cmb_role.get()],
+            "is_active": self.var_active.get(),
+        }
 
 class UsersPage(tk.Frame):
     def __init__(self, master):
@@ -911,18 +1047,22 @@ class UsersPage(tk.Frame):
         top.pack(fill="x", padx=8, pady=8)
 
         ttk.Button(top, text="Создать пользователя", command=self._on_create_user).pack(side="left")
+        ttk.Button(top, text="Изменить", command=self._on_edit_user).pack(side="left", padx=4)
+        ttk.Button(top, text="Удалить", command=self._on_delete_user).pack(side="left")
 
         self.tree = ttk.Treeview(
             self,
-            columns=("username", "full_name", "role", "is_active"),
+            columns=("id", "username", "full_name", "role", "is_active"),
             show="headings",
             height=12,
         )
+        self.tree.heading("id", text="ID")
         self.tree.heading("username", text="Логин")
         self.tree.heading("full_name", text="ФИО")
         self.tree.heading("role", text="Роль")
         self.tree.heading("is_active", text="Активен")
 
+        self.tree.column("id", width=40, anchor="center")
         self.tree.column("username", width=140)
         self.tree.column("full_name", width=220)
         self.tree.column("role", width=100)
@@ -944,12 +1084,56 @@ class UsersPage(tk.Frame):
                 "",
                 "end",
                 values=(
+                    u["id"],
                     u["username"],
                     u.get("full_name") or "",
                     u.get("role") or "",
                     "Да" if u.get("is_active") else "Нет",
                 ),
             )
+
+    def _get_selected_user(self) -> Optional[dict]:
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Пользователи", "Выберите пользователя в списке.", parent=self)
+            return None
+        item_id = sel[0]
+        values = self.tree.item(item_id, "values")
+        # порядок: id, username, full_name, role, is_active
+        user = {
+            "id": int(values[0]),
+            "username": values[1],
+            "full_name": values[2],
+            "role": values[3],
+            "is_active": (values[4] == "Да"),
+        }
+        return user
+
+    def _on_edit_user(self):
+        user = self._get_selected_user()
+        if not user:
+            return
+
+        dlg = EditUserDialog(self, user)
+        if not dlg.result:
+            return
+
+        data = dlg.result
+        try:
+            update_app_user(
+                user_id=data["id"],
+                username=data["username"],
+                full_name=data["full_name"],
+                role_code=data["role"],
+                is_active=data["is_active"],
+                new_password=data["password"] or None,
+            )
+        except Exception as e:
+            messagebox.showerror("Редактировать пользователя", f"Ошибка сохранения:\n{e}", parent=self)
+            return
+
+        self.reload_users()
+        messagebox.showinfo("Редактировать пользователя", "Изменения сохранены.", parent=self)
 
     def _on_create_user(self):
         dlg = CreateUserDialog(self)
@@ -970,9 +1154,28 @@ class UsersPage(tk.Frame):
         self.reload_users()
         messagebox.showinfo("Создать пользователя", "Пользователь создан.", parent=self)
 
+    def _on_delete_user(self):
+        user = self._get_selected_user()
+        if not user:
+            return
+
+        if not messagebox.askyesno(
+            "Удалить пользователя",
+            f"Удалить пользователя '{user['username']}'?",
+            parent=self,
+        ):
+            return
+
+        try:
+            delete_app_user(user["id"])
+        except Exception as e:
+            messagebox.showerror("Удалить пользователя", f"Ошибка удаления:\n{e}", parent=self)
+            return
+
+        self.reload_users()
+        messagebox.showinfo("Удалить пользователя", "Пользователь удалён.", parent=self)
 
 # ---------------- UI ОКНО НАСТРОЕК ----------------
-
 
 def open_settings_window(parent: tk.Tk):
     ensure_config()
