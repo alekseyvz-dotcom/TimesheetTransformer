@@ -1566,7 +1566,7 @@ class MealPlanningPage(tk.Frame):
             row=0, column=7, padx=4
         )
 
-        ttk.Button(top, text="Заявка поставщика", command=self.export_supplier_order).grid(
+        ttk.Button(top, text="Заявка поставщику", command=self.export_supplier_order).grid(
             row=0, column=8, padx=4
         )
 
