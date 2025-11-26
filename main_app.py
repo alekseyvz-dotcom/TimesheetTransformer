@@ -547,6 +547,52 @@ def load_timesheet_rows_from_db(
     finally:
         conn.close()
 
+def load_timesheet_rows_by_header_id(header_id: int) -> List[Dict[str, Any]]:
+    """
+    Загружает строки табеля по ID заголовка (timesheet_headers.id).
+    Возвращает: список dict:
+      {
+        'fio': str,
+        'tbn': str,
+        'hours_raw': [str|None x31],
+        'total_days': int|None,
+        'total_hours': float|None,
+        'overtime_day': float|None,
+        'overtime_night': float|None,
+      }
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT fio, tbn, hours_raw,
+                       total_days, total_hours,
+                       overtime_day, overtime_night
+                  FROM timesheet_rows
+                 WHERE header_id = %s
+                 ORDER BY fio, tbn
+                """,
+                (header_id,),
+            )
+            result: List[Dict[str, Any]] = []
+            for fio, tbn, hours_raw, total_days, total_hours, ot_day, ot_night in cur.fetchall():
+                hrs = list(hours_raw) if hours_raw is not None else [None] * 31
+                if len(hrs) != 31:
+                    hrs = (hrs + [None] * 31)[:31]
+                result.append({
+                    "fio": fio or "",
+                    "tbn": tbn or "",
+                    "hours_raw": [h if h is not None else None for h in hrs],
+                    "total_days": total_days,
+                    "total_hours": float(total_hours) if total_hours is not None else None,
+                    "overtime_day": float(ot_day) if ot_day is not None else None,
+                    "overtime_night": float(ot_night) if ot_night is not None else None,
+                })
+            return result
+    finally:
+        conn.close()
+
 def load_user_timesheet_headers(user_id: int) -> List[Dict[str, Any]]:
     """
     Возвращает список заголовков табелей, созданных пользователем.
@@ -2883,6 +2929,129 @@ class MyTimesheetsPage(tk.Frame):
                 return h
         return None
 
+    def _export_to_excel(self):
+        """
+        Выгружает все табели, показанные в реестре (с учётом фильтров),
+        в один Excel-файл.
+        Формат строк:
+          Год, Месяц, Адрес, ID объекта, Подразделение, Пользователь,
+          ФИО, Таб.№, D1..D31, Итого_дней, Итого_часов, Переработка_день, Переработка_ночь
+        """
+        if not self._headers:
+            messagebox.showinfo("Экспорт в Excel", "Нет данных для выгрузки.")
+            return
+
+        from tkinter import filedialog
+
+        # Выбор файла для сохранения
+        default_name = f"Реестр_табелей_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Сохранить реестр табелей в Excel",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Excel файлы", "*.xlsx"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            # Создаём новую рабочую книгу
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Реестр табелей"
+
+            # Заголовок
+            header_row = [
+                "Год",
+                "Месяц",
+                "Адрес",
+                "ID объекта",
+                "Подразделение",
+                "Пользователь",
+                "ФИО",
+                "Табельный №",
+            ] + [f"{i}" for i in range(1, 32)] + [
+                "Итого_дней",
+                "Итого_часов",
+                "Переработка_день",
+                "Переработка_ночь",
+            ]
+            ws.append(header_row)
+
+            # Немного ширин столбцов
+            ws.column_dimensions["A"].width = 6   # Год
+            ws.column_dimensions["B"].width = 10  # Месяц
+            ws.column_dimensions["C"].width = 40  # Адрес
+            ws.column_dimensions["D"].width = 14  # ID объекта
+            ws.column_dimensions["E"].width = 22  # Подразделение
+            ws.column_dimensions["F"].width = 22  # Пользователь
+            ws.column_dimensions["G"].width = 28  # ФИО
+            ws.column_dimensions["H"].width = 12  # Таб.№
+            for col_idx in range(9, 9 + 31):      # дни
+                ws.column_dimensions[get_column_letter(col_idx)].width = 6
+            # Итоги
+            base = 9 + 31
+            ws.column_dimensions[get_column_letter(base)].width = 10   # Итого_дней
+            ws.column_dimensions[get_column_letter(base + 1)].width = 14  # Итого_часов
+            ws.column_dimensions[get_column_letter(base + 2)].width = 16  # Переработка_день
+            ws.column_dimensions[get_column_letter(base + 3)].width = 16  # Переработка_ночь
+
+            # Заполняем данные
+            total_rows = 0
+            for h in self._headers:
+                header_id = int(h["id"])
+                year = int(h["year"])
+                month = int(h["month"])
+                addr = h.get("object_addr") or ""
+                obj_id = h.get("object_id") or ""
+                dep = h.get("department") or ""
+                user_display = h.get("full_name") or h.get("username") or ""
+
+                rows = load_timesheet_rows_by_header_id(header_id)
+
+                for row in rows:
+                    fio = row["fio"]
+                    tbn = row["tbn"]
+                    hours_raw = row.get("hours_raw") or [None] * 31
+                    total_days = row.get("total_days")
+                    total_hours = row.get("total_hours")
+                    ot_day = row.get("overtime_day")
+                    ot_night = row.get("overtime_night")
+
+                    excel_row = [
+                        year,
+                        month,
+                        addr,
+                        obj_id,
+                        dep,
+                        user_display,
+                        fio,
+                        tbn,
+                    ]
+
+                    # 1..31 дни (как в БД/табеле — строковые значения)
+                    for v in hours_raw:
+                        excel_row.append(v if v is not None else None)
+
+                    excel_row.append(total_days if total_days is not None else None)
+                    excel_row.append(total_hours if total_hours is not None else None)
+                    excel_row.append(ot_day if ot_day is not None else None)
+                    excel_row.append(ot_night if ot_night is not None else None)
+
+                    ws.append(excel_row)
+                    total_rows += 1
+
+            wb.save(path)
+            messagebox.showinfo(
+                "Экспорт в Excel",
+                f"Выгрузка завершена.\nФайл: {path}\nСтрок табеля: {total_rows}",
+                parent=self,
+            )
+        except Exception as e:
+            logging.exception("Ошибка экспорта реестра табелей в Excel")
+            messagebox.showerror("Экспорт в Excel", f"Ошибка при выгрузке:\n{e}", parent=self)
+
     def _on_open(self, event=None):
         h = self._get_selected_header()
         if not h:
@@ -2909,7 +3078,6 @@ class MyTimesheetsPage(tk.Frame):
                 owner_user_id=None,
             ),
         )
-
 
 class TimesheetRegistryPage(tk.Frame):
     """
@@ -2979,6 +3147,7 @@ class TimesheetRegistryPage(tk.Frame):
         btns.grid(row=row_f, column=5, sticky="e", padx=(8, 0), pady=(4, 0))
         ttk.Button(btns, text="Применить фильтр", command=self._load_data).pack(side="left", padx=2)
         ttk.Button(btns, text="Сброс", command=self._reset_filters).pack(side="left", padx=2)
+        ttk.Button(btns, text="Выгрузить в Excel", command=self._export_to_excel).pack(side="left", padx=2)
 
         # Таблица
         frame = tk.Frame(self)
