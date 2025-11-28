@@ -3,7 +3,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
 block_cipher = None
-spec_dir = os.path.dirname(os.path.abspath(__file__))
+spec_dir = os.getcwd() # Используем текущую рабочую директорию
 
 a = Analysis(
     ['main_app.py'],
