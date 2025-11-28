@@ -5,6 +5,8 @@ import csv
 import json
 import math
 import calendar
+import meals_module
+import SpecialOrders
 import subprocess
 import configparser
 import urllib.request
@@ -3958,6 +3960,11 @@ if __name__ == "__main__":
         # 2. Инициализируем пул соединений с базой данных.
         # Это новая функция, которую мы добавили.
         initialize_db_pool()
+
+        if meals_module:
+            meals_module.set_db_pool(db_connection_pool)
+        if SpecialOrders:
+            SpecialOrders.set_db_pool(db_connection_pool) 
 
     except Exception as e:
         # Если на этапе инициализации произошла ошибка (например, неверный пароль к БД),
