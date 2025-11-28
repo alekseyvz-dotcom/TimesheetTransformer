@@ -24,192 +24,24 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Any, Dict
 import base64
 
-# --- Импорты сторонних библиотек ---
-try:
-    import pandas as pd
-except ImportError:
-    pd = None
+import BudgetAnalyzer
+import assets_logo as _assets_logo
+import SpecialOrders
+import timesheet_transformer
+import meals_module
+import objects
+import settings_manager as Settings
 
-try:
-    from PIL import Image, ImageTk
-except Exception:
-    Image = ImageTk = None
+_LOGO_BASE64 = getattr(_assets_logo, "LOGO_BASE64", None)
 
-import logging
-
-# Простейшее логирование в файл рядом с программой
-logging.basicConfig(
-    filename="main_app_log.txt",
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    encoding="utf-8",
-)
-logging.debug("=== main_app запущен ===")
-
-# Мягкий импорт модулей
-try:
-    import BudgetAnalyzer  # должен содержать create_page(parent)
-except Exception:
-    BudgetAnalyzer = None
-
-try:
-    import assets_logo as _assets_logo
-    _LOGO_BASE64 = getattr(_assets_logo, "LOGO_BASE64", None)
-except Exception:
-    _LOGO_BASE64 = None
-
-try:
-    import SpecialOrders  # должен содержать create_page/create_planning_page
-except Exception:
-    SpecialOrders = None
-
-try:
-    import timesheet_transformer  # должен содержать open_converter(parent)
-except Exception:
-    timesheet_transformer = None
-
-# --- логируем импорт модуля питания ---
-logging.debug("Пробуем импортировать meals_module...")
-try:
-    import meals_module  # обновлённый модуль питания (работает с БД)
-    logging.debug(f"meals_module импортирован: {meals_module}")
-except Exception:
-    logging.exception("Ошибка при импорте meals_module")
-    meals_module = None
-
-try:
-    import objects  # наш новый модуль
-except Exception:
-    logging.exception("Ошибка при импорте модуля objects")
-    objects = None
-
-# --- логируем импорт settings_manager ---
-logging.debug("Пробуем импортировать settings_manager...")
-try:
-    import settings_manager as Settings
-    logging.debug("settings_manager импортирован успешно")
-except Exception:
-    logging.exception("Ошибка при импорте settings_manager")
-    Settings = None
-
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
-
-from openpyxl import Workbook, load_workbook
-from openpyxl.utils import get_column_letter
-
-APP_NAME = "Управление строительством (Главное меню)"
-
-# ------------- КОНФИГ, СХЕМЫ И КОНСТАНТЫ -------------
-
-CONFIG_FILE = "tabel_config.ini"
-CONFIG_SECTION_PATHS = "Paths"
-CONFIG_SECTION_UI = "UI"
-CONFIG_SECTION_INTEGR = "Integrations"
-
-KEY_OUTPUT_DIR = "output_dir"
-KEY_EXPORT_PWD = "export_password"
-KEY_SELECTED_DEP = "selected_department"
-
-OUTPUT_DIR_DEFAULT = "Объектные_табели"
-RAW_LOGO_URL = "https://raw.githubusercontent.com/alekseyvz-dotcom/TimesheetTransformer/main/logo.png"
-TINY_PNG_BASE64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
-    "/w8AAn8B9w3G2kIAAAAASUVORK5CYII="
-)
-
-
-def exe_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent
-
-
-def config_path() -> Path:
-    return exe_dir() / CONFIG_FILE
-
-
-# Если settings_manager есть — используем его
-if Settings:
-    ensure_config = Settings.ensure_config
-    read_config = Settings.read_config
-    write_config = Settings.write_config
-
-    get_output_dir_from_config = Settings.get_output_dir_from_config
-    get_export_password_from_config = Settings.get_export_password_from_config
-
-    get_selected_department_from_config = Settings.get_selected_department_from_config
-    set_selected_department_in_config = Settings.set_selected_department_in_config
-else:
-    # fallback на ini‑файл
-    def ensure_config():
-        cp = config_path()
-        if cp.exists():
-            cfg = configparser.ConfigParser()
-            cfg.read(cp, encoding="utf-8")
-            changed = False
-            if not cfg.has_section(CONFIG_SECTION_PATHS):
-                cfg[CONFIG_SECTION_PATHS] = {}
-                changed = True
-            if KEY_OUTPUT_DIR not in cfg[CONFIG_SECTION_PATHS]:
-                cfg[CONFIG_SECTION_PATHS][KEY_OUTPUT_DIR] = str(exe_dir() / OUTPUT_DIR_DEFAULT)
-                changed = True
-            if not cfg.has_section(CONFIG_SECTION_UI):
-                cfg[CONFIG_SECTION_UI] = {}
-                changed = True
-            if KEY_SELECTED_DEP not in cfg[CONFIG_SECTION_UI]:
-                cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = "Все"
-                changed = True
-            if not cfg.has_section(CONFIG_SECTION_INTEGR):
-                cfg[CONFIG_SECTION_INTEGR] = {}
-                changed = True
-            if KEY_EXPORT_PWD not in cfg[CONFIG_SECTION_INTEGR]:
-                cfg[CONFIG_SECTION_INTEGR][KEY_EXPORT_PWD] = "2025"
-                changed = True
-            if changed:
-                with open(cp, "w", encoding="utf-8") as f:
-                    cfg.write(f)
-            return
-
-        cfg = configparser.ConfigParser()
-        cfg[CONFIG_SECTION_PATHS] = {
-            KEY_OUTPUT_DIR: str(exe_dir() / OUTPUT_DIR_DEFAULT),
-        }
-        cfg[CONFIG_SECTION_UI] = {KEY_SELECTED_DEP: "Все"}
-        cfg[CONFIG_SECTION_INTEGR] = {KEY_EXPORT_PWD: "2025"}
-        with open(cp, "w", encoding="utf-8") as f:
-            cfg.write(f)
-
-    def read_config() -> configparser.ConfigParser:
-        ensure_config()
-        cfg = configparser.ConfigParser()
-        cfg.read(config_path(), encoding="utf-8")
-        return cfg
-
-    def write_config(cfg: configparser.ConfigParser):
-        with open(config_path(), "w", encoding="utf-8") as f:
-            cfg.write(f)
-
-    def get_output_dir_from_config() -> Path:
-        cfg = read_config()
-        raw = cfg.get(CONFIG_SECTION_PATHS, KEY_OUTPUT_DIR, fallback=str(exe_dir() / OUTPUT_DIR_DEFAULT))
-        return Path(os.path.expandvars(raw))
-
-    def get_export_password_from_config() -> str:
-        cfg = read_config()
-        return cfg.get(CONFIG_SECTION_INTEGR, KEY_EXPORT_PWD, fallback="2025")
-
-    def get_selected_department_from_config() -> str:
-        cfg = read_config()
-        return cfg.get(CONFIG_SECTION_UI, KEY_SELECTED_DEP, fallback="Все")
-
-    def set_selected_department_in_config(dep: str):
-        cfg = read_config()
-        if not cfg.has_section(CONFIG_SECTION_UI):
-            cfg[CONFIG_SECTION_UI] = {}
-        cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = dep or "Все"
-        write_config(cfg)
-
+# Вся логика теперь использует Settings, fallback на ini-файл больше не нужен
+ensure_config = Settings.ensure_config
+read_config = Settings.read_config
+write_config = Settings.write_config
+get_output_dir_from_config = Settings.get_output_dir_from_config
+get_export_password_from_config = Settings.get_export_password_from_config
+get_selected_department_from_config = Settings.get_selected_department_from_config
+set_selected_department_in_config = Settings.set_selected_department_in_config
 
 def embedded_logo_image(parent, max_w=360, max_h=160):
     """
