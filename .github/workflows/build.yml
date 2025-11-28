@@ -41,6 +41,19 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      # --- ВАЖНОЕ ИЗМЕНЕНИЕ ---
+      - name: Add Python Scripts to PATH
+        id: python_paths
+        run: |
+          $pythonLocation = (Get-Command python).Source
+          $pythonDir = Split-Path $pythonLocation -Parent
+          $scriptsDir = Join-Path $pythonDir "Scripts"
+          echo "Python Directory: $pythonDir"
+          echo "Scripts Directory: $scriptsDir"
+          echo "$scriptsDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "$pythonDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: pwsh
+
       - name: Clean previous build folders
         run: |
           if (Test-Path dist) { Remove-Item -Recurse -Force dist }
@@ -48,7 +61,8 @@ jobs:
         shell: pwsh
 
       - name: Build Executable using .spec file
-        run: python -m pyinstaller main_app.spec 
+        run: pyinstaller main_app.spec --onefile
+        # Теперь можно вызывать pyinstaller напрямую, т.к. он в PATH
 
       - name: List build artifacts
         run: Get-ChildItem -Recurse dist
@@ -58,6 +72,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: TabelSuite_Unified_Package
-          path: dist/*.exe # Берем любой exe-файл из папки dist
+          path: dist/*.exe
           if-no-files-found: error
           retention-days: 14
