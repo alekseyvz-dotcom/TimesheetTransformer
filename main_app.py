@@ -38,6 +38,28 @@ try:
 except ImportError:
     Image = ImageTk = None
 
+logging.basicConfig(
+    filename="main_app_log.txt",
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    encoding="utf-8",
+)
+logging.debug("=== main_app запущен ===")
+
+# --- КОНСТАНТЫ И УТИЛИТЫ ---
+APP_NAME = "Управление строительством (Главное меню)"
+RAW_LOGO_URL = "https://raw.githubusercontent.com/alekseyvz-dotcom/TimesheetTransformer/main/logo.png"
+TINY_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+    "/w8AAn8B9w3G2kIAAAAASUVORK5CYII="
+)
+
+def exe_dir() -> Path:
+    """Определяет директорию запущенного .exe или .py файла."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
 import BudgetAnalyzer
 import assets_logo as _assets_logo
 import SpecialOrders
