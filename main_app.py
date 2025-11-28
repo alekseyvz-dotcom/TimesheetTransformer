@@ -3458,6 +3458,8 @@ class MainApp(tk.Tk):
             SpecialOrders.set_db_pool(db_connection_pool)
         if objects:
             objects.set_db_pool(db_connection_pool)
+        if Settings:  # <-- ДОБАВЬТЕ ЭТОТ БЛОК
+            Settings.set_db_pool(db_connection_pool)
 
         self._menu_timesheets = None
         self._menu_timesheets_registry_index = None
