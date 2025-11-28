@@ -3488,9 +3488,11 @@ class MainApp(tk.Tk):
                 label="📝 Создать заявку",
                 command=lambda: self._show_page(
                     "meals_order",
-                    lambda parent: meals_module.create_meals_order_page(parent),
+                    lambda parent: meals_module.create_meals_order_page(parent, app_ref=self),
                 ),
             )
+        else:
+            m_meals.add_command(label="📝 Создать заявку", command=self.run_meals_exe)
 
         if meals_module and hasattr(meals_module, "create_my_meals_orders_page"):
             m_meals.add_command(
