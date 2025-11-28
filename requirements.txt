@@ -5,3 +5,4 @@ Pillow  # Если вы используете логотип и PIL/ImageTk
 # Добавляем Pandas
 pandas
 psycopg2-binary
+pyinstaller
