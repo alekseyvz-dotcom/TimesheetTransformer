@@ -1,4 +1,3 @@
-# python
 import os
 import re
 import sys
@@ -11,7 +10,7 @@ import urllib.error
 import urllib.parse
 from urllib.parse import urlparse, parse_qs
 import psycopg2
-from psycopg2 import pool  # <-- Добавлен импорт
+from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 from io import BytesIO
 from pathlib import Path
@@ -24,56 +23,63 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 from datetime import datetime, date, timedelta
 
-# Мягкий импорт менеджера настроек (зашифрованные настройки)
+# ------------------------- Логика работы с пулом соединений -------------------------
+db_connection_pool = None
+USING_SHARED_POOL = False
+
+def set_db_pool(pool):
+    """Функция для установки пула соединений извне."""
+    global db_connection_pool, USING_SHARED_POOL
+    db_connection_pool = pool
+    USING_SHARED_POOL = True
+
+def release_db_connection(conn):
+    """Возвращает соединение обратно в пул."""
+    if db_connection_pool:
+        db_connection_pool.putconn(conn)
+
+# ------------------------- Загрузка зависимостей и констант -------------------------
 try:
     import settings_manager as Settings
 except Exception:
     Settings = None
 
 APP_TITLE = "Заказ спецтехники"
-
-# Конфиг и файлы (ключи совместимы с main_app/settings_manager)
 CONFIG_FILE = "tabel_config.ini"
-CONFIG_SECTION_PATHS   = "Paths"
-CONFIG_SECTION_UI      = "UI"
-CONFIG_SECTION_INTEGR  = "Integrations"
-CONFIG_SECTION_ORDERS  = "Orders"
-CONFIG_SECTION_REMOTE  = "Remote"   # удалённый справочник (Яндекс Диск — публичная ссылка)
+CONFIG_SECTION_PATHS = "Paths"
+CONFIG_SECTION_UI = "UI"
+CONFIG_SECTION_INTEGR = "Integrations"
+CONFIG_SECTION_ORDERS = "Orders"
+CONFIG_SECTION_REMOTE = "Remote"
 
-KEY_SPR                 = "spravochnik_path"
-KEY_SELECTED_DEP        = "selected_department"
-
-KEY_PLANNING_ENABLED    = "planning_enabled"          # true|false
-KEY_PLANNING_PASSWORD   = "planning_password"
-
-# Настройки отсечки подачи заявок
-KEY_CUTOFF_ENABLED      = "cutoff_enabled"            # true|false
-KEY_CUTOFF_HOUR         = "cutoff_hour"               # 0..23
-KEY_DRIVER_DEPARTMENTS  = "driver_departments"
-
-# Удалённый справочник (Я.Диск)
-KEY_REMOTE_USE          = "use_remote"                # true|false
-KEY_YA_PUBLIC_LINK      = "yadisk_public_link"        # публичная ссылка (public_key)
-KEY_YA_PUBLIC_PATH      = "yadisk_public_path"        # если опубликована папка — путь к файлу внутри неё
-
+KEY_SPR = "spravochnik_path"
+KEY_SELECTED_DEP = "selected_department"
+KEY_PLANNING_ENABLED = "planning_enabled"
+KEY_PLANNING_PASSWORD = "planning_password"
+KEY_CUTOFF_ENABLED = "cutoff_enabled"
+KEY_CUTOFF_HOUR = "cutoff_hour"
+KEY_DRIVER_DEPARTMENTS = "driver_departments"
+KEY_REMOTE_USE = "use_remote"
+KEY_YA_PUBLIC_LINK = "yadisk_public_link"
+KEY_YA_PUBLIC_PATH = "yadisk_public_path"
 SPRAVOCHNIK_FILE = "Справочник.xlsx"
 
-# ------------------------- Логика работы с пулом соединений -------------------------
-try:
-    from __main__ import db_connection_pool, release_db_connection
-    USING_SHARED_POOL = True
-except ImportError:
-    db_connection_pool = None
-    USING_SHARED_POOL = False
 
+# ------------------------- Утилиты конфигурации -------------------------
 
-# Если доступен settings_manager — подменяем конфиг-функции на зашифрованное хранилище
+def exe_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+def config_path() -> Path:
+    return exe_dir() / CONFIG_FILE
+
 if Settings:
     ensure_config = Settings.ensure_config
     read_config = Settings.read_config
     write_config = Settings.write_config
 
-    # Совместимые обертки под старые имена
     def get_spr_path() -> Path:
         return Settings.get_spr_path_from_config()
 
@@ -83,214 +89,118 @@ if Settings:
     def set_saved_dep(dep: str):
         return Settings.set_selected_department_in_config(dep)
 
-
-# ------------------------- Утилиты конфигурации -------------------------
-
 # ------------------------- БД: подключение -------------------------
 
 def get_db_connection():
-    """
-    Возвращает подключение к БД.
-    Если используется общий пул, берет из него. Иначе создает свой.
-    """
-    global db_connection_pool, USING_SHARED_POOL
-
-    if USING_SHARED_POOL:
-        # Если мы работаем внутри main_app, просто используем его пул
-        if db_connection_pool is None:
-             raise RuntimeError("Общий пул соединений из main_app не доступен.")
+    """Получает соединение из пула (общего или локального)."""
+    global db_connection_pool
+    if db_connection_pool:
         return db_connection_pool.getconn()
 
-    # --- Логика для самостоятельного запуска ---
-    if db_connection_pool is None:
-        if not Settings:
-            raise RuntimeError("settings_manager не доступен, не могу прочитать параметры БД")
+    # Если мы здесь, значит, пул не установлен. Это либо самостоятельный запуск,
+    # либо ошибка в главном приложении.
+    if USING_SHARED_POOL:
+        raise RuntimeError("Общий пул соединений не был передан в модуль.")
 
-        provider = Settings.get_db_provider().strip().lower()
-        if provider != "postgres":
-            raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
+    # Логика для самостоятельного запуска: создаем локальный пул
+    if not Settings:
+        raise RuntimeError("settings_manager не доступен, не могу прочитать параметры БД")
 
-        db_url = Settings.get_database_url().strip()
-        if not db_url:
-            raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
+    provider = Settings.get_db_provider().strip().lower()
+    if provider != "postgres":
+        raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
 
-        url = urlparse(db_url)
-        if url.scheme not in ("postgresql", "postgres"):
-            raise RuntimeError(f"Неверная схема в DATABASE_URL: {url.scheme}")
+    db_url = Settings.get_database_url().strip()
+    if not db_url:
+        raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
 
-        user = url.username
-        password = url.password
-        host = url.hostname or "localhost"
-        port = url.port or 5432
-        dbname = url.path.lstrip("/")
-        q = parse_qs(url.query)
-        sslmode = (q.get("sslmode", [Settings.get_db_sslmode()])[0] or "require")
+    url = urlparse(db_url)
+    user = url.username
+    password = url.password
+    host = url.hostname or "localhost"
+    port = url.port or 5432
+    dbname = url.path.lstrip("/")
+    q = parse_qs(url.query)
+    sslmode = (q.get("sslmode", [Settings.get_db_sslmode()])[0] or "require")
 
-        db_connection_pool = pool.SimpleConnectionPool(
-            minconn=1, maxconn=5,
-            host=host, port=port, dbname=dbname, user=user, password=password, sslmode=sslmode
-        )
+    db_connection_pool = pool.SimpleConnectionPool(
+        minconn=1, maxconn=5,
+        host=host, port=port, dbname=dbname, user=user, password=password, sslmode=sslmode
+    )
     return db_connection_pool.getconn()
 
-if not USING_SHARED_POOL:
-    def release_db_connection(conn):
-        """Возвращает соединение обратно в локальный пул."""
-        if db_connection_pool:
-            db_connection_pool.putconn(conn)
-
 def get_or_create_object(cur, excel_id: str, address: str) -> Optional[int]:
-    """
-    Переиспользует таблицу objects (совместно с модулем питания).
-    excel_id — ID объекта из справочника (код из Excel).
-    """
     excel_id = (excel_id or "").strip()
     address = (address or "").strip()
     if not (excel_id or address):
         return None
 
     if excel_id:
-        # ищем по excel_id
         cur.execute("SELECT id FROM objects WHERE excel_id = %s", (excel_id,))
         row = cur.fetchone()
-        if row:
-            return row[0]
-        # если не нашли — создаём новую запись
-        cur.execute(
-            "INSERT INTO objects (excel_id, address) VALUES (%s, %s) RETURNING id",
-            (excel_id, address),
-        )
+        if row: return row[0]
+        cur.execute("INSERT INTO objects (excel_id, address) VALUES (%s, %s) RETURNING id", (excel_id, address))
         return cur.fetchone()[0]
 
-    # без excel_id ищем по адресу
     cur.execute("SELECT id FROM objects WHERE address = %s", (address,))
     row = cur.fetchone()
-    if row:
-        return row[0]
-
-    cur.execute(
-        "INSERT INTO objects (excel_id, address) VALUES (NULL, %s) RETURNING id",
-        (address,),
-    )
+    if row: return row[0]
+    cur.execute("INSERT INTO objects (excel_id, address) VALUES (NULL, %s) RETURNING id", (address,))
     return cur.fetchone()[0]
 
 def save_transport_order_to_db(data: dict) -> int:
-    """
-    Сохраняет заявку на спецтехнику в PostgreSQL.
-    data — словарь из SpecialOrdersPage._build_order_dict().
-    """
     conn = None
     try:
         conn = get_db_connection()
         with conn:
             with conn.cursor() as cur:
                 obj = data.get("object") or {}
-                obj_excel_id = (obj.get("id") or "").strip()
-                obj_address = (obj.get("address") or "").strip()
-                object_id = get_or_create_object(cur, obj_excel_id, obj_address)
-
+                object_id = get_or_create_object(cur, obj.get("id", ""), obj.get("address", ""))
                 created_at = datetime.strptime(data["created_at"], "%Y-%m-%dT%H:%M:%S")
                 order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
-
                 cur.execute(
                     """
-                    INSERT INTO transport_orders
-                        (created_at, date, department, requester_fio, requester_phone,
-                         object_id, object_address, comment)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id
+                    INSERT INTO transport_orders (created_at, date, department, requester_fio, requester_phone, object_id, object_address, comment)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
                     """,
-                    (
-                        created_at,
-                        order_date,
-                        (data.get("department") or "").strip(),
-                        (data.get("requester_fio") or "").strip(),
-                        (data.get("requester_phone") or "").strip(),
-                        object_id,
-                        obj_address,
-                        (data.get("comment") or "").strip(),
-                    ),
+                    (created_at, order_date, data.get("department", ""), data.get("requester_fio", ""), data.get("requester_phone", ""), object_id, obj.get("address", ""), data.get("comment", "")),
                 )
                 order_id = cur.fetchone()[0]
 
                 for p in data.get("positions", []):
-                    tech = (p.get("tech") or "").strip()
-                    qty = int(p.get("qty") or 0)
                     time_str = (p.get("time") or "").strip()
-                    hours = float(p.get("hours") or 0.0)
-                    note = (p.get("note") or "").strip()
-
-                    tval = None
-                    if time_str:
-                        try:
-                            tval = datetime.strptime(time_str, "%H:%M").time()
-                        except Exception:
-                            tval = None
-
+                    tval = datetime.strptime(time_str, "%H:%M").time() if time_str else None
                     cur.execute(
                         """
-                        INSERT INTO transport_order_positions
-                            (order_id, tech, qty, time, hours, note, assigned_vehicle, driver, status)
-                        VALUES (%s, %s, %s, %s, %s, %s, NULL, NULL, 'Новая')
+                        INSERT INTO transport_order_positions (order_id, tech, qty, time, hours, note, status)
+                        VALUES (%s, %s, %s, %s, %s, %s, 'Новая')
                         """,
-                        (
-                            order_id,
-                            tech,
-                            qty,
-                            tval,
-                            hours,
-                            note,
-                        ),
+                        (order_id, p.get("tech", ""), int(p.get("qty", 0)), tval, float(p.get("hours", 0.0)), p.get("note", "")),
                     )
         return order_id
     finally:
         if conn:
             release_db_connection(conn)
 
-# ------------------------- БД: реестр транспорта -------------------------
-
 def fetch_all_vehicles() -> List[Dict[str, Any]]:
-    """
-    Возвращает список всех транспортных средств из таблицы vehicles.
-    """
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT id, type, name, plate, department, note
-                FROM vehicles
-                ORDER BY type, name, plate
-                """
-            )
+            cur.execute("SELECT id, type, name, plate, department, note FROM vehicles ORDER BY type, name, plate")
             return [dict(r) for r in cur.fetchall()]
     finally:
         if conn:
             release_db_connection(conn)
 
-
-def insert_vehicle(
-    v_type: str,
-    name: str,
-    plate: str,
-    department: str = "",
-    note: str = "",
-) -> int:
-    """
-    Добавляет транспортное средство в таблицу vehicles.
-    Возвращает id.
-    """
+def insert_vehicle(v_type: str, name: str, plate: str, department: str = "", note: str = "") -> int:
     conn = None
     try:
         conn = get_db_connection()
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    INSERT INTO vehicles (type, name, plate, department, note)
-                    VALUES (%s, %s, %s, %s, %s)
-                    RETURNING id
-                    """,
+                    "INSERT INTO vehicles (type, name, plate, department, note) VALUES (%s, %s, %s, %s, %s) RETURNING id",
                     (v_type.strip(), name.strip(), plate.strip(), department.strip(), note.strip()),
                 )
                 return cur.fetchone()[0]
@@ -298,12 +208,7 @@ def insert_vehicle(
         if conn:
             release_db_connection(conn)
 
-
 def delete_vehicle(vehicle_id: int) -> None:
-    """
-    Удаляет транспортное средство по id.
-    (Проверку на использование в заявках можно добавить позже.)
-    """
     conn = None
     try:
         conn = get_db_connection()
@@ -315,139 +220,66 @@ def delete_vehicle(vehicle_id: int) -> None:
             release_db_connection(conn)
 
 def load_employees_for_transport() -> List[Dict[str, Any]]:
-    """
-    Возвращает сотрудников для модуля транспорта:
-      [{'fio': ..., 'tbn': ..., 'pos': ..., 'dep': ...}, ...]
-    Берём только неуволенных (is_fired = false), как в питании.
-    """
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT e.fio, e.tbn, e.position, d.name AS dep
-                  FROM employees e
-                  LEFT JOIN departments d ON d.id = e.department_id
-                 WHERE COALESCE(e.is_fired, FALSE) = FALSE
-              ORDER BY e.fio
-                """
-            )
-            res: List[Dict[str, Any]] = []
-            for fio, tbn, pos, dep in cur.fetchall():
-                res.append({
-                    "fio": fio or "",
-                    "tbn": tbn or "",
-                    "pos": pos or "",
-                    "dep": dep or "",
-                })
-            return res
+            cur.execute("""
+                SELECT e.fio, e.tbn, e.position, d.name AS dep FROM employees e
+                LEFT JOIN departments d ON d.id = e.department_id
+                WHERE COALESCE(e.is_fired, FALSE) = FALSE ORDER BY e.fio
+            """)
+            return [{"fio": r[0] or "", "tbn": r[1] or "", "pos": r[2] or "", "dep": r[3] or ""} for r in cur.fetchall()]
     finally:
         if conn:
             release_db_connection(conn)
 
 def load_objects_for_transport() -> List[Tuple[str, str]]:
-    """
-    Возвращает объекты [(code, address)].
-    code = excel_id (или excel_id, если вы туда перенесли код объекта).
-    """
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    COALESCE(NULLIF(excel_id, ''), '') AS code,
-                    address
-                  FROM objects
-                 ORDER BY address
-                """
-            )
-            rows = cur.fetchall()
-            return [(code or "", addr or "") for code, addr in rows]
+            cur.execute("SELECT COALESCE(NULLIF(excel_id, ''), '') AS code, address FROM objects ORDER BY address")
+            return [(r[0] or "", r[1] or "") for r in cur.fetchall()]
     finally:
         if conn:
             release_db_connection(conn)
 
 def load_vehicles_for_transport() -> List[Dict[str, Any]]:
-    """
-    Возвращает транспортные средства для заявки/планирования:
-      [{'type': ..., 'name': ..., 'plate': ..., 'dep': ..., 'note': ...}, ...]
-    """
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT type, name, plate, department AS dep, note
-                  FROM vehicles
-              ORDER BY type, name, plate
-                """
-            )
+            cur.execute("SELECT type, name, plate, department AS dep, note FROM vehicles ORDER BY type, name, plate")
             return [dict(r) for r in cur.fetchall()]
     finally:
         if conn:
             release_db_connection(conn)
 
-def get_transport_orders_for_planning(
-    filter_date: Optional[str] = None,
-    filter_department: Optional[str] = None,
-    filter_status: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    """
-    Возвращает список позиций заявок для планирования транспорта.
-    Формат элементов совместим с TransportPlanningPage._populate_tree().
-    """
+def get_transport_orders_for_planning(filter_date: Optional[str], filter_department: Optional[str], filter_status: Optional[str]) -> List[Dict[str, Any]]:
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            params = []
-            where = []
-
-            if filter_date:
-                where.append("o.date = %s")
-                params.append(filter_date)
-
-            if filter_department and filter_department.lower() != "все":
-                where.append("o.department = %s")
-                params.append(filter_department)
-
-            if filter_status and filter_status.lower() != "все":
-                where.append("p.status = %s")
-                params.append(filter_status)
-
+            params, where = [], []
+            if filter_date: where.append("o.date = %s"); params.append(filter_date)
+            if filter_department and filter_department.lower() != "все": where.append("o.department = %s"); params.append(filter_department)
+            if filter_status and filter_status.lower() != "все": where.append("p.status = %s"); params.append(filter_status)
             where_sql = "WHERE " + " AND ".join(where) if where else ""
-
             sql = f"""
-                SELECT
-                    p.id                                   AS id,
-                    to_char(o.created_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS created_at,
-                    o.date::text                          AS date,
-                    COALESCE(o.department,'')             AS department,
-                    COALESCE(o.requester_fio,'')          AS requester_fio,
-                    COALESCE(o.object_address,'')         AS object_address,
-                    COALESCE(obj.excel_id,'')             AS object_id,
-                    COALESCE(p.tech,'')                   AS tech,
-                    COALESCE(p.qty,0)                     AS qty,
-                    COALESCE(to_char(p.time, 'HH24:MI'),'') AS time,
-                    COALESCE(p.hours,0)                   AS hours,
-                    COALESCE(p.assigned_vehicle,'')       AS assigned_vehicle,
-                    COALESCE(p.driver,'')                 AS driver,
-                    COALESCE(p.status,'Новая')            AS status,
-                    COALESCE(o.comment,'')                AS comment,
-                    COALESCE(p.note,'')                   AS position_note
-                FROM transport_order_positions p
-                JOIN transport_orders o ON o.id = p.order_id
-                LEFT JOIN objects obj ON obj.id = o.object_id
-                {where_sql}
-                ORDER BY o.date, o.created_at, p.id
+                SELECT p.id, to_char(o.created_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS created_at, o.date::text AS date,
+                       COALESCE(o.department,'') AS department, COALESCE(o.requester_fio,'') AS requester_fio,
+                       COALESCE(o.object_address,'') AS object_address, COALESCE(obj.excel_id,'') AS object_id,
+                       COALESCE(p.tech,'') AS tech, COALESCE(p.qty,0) AS qty,
+                       COALESCE(to_char(p.time, 'HH24:MI'),'') AS time, COALESCE(p.hours,0) AS hours,
+                       COALESCE(p.assigned_vehicle,'') AS assigned_vehicle, COALESCE(p.driver,'') AS driver,
+                       COALESCE(p.status,'Новая') AS status, COALESCE(o.comment,'') AS comment,
+                       COALESCE(p.note,'') AS position_note
+                FROM transport_order_positions p JOIN transport_orders o ON o.id = p.order_id
+                LEFT JOIN objects obj ON obj.id = o.object_id {where_sql} ORDER BY o.date, o.created_at, p.id
             """
             cur.execute(sql, params)
-            rows = cur.fetchall()
-            return [dict(r) for r in rows]
+            return [dict(r) for r in cur.fetchall()]
     finally:
         if conn:
             release_db_connection(conn)
@@ -1841,51 +1673,51 @@ class TransportPlanningPage(tk.Frame):
         check_conflicts()
 
     def save_assignments(self):
-        """Сохранение назначений в PostgreSQL"""
+        """Сохранение назначений в PostgreSQL в одной транзакции."""
+        assignments = []
+        for item in self.tree.get_children():
+            values = self.tree.item(item)['values']
+            assignments.append({
+                'id': values[0],
+                'assigned_vehicle': values[10],
+                'driver': values[11],
+                'status': values[12],
+            })
+
+        if not assignments:
+            messagebox.showwarning("Сохранение", "Нет данных для сохранения")
+            return
+
+        conn = None
         try:
-            assignments = []
-            for item in self.tree.get_children():
-                values = self.tree.item(item)['values']
-                assignments.append({
-                    'id': values[0],             # id позиции (transport_order_positions.id)
-                    'assigned_vehicle': values[10],
-                    'driver': values[11],
-                    'status': values[12],
-                })
-
-            if not assignments:
-                messagebox.showwarning("Сохранение", "Нет данных для сохранения")
-                return
-
             conn = get_db_connection()
-            try:
-                with conn:
-                    with conn.cursor() as cur:
-                        for a in assignments:
-                            pos_id = a.get('id')
-                            if not pos_id:
-                                continue
-                            cur.execute(
-                                """
-                                UPDATE transport_order_positions
-                                SET assigned_vehicle = %s,
-                                    driver = %s,
-                                    status = %s
-                                WHERE id = %s
-                                """,
-                                (
-                                    (a.get('assigned_vehicle') or "").strip(),
-                                    (a.get('driver') or "").strip(),
-                                    (a.get('status') or "Новая").strip(),
-                                    pos_id,
-                                ),
-                            )
-                messagebox.showinfo("Сохранение", f"Назначения успешно сохранены.\nОбновлено записей: {len(assignments)}")
-            finally:
-                conn.close()
-
+            with conn: # Начинаем транзакцию
+                with conn.cursor() as cur:
+                    # Используем execute_batch для эффективности
+                    from psycopg2.extras import execute_batch
+                    sql = """
+                        UPDATE transport_order_positions
+                        SET assigned_vehicle = %s, driver = %s, status = %s
+                        WHERE id = %s
+                    """
+                    # Готовим данные для execute_batch
+                    data_to_update = [
+                        (
+                            (a.get('assigned_vehicle') or "").strip(),
+                            (a.get('driver') or "").strip(),
+                            (a.get('status') or "Новая").strip(),
+                            a.get('id'),
+                        )
+                        for a in assignments if a.get('id')
+                    ]
+                    execute_batch(cur, sql, data_to_update)
+            
+            messagebox.showinfo("Сохранение", f"Назначения успешно сохранены.\nОбновлено записей: {len(assignments)}")
         except Exception as e:
             messagebox.showerror("Ошибка", f"Ошибка сохранения в БД:\n{e}")
+        finally:
+            if conn:
+                release_db_connection(conn)
 
 # ------------------------- Реестр транспорта -------------------------
 
@@ -2112,6 +1944,14 @@ class SpecialOrdersApp(tk.Tk):
         page = SpecialOrdersPage(self)
         page.pack(fill="both", expand=True)
 
+    def destroy(self):
+        """Переопределяем для закрытия локального пула."""
+        global db_connection_pool, USING_SHARED_POOL
+        if not USING_SHARED_POOL and db_connection_pool:
+            print("Closing local DB connection pool for SpecialOrders...")
+            db_connection_pool.closeall()
+            db_connection_pool = None
+        super().destroy()
 
 # ------------------------- API для встраивания -------------------------
 
@@ -2170,5 +2010,13 @@ def safe_filename(s: str, maxlen: int = 60) -> str:
 
 if __name__ == "__main__":
     ensure_config()
+    try:
+        # Пробный вызов для инициализации локального пула
+        conn = get_db_connection()
+        release_db_connection(conn)
+    except Exception as e:
+        messagebox.showerror("Критическая ошибка", f"Не удалось подключиться к базе данных:\n{e}")
+        sys.exit(1)
+
     app = SpecialOrdersApp()
     app.mainloop()
