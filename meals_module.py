@@ -164,25 +164,29 @@ def get_db_connection():
         # Пул еще не создан, создаем его для этого модуля
         if not Settings:
             raise RuntimeError("settings_manager не доступен, не могу прочитать параметры БД")
-        # ... (здесь идет ВАШ СУЩЕСТВУЮЩИЙ код из get_db_connection для парсинга URL) ...
+
+        # Вся логика парсинга URL должна быть здесь, внутри if
         provider = Settings.get_db_provider().strip().lower()
         if provider != "postgres":
-            # ...
+            raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
+
         db_url = Settings.get_database_url().strip()
+        if not db_url:
+            raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
 
-    url = urlparse(db_url)
-    if url.scheme not in ("postgresql", "postgres"):
-        raise RuntimeError(f"Неверная схема в DATABASE_URL: {url.scheme}")
+        url = urlparse(db_url)
+        if url.scheme not in ("postgresql", "postgres"):
+            raise RuntimeError(f"Неверная схема в DATABASE_URL: {url.scheme}")
 
-    user = url.username
-    password = url.password
-    host = url.hostname or "localhost"
-    port = url.port or 5432
-    dbname = url.path.lstrip("/")
+        user = url.username
+        password = url.password
+        host = url.hostname or "localhost"
+        port = url.port or 5432
+        dbname = url.path.lstrip("/")
+        q = parse_qs(url.query)
+        sslmode = (q.get("sslmode", [Settings.get_db_sslmode()])[0] or "require")
 
-    q = parse_qs(url.query)
-    sslmode = (q.get("sslmode", [Settings.get_db_sslmode()])[0] or "require")
-
+        # Создаем пул
         db_connection_pool = pool.SimpleConnectionPool(
             minconn=1,
             maxconn=5,  # Можно сделать поменьше, т.к. это отдельный модуль
@@ -1426,7 +1430,7 @@ class MealOrderPage(tk.Frame):
         data = self._build_order_dict()
         total_items = len(data.get("employees", []))
 
-        # проверка пересечений как было
+        # 1. Проверка пересечений
         try:
             conflicts = find_conflicting_meal_orders_same_date_other_object(data)
         except Exception as e:
@@ -1440,7 +1444,7 @@ class MealOrderPage(tk.Frame):
             conflicts = []
 
         if conflicts:
-            # ... блок с текстом остался без изменений ...
+            # Формируем и показываем сообщение о конфликтах
             lines = []
             for c in conflicts:
                 fio = c.get("fio") or "?"
@@ -1464,92 +1468,78 @@ class MealOrderPage(tk.Frame):
                 "или «Отмена», чтобы вернуться к редактированию заявки."
             )
 
-            if not messagebox.askokcancel(
-                "Пересечение заявок по сотрудникам", text
-            ):
+            if not messagebox.askokcancel("Пересечение заявок по сотрудникам", text):
                 return
 
+        # 2. Сохранение в БД (выполняется всегда, если пользователь не нажал "Отмена")
+        order_db_id = None
+        conn = None
         try:
-            if self.edit_order_id:
-                # редактирование: удаляем старые строки, перезаписываем items,
-                # при желании можно также обновить заголовок заявки (date, dep, object ...)
-                delete_order_items_from_db(self.edit_order_id)
+            conn = get_db_connection()
+            with conn.cursor() as cur:
+                with conn:  # Начинаем транзакцию
+                    if self.edit_order_id:
+                        # --- РЕДАКТИРОВАНИЕ ---
+                        cur.execute("DELETE FROM meal_order_items WHERE order_id = %s", (self.edit_order_id,))
+                        
+                        dept_name = (data.get("department") or "").strip()
+                        dept_id = get_or_create_department(cur, dept_name) if dept_name else None
+                        obj = data.get("object") or {}
+                        object_id = get_or_create_object(cur, obj.get("id"), obj.get("address"))
+                        order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
+                        team_name = (data.get("team_name") or "").strip()
+                        
+                        cur.execute(
+                            "UPDATE meal_orders SET date = %s, department_id = %s, team_name = %s, object_id = %s WHERE id = %s",
+                            (order_date, dept_id, team_name, object_id, self.edit_order_id),
+                        )
+                        order_db_id = self.edit_order_id
+                    else:
+                        # --- СОЗДАНИЕ ---
+                        dept_name = (data.get("department") or "").strip()
+                        dept_id = get_or_create_department(cur, dept_name) if dept_name else None
+                        obj = data.get("object") or {}
+                        object_id = get_or_create_object(cur, obj.get("id"), obj.get("address"))
+                        created_at = datetime.strptime(data["created_at"], "%Y-%m-%dT%H:%M:%S")
+                        order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
+                        team_name = (data.get("team_name") or "").strip()
+                        user_id = data.get("user_id")
 
-                # сохраняем только строки сотрудников, используя уже существующий order_id
-                conn = get_db_connection()
-                try:
-                    with conn:
-                        with conn.cursor() as cur:
-                            dept_name = (data.get("department") or "").strip()
-                            dept_id = get_or_create_department(cur, dept_name) if dept_name else None
+                        cur.execute(
+                            "INSERT INTO meal_orders (created_at, date, department_id, team_name, object_id, user_id) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+                            (created_at, order_date, dept_id, team_name, object_id, user_id),
+                        )
+                        order_db_id = cur.fetchone()[0]
 
-                            obj = data.get("object") or {}
-                            obj_excel_id = (obj.get("id") or "").strip()
-                            obj_address = (obj.get("address") or "").strip()
-                            object_id = get_or_create_object(cur, obj_excel_id, obj_address)
+                    # --- ОБЩАЯ ЧАСТЬ: вставка строк сотрудников ---
+                    for emp in data.get("employees", []):
+                        fio = (emp.get("fio") or "").strip()
+                        tbn = (emp.get("tbn") or "").strip()
+                        position = (emp.get("position") or "").strip()
+                        meal_type_name = (emp.get("meal_type") or "").strip()
+                        comment = (emp.get("comment") or "").strip()
 
-                            order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
-                            team_name = (data.get("team_name") or "").strip()
+                        meal_type_id = get_or_create_meal_type(cur, meal_type_name)
+                        employee_id = find_employee(cur, fio, tbn)
 
-                            # обновляем заголовок заявки
-                            cur.execute(
-                                """
-                                UPDATE meal_orders
-                                   SET date = %s,
-                                       department_id = %s,
-                                       team_name = %s,
-                                       object_id = %s
-                                 WHERE id = %s
-                                """,
-                                (order_date, dept_id, team_name, object_id, self.edit_order_id),
-                            )
-
-                            # вставляем новые строки сотрудников
-                            for emp in data.get("employees", []):
-                                fio = (emp.get("fio") or "").strip()
-                                tbn = (emp.get("tbn") or "").strip()
-                                position = (emp.get("position") or "").strip()
-                                meal_type_name = (emp.get("meal_type") or "").strip()
-                                comment = (emp.get("comment") or "").strip()
-
-                                meal_type_id = get_or_create_meal_type(cur, meal_type_name)
-                                employee_id = find_employee(cur, fio, tbn)
-
-                                cur.execute(
-                                    """
-                                    INSERT INTO meal_order_items
-                                    (order_id, employee_id, fio_text, tbn_text, position_text,
-                                     meal_type_id, meal_type_text, comment)
-                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                                    """,
-                                    (
-                                        self.edit_order_id,
-                                        employee_id,
-                                        fio,
-                                        tbn,
-                                        position,
-                                        meal_type_id,
-                                        meal_type_name,
-                                        comment,
-                                    ),
-                                )
-                finally:
-                    conn.close()
-                order_db_id = self.edit_order_id
-            else:
-                # создание новой заявки — старое поведение
-                order_db_id = save_order_to_db(data)
+                        cur.execute(
+                            """
+                            INSERT INTO meal_order_items
+                            (order_id, employee_id, fio_text, tbn_text, position_text,
+                             meal_type_id, meal_type_text, comment)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            (order_db_id, employee_id, fio, tbn, position, meal_type_id, meal_type_name, comment),
+                        )
 
         except Exception as e:
-            messagebox.showerror(
-                "Сохранение в БД",
-                f"Не удалось сохранить заявку в базу данных:\n{e}",
-            )
-            return
+            messagebox.showerror("Сохранение в БД", f"Не удалось сохранить заявку:\n{e}")
+            return  # Выходим, если была ошибка БД
+        finally:
+            if conn:
+                release_db_connection(conn)
 
-        # формирование XLSX можно оставить как есть при создании,
-        # при редактировании можно либо не создавать новый файл, либо оставить поведение
-        # ниже – без изменений
+        # 3. Сохранение в Excel (выполняется, только если работа с БД прошла успешно)
         ts = datetime.now().strftime("%H%M%S")
         id_part = data["object"]["id"] or safe_filename(data["object"]["address"])
         fname = f"Заявка_питание_{data['date']}_{ts}_{id_part or 'NOID'}.xlsx"
@@ -1575,7 +1565,7 @@ class MealOrderPage(tk.Frame):
             ws.freeze_panes = "A8"
             wb.save(fpath)
         except Exception as e:
-            messagebox.showerror("Сохранение", f"Не удалось сохранить XLSX:\n{e}")
+            messagebox.showerror("Сохранение", f"Заявка сохранена в БД, но не удалось создать XLSX файл:\n{e}")
             return
 
         messagebox.showinfo(
