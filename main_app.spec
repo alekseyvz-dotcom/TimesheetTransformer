@@ -15,7 +15,16 @@ a = Analysis(
     ['main_app.py'],
     pathex=[spec_dir],
     binaries=[],
-    datas=pandas_datas + psycopg2_datas,
+    datas=[
+        # --- ВАЖНО: Явно добавляем все наши модули как файлы данных ---
+        ('settings_manager.py', '.'),
+        ('meals_module.py', '.'),
+        ('SpecialOrders.py', '.'),
+        ('objects.py', '.'),
+        ('assets_logo.py', '.'),
+        ('timesheet_transformer.py', '.'),
+        ('BudgetAnalyzer.py', '.'),
+    ] + pandas_datas + psycopg2_datas, # Добавляем данные библиотек
     hiddenimports=[
         'settings_manager', 'meals_module', 'SpecialOrders', 'objects',
         'assets_logo', 'timesheet_transformer', 'BudgetAnalyzer',
@@ -30,7 +39,7 @@ a = Analysis(
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
-    clean=True  # <--- ВАЖНО: Добавлена эта строка
+    clean=True
 )
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
@@ -40,7 +49,7 @@ exe = EXE(
     a.binaries,
     a.zipfiles,
     a.datas,
-    [], # Эта пустая коллекция нужна для --onefile
+    [],
     name='TabelSuite_Unified_Package_D_Mode',
     debug=False,
     bootloader_ignore_signals=False,
