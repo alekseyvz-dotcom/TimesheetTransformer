@@ -12,21 +12,46 @@ from tkinter import ttk, messagebox
 try:
     from psycopg2.extras import RealDictCursor
 except Exception:
-    RealDictCursor = None  # тип, чтобы не падать при импорте без psycopg2
+    RealDictCursor = None 
 
-# ВАЖНО: импортируем get_db_connection и month_name_ru из main_app
-from main_app import get_db_connection, month_name_ru
+# ------------------------- Логика работы с пулом соединений -------------------------
+db_connection_pool = None
 
+def set_db_pool(pool):
+    """Функция для установки пула соединений извне."""
+    global db_connection_pool
+    db_connection_pool = pool
+
+def release_db_connection(conn):
+    """Возвращает соединение обратно в пул."""
+    if db_connection_pool:
+        db_connection_pool.putconn(conn)
+
+def get_db_connection():
+    """Получает соединение из установленного пула."""
+    if db_connection_pool is None:
+         raise RuntimeError("Пул соединений не был установлен из главного приложения.")
+    return db_connection_pool.getconn()
+
+# ------------------------- Утилиты (копии из main_app для разрыва зависимостей) -------------------------
+def month_name_ru(month: int) -> str:
+    names = [
+        "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+        "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
+    ]
+    if 1 <= month <= 12:
+        return names[month - 1]
+    return str(month)
 
 # ---------- БД: объекты ----------
 
 def load_objects_full_from_db() -> List[Dict[str, Any]]:
     """
     Возвращает все объекты со всеми основными полями.
-    Колонки совпадают с import_objects_from_excel.
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -48,7 +73,8 @@ def load_objects_full_from_db() -> List[Dict[str, Any]]:
             )
             return [dict(r) for r in cur.fetchall()]
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 
 def create_or_update_object(
@@ -69,75 +95,78 @@ def create_or_update_object(
     Создаёт новый объект или обновляет существующий.
     Возвращает id объекта.
     """
-    conn = get_db_connection()
+    conn = None
     try:
-        with conn, conn.cursor() as cur:
-            if obj_id:
-                cur.execute(
-                    """
-                    UPDATE objects
-                       SET excel_id = %s,
-                           year = %s,
-                           program_name = %s,
-                           customer_name = %s,
-                           address = %s,
-                           contract_number = %s,
-                           contract_date = %s,
-                           short_name = %s,
-                           executor_department = %s,
-                           contract_type = %s,
-                           status = %s
-                     WHERE id = %s
-                    """,
-                    (
-                        excel_id or None,
-                        year or None,
-                        program_name or None,
-                        customer_name or None,
-                        address or None,
-                        contract_number or None,
-                        contract_date,
-                        short_name or None,
-                        executor_department or None,
-                        contract_type or None,
-                        status or None,
-                        obj_id,
-                    ),
-                )
-                return obj_id
-            else:
-                # если статус не задан явно, считаем новый объект "Новый"
-                if not status:
-                    status = "Новый"
-
-                cur.execute(
-                    """
-                    INSERT INTO objects (
-                        excel_id, year, program_name, customer_name,
-                        address, contract_number, contract_date,
-                        short_name, executor_department, contract_type,
-                        status
+        conn = get_db_connection()
+        with conn:
+            with conn.cursor() as cur:
+                if obj_id:
+                    cur.execute(
+                        """
+                        UPDATE objects
+                           SET excel_id = %s,
+                               year = %s,
+                               program_name = %s,
+                               customer_name = %s,
+                               address = %s,
+                               contract_number = %s,
+                               contract_date = %s,
+                               short_name = %s,
+                               executor_department = %s,
+                               contract_type = %s,
+                               status = %s
+                         WHERE id = %s
+                        """,
+                        (
+                            excel_id or None,
+                            year or None,
+                            program_name or None,
+                            customer_name or None,
+                            address or None,
+                            contract_number or None,
+                            contract_date,
+                            short_name or None,
+                            executor_department or None,
+                            contract_type or None,
+                            status or None,
+                            obj_id,
+                        ),
                     )
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    RETURNING id
-                    """,
-                    (
-                        excel_id or None,
-                        year or None,
-                        program_name or None,
-                        customer_name or None,
-                        address or None,
-                        contract_number or None,
-                        contract_date,
-                        short_name or None,
-                        executor_department or None,
-                        contract_type or None,
-                        status or None,
-                    ),
-                )
-                return cur.fetchone()[0]
+                    return obj_id
+                else:
+                    # если статус не задан явно, считаем новый объект "Новый"
+                    if not status:
+                        status = "Новый"
+
+                    cur.execute(
+                        """
+                        INSERT INTO objects (
+                            excel_id, year, program_name, customer_name,
+                            address, contract_number, contract_date,
+                            short_name, executor_department, contract_type,
+                            status
+                        )
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        RETURNING id
+                        """,
+                        (
+                            excel_id or None,
+                            year or None,
+                            program_name or None,
+                            customer_name or None,
+                            address or None,
+                            contract_number or None,
+                            contract_date,
+                            short_name or None,
+                            executor_department or None,
+                            contract_type or None,
+                            status or None,
+                        ),
+                    )
+                    return cur.fetchone()[0]
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def get_next_excel_id() -> str:
     """
@@ -145,8 +174,9 @@ def get_next_excel_id() -> str:
     Берём MAX(excel_id::bigint), игнорируя нечисловые значения.
     Если нет ни одного — вернём '1'.
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -164,7 +194,8 @@ def get_next_excel_id() -> str:
         # на всякий случай
         return "1"
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 # ---------- UI: страница создания/редактирования объекта ----------
 
@@ -172,7 +203,7 @@ class ObjectCreatePage(tk.Frame):
     """
     Страница создания/редактирования одного объекта.
     """
-    def __init__(self, master, app_ref: "MainApp", obj_data: Optional[Dict[str, Any]] = None):
+    def __init__(self, master, app_ref=None, obj_data: Optional[Dict[str, Any]] = None):
         super().__init__(master, bg="#f7f7f7")
         self.app_ref = app_ref
         self.obj_data = obj_data or {}
@@ -525,11 +556,11 @@ class ObjectsRegistryPage(tk.Frame):
     """
     Реестр всех объектов из таблицы objects.
     """
-    def __init__(self, master, app_ref: "MainApp"):
+    def __init__(self, master, app_ref=None):
         super().__init__(master)
         self.app_ref = app_ref
         # роль текущего пользователя
-        self.current_role = (self.app_ref.current_user or {}).get("role") or "specialist"
+        self.current_role = (getattr(self.app_ref, "current_user", {}) or {}).get("role") or "specialist"
 
         self.tree = None
         self._objects: List[Dict[str, Any]] = []
@@ -870,7 +901,8 @@ class ObjectsRegistryPage(tk.Frame):
             messagebox.showerror("Статус", f"Ошибка обновления статуса в БД:\n{e}")
             return
         finally:
-            conn.close()
+            if conn:
+                release_db_connection(conn)
 
         # Обновляем локальный объект и перерисовываем реестр
         obj["status"] = new_status
