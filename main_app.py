@@ -3936,12 +3936,6 @@ class MainApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Конвертер", f"Не удалось запустить конвертер:\n{e}")
 
-    def __init__(self, current_user: Optional[Dict[str, Any]] = None):
-        super().__init__()
-        # ... ваш существующий код инициализации ...
-
-    # ... все остальные методы класса ...
-
     def destroy(self):
         """Переопределяем стандартный метод destroy для корректного завершения работы."""
         logging.info("Приложение закрывается. Закрываем пул соединений.")
