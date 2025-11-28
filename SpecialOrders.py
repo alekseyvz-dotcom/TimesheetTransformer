@@ -11,6 +11,7 @@ import urllib.error
 import urllib.parse
 from urllib.parse import urlparse, parse_qs
 import psycopg2
+from psycopg2 import pool  # <-- Добавлен импорт
 from psycopg2.extras import RealDictCursor
 from io import BytesIO
 from pathlib import Path
@@ -57,6 +58,15 @@ KEY_YA_PUBLIC_PATH      = "yadisk_public_path"        # если опублик�
 
 SPRAVOCHNIK_FILE = "Справочник.xlsx"
 
+# ------------------------- Логика работы с пулом соединений -------------------------
+try:
+    from __main__ import db_connection_pool, release_db_connection
+    USING_SHARED_POOL = True
+except ImportError:
+    db_connection_pool = None
+    USING_SHARED_POOL = False
+
+
 # Если доступен settings_manager — подменяем конфиг-функции на зашифрованное хранилище
 if Settings:
     ensure_config = Settings.ensure_config
@@ -80,42 +90,53 @@ if Settings:
 
 def get_db_connection():
     """
-    Подключение к БД по настройкам из settings_manager.
-    Ожидается provider=postgres и корректный DATABASE_URL.
+    Возвращает подключение к БД.
+    Если используется общий пул, берет из него. Иначе создает свой.
     """
-    if not Settings:
-        raise RuntimeError("settings_manager не доступен, не могу прочитать параметры БД")
+    global db_connection_pool, USING_SHARED_POOL
 
-    provider = Settings.get_db_provider().strip().lower()
-    if provider != "postgres":
-        raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
+    if USING_SHARED_POOL:
+        # Если мы работаем внутри main_app, просто используем его пул
+        if db_connection_pool is None:
+             raise RuntimeError("Общий пул соединений из main_app не доступен.")
+        return db_connection_pool.getconn()
 
-    db_url = Settings.get_database_url().strip()
-    if not db_url:
-        raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
+    # --- Логика для самостоятельного запуска ---
+    if db_connection_pool is None:
+        if not Settings:
+            raise RuntimeError("settings_manager не доступен, не могу прочитать параметры БД")
 
-    url = urlparse(db_url)
-    if url.scheme not in ("postgresql", "postgres"):
-        raise RuntimeError(f"Неверная схема в DATABASE_URL: {url.scheme}")
+        provider = Settings.get_db_provider().strip().lower()
+        if provider != "postgres":
+            raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
 
-    user = url.username
-    password = url.password
-    host = url.hostname or "localhost"
-    port = url.port or 5432
-    dbname = url.path.lstrip("/")
+        db_url = Settings.get_database_url().strip()
+        if not db_url:
+            raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
 
-    q = parse_qs(url.query)
-    sslmode = (q.get("sslmode", [Settings.get_db_sslmode()])[0] or "require")
+        url = urlparse(db_url)
+        if url.scheme not in ("postgresql", "postgres"):
+            raise RuntimeError(f"Неверная схема в DATABASE_URL: {url.scheme}")
 
-    conn = psycopg2.connect(
-        host=host,
-        port=port,
-        dbname=dbname,
-        user=user,
-        password=password,
-        sslmode=sslmode,
-    )
-    return conn
+        user = url.username
+        password = url.password
+        host = url.hostname or "localhost"
+        port = url.port or 5432
+        dbname = url.path.lstrip("/")
+        q = parse_qs(url.query)
+        sslmode = (q.get("sslmode", [Settings.get_db_sslmode()])[0] or "require")
+
+        db_connection_pool = pool.SimpleConnectionPool(
+            minconn=1, maxconn=5,
+            host=host, port=port, dbname=dbname, user=user, password=password, sslmode=sslmode
+        )
+    return db_connection_pool.getconn()
+
+if not USING_SHARED_POOL:
+    def release_db_connection(conn):
+        """Возвращает соединение обратно в локальный пул."""
+        if db_connection_pool:
+            db_connection_pool.putconn(conn)
 
 def get_or_create_object(cur, excel_id: str, address: str) -> Optional[int]:
     """
@@ -157,8 +178,9 @@ def save_transport_order_to_db(data: dict) -> int:
     Сохраняет заявку на спецтехнику в PostgreSQL.
     data — словарь из SpecialOrdersPage._build_order_dict().
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn:
             with conn.cursor() as cur:
                 obj = data.get("object") or {}
@@ -219,10 +241,10 @@ def save_transport_order_to_db(data: dict) -> int:
                             note,
                         ),
                     )
-
         return order_id
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 # ------------------------- БД: реестр транспорта -------------------------
 
@@ -230,8 +252,9 @@ def fetch_all_vehicles() -> List[Dict[str, Any]]:
     """
     Возвращает список всех транспортных средств из таблицы vehicles.
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -242,7 +265,8 @@ def fetch_all_vehicles() -> List[Dict[str, Any]]:
             )
             return [dict(r) for r in cur.fetchall()]
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 
 def insert_vehicle(
@@ -256,8 +280,9 @@ def insert_vehicle(
     Добавляет транспортное средство в таблицу vehicles.
     Возвращает id.
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -270,7 +295,8 @@ def insert_vehicle(
                 )
                 return cur.fetchone()[0]
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 
 def delete_vehicle(vehicle_id: int) -> None:
@@ -278,13 +304,15 @@ def delete_vehicle(vehicle_id: int) -> None:
     Удаляет транспортное средство по id.
     (Проверку на использование в заявках можно добавить позже.)
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM vehicles WHERE id = %s", (vehicle_id,))
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def load_employees_for_transport() -> List[Dict[str, Any]]:
     """
@@ -292,8 +320,9 @@ def load_employees_for_transport() -> List[Dict[str, Any]]:
       [{'fio': ..., 'tbn': ..., 'pos': ..., 'dep': ...}, ...]
     Берём только неуволенных (is_fired = false), как в питании.
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -314,15 +343,17 @@ def load_employees_for_transport() -> List[Dict[str, Any]]:
                 })
             return res
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def load_objects_for_transport() -> List[Tuple[str, str]]:
     """
     Возвращает объекты [(code, address)].
     code = excel_id (или excel_id, если вы туда перенесли код объекта).
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -336,15 +367,17 @@ def load_objects_for_transport() -> List[Tuple[str, str]]:
             rows = cur.fetchall()
             return [(code or "", addr or "") for code, addr in rows]
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def load_vehicles_for_transport() -> List[Dict[str, Any]]:
     """
     Возвращает транспортные средства для заявки/планирования:
       [{'type': ..., 'name': ..., 'plate': ..., 'dep': ..., 'note': ...}, ...]
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -355,7 +388,8 @@ def load_vehicles_for_transport() -> List[Dict[str, Any]]:
             )
             return [dict(r) for r in cur.fetchall()]
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def get_transport_orders_for_planning(
     filter_date: Optional[str] = None,
@@ -366,8 +400,9 @@ def get_transport_orders_for_planning(
     Возвращает список позиций заявок для планирования транспорта.
     Формат элементов совместим с TransportPlanningPage._populate_tree().
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             params = []
             where = []
@@ -414,7 +449,8 @@ def get_transport_orders_for_planning(
             rows = cur.fetchall()
             return [dict(r) for r in rows]
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def exe_dir() -> Path:
     if getattr(sys, "frozen", False):
