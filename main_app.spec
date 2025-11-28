@@ -10,19 +10,18 @@ spec_dir = os.getcwd()
 # --- Сбор данных для сложных библиотек ---
 pandas_datas = collect_data_files('pandas')
 psycopg2_datas = collect_data_files('psycopg2')
-# Добавьте другие по необходимости
 
 a = Analysis(
     ['main_app.py'],
     pathex=[spec_dir],
     binaries=[],
-    datas=pandas_datas + psycopg2_datas, # <--- ВАЖНО: Добавляем данные библиотек
+    datas=pandas_datas + psycopg2_datas,
     hiddenimports=[
         'settings_manager', 'meals_module', 'SpecialOrders', 'objects',
         'assets_logo', 'timesheet_transformer', 'BudgetAnalyzer',
         'psycopg2', 'psycopg2.extras',
         'pandas', 'openpyxl', 'PIL'
-    ] + collect_submodules('pandas'), # <--- ВАЖНО: Добавляем все подмодули pandas
+    ] + collect_submodules('pandas'),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -31,15 +30,17 @@ a = Analysis(
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
+    clean=True  # <--- ВАЖНО: Добавлена эта строка
 )
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries, # <--- ВАЖНО: Включаем бинарные файлы
-    a.zipfiles, # <--- ВАЖНО: Включаем zip-файлы
-    a.datas,    # <--- ВАЖНО: Включаем данные
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [], # Эта пустая коллекция нужна для --onefile
     name='TabelSuite_Unified_Package_D_Mode',
     debug=False,
     bootloader_ignore_signals=False,
