@@ -3452,15 +3452,7 @@ class TimesheetRegistryPage(tk.Frame):
 class MainApp(tk.Tk):
     def __init__(self, current_user: Optional[Dict[str, Any]] = None):
         super().__init__()
-        if meals_module:
-            meals_module.set_db_pool(db_connection_pool)
-        if SpecialOrders:
-            SpecialOrders.set_db_pool(db_connection_pool)
-        if objects:
-            objects.set_db_pool(db_connection_pool)
-        if Settings:  # <-- ДОБАВЬТЕ ЭТОТ БЛОК
-            Settings.set_db_pool(db_connection_pool)
-
+    
         self._menu_timesheets = None
         self._menu_timesheets_registry_index = None
         self.current_user: Dict[str, Any] = current_user or {}
@@ -3952,28 +3944,45 @@ logging.debug("Модуль main_app импортирован, готов к з�
 if __name__ == "__main__":
     logging.debug("Старт приложения...")
 
-    # Инициализируем конфиг и пул ДО создания окна
     try:
-        # 1. Убеждаемся, что файл конфигурации существует.
-        # Эта функция уже есть в вашем коде.
-        ensure_config()
+        # 1. Мягкий импорт настроек (если он упадет, сработает fallback)
+        if Settings:
+            Settings.ensure_config()
+        else:
+            ensure_config()
+
+        # 2. Инициализация пула соединений
         initialize_db_pool()
+
+        # 3. ВАЖНЫЙ ШАГ: Передаем созданный пул во все дочерние модули
+        logging.debug("Передача пула соединений в дочерние модули...")
+        if meals_module and hasattr(meals_module, "set_db_pool"):
+            meals_module.set_db_pool(db_connection_pool)
+        if SpecialOrders and hasattr(SpecialOrders, "set_db_pool"):
+            SpecialOrders.set_db_pool(db_connection_pool)
+        if objects and hasattr(objects, "set_db_pool"):
+            objects.set_db_pool(db_connection_pool)
+        if Settings and hasattr(Settings, "set_db_pool"):
+            Settings.set_db_pool(db_connection_pool)
+        logging.debug("Передача пула завершена.")
 
     except Exception as e:
         logging.critical("Приложение не может быть запущено из-за ошибки инициализации.", exc_info=True)
         root = tk.Tk()
-        root.withdraw() # Прячем пустое окно
+        root.withdraw()
         messagebox.showerror(
             "Критическая ошибка",
             f"Не удалось инициализировать приложение.\n\n"
             f"Ошибка: {e}\n\n"
-            "Проверьте настройки в файле settings.json (DATABASE_URL) и доступность базы данных.",
+            "Проверьте настройки в файле settings.dat и доступность базы данных.",
             parent=root
         )
         root.destroy()
         sys.exit(1)
 
-    # 3. Только если всё прошло успешно, создаём и запускаем главное окно приложения.
+    # 4. Только теперь, когда все модули готовы, создаем и запускаем главный цикл
     logging.debug("Инициализация успешна. Запускаем главный цикл приложения.")
     app = MainApp()
+    app.protocol("WM_DELETE_WINDOW", app.destroy) # Корректное закрытие по крестику
     app.mainloop()
+
