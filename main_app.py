@@ -3455,7 +3455,10 @@ class MainApp(tk.Tk):
         if meals_module:
             meals_module.set_db_pool(db_connection_pool)
         if SpecialOrders:
-            SpecialOrders.set_db_pool(db_connection_pool) 
+            SpecialOrders.set_db_pool(db_connection_pool)
+        if objects:
+            objects.set_db_pool(db_connection_pool)
+
         self._menu_timesheets = None
         self._menu_timesheets_registry_index = None
         self.current_user: Dict[str, Any] = current_user or {}
