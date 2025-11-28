@@ -5,8 +5,6 @@ import csv
 import json
 import math
 import calendar
-import meals_module
-import SpecialOrders
 import subprocess
 import configparser
 import urllib.request
@@ -3454,6 +3452,10 @@ class TimesheetRegistryPage(tk.Frame):
 class MainApp(tk.Tk):
     def __init__(self, current_user: Optional[Dict[str, Any]] = None):
         super().__init__()
+        if meals_module:
+            meals_module.set_db_pool(db_connection_pool)
+        if SpecialOrders:
+            SpecialOrders.set_db_pool(db_connection_pool) 
         self._menu_timesheets = None
         self._menu_timesheets_registry_index = None
         self.current_user: Dict[str, Any] = current_user or {}
@@ -3956,27 +3958,21 @@ if __name__ == "__main__":
         # 1. Убеждаемся, что файл конфигурации существует.
         # Эта функция уже есть в вашем коде.
         ensure_config()
-
-        # 2. Инициализируем пул соединений с базой данных.
-        # Это новая функция, которую мы добавили.
         initialize_db_pool()
 
-        if meals_module:
-            meals_module.set_db_pool(db_connection_pool)
-        if SpecialOrders:
-            SpecialOrders.set_db_pool(db_connection_pool) 
-
     except Exception as e:
-        # Если на этапе инициализации произошла ошибка (например, неверный пароль к БД),
-        # сообщаем пользователю и завершаем работу приложения.
         logging.critical("Приложение не может быть запущено из-за ошибки инициализации.", exc_info=True)
+        root = tk.Tk()
+        root.withdraw() # Прячем пустое окно
         messagebox.showerror(
             "Критическая ошибка",
             f"Не удалось инициализировать приложение.\n\n"
             f"Ошибка: {e}\n\n"
-            "Проверьте настройки в файле settings.json (DATABASE_URL) и доступность базы данных."
+            "Проверьте настройки в файле settings.json (DATABASE_URL) и доступность базы данных.",
+            parent=root
         )
-        sys.exit(1) # Завершаем работу с кодом ошибки
+        root.destroy()
+        sys.exit(1)
 
     # 3. Только если всё прошло успешно, создаём и запускаем главное окно приложения.
     logging.debug("Инициализация успешна. Запускаем главный цикл приложения.")
