@@ -394,7 +394,6 @@ def set_meals_webhook_token_in_config(tok: str):
 
 # ---------------- РАБОТА С БД ДЛЯ ПОЛЬЗОВАТЕЛЕЙ ----------------
 
-:
     provider = get_db_provider().strip().lower()
     if provider != "postgres":
         raise RuntimeError(
