@@ -24,6 +24,19 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Any, Dict
 import base64
 
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+
+# ВАЖНО: Переносим tkinter и PIL сюда
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog
+try:
+    from PIL import Image, ImageTk
+except ImportError:
+    Image = ImageTk = None
+
 import BudgetAnalyzer
 import assets_logo as _assets_logo
 import SpecialOrders
@@ -78,11 +91,6 @@ def embedded_logo_image(parent, max_w=360, max_h=160):
         return ph
     except Exception:
         return None
-
-
-# ================= БД: подключение и пользователи =================
-
-# ================= БД: подключение и пользователи =================
 
 # Глобальная переменная для хранения пула соединений
 db_connection_pool = None
@@ -751,7 +759,6 @@ def safe_filename(s: str, maxlen: int = 60) -> str:
     s = re.sub(r"_+", "_", s)
     return s[:maxlen] if len(s) > maxlen else s
 
-
 # ------------- Логотип / домашняя страница -------------
 
 def find_logo_path() -> Optional[Path]:
@@ -767,7 +774,6 @@ def find_logo_path() -> Optional[Path]:
         if p.exists():
             return p
     return None
-
 
 class HomePage(tk.Frame):
     def __init__(self, master):
