@@ -3491,6 +3491,15 @@ class MainApp(tk.Tk):
                     lambda parent: meals_module.create_meals_order_page(parent),
                 ),
             )
+
+        if meals_module and hasattr(meals_module, "create_my_meals_orders_page"):
+            m_meals.add_command(
+                label="📄 Мои заявки",
+                command=lambda: self._show_page(
+                    "my_meals_orders",
+                    lambda parent: meals_module.create_my_meals_orders_page(parent, app_ref=self),
+                ),
+            )
         else:
             m_meals.add_command(label="📝 Создать заявку", command=self.run_meals_exe)
 
@@ -3698,6 +3707,8 @@ class MainApp(tk.Tk):
             self._set_header("Реестр транспорта", "")
         elif key == "meals_order":
             self._set_header("Заказ питания", "")
+        elif key == "my_meals_orders":
+            self._set_header("Мои заявки на питание", "")
         elif key == "meals_planning":
             self._set_header("Планирование питания", "")
         elif key == "meals_settings":
