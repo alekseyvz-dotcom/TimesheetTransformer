@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - '**.py'
+      - '**.spec'
       - 'requirements.txt'
       - '**.ico'
       - '.github/workflows/build.yml'
@@ -35,27 +36,28 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies
+      - name: Install dependencies from requirements.txt
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-          python -m pip install pyinstaller
 
       - name: Clean previous build folders
         run: |
           if (Test-Path dist) { Remove-Item -Recurse -Force dist }
           if (Test-Path build) { Remove-Item -Recurse -Force build }
+        shell: pwsh
 
       - name: Build Executable using .spec file
-        run: python -m pyinstaller main_app.spec --onefile
+        run: python -m pyinstaller main_app.spec 
 
       - name: List build artifacts
         run: Get-ChildItem -Recurse dist
+        shell: pwsh
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: TabelSuite_Unified_Package
-          path: dist/TabelSuite_Unified_Package_D_Mode.exe # <-- Путь к единственному exe-файлу
+          path: dist/*.exe # Берем любой exe-файл из папки dist
           if-no-files-found: error
           retention-days: 14
