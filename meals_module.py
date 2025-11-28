@@ -370,6 +370,20 @@ def get_meal_type_price_map() -> Dict[str, float]:
 
 # ---------------- Сохранение заказов, реестры, проверки ----------------
 
+def get_current_user_id() -> Optional[int]:
+    """
+    Возвращает id текущего пользователя, если модуль питания
+    запущен внутри главного приложения.
+
+    Здесь мы НЕ видим MainApp напрямую, поэтому базовый способ:
+    - если settings_manager когда‑нибудь начнёт хранить текущего пользователя,
+      можно будет брать оттуда;
+    - сейчас в practice user_id передаётся в MainApp.current_user и используется только там,
+      поэтому для сохранения user_id лучше передавать его явно в данные заявки (data['user_id']).
+    """
+    # Пока этот хелпер не используется напрямую — user_id будем брать из data.
+    return None
+
 def save_order_to_db(data: dict) -> int:
     """
     Сохраняет заявку (dict из _build_order_dict) в PostgreSQL.
@@ -395,13 +409,15 @@ def save_order_to_db(data: dict) -> int:
                 order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
                 team_name = (data.get("team_name") or "").strip()
 
+                user_id = data.get("user_id")
+
                 cur.execute(
                     """
-                    INSERT INTO meal_orders (created_at, date, department_id, team_name, object_id)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO meal_orders (created_at, date, department_id, team_name, object_id, user_id)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
-                    (created_at, order_date, dept_id, team_name, object_id),
+                    (created_at, order_date, dept_id, team_name, object_id, user_id),
                 )
                 order_id = cur.fetchone()[0]
 
@@ -567,6 +583,60 @@ def get_registry_from_db(
 
         return list(result.values())
 
+    finally:
+        conn.close()
+
+def load_user_meal_orders(user_id: int) -> List[Dict[str, Any]]:
+    """
+    Возвращает список заголовков заявок на питание, созданных пользователем.
+    Формат:
+      {
+        'id': int,
+        'date': 'YYYY-MM-DD',
+        'created_at': datetime,
+        'department': str,
+        'team_name': str,
+        'object_id': str,
+        'object_address': str,
+        'employees_count': int,
+      }
+    """
+    if not user_id:
+        return []
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    mo.id,
+                    mo.date,
+                    mo.created_at,
+                    COALESCE(d.name, '')      AS department,
+                    COALESCE(mo.team_name, '') AS team_name,
+                    COALESCE(o.excel_id, '')  AS object_id,
+                    COALESCE(o.address, '')   AS object_address,
+                    COUNT(moi.id)             AS employees_count
+                FROM meal_orders mo
+                JOIN meal_order_items moi ON moi.order_id = mo.id
+                LEFT JOIN departments d    ON d.id = mo.department_id
+                LEFT JOIN objects o        ON o.id = mo.object_id
+                WHERE mo.user_id = %s
+                GROUP BY
+                    mo.id,
+                    mo.date,
+                    mo.created_at,
+                    d.name,
+                    mo.team_name,
+                    o.excel_id,
+                    o.address
+                ORDER BY mo.date DESC, mo.id DESC
+                """,
+                (user_id,),
+            )
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
     finally:
         conn.close()
 
@@ -1145,21 +1215,30 @@ class MealOrderPage(tk.Frame):
         addr = (self.cmb_address.get() or "").strip()
         oid = (self.cmb_object_id.get() or "").strip()
         employees = [r.get_dict() for r in self.emp_rows]
-        return {
+
+        user_id = None
+        # если страница открыта из MainApp, у неё может быть атрибут app_ref
+        app_ref = getattr(self, "app_ref", None)
+        if app_ref is not None and hasattr(app_ref, "current_user"):
+            try:
+                user_id = int((app_ref.current_user or {}).get("id") or 0) or None
+            except Exception:
+                user_id = None
+
+        core = {
             "date": req_date.strftime("%Y-%m-%d"),
             "department": (self.cmb_dep.get() or "").strip(),
             "team_name": (self.ent_team.get() or "").strip(),
             "object": {"id": oid, "address": addr},
             "employees": employees,
         }
+        if user_id is not None:
+            core["user_id"] = user_id
+        return core
 
     def _build_order_dict(self) -> Dict:
         core = self._build_order_dict_core()
-        if self.edit_order_id:
-            # при редактировании created_at можно не менять
-            core["created_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-        else:
-            core["created_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        core["created_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         return core
 
     def _update_emp_list(self):
@@ -1524,6 +1603,216 @@ class MealOrderPage(tk.Frame):
         except Exception as e:
             messagebox.showerror("Папка", f"Не удалось открыть папку:\n{e}")
 
+class MyMealsOrdersPage(tk.Frame):
+    """
+    Реестр заявок на питание текущего пользователя (как 'Мои табели').
+    """
+    def __init__(self, master, app_ref=None):
+        super().__init__(master, bg="#f7f7f7")
+        self.app_ref = app_ref
+        self.tree = None
+        self._orders: List[Dict[str, Any]] = []
+        self._build_ui()
+        self._load_data()
+
+    def _get_current_user_id(self) -> Optional[int]:
+        if self.app_ref is not None and hasattr(self.app_ref, "current_user"):
+            try:
+                return int((self.app_ref.current_user or {}).get("id") or 0) or None
+            except Exception:
+                return None
+        return None
+
+    def _build_ui(self):
+        top = tk.Frame(self, bg="#f7f7f7")
+        top.pack(fill="x", padx=8, pady=(8, 4))
+
+        tk.Label(
+            top,
+            text="Мои заявки на питание",
+            font=("Segoe UI", 12, "bold"),
+            bg="#f7f7f7",
+        ).pack(side="left")
+
+        ttk.Button(
+            top,
+            text="Обновить",
+            command=self._load_data,
+        ).pack(side="right", padx=4)
+
+        frame = tk.Frame(self, bg="#f7f7f7")
+        frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+
+        cols = ("date", "object", "department", "team", "count", "created_at")
+        self.tree = ttk.Treeview(
+            frame,
+            columns=cols,
+            show="headings",
+            selectmode="browse",
+        )
+
+        self.tree.heading("date", text="Дата")
+        self.tree.heading("object", text="Объект")
+        self.tree.heading("department", text="Подразделение")
+        self.tree.heading("team", text="Бригада")
+        self.tree.heading("count", text="Сотр., чел.")
+        self.tree.heading("created_at", text="Создана")
+
+        self.tree.column("date", width=90, anchor="center")
+        self.tree.column("object", width=280, anchor="w")
+        self.tree.column("department", width=180, anchor="w")
+        self.tree.column("team", width=220, anchor="w")
+        self.tree.column("count", width=90, anchor="center")
+        self.tree.column("created_at", width=140, anchor="center")
+
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        self.tree.bind("<Double-1>", self._on_open)
+        self.tree.bind("<Return>", self._on_open)
+
+        bottom = tk.Frame(self, bg="#f7f7f7")
+        bottom.pack(fill="x", padx=8, pady=(0, 8))
+        tk.Label(
+            bottom,
+            text="Двойной щелчок или Enter по строке — открыть заявку для редактирования или дублирования.",
+            font=("Segoe UI", 9),
+            fg="#555",
+            bg="#f7f7f7",
+        ).pack(side="left")
+
+    def _load_data(self):
+        self.tree.delete(*self.tree.get_children())
+        self._orders.clear()
+
+        user_id = self._get_current_user_id()
+        if not user_id:
+            messagebox.showwarning(
+                "Мои заявки",
+                "Не определён текущий пользователь.",
+                parent=self,
+            )
+            return
+
+        try:
+            orders = load_user_meal_orders(user_id)
+        except Exception as e:
+            messagebox.showerror(
+                "Мои заявки",
+                f"Ошибка загрузки списка заявок из БД:\n{e}",
+                parent=self,
+            )
+            return
+
+        self._orders = orders
+
+        for o in orders:
+            oid = o["id"]
+            date_val = o.get("date")
+            if isinstance(date_val, datetime):
+                date_str = date_val.date().strftime("%Y-%m-%d")
+            else:
+                date_str = str(date_val or "")
+
+            addr = o.get("object_address") or ""
+            obj_code = o.get("object_id") or ""
+            obj_display = f"[{obj_code}] {addr}" if obj_code else addr
+
+            dep = o.get("department") or ""
+            team = o.get("team_name") or ""
+            cnt = o.get("employees_count") or 0
+            created_at = o.get("created_at")
+            if isinstance(created_at, datetime):
+                created_str = created_at.strftime("%d.%m.%Y %H:%M")
+            else:
+                created_str = str(created_at or "")
+
+            iid = str(oid)
+            self.tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(date_str, obj_display, dep, team, cnt, created_str),
+            )
+
+    def _get_selected_order(self) -> Optional[Dict[str, Any]]:
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        iid = sel[0]
+        try:
+            oid = int(iid)
+        except Exception:
+            return None
+        for o in self._orders:
+            if int(o["id"]) == oid:
+                return o
+        return None
+
+    def _on_open(self, event=None):
+        info = self._get_selected_order()
+        if not info:
+            return
+
+        order_id = int(info["id"])
+
+        try:
+            order_data = get_order_with_items_from_db(order_id)
+        except Exception as e:
+            messagebox.showerror(
+                "Мои заявки",
+                f"Не удалось загрузить заявку id={order_id}:\n{e}",
+                parent=self,
+            )
+            return
+
+        choice = messagebox.askyesnocancel(
+            "Открыть заявку",
+            "Нажмите «Да», чтобы ОТКРЫТЬ заявку для РЕДАКТИРОВАНИЯ.\n"
+            "Нажмите «Нет», чтобы СОЗДАТЬ КОПИЮ заявки (на другой день).\n"
+            "Отмена — закрыть.",
+            parent=self,
+        )
+        if choice is None:
+            return
+
+        if choice is False:
+            # создаём копию: увеличиваем дату на 1 день
+            try:
+                old_date = datetime.strptime(order_data["date"], "%Y-%m-%d").date()
+                new_date = old_date + timedelta(days=1)
+                order_data["date"] = new_date.strftime("%Y-%m-%d")
+            except Exception:
+                pass
+            edit_id = None
+            title = f"Новая заявка (копия #{order_id})"
+        else:
+            edit_id = order_id
+            title = f"Редактирование заявки #{order_id}"
+
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.geometry("1100x720")
+
+        # прокинем app_ref дальше, чтобы форма могла взять user_id
+        if hasattr(self, "app_ref"):
+            setattr(win, "app_ref", self.app_ref)
+
+        def on_saved_callback():
+            self._load_data()
+
+        page = MealOrderPage(
+            win,
+            existing_data=order_data,
+            order_id=edit_id,
+            on_saved=on_saved_callback,
+        )
+        # чтобы _build_order_dict_core увидел app_ref
+        page.app_ref = self.app_ref
+        page.pack(fill="both", expand=True)
 
 # ========================= СТРАНИЦА ПЛАНИРОВАНИЯ ПИТАНИЯ =========================
 
@@ -2300,10 +2589,13 @@ def get_order_with_items_from_db(order_id: int) -> Dict[str, Any]:
     finally:
         conn.close()
 
-def create_meals_order_page(parent) -> tk.Frame:
+def create_meals_order_page(parent, app_ref=None) -> tk.Frame:
     ensure_config()
     try:
-        return MealOrderPage(parent)
+        # app_ref просто сохраняем в self.app_ref, чтобы при желании иметь доступ к current_user
+        page = MealOrderPage(parent)
+        page.app_ref = app_ref
+        return page
     except Exception:
         import traceback
         messagebox.showerror(
@@ -2311,11 +2603,24 @@ def create_meals_order_page(parent) -> tk.Frame:
         )
         return tk.Frame(parent)
 
-
-def create_meals_planning_page(parent) -> tk.Frame:
+def create_my_meals_orders_page(parent, app_ref=None) -> tk.Frame:
     ensure_config()
     try:
-        return MealPlanningPage(parent)
+        page = MyMealsOrdersPage(parent, app_ref=app_ref)
+        return page
+    except Exception:
+        import traceback
+        messagebox.showerror(
+            "Питание — мои заявки", traceback.format_exc(), parent=parent
+        )
+        return tk.Frame(parent)
+
+def create_meals_planning_page(parent, app_ref=None) -> tk.Frame:
+    ensure_config()
+    try:
+        page = MealPlanningPage(parent)
+        page.app_ref = app_ref
+        return page
     except Exception:
         import traceback
         messagebox.showerror(
