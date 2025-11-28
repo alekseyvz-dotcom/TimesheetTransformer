@@ -10,6 +10,7 @@ on:
       - assets_logo.py
       - BudgetAnalyzer.py
       - objects.py
+      - settings_manager.py
       - requirements.txt
       - icon.ico
       - icon2.ico
