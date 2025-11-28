@@ -20,6 +20,18 @@ from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 from urllib.parse import urlparse, parse_qs
 
+db_connection_pool = None
+
+def set_db_pool(pool):
+    """Функция для установки пула соединений извне."""
+    global db_connection_pool
+    db_connection_pool = pool
+
+def release_db_connection(conn):
+    """Возвращает соединение обратно в пул."""
+    if db_connection_pool:
+        db_connection_pool.putconn(conn)
+
 # ========================= БАЗОВЫЕ КОНСТАНТЫ =========================
 
 APP_TITLE = "Заказ питания"
@@ -45,20 +57,9 @@ def exe_dir() -> Path:
 def config_path() -> Path:
     """Путь к ini‑конфигу для fallback‑режима (без settings_manager)."""
     return exe_dir() / CONFIG_FILE
-
+    
 
 # ========================= РАБОТА С НАСТРОЙКАМИ =========================
-
-try:
-    from __main__ import db_connection_pool, initialize_db_pool, release_db_connection, close_db_pool
-    # В Python __main__ ссылается на главный исполняемый скрипт.
-    # Если это main_app.py, мы получим доступ к его глобальным переменным и функциям.
-    USING_SHARED_POOL = True
-except ImportError:
-    # Если импорт не удался, значит, meals_module запущен как самостоятельное приложение.
-    # В этом случае мы создадим для него собственный пул.
-    db_connection_pool = None
-    USING_SHARED_POOL = False
 
 try:
     import settings_manager as Settings
@@ -147,64 +148,11 @@ def get_meals_planning_enabled() -> bool:
 # ========================= РАБОТА С БД =========================
 
 def get_db_connection():
-    """
-    Возвращает подключение к БД.
-    Если используется общий пул, берет из него. Иначе создает свой.
-    """
-    global db_connection_pool, USING_SHARED_POOL
-
-    if USING_SHARED_POOL:
-        # Если мы работаем внутри main_app, просто используем его пул
-        if db_connection_pool is None:
-             raise RuntimeError("Общий пул соединений из main_app не доступен.")
-        return db_connection_pool.getconn()
-
-    # --- Логика для самостоятельного запуска ---
+    """Получает соединение из установленного пула."""
     if db_connection_pool is None:
-        # Пул еще не создан, создаем его для этого модуля
-        if not Settings:
-            raise RuntimeError("settings_manager не доступен, не могу прочитать параметры БД")
-
-        # Вся логика парсинга URL должна быть здесь, внутри if
-        provider = Settings.get_db_provider().strip().lower()
-        if provider != "postgres":
-            raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
-
-        db_url = Settings.get_database_url().strip()
-        if not db_url:
-            raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
-
-        url = urlparse(db_url)
-        if url.scheme not in ("postgresql", "postgres"):
-            raise RuntimeError(f"Неверная схема в DATABASE_URL: {url.scheme}")
-
-        user = url.username
-        password = url.password
-        host = url.hostname or "localhost"
-        port = url.port or 5432
-        dbname = url.path.lstrip("/")
-        q = parse_qs(url.query)
-        sslmode = (q.get("sslmode", [Settings.get_db_sslmode()])[0] or "require")
-
-        # Создаем пул
-        db_connection_pool = pool.SimpleConnectionPool(
-            minconn=1,
-            maxconn=5,  # Можно сделать поменьше, т.к. это отдельный модуль
-            host=host,
-            port=port,
-            dbname=dbname,
-            user=user,
-            password=password,
-            sslmode=sslmode,
-        )
-
+         raise RuntimeError("Пул соединений не был установлен из главного приложения.")
     return db_connection_pool.getconn()
 
-if not USING_SHARED_POOL:
-    def release_db_connection(conn):
-        """Возвращает соединение обратно в локальный пул."""
-        if db_connection_pool:
-            db_connection_pool.putconn(conn)
 
 def get_or_create_department(cur, name: str):
     if not name:
