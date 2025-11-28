@@ -16,6 +16,7 @@ from openpyxl.utils import get_column_letter
 from datetime import datetime, date, timedelta
 
 import psycopg2
+from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 from urllib.parse import urlparse, parse_qs
 
@@ -47,6 +48,17 @@ def config_path() -> Path:
 
 
 # ========================= РАБОТА С НАСТРОЙКАМИ =========================
+
+try:
+    from __main__ import db_connection_pool, initialize_db_pool, release_db_connection, close_db_pool
+    # В Python __main__ ссылается на главный исполняемый скрипт.
+    # Если это main_app.py, мы получим доступ к его глобальным переменным и функциям.
+    USING_SHARED_POOL = True
+except ImportError:
+    # Если импорт не удался, значит, meals_module запущен как самостоятельное приложение.
+    # В этом случае мы создадим для него собственный пул.
+    db_connection_pool = None
+    USING_SHARED_POOL = False
 
 try:
     import settings_manager as Settings
@@ -136,20 +148,27 @@ def get_meals_planning_enabled() -> bool:
 
 def get_db_connection():
     """
-    Возвращает подключение к БД на основе настроек из settings_manager.
-    Ожидается provider=postgres и DATABASE_URL в формате:
-      postgresql://user:password@host:port/dbname?sslmode=...
+    Возвращает подключение к БД.
+    Если используется общий пул, берет из него. Иначе создает свой.
     """
-    if not Settings:
-        raise RuntimeError("settings_manager не доступен, не могу прочитать параметры БД")
+    global db_connection_pool, USING_SHARED_POOL
 
-    provider = Settings.get_db_provider().strip().lower()
-    if provider != "postgres":
-        raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
+    if USING_SHARED_POOL:
+        # Если мы работаем внутри main_app, просто используем его пул
+        if db_connection_pool is None:
+             raise RuntimeError("Общий пул соединений из main_app не доступен.")
+        return db_connection_pool.getconn()
 
-    db_url = Settings.get_database_url().strip()
-    if not db_url:
-        raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
+    # --- Логика для самостоятельного запуска ---
+    if db_connection_pool is None:
+        # Пул еще не создан, создаем его для этого модуля
+        if not Settings:
+            raise RuntimeError("settings_manager не доступен, не могу прочитать параметры БД")
+        # ... (здесь идет ВАШ СУЩЕСТВУЮЩИЙ код из get_db_connection для парсинга URL) ...
+        provider = Settings.get_db_provider().strip().lower()
+        if provider != "postgres":
+            # ...
+        db_url = Settings.get_database_url().strip()
 
     url = urlparse(db_url)
     if url.scheme not in ("postgresql", "postgres"):
@@ -164,16 +183,24 @@ def get_db_connection():
     q = parse_qs(url.query)
     sslmode = (q.get("sslmode", [Settings.get_db_sslmode()])[0] or "require")
 
-    conn = psycopg2.connect(
-        host=host,
-        port=port,
-        dbname=dbname,
-        user=user,
-        password=password,
-        sslmode=sslmode,
-    )
-    return conn
+        db_connection_pool = pool.SimpleConnectionPool(
+            minconn=1,
+            maxconn=5,  # Можно сделать поменьше, т.к. это отдельный модуль
+            host=host,
+            port=port,
+            dbname=dbname,
+            user=user,
+            password=password,
+            sslmode=sslmode,
+        )
 
+    return db_connection_pool.getconn()
+
+if not USING_SHARED_POOL:
+    def release_db_connection(conn):
+        """Возвращает соединение обратно в локальный пул."""
+        if db_connection_pool:
+            db_connection_pool.putconn(conn)
 
 def get_or_create_department(cur, name: str):
     if not name:
@@ -272,8 +299,9 @@ def load_employees_from_db() -> List[Dict[str, Any]]:
     Возвращает список сотрудников:
       [{'fio': ..., 'tbn': ..., 'pos': ..., 'dep': ...}, ...]
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -294,15 +322,17 @@ def load_employees_from_db() -> List[Dict[str, Any]]:
                 })
             return res
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 
 def load_objects_from_db() -> List[Tuple[str, str]]:
     """
     Возвращает список объектов: [(excel_id, address), ...]
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -318,15 +348,17 @@ def load_objects_from_db() -> List[Tuple[str, str]]:
                 res.append((code or "", addr or ""))
             return res
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def load_meal_types_from_db() -> List[Dict[str, Any]]:
     """
     Возвращает список типов питания с ценой:
       [{'id': 1, 'name': 'Одноразовое', 'price': 200.0}, ...]
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -348,15 +380,17 @@ def load_meal_types_from_db() -> List[Dict[str, Any]]:
                 conn.commit()
             return rows
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def get_meal_type_price_map() -> Dict[str, float]:
     """
     Возвращает словарь: {имя_типа_питания: цена}.
     Если в meal_types нет записи, цена считается 0.
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT name, COALESCE(price, 0) FROM meal_types"
@@ -366,7 +400,8 @@ def get_meal_type_price_map() -> Dict[str, float]:
                 for name, price in cur.fetchall()
             }
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 # ---------------- Сохранение заказов, реестры, проверки ----------------
 
@@ -393,8 +428,9 @@ def save_order_to_db(data: dict) -> int:
         они удаляются и записываются заново (перезапись по объекту).
       - Записи на другие объекты не трогаем.
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn:
             with conn.cursor() as cur:
                 dept_name = (data.get("department") or "").strip()
@@ -492,7 +528,8 @@ def save_order_to_db(data: dict) -> int:
 
         return order_id
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 
 def get_registry_from_db(
@@ -507,8 +544,9 @@ def get_registry_from_db(
       - by_department
       - order_ids: список id заявок (по этому объекту и дате)
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor() as cur:
             params = []
             where_clauses = []
@@ -584,7 +622,8 @@ def get_registry_from_db(
         return list(result.values())
 
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def load_user_meal_orders(user_id: int) -> List[Dict[str, Any]]:
     """
@@ -604,8 +643,9 @@ def load_user_meal_orders(user_id: int) -> List[Dict[str, Any]]:
     if not user_id:
         return []
 
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -638,7 +678,8 @@ def load_user_meal_orders(user_id: int) -> List[Dict[str, Any]]:
             rows = cur.fetchall()
             return [dict(r) for r in rows]
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def get_details_from_db(
     filter_date: Optional[str] = None,
@@ -648,8 +689,9 @@ def get_details_from_db(
     """
     Возвращает детализированный список заявок.
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor() as cur:
             params = []
             where_clauses = []
@@ -724,7 +766,8 @@ def get_details_from_db(
         return result
 
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 
 def find_conflicting_meal_orders_same_date_other_object(data: dict) -> List[Dict[str, Any]]:
@@ -732,8 +775,9 @@ def find_conflicting_meal_orders_same_date_other_object(data: dict) -> List[Dict
     Ищет в БД записи о том, что на этих же людей уже оформлено питание
     в ТУ ЖЕ дату, но на ДРУГОМ объекте.
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor() as cur:
             order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
             obj = data.get("object") or {}
@@ -795,7 +839,8 @@ def find_conflicting_meal_orders_same_date_other_object(data: dict) -> List[Dict
 
             return conflicts
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 
 # ========================= УТИЛИТЫ =========================
@@ -2432,8 +2477,9 @@ class MealsSettingsPage(tk.Frame):
             )
             return
 
-        conn = get_db_connection()
+        conn = None
         try:
+            conn = get_db_connection()
             with conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     # читаем текущие типы
@@ -2476,7 +2522,8 @@ class MealsSettingsPage(tk.Frame):
                 parent=self,
             )
         finally:
-            conn.close()
+            if conn:
+                release_db_connection(conn)
 
 # ========================= STANDALONE ОКНО =========================
 
@@ -2503,6 +2550,14 @@ class MealsApp(tk.Tk):
             settings_page = MealsSettingsPage(notebook)
             notebook.add(settings_page, text="Настройки")
 
+    def destroy(self):
+        """Переопределяем для закрытия локального пула."""
+        global db_connection_pool, USING_SHARED_POOL
+        if not USING_SHARED_POOL and db_connection_pool:
+            print("Closing local DB connection pool for meals_module...")
+            db_connection_pool.closeall()
+            db_connection_pool = None
+        super().destroy()
 
 # ========================= API ДЛЯ ВСТРАИВАНИЯ =========================
 
@@ -2522,8 +2577,9 @@ def get_order_with_items_from_db(order_id: int) -> Dict[str, Any]:
         ]
     }
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -2587,7 +2643,8 @@ def get_order_with_items_from_db(order_id: int) -> Dict[str, Any]:
             "employees": emps,
         }
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def create_meals_order_page(parent, app_ref=None) -> tk.Frame:
     ensure_config()
@@ -2630,13 +2687,15 @@ def create_meals_planning_page(parent, app_ref=None) -> tk.Frame:
 
 def delete_order_items_from_db(order_id: int):
     """Удаляет все строки сотрудников по заявке (оставляя сам заголовок заявки)."""
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM meal_order_items WHERE order_id = %s", (order_id,))
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def create_meals_settings_page(parent, current_user_role: str) -> Optional[tk.Frame]:
     """
@@ -2685,5 +2744,17 @@ def open_meals_module(parent=None, current_user_role: str = "user"):
 
 if __name__ == "__main__":
     ensure_config()
+    # --- ДОБАВЬТЕ ПРОВЕРКУ ПРИ СТАРТЕ ---
+    try:
+        # Пробный вызов для инициализации локального пула
+        conn = get_db_connection()
+        release_db_connection(conn)
+    except Exception as e:
+        messagebox.showerror(
+            "Критическая ошибка",
+            f"Не удалось подключиться к базе данных:\n{e}"
+        )
+        sys.exit(1)
+
     app = MealsApp(current_user_role="admin")
     app.mainloop()
