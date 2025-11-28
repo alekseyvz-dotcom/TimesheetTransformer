@@ -13,6 +13,7 @@ import urllib.parse
 import traceback
 import threading
 import psycopg2
+from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 from urllib.parse import urlparse, parse_qs
 import hashlib
@@ -249,45 +250,94 @@ def embedded_logo_image(parent, max_w=360, max_h=160):
 
 # ================= БД: подключение и пользователи =================
 
-def get_db_connection():
+# ================= БД: подключение и пользователи =================
+
+# Глобальная переменная для хранения пула соединений
+db_connection_pool = None
+
+def initialize_db_pool():
     """
-    Подключение к БД по настройкам из settings_manager.
-    Ожидается provider=postgres и корректный DATABASE_URL.
+    Создает пул соединений с БД. Вызывается один раз при старте приложения.
     """
+    global db_connection_pool
+    if db_connection_pool:
+        logging.info("Пул соединений уже был инициализирован.")
+        return
+
     if not Settings:
+        logging.error("settings_manager не доступен, не могу инициализировать пул БД.")
         raise RuntimeError("settings_manager не доступен, не могу прочитать параметры БД")
 
-    provider = Settings.get_db_provider().strip().lower()
-    if provider != "postgres":
-        raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
+    try:
+        provider = Settings.get_db_provider().strip().lower()
+        if provider != "postgres":
+            raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
 
-    db_url = Settings.get_database_url().strip()
-    if not db_url:
-        raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
+        db_url = Settings.get_database_url().strip()
+        if not db_url:
+            raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
 
-    url = urlparse(db_url)
-    if url.scheme not in ("postgresql", "postgres"):
-        raise RuntimeError(f"Неверная схема в DATABASE_URL: {url.scheme}")
+        url = urlparse(db_url)
+        if url.scheme not in ("postgresql", "postgres"):
+            raise RuntimeError(f"Неверная схема в DATABASE_URL: {url.scheme}")
 
-    user = url.username
-    password = url.password
-    host = url.hostname or "localhost"
-    port = url.port or 5432
-    dbname = url.path.lstrip("/")
+        user = url.username
+        password = url.password
+        host = url.hostname or "localhost"
+        port = url.port or 5432
+        dbname = url.path.lstrip("/")
+        q = parse_qs(url.query)
+        sslmode = (q.get("sslmode", [Settings.get_db_sslmode()])[0] or "require")
 
-    q = parse_qs(url.query)
-    sslmode = (q.get("sslmode", [Settings.get_db_sslmode()])[0] or "require")
+        logging.debug("Инициализация пула соединений с БД...")
+        # Создаем пул. minconn=1 (минимум 1 соединение держать открытым), maxconn=10 (до 10 одновременных)
+        db_connection_pool = pool.SimpleConnectionPool(
+            minconn=1,
+            maxconn=10,
+            host=host,
+            port=port,
+            dbname=dbname,
+            user=user,
+            password=password,
+            sslmode=sslmode,
+        )
+        logging.info("Пул соединений с БД успешно инициализирован.")
 
-    conn = psycopg2.connect(
-        host=host,
-        port=port,
-        dbname=dbname,
-        user=user,
-        password=password,
-        sslmode=sslmode,
-    )
-    return conn
+    except Exception as e:
+        logging.exception("Критическая ошибка: не удалось создать пул соединений с БД.")
+        # Здесь можно либо показать messagebox и завершить приложение, либо просто выбросить исключение
+        db_connection_pool = None
+        raise e
 
+def get_db_connection():
+    """
+    Получает соединение из пула.
+    ВАЖНО: соединение нужно обязательно вернуть в пул с помощью putconn().
+    """
+    if db_connection_pool is None:
+        # Попытка ленивой инициализации, если пул еще не создан
+        initialize_db_pool()
+        if db_connection_pool is None: # Если и после этого не создан, то беда
+             raise RuntimeError("Пул соединений с БД не доступен.")
+    return db_connection_pool.getconn()
+
+def release_db_connection(conn):
+    """
+    Возвращает соединение обратно в пул.
+    """
+    if db_connection_pool:
+        db_connection_pool.putconn(conn)
+
+def close_db_pool():
+    """
+    Закрывает все соединения в пуле. Вызывается при выходе из приложения.
+    """
+    global db_connection_pool
+    if db_connection_pool:
+        logging.info("Закрытие пула соединений с БД...")
+        db_connection_pool.closeall()
+        db_connection_pool = None
+        logging.info("Пул соединений закрыт.")
 
 def _hash_password(password: str, salt: Optional[bytes] = None) -> str:
     if salt is None:
@@ -317,8 +367,9 @@ def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
     При успехе возвращает dict с данными пользователя (без password_hash), иначе None.
     """
     logging.debug(f"authenticate_user: пытаемся авторизовать {username!r}")
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection() # <-- Получаем соединение из пула
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -343,7 +394,8 @@ def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
             row.pop("password_hash", None)
             return dict(row)
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn) # <-- ОБЯЗАТЕЛЬНО возвращаем 
 
 def find_object_db_id_by_excel_or_address(
     excel_id: Optional[str],
@@ -355,8 +407,9 @@ def find_object_db_id_by_excel_or_address(
       - если не найдено — по точному адресу.
     Возвращает id объекта или None.
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor() as cur:
             if excel_id:
                 cur.execute(
@@ -383,7 +436,8 @@ def find_object_db_id_by_excel_or_address(
             row = cur.fetchone()
             return row[0] if row else None
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 # ---------- Справочники из БД ----------
 
@@ -392,8 +446,9 @@ def load_employees_from_db() -> List[Tuple[str, str, str, str]]:
     Возвращает список сотрудников:
       [(fio, tbn, position, department), ...]
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -407,7 +462,8 @@ def load_employees_from_db() -> List[Tuple[str, str, str, str]]:
             rows = cur.fetchall()
             return [(fio or "", tbn or "", pos or "", dep or "") for fio, tbn, pos, dep in rows]
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 
 def load_objects_from_db() -> List[Tuple[str, str]]:
@@ -415,8 +471,9 @@ def load_objects_from_db() -> List[Tuple[str, str]]:
     Возвращает список объектов [(code, address)].
     code = excel_id (если есть) или пустая строка.
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -430,7 +487,8 @@ def load_objects_from_db() -> List[Tuple[str, str]]:
             rows = cur.fetchall()
             return [(code or "", addr or "") for code, addr in rows]
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def upsert_timesheet_header(
     object_id: str,
@@ -457,8 +515,9 @@ def upsert_timesheet_header(
             f"Сначала создайте объект в разделе «Объекты»."
         )
 
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn, conn.cursor() as cur:
             cur.execute(
                 """
@@ -491,7 +550,8 @@ def upsert_timesheet_header(
             ts_id = cur.fetchone()[0]
         return ts_id
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def replace_timesheet_rows(
     header_id: int,
@@ -501,8 +561,9 @@ def replace_timesheet_rows(
     Полностью заменяет строки табеля для заданного header_id.
     rows: [{'fio': str, 'tbn': str, 'hours': [str|None x31]}, ...]
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn, conn.cursor() as cur:
             # Удаляем старые строки
             cur.execute("DELETE FROM timesheet_rows WHERE header_id = %s", (header_id,))
@@ -554,7 +615,8 @@ def replace_timesheet_rows(
                     ),
                 )
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def load_timesheet_rows_from_db(
     object_id: str,
@@ -569,8 +631,9 @@ def load_timesheet_rows_from_db(
     (объект, подразделение, период).
     Возвращает список dict: {'fio', 'tbn', 'hours': [str|None x31]}
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -612,7 +675,8 @@ def load_timesheet_rows_from_db(
                 })
             return result
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def load_timesheet_rows_by_header_id(header_id: int) -> List[Dict[str, Any]]:
     """
@@ -628,8 +692,9 @@ def load_timesheet_rows_by_header_id(header_id: int) -> List[Dict[str, Any]]:
         'overtime_night': float|None,
       }
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -658,7 +723,8 @@ def load_timesheet_rows_by_header_id(header_id: int) -> List[Dict[str, Any]]:
                 })
             return result
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def load_user_timesheet_headers(user_id: int) -> List[Dict[str, Any]]:
     """
@@ -675,8 +741,9 @@ def load_user_timesheet_headers(user_id: int) -> List[Dict[str, Any]]:
         'updated_at': datetime
       }
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -697,7 +764,8 @@ def load_user_timesheet_headers(user_id: int) -> List[Dict[str, Any]]:
             rows = cur.fetchall()
             return [dict(r) for r in rows]
     finally:
-        conn.close()
+        if conn:
+            release_db_connection(conn)
 
 def load_all_timesheet_headers(
     year: Optional[int] = None,
@@ -721,8 +789,9 @@ def load_all_timesheet_headers(
         'created_at', 'updated_at'
       }
     """
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             where = ["1=1"]
             params: List[Any] = []
@@ -772,8 +841,8 @@ def load_all_timesheet_headers(
             rows = cur.fetchall()
             return [dict(r) for r in rows]
     finally:
-        conn.close()
-
+        if conn:
+            release_db_connection(conn)
 # ------------- Утилиты для времени и табеля -------------
 
 def month_days(year: int, month: int) -> int:
@@ -1273,14 +1342,6 @@ class RowWidget:
         self.lbl_overtime_night.grid_configure(row=new_row, column=36)
         self.btn_52.grid_configure(row=new_row, column=37)
         self.btn_del.grid_configure(row=new_row, column=38)
-
-    def destroy(self):
-        for w in self.widgets:
-            try:
-                w.destroy()
-            except Exception:
-                pass
-        self.widgets.clear()
 
     def fio(self) -> str:
         return self.lbl_fio.cget("text")
@@ -3871,9 +3932,46 @@ class MainApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Конвертер", f"Не удалось запустить конвертер:\n{e}")
 
+    def __init__(self, current_user: Optional[Dict[str, Any]] = None):
+        super().__init__()
+        # ... ваш существующий код инициализации ...
+
+    # ... все остальные методы класса ...
+
+    def destroy(self):
+        """Переопределяем стандартный метод destroy для корректного завершения работы."""
+        logging.info("Приложение закрывается. Закрываем пул соединений.")
+        close_db_pool()  # Закрываем все соединения в пуле
+        super().destroy() # Вызываем оригинальный метод destroy
+
 logging.debug("Модуль main_app импортирован, готов к запуску.")
 
 if __name__ == "__main__":
-    logging.debug("Старт приложения без внешней авторизации (логин-страница внутри MainApp).")
+    logging.debug("Старт приложения...")
+
+    # Инициализируем конфиг и пул ДО создания окна
+    try:
+        # 1. Убеждаемся, что файл конфигурации существует.
+        # Эта функция уже есть в вашем коде.
+        ensure_config()
+
+        # 2. Инициализируем пул соединений с базой данных.
+        # Это новая функция, которую мы добавили.
+        initialize_db_pool()
+
+    except Exception as e:
+        # Если на этапе инициализации произошла ошибка (например, неверный пароль к БД),
+        # сообщаем пользователю и завершаем работу приложения.
+        logging.critical("Приложение не может быть запущено из-за ошибки инициализации.", exc_info=True)
+        messagebox.showerror(
+            "Критическая ошибка",
+            f"Не удалось инициализировать приложение.\n\n"
+            f"Ошибка: {e}\n\n"
+            "Проверьте настройки в файле settings.json (DATABASE_URL) и доступность базы данных."
+        )
+        sys.exit(1) # Завершаем работу с кодом ошибки
+
+    # 3. Только если всё прошло успешно, создаём и запускаем главное окно приложения.
+    logging.debug("Инициализация успешна. Запускаем главный цикл приложения.")
     app = MainApp()
     app.mainloop()
