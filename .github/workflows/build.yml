@@ -61,7 +61,7 @@ jobs:
         shell: pwsh
 
       - name: Build Executable using .spec file
-        run: pyinstaller main_app.spec --onefile
+        run: pyinstaller main_app.spec 
         # Теперь можно вызывать pyinstaller напрямую, т.к. он в PATH
 
       - name: List build artifacts
