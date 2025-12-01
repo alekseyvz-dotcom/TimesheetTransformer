@@ -4,6 +4,7 @@ import json
 import hmac
 import base64
 import hashlib
+import os as _os
 import configparser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
