@@ -3367,39 +3367,60 @@ class MainApp(tk.Tk):
         self._menu_timesheets = m_ts
         self._menu_timesheets_registry_index = 2  # 0 - Создать, 1 - Мои табели, 2 - Реестр табелей
 
+        # === ИЗМЕНЕНИЯ ЗДЕСЬ ===
+        
         # Автотранспорт
         m_transport = tk.Menu(menubar, tearoff=0)
         self._menu_transport = m_transport
+
+        # 1. Создать заявку
         if SpecialOrders and hasattr(SpecialOrders, "create_page"):
             m_transport.add_command(
                 label="📝 Создать заявку",
-                command=lambda: self._show_page("transport", lambda parent: SpecialOrders.create_page(parent)),
+                # ОБНОВЛЕНО: передаем app_ref=self
+                command=lambda: self._show_page("transport", lambda parent: SpecialOrders.create_page(parent, app_ref=self)),
             )
         else:
             m_transport.add_command(label="📝 Создать заявку", command=self.run_special_orders_exe)
+        
+        # 2. Мои заявки (НОВЫЙ ПУНКТ)
+        if SpecialOrders and hasattr(SpecialOrders, "create_my_transport_orders_page"):
+            m_transport.add_command(
+                label="📄 Мои заявки",
+                command=lambda: self._show_page(
+                    "my_transport_orders",
+                    lambda parent: SpecialOrders.create_my_transport_orders_page(parent, app_ref=self)
+                ),
+            )
 
+        # 3. Планирование транспорта
         self._menu_transport_planning_index = None
         if SpecialOrders and hasattr(SpecialOrders, "create_planning_page"):
-            self._menu_transport_planning_index = 1
+            # Индекс может измениться, так как мы добавили "Мои заявки"
+            # Проще будет управлять видимостью по роли, как для других меню
+            self._menu_transport_planning_index = m_transport.index("end") + 1
             m_transport.add_command(
-                label="🚛Планирование транспорта",
+                label="🚛 Планирование транспорта",
                 command=lambda: self._show_page(
                     "planning", lambda parent: SpecialOrders.create_planning_page(parent)
                 ),
             )
 
+        # 4. Реестр транспорта
         self._menu_transport_registry_index = None
         if SpecialOrders and hasattr(SpecialOrders, "create_transport_registry_page"):
-            idx = m_transport.index("end")
-            self._menu_transport_registry_index = idx + 1 if idx is not None else 0
+            self._menu_transport_registry_index = m_transport.index("end") + 1
             m_transport.add_command(
-                label="🚘Реестр транспорта",
+                label="🚘 Реестр транспорта",
                 command=lambda: self._show_page(
                     "transport_registry",
                     lambda parent: SpecialOrders.create_transport_registry_page(parent),
                 ),
             )
         menubar.add_cascade(label="Автотранспорт", menu=m_transport)
+
+        # === КОНЕЦ ИЗМЕНЕНИЙ ===
+
 
         # Питание
         logging.debug(f"Строим меню Питание. meals_module={meals_module}")
@@ -3626,6 +3647,10 @@ class MainApp(tk.Tk):
             self._set_header("Реестр табелей", "")
         elif key == "transport":
             self._set_header("Заявка на спецтехнику", "")
+        # === ИЗМЕНЕНИЯ ЗДЕСЬ ===
+        elif key == "my_transport_orders":
+            self._set_header("Мои заявки на транспорт", "")
+        # === КОНЕЦ ИЗМЕНЕНИЙ ===
         elif key == "planning":
             self._set_header("Планирование транспорта", "")
         elif key == "transport_registry":
@@ -3846,4 +3871,3 @@ if __name__ == "__main__":
     app = MainApp()
     app.protocol("WM_DELETE_WINDOW", app.destroy) # Корректное закрытие по крестику
     app.mainloop()
-
