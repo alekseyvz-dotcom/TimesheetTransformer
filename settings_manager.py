@@ -539,6 +539,24 @@ def import_objects_from_excel(path: Path) -> int:
             release_db_connection(conn)
     return processed
 
+def _hash_password(password: str) -> str:
+    """Хеширует пароль для хранения в БД."""
+    if not isinstance(password, str) or not password:
+        raise ValueError("Пароль должен быть непустой строкой")
+    
+    # Используем надежный алгоритм с солью.
+    # Соль генерируется для каждого пароля и хранится вместе с хешем.
+    salt = os.urandom(16)
+    pwd_hash = hashlib.pbkdf2_hmac(
+        'sha256',
+        password.encode('utf-8'),
+        salt,
+        100000, # Количество итераций
+        dklen=32  # Длина ключа
+    )
+    # Храним в формате: алгоритм$соль$хеш
+    return f"pbkdf2:sha256:100000${salt.hex()}${pwd_hash.hex()}"
+
 def get_roles_list() -> List[Dict]:
     conn = None
     try:
