@@ -1330,14 +1330,20 @@ class TimesheetPage(tk.Frame):
         self._render_page(self.current_page)
 
     def clear_all_rows(self):
-        """Очищает всю модель."""
-        if self.read_only or not self.model_rows: return
-        if not messagebox.askyesno("Объектный табель", "Очистить все строки? Это действие нельзя отменить."):
+        """Очищает часы во всех строках, не удаляя сами строки."""
+        if self.read_only or not self.model_rows:
             return
+        if not messagebox.askyesno("Очистка табеля", "Вы уверены, что хотите очистить все часы у всех сотрудников?\n\nСами сотрудники останутся в списке."):
+            return
+
+        # Проходим по всей модели и обнуляем часы
+        for rec in self.model_rows:
+            rec['hours'] = [None] * 31
+            
+        # Перерисовываем текущую видимую страницу
+        self._render_page(self.current_page)
         
-        self.model_rows.clear()
-        self._render_page(1) # Рендерим пустую первую страницу
-        messagebox.showinfo("Очистка", "Все строки были удалены.")
+        messagebox.showinfo("Очистка", "Все часы были стерты.")
 
     def _current_file_path(self) -> Optional[Path]:
         addr = self.cmb_address.get().strip(); oid = self.cmb_object_id.get().strip(); dep = self.cmb_department.get().strip()
