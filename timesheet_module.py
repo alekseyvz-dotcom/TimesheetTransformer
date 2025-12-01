@@ -1470,8 +1470,25 @@ class TimesheetPage(tk.Frame):
             return
         if not messagebox.askyesno("Объектный табель", "Очистить все строки?"):
             return
+
+        # 1. Очищаем модель данных (как и было)
         self.model_rows.clear()
+
+        # 2. Уничтожаем все виджеты строк, которые сейчас на экране
+        for row_widget in list(self.rows):
+            # Уничтожаем все виджеты внутри строки
+            for widget in row_widget.widgets:
+                try:
+                    widget.destroy()
+                except tk.TclError:
+                    pass # Виджет мог быть уже уничтожен
+        
+        # 3. Очищаем список самих объектов-строк
+        self.rows.clear()
+
+        # 4. Перерисовываем интерфейс (теперь он будет пустой)
         self._render_page(1)
+        messagebox.showinfo("Очистка", "Все строки были удалены.")
 
     def _current_file_path(self) -> Optional[Path]:
         """Генерирует путь к файлу с учетом подразделения"""
