@@ -224,7 +224,7 @@ class ObjectCreatePage(tk.Frame):
 
         tk.Label(
             header,
-            text="Укажите основные данные по объекту, затем нажмите «Сохранить»",
+            text="Скопируйте данные из файла и вставьте (Ctrl+V) в нужные поля", # ИЗМЕНЕНО: Более понятная подсказка
             font=("Segoe UI", 9),
             fg="#555",
             bg="#f7f7f7",
@@ -237,7 +237,6 @@ class ObjectCreatePage(tk.Frame):
         body = tk.Frame(body_outer)
         body.pack(fill="both", expand=True)
 
-        # Левая и правая колонка
         left = tk.LabelFrame(body, text="Общие сведения", padx=10, pady=8)
         right = tk.LabelFrame(body, text="Договор", padx=10, pady=8)
 
@@ -250,27 +249,38 @@ class ObjectCreatePage(tk.Frame):
         # ---------- Левая колонка: общие сведения ----------
         row_l = 0
 
-        def add_left(label: str, var_name: str, width: int = 40, note: str = ""):
+        # Внутренняя функция для создания поля ввода
+        def add_entry(parent, label, var_name, width=40, note=""):
             nonlocal row_l
-            tk.Label(left, text=label, anchor="e").grid(
+            tk.Label(parent, text=label, anchor="e").grid(
                 row=row_l, column=0, sticky="e", padx=(0, 6), pady=3
             )
             var = tk.StringVar()
-            ent = ttk.Entry(left, textvariable=var, width=width)
+            ent = ttk.Entry(parent, textvariable=var, width=width)
             ent.grid(row=row_l, column=1, sticky="w", pady=3)
             if note:
-                tk.Label(left, text=note, fg="#777", font=("Segoe UI", 8)).grid(
+                tk.Label(parent, text=note, fg="#777", font=("Segoe UI", 8)).grid(
                     row=row_l, column=2, sticky="w", padx=(6, 0)
                 )
             setattr(self, f"var_{var_name}", var)
             setattr(self, f"ent_{var_name}", ent)
             row_l += 1
 
-        add_left("ID объекта (excel_id):", "excel_id", width=16, note="числовой, подставляется автоматически")
-        add_left("Год реализации программы:", "year", width=8)
-        add_left("Наименование программы:", "program_name", width=46)
-        add_left("Наименование заказчика:", "customer_name", width=46)
-        add_left("Адрес объекта:", "address", width=52)
+        add_entry(left, "ID объекта (excel_id):", "excel_id", width=16, note="подставляется автоматически")
+        add_entry(left, "Год реализации программы:", "year", width=8)
+
+        # Поле "Наименование программы" теперь Combobox
+        tk.Label(left, text="Наименование программы:", anchor="e").grid(
+            row=row_l, column=0, sticky="e", padx=(0, 6), pady=3
+        )
+        self.var_program_name = tk.StringVar()
+        program_names = get_unique_program_names() # Загружаем список
+        self.cmb_program_name = ttk.Combobox(left, textvariable=self.var_program_name, values=program_names, width=44)
+        self.cmb_program_name.grid(row=row_l, column=1, sticky="w", pady=3)
+        row_l += 1
+
+        add_entry(left, "Наименование заказчика:", "customer_name", width=46)
+        add_entry(left, "Адрес объекта:", "address", width=52)
 
         # ---------- Правая колонка: договор ----------
         row_r = 0
@@ -302,7 +312,7 @@ class ObjectCreatePage(tk.Frame):
         btns.pack(fill="x", padx=12, pady=(4, 10))
 
         ttk.Button(btns, text="Сохранить", command=self._on_save).pack(side="right", padx=4)
-        ttk.Button(btns, text="Очистить", command=self._on_clear).pack(side="right", padx=4)
+        ttk.Button(btns, text="Очистить форму", command=self._on_clear).pack(side="right", padx=4) # ИЗМЕНЕНО: Текст кнопки
 
         # Поле ID объекта (excel_id) делаем только для чтения
         try:
@@ -310,12 +320,9 @@ class ObjectCreatePage(tk.Frame):
         except Exception:
             pass
 
-    # ---------- заполнение полей ----------
-
     def _fill_from_data_or_default(self):
         d = self.obj_data
-        if d:
-            # режим редактирования (на будущее)
+        if d: # Режим редактирования
             self.var_excel_id.set(d.get("excel_id") or "")
             self.var_year.set(d.get("year") or "")
             self.var_program_name.set(d.get("program_name") or "")
@@ -330,43 +337,30 @@ class ObjectCreatePage(tk.Frame):
             self.var_short_name.set(d.get("short_name") or "")
             self.var_executor_department.set(d.get("executor_department") or "")
             self.var_contract_type.set(d.get("contract_type") or "")
-        else:
-            # новый объект — подставляем следующий excel_id
-            try:
-                next_id = get_next_excel_id()
-            except Exception:
-                next_id = "1"
-            self.var_excel_id.set(next_id)
-
-    # ---------- действия ----------
+        else: # Режим создания нового объекта
+            self._on_clear() # Просто очищаем форму и генерируем ID
 
     def _on_clear(self):
-        # при очистке: для нового объекта можно заново сгенерировать excel_id,
-        # для существующего — не трогаем его
+        """Полностью очищает все поля и генерирует новый ID для создания с нуля."""
         is_new = not bool(self.obj_data.get("id")) if self.obj_data else True
 
-        next_id = None
+        next_id = ""
         if is_new:
             try:
                 next_id = get_next_excel_id()
             except Exception:
                 next_id = ""
-
+        
+        # Очищаем все переменные
         for name in (
-            "excel_id", "year", "program_name", "customer_name", "address",
+            "year", "program_name", "customer_name", "address",
             "contract_number", "contract_date", "short_name",
             "executor_department", "contract_type",
         ):
             getattr(self, f"var_{name}").set("")
-
-        if is_new and next_id:
-            self.var_excel_id.set(next_id)
-
-        # возвращаем readonly
-        try:
-            self.ent_excel_id.configure(state="readonly")
-        except Exception:
-            pass
+        
+        # Устанавливаем новый ID
+        self.var_excel_id.set(next_id)
 
     def _on_save(self):
         addr = self.var_address.get().strip()
@@ -374,8 +368,8 @@ class ObjectCreatePage(tk.Frame):
             messagebox.showwarning("Объект", "Адрес объекта обязателен.")
             return
 
-        # excel_id: проверим, что это число (по твоей логике)
         excel_id_raw = self.var_excel_id.get().strip()
+        # ... (остальная часть _on_save без изменений) ...
         if excel_id_raw:
             if not excel_id_raw.isdigit():
                 if not messagebox.askyesno(
@@ -421,9 +415,31 @@ class ObjectCreatePage(tk.Frame):
             logging.exception("Ошибка сохранения объекта")
             messagebox.showerror("Объект", f"Ошибка сохранения в БД:\n{e}")
             return
+        
+        # Только если это был новый объект, готовим форму к следующему вводу
+        if not obj_id:
+            messagebox.showinfo("Объект", "Объект успешно сохранён в базе данных.")
+            
+            # ИЗМЕНЕНО: Готовим форму для создания следующего объекта
+            # Генерируем новый ID
+            self.var_excel_id.set(get_next_excel_id())
+            # Очищаем только те поля, которые скорее всего будут другими
+            self.var_address.set("")
+            self.var_short_name.set("")
+            self.var_contract_number.set("")
+            self.var_contract_date.set("")
+            
+            # Переводим фокус на поле "Адрес", чтобы сразу вставлять следующий
+            self.ent_address.focus_set()
 
-        self.obj_data["id"] = new_id
-        messagebox.showinfo("Объект", "Объект сохранён в базе данных.")
+            # Обновляем список программ, если пользователь ввел новое значение
+            current_programs = self.cmb_program_name['values']
+            new_program = self.var_program_name.get().strip()
+            if new_program and new_program not in current_programs:
+                self.cmb_program_name['values'] = get_unique_program_names()
+        else: # Если это было редактирование, просто сообщаем
+             messagebox.showinfo("Объект", "Изменения сохранены.")
+
 
 class ObjectEditDialog(tk.Toplevel):
     """Диалог редактирования объекта из реестра (без изменения ID и статуса)."""
