@@ -148,22 +148,35 @@ def get_or_create_object(cur, excel_id: str, address: str) -> Optional[int]:
     cur.execute("INSERT INTO objects (excel_id, address) VALUES (NULL, %s) RETURNING id", (address,))
     return cur.fetchone()[0]
 
-def save_transport_order_to_db(data: dict) -> int:
+def save_transport_order_to_db(data: dict, edit_order_id: Optional[int] = None) -> int:
     conn = None
     try:
         conn = get_db_connection()
-        with conn:
+        with conn: # Начинаем транзакцию
             with conn.cursor() as cur:
+                # Если это редактирование, сначала полностью удаляем старую заявку
+                if edit_order_id:
+                    cur.execute("DELETE FROM transport_order_positions WHERE order_id = %s", (edit_order_id,))
+                    cur.execute("DELETE FROM transport_orders WHERE id = %s", (edit_order_id,))
+
+                # Общая логика вставки (для новой или "отредактированной" заявки)
                 obj = data.get("object") or {}
                 object_id = get_or_create_object(cur, obj.get("id", ""), obj.get("address", ""))
+                
+                # Валидация: если адрес есть, а ID объекта не нашелся, это ошибка
+                if obj.get("address", "") and not object_id:
+                     raise ValueError(f"Не удалось найти или создать объект с адресом: {obj.get('address', '')}")
+
                 created_at = datetime.strptime(data["created_at"], "%Y-%m-%dT%H:%M:%S")
                 order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
+                user_id = data.get("user_id") # Получаем ID пользователя
+
                 cur.execute(
                     """
-                    INSERT INTO transport_orders (created_at, date, department, requester_fio, requester_phone, object_id, object_address, comment)
+                    INSERT INTO transport_orders (created_at, date, department, requester_fio, requester_phone, object_id, comment, user_id)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
                     """,
-                    (created_at, order_date, data.get("department", ""), data.get("requester_fio", ""), data.get("requester_phone", ""), object_id, obj.get("address", ""), data.get("comment", "")),
+                    (created_at, order_date, data.get("department", ""), data.get("requester_fio", ""), data.get("requester_phone", ""), object_id, data.get("comment", ""), user_id),
                 )
                 order_id = cur.fetchone()[0]
 
@@ -178,6 +191,93 @@ def save_transport_order_to_db(data: dict) -> int:
                         (order_id, p.get("tech", ""), int(p.get("qty", 0)), tval, float(p.get("hours", 0.0)), p.get("note", "")),
                     )
         return order_id
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+def load_user_transport_orders(user_id: int) -> List[Dict[str, Any]]:
+    """
+    Возвращает список заголовков заявок на транспорт, созданных пользователем.
+    """
+    if not user_id:
+        return []
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    o.id,
+                    o.date,
+                    o.created_at,
+                    COALESCE(o.department, '') AS department,
+                    COALESCE(o.requester_fio, '') AS requester_fio,
+                    COALESCE(obj.address, '') AS object_address,
+                    (SELECT COUNT(p.id) FROM transport_order_positions p WHERE p.order_id = o.id) AS positions_count
+                FROM transport_orders o
+                LEFT JOIN objects obj ON o.object_id = obj.id
+                WHERE o.user_id = %s
+                ORDER BY o.date DESC, o.id DESC
+                """,
+                (user_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+
+def get_transport_order_with_positions_from_db(order_id: int) -> Dict[str, Any]:
+    """
+    Возвращает полную информацию о заявке на транспорт, включая все её позиции.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Загружаем заголовок заявки
+            cur.execute(
+                """
+                SELECT
+                    o.id, o.created_at, o.date::text, o.department, o.requester_fio,
+                    o.requester_phone, o.comment,
+                    COALESCE(obj.address, '') AS object_address,
+                    COALESCE(obj.excel_id, '') AS object_id
+                FROM transport_orders o
+                LEFT JOIN objects obj ON o.object_id = obj.id
+                WHERE o.id = %s
+                """,
+                (order_id,),
+            )
+            order_header = cur.fetchone()
+            if not order_header:
+                raise ValueError(f"Заявка на транспорт с ID={order_id} не найдена")
+
+            # Загружаем позиции заявки
+            cur.execute(
+                "SELECT tech, qty, to_char(time, 'HH24:MI') AS time, hours, note "
+                "FROM transport_order_positions WHERE order_id = %s ORDER BY id",
+                (order_id,),
+            )
+            positions = cur.fetchall()
+
+            # Собираем результат в нужном формате
+            return {
+                "id": order_header["id"],
+                "created_at": order_header["created_at"].strftime("%Y-%m-%dT%H:%M:%S"),
+                "date": order_header["date"],
+                "department": order_header["department"],
+                "requester_fio": order_header["requester_fio"],
+                "requester_phone": order_header["requester_phone"],
+                "comment": order_header["comment"],
+                "object": {
+                    "id": order_header["object_id"],
+                    "address": order_header["object_address"]
+                },
+                "positions": [dict(p) for p in positions]
+            }
     finally:
         if conn:
             release_db_connection(conn)
@@ -269,7 +369,8 @@ def get_transport_orders_for_planning(filter_date: Optional[str], filter_departm
             sql = f"""
                 SELECT p.id, to_char(o.created_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS created_at, o.date::text AS date,
                        COALESCE(o.department,'') AS department, COALESCE(o.requester_fio,'') AS requester_fio,
-                       COALESCE(o.object_address,'') AS object_address, COALESCE(obj.excel_id,'') AS object_id,
+                       COALESCE(obj.address,'') AS object_address, -- Изменено
+                       COALESCE(obj.excel_id,'') AS object_id,
                        COALESCE(p.tech,'') AS tech, COALESCE(p.qty,0) AS qty,
                        COALESCE(to_char(p.time, 'HH24:MI'),'') AS time, COALESCE(p.hours,0) AS hours,
                        COALESCE(p.assigned_vehicle,'') AS assigned_vehicle, COALESCE(p.driver,'') AS driver,
@@ -776,16 +877,61 @@ class AddVehicleDialog(simpledialog.Dialog):
 # ------------------------- Встраиваемая страница -------------------------
 
 class SpecialOrdersPage(tk.Frame):
-    def __init__(self, master):
+    def __init__(self, master, existing_data: dict = None, order_id: int = None, on_saved=None):
         super().__init__(master, bg="#f7f7f7")
-        ensure_config()  # из settings_manager, если доступен
+        ensure_config()
         self.base_dir = exe_dir()
-        self.spr_path = get_spr_path()
+    
+        self.edit_order_id = order_id  # id редактируемой заявки
+        self.on_saved = on_saved      # callback после сохранения
 
         self._load_spr()
         self._build_ui()
 
-    # Ниже — те же методы, что использует standalone-окно, но работают в рамках Frame
+        if existing_data:
+            self._fill_from_existing(existing_data)
+        else:
+            # Для новой заявки, как и раньше
+            self._update_fio_list()
+            self._update_tomorrow_hint()
+            self.add_position()
+
+    def _fill_from_existing(self, data: dict):
+        # Заполняем поля заголовка
+        self.cmb_dep.set(data.get("department", "Все"))
+        self._update_fio_list()
+        self.fio_var.set(data.get("requester_fio", ""))
+        self.ent_phone.delete(0, "end"); self.ent_phone.insert(0, data.get("requester_phone", ""))
+        self.ent_date.delete(0, "end"); self.ent_date.insert(0, data.get("date", ""))
+        self.txt_comment.delete("1.0", "end"); self.txt_comment.insert("1.0", data.get("comment", ""))
+    
+        # Объект
+        obj = data.get("object", {})
+        self.cmb_address.set(obj.get("address", ""))
+        self._sync_ids_by_address()
+        if obj.get("id"):
+            self.cmb_object_id.set(obj.get("id"))
+
+        # Очищаем и заполняем позиции
+        for row in self.pos_rows:
+            row.destroy()
+        self.pos_rows.clear()
+    
+        positions_data = data.get("positions", [])
+        if not positions_data: # Если вдруг позиций нет, добавляем одну пустую
+            self.add_position()
+        else:
+            for pos_data in positions_data:
+                self.add_position()
+                row = self.pos_rows[-1]
+                row.cmb_tech.set(pos_data.get("tech", ""))
+                row.ent_qty.delete(0, "end"); row.ent_qty.insert(0, str(pos_data.get("qty", "1")))
+                row.ent_time.delete(0, "end"); row.ent_time.insert(0, pos_data.get("time", ""))
+                row.ent_hours.delete(0, "end"); row.ent_hours.insert(0, str(pos_data.get("hours", "4")))
+                row.ent_note.delete(0, "end"); row.ent_note.insert(0, pos_data.get("note", ""))
+
+        self._update_tomorrow_hint()
+
     def _load_spr(self):
         """
         Загружает сотрудников, объекты и технику из БД,
@@ -1026,7 +1172,17 @@ class SpecialOrdersPage(tk.Frame):
         oid = (self.cmb_object_id.get() or "").strip()
         comment = self.txt_comment.get("1.0", "end").strip()
         positions = [r.get_dict() for r in self.pos_rows]
-        return {
+    
+        user_id = None
+        # Получаем user_id из app_ref, который будет передан из главного приложения
+        app_ref = getattr(self, "app_ref", None)
+        if app_ref is not None and hasattr(app_ref, "current_user"):
+            try:
+                user_id = int((app_ref.current_user or {}).get("id") or 0) or None
+            except (ValueError, TypeError):
+                user_id = None
+            
+        data = {
             "created_at": created_at,
             "date": req_date.strftime("%Y-%m-%d"),
             "department": (self.cmb_dep.get() or "").strip(),
@@ -1036,30 +1192,38 @@ class SpecialOrdersPage(tk.Frame):
             "comment": comment,
             "positions": positions,
         }
+        if user_id:
+            data["user_id"] = user_id
+        return data
 
     def save_order(self):
         if not self._validate_form():
             return
 
         data = self._build_order_dict()
-
-        # Сохраняем только в БД
-        order_db_id = None
+    
         try:
-            if Settings:
-                order_db_id = save_transport_order_to_db(data)
+            # Передаем edit_order_id в функцию сохранения
+            order_db_id = save_transport_order_to_db(data, edit_order_id=self.edit_order_id)
         except Exception as e:
+            import traceback
             messagebox.showerror(
                 "Сохранение",
-                f"Не удалось сохранить заявку в БД:\n{e}"
+                f"Не удалось сохранить заявку в БД:\n{traceback.format_exc()}"
             )
             return
 
-        # Краткое подтверждение без путей к файлам
         messagebox.showinfo(
             "Сохранение",
-            f"Заявка сохранена в БД.\nID: {order_db_id if order_db_id is not None else '—'}"
+            f"Заявка {'обновлена' if self.edit_order_id else 'сохранена'} в БД.\nID: {order_db_id}"
         )
+
+        # Вызываем callback для обновления списка "Мои заявки", если он был передан
+        if self.on_saved:
+            self.on_saved()
+            # Если это было окно редактирования, закрываем его
+            if self.edit_order_id:
+                 self.winfo_toplevel().destroy()
 
     def clear_form(self):
         self.fio_var.set("")
@@ -1932,6 +2096,161 @@ class TransportRegistryPage(tk.Frame):
             f"Загружено записей: {added}\nОшибок: {errors}",
             parent=self,
         )
+
+class MyTransportOrdersPage(tk.Frame):
+    """Реестр заявок на транспорт, созданных текущим пользователем."""
+    def __init__(self, master, app_ref=None):
+        super().__init__(master, bg="#f7f7f7")
+        self.app_ref = app_ref
+        self.tree = None
+        self._orders: List[Dict[str, Any]] = []
+        self._build_ui()
+        self._load_data()
+
+    def _get_current_user_id(self) -> Optional[int]:
+        if self.app_ref and hasattr(self.app_ref, "current_user"):
+            try:
+                return int((self.app_ref.current_user or {}).get("id") or 0) or None
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def _build_ui(self):
+        top = tk.Frame(self, bg="#f7f7f7")
+        top.pack(fill="x", padx=8, pady=(8, 4))
+        tk.Label(top, text="Мои заявки на транспорт", font=("Segoe UI", 12, "bold"), bg="#f7f7f7").pack(side="left")
+        ttk.Button(top, text="🔄 Обновить", command=self._load_data).pack(side="right", padx=4)
+
+        frame = tk.Frame(self, bg="#f7f7f7")
+        frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+
+        cols = ("date", "object", "department", "requester", "count", "created_at")
+        self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="browse")
+
+        self.tree.heading("date", text="Дата"); self.tree.column("date", width=90, anchor="center")
+        self.tree.heading("object", text="Объект"); self.tree.column("object", width=280)
+        self.tree.heading("department", text="Подразделение"); self.tree.column("department", width=180)
+        self.tree.heading("requester", text="Заявитель"); self.tree.column("requester", width=220)
+        self.tree.heading("count", text="Позиций"); self.tree.column("count", width=80, anchor="center")
+        self.tree.heading("created_at", text="Создана"); self.tree.column("created_at", width=140, anchor="center")
+
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        self.tree.bind("<Double-1>", self._on_open)
+        self.tree.bind("<Return>", self._on_open)
+
+        bottom = tk.Frame(self, bg="#f7f7f7")
+        bottom.pack(fill="x", padx=8, pady=(0, 8))
+        tk.Label(bottom, text="Двойной щелчок или Enter — открыть для редактирования или копирования.",
+                 font=("Segoe UI", 9), fg="#555", bg="#f7f7f7").pack(side="left")
+
+    def _load_data(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        self._orders.clear()
+
+        user_id = self._get_current_user_id()
+        if not user_id:
+            messagebox.showwarning("Мои заявки", "Не удалось определить текущего пользователя.", parent=self)
+            return
+
+        try:
+            orders = load_user_transport_orders(user_id)
+            self._orders = orders
+        except Exception as e:
+            messagebox.showerror("Мои заявки", f"Ошибка загрузки списка заявок:\n{e}", parent=self)
+            return
+        
+        for o in self._orders:
+            created_str = o["created_at"].strftime("%d.%m.%Y %H:%M") if isinstance(o.get("created_at"), datetime) else ""
+            date_str = o["date"].strftime("%Y-%m-%d") if isinstance(o.get("date"), date) else str(o.get("date", ""))
+            self.tree.insert("", "end", iid=str(o["id"]), values=(
+                date_str,
+                o.get("object_address", ""),
+                o.get("department", ""),
+                o.get("requester_fio", ""),
+                o.get("positions_count", 0),
+                created_str
+            ))
+
+    def _get_selected_order_id(self) -> Optional[int]:
+        sel = self.tree.selection()
+        return int(sel[0]) if sel else None
+
+    def _on_open(self, event=None):
+        order_id = self._get_selected_order_id()
+        if not order_id:
+            return
+
+        try:
+            order_data = get_transport_order_with_positions_from_db(order_id)
+        except Exception as e:
+            messagebox.showerror("Мои заявки", f"Не удалось загрузить данные заявки ID={order_id}:\n{e}", parent=self)
+            return
+        
+        choice = messagebox.askyesnocancel(
+            "Открыть заявку",
+            "Нажмите «Да» для РЕДАКТИРОВАНИЯ заявки.\n"
+            "Нажмите «Нет» для СОЗДАНИЯ КОПИИ (на другой день).\n"
+            "Отмена — закрыть.",
+            parent=self
+        )
+
+        if choice is None: return # Отмена
+
+        if choice is False: # Создать копию
+            try:
+                # Увеличиваем дату по умолчанию на 1 день для копии
+                old_date = datetime.strptime(order_data["date"], "%Y-%m-%d").date()
+                order_data["date"] = (old_date + timedelta(days=1)).strftime("%Y-%m-%d")
+            except Exception: pass
+            edit_id = None
+            title = f"Новая заявка на транспорт (копия #{order_id})"
+        else: # Редактировать
+            edit_id = order_id
+            title = f"Редактирование заявки на транспорт #{order_id}"
+
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.geometry("1180x720")
+
+        page = SpecialOrdersPage(
+            win,
+            existing_data=order_data,
+            order_id=edit_id,
+            on_saved=self._load_data # Callback для обновления списка
+        )
+        page.app_ref = self.app_ref # Передаем app_ref дальше
+        page.pack(fill="both", expand=True)
+
+# ------------------------- API для встраивания -------------------------
+
+# ЗАМЕНИТЕ существующую функцию create_page
+def create_page(parent, app_ref=None) -> tk.Frame:
+    ensure_config()
+    try:
+        page = SpecialOrdersPage(parent)
+        page.app_ref = app_ref # Добавлено
+        return page
+    except Exception:
+        import traceback
+        messagebox.showerror("Заявка — ошибка", traceback.format_exc(), parent=parent)
+        return tk.Frame(parent)
+
+# ДОБАВЬТЕ новую функцию create_my_transport_orders_page в этот же блок
+def create_my_transport_orders_page(parent, app_ref=None) -> tk.Frame:
+    """Создает страницу 'Мои заявки на транспорт'."""
+    ensure_config()
+    try:
+        page = MyTransportOrdersPage(parent, app_ref=app_ref)
+        return page
+    except Exception:
+        import traceback
+        messagebox.showerror("Мои заявки (транспорт)", traceback.format_exc(), parent=parent)
+        return tk.Frame(parent)
 
 # ------------------------- Вариант standalone-окна -------------------------
 
