@@ -928,10 +928,18 @@ class TimesheetPage(tk.Frame):
         self.cmb_page_size.set(str(self.page_size.get()))
         self.cmb_page_size.bind("<<ComboboxSelected>>", lambda e: self._on_page_size_change())
 
-        ttk.Button(pag_frame, text="⟨", width=3, command=lambda: self._render_page(self.current_page - 1)).pack(side="left", padx=4)
+        def go_prev_page():
+            self._sync_visible_to_model()
+            self._render_page(self.current_page - 1)
+            
+        def go_next_page():
+            self._sync_visible_to_model()
+            self._render_page(self.current_page + 1)
+
+        ttk.Button(pag_frame, text="⟨", width=3, command=go_prev_page).pack(side="left", padx=4)
         self.lbl_page = ttk.Label(pag_frame, text="Стр. 1 / 1")
         self.lbl_page.pack(side="left")
-        ttk.Button(pag_frame, text="⟩", width=3, command=lambda: self._render_page(self.current_page + 1)).pack(side="left", padx=4)
+        ttk.Button(pag_frame, text="⟩", width=3, command=go_next_page).pack(side="left", padx=4)
 
         # --- Инициализация (без изменений) ---
         if self._init_department and self._init_department in deps:
@@ -1065,7 +1073,7 @@ class TimesheetPage(tk.Frame):
         except Exception:
             self.page_size.set(50)
         # Перед сменой размера сохраняем видимые правки и рендерим первую страницу
-        self._sync_visible_to_model()
+        self._sync_visible_to_model() # Явный вызов сохранения
         self._render_page(1)
 
     def _page_count(self) -> int:
@@ -1095,10 +1103,7 @@ class TimesheetPage(tk.Frame):
 
     def _render_page(self, page: Optional[int] = None):
         """Основной метод рендеринга. Создает виджеты только для текущей страницы."""
-        # 1. Сохраняем изменения с текущей страницы в модель
-        self._sync_visible_to_model()
-
-        # 2. Очищаем текущие UI-строки
+        # 1. Очищаем текущие UI-строки
         for r in self.rows:
             # Уничтожаем все виджеты внутри строки
             for widget in r.widgets:
@@ -1106,35 +1111,33 @@ class TimesheetPage(tk.Frame):
                 except tk.TclError: pass
         self.rows.clear()
         
-        # 3. Определяем, какую страницу показывать
+        # 2. Определяем, какую страницу показывать
         total_pages = self._page_count()
         if page is None: page = self.current_page
         self.current_page = max(1, min(total_pages, page))
 
-        # 4. Определяем срез данных для этой страницы
+        # 3. Определяем срез данных для этой страницы
         sz = max(1, self.page_size.get())
         start = (self.current_page - 1) * sz
         end = min(start + sz, len(self.model_rows))
 
         y, m = self.get_year_month()
 
-        # 5. Создаём виджеты только для этого среза
+        # 4. Создаём виджеты только для этого среза
         for i in range(start, end):
             rec = self.model_rows[i]
-            # row_index для RowWidget теперь просто порядковый номер на экране (1, 2, 3...)
             row_widget = RowWidget(self.table, len(self.rows) + 1, rec["fio"], rec["tbn"], self.get_year_month, self.delete_row)
             row_widget.set_day_font(self.DAY_ENTRY_FONT)
             
-            # Применяем формат дней и подставляем значения часов
             row_widget.update_days_enabled(y, m)
             row_widget.set_hours(rec.get("hours") or [None] * 31)
             
             self.rows.append(row_widget)
 
-        # 6. Обновляем UI
+        # 5. Обновляем UI
         self.after(30, self._on_scroll_frame_configure)
         self._update_page_label()
-        self._recalc_object_total() # Итоги всегда по всей модели
+        self._recalc_object_total()
     
     def _recalc_object_total(self):
         """Пересчитывает общие итоги по ВСЕЙ модели, а не только по видимой странице."""
@@ -1255,8 +1258,7 @@ class TimesheetPage(tk.Frame):
                 wd = datetime(y, m, d).weekday()
                 if wd < 4: hrs[d - 1] = "8,25"
                 elif wd == 4: hrs[d - 1] = "7"
-            rec["hours"] = hrs
-        
+            rec["hours"] = hrs  
         # Перерисовываем текущую страницу, чтобы увидеть изменения
         self._render_page(self.current_page)
         messagebox.showinfo("5/2 всем", "Режим 5/2 установлен всем сотрудникам.")
@@ -1285,6 +1287,9 @@ class TimesheetPage(tk.Frame):
                 hours_val_str = f"{hours_val_float:.2f}".rstrip("0").rstrip(".").replace(".", ",")
 
         for rec in self.model_rows:
+            # Убедимся, что список часов нужной длины
+            if len(rec.get("hours", [])) < 31:
+                rec["hours"] = (rec.get("hours", []) + [None]*31)[:31]
             rec["hours"][day_idx] = hours_val_str
             
         self._render_page(self.current_page)
@@ -1292,7 +1297,6 @@ class TimesheetPage(tk.Frame):
             messagebox.showinfo("Проставить часы", f"День {day} очищен у всех сотрудников.")
         else:
             messagebox.showinfo("Проставить часы", f"Часы '{hours_val_str}' проставлены в день {day} всем сотрудникам.")
-
 
     def delete_row(self, roww: RowWidget):
         """Удаляет строку из модели и перерисовывает страницу."""
