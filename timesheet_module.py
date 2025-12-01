@@ -8,7 +8,7 @@ from typing import List, Tuple, Optional, Any, Dict
 
 import psycopg2
 from psycopg2 import pool
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, execute_values
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
 
@@ -110,12 +110,19 @@ def upsert_timesheet_header(
             release_db_connection(conn)
 
 def replace_timesheet_rows(header_id: int, rows: List[Dict[str, Any]]):
-    """Полностью заменяет строки табеля для заданного header_id."""
+    """Полностью заменяет строки табеля одним запросом (Batch Insert)."""
     conn = None
     try:
         conn = get_db_connection()
         with conn, conn.cursor() as cur:
+            # Сначала удаляем старые (тут всё ок)
             cur.execute("DELETE FROM timesheet_rows WHERE header_id = %s", (header_id,))
+            
+            if not rows:
+                return
+
+            # Подготовка данных для массовой вставки
+            values = []
             for rec in rows:
                 hours_list = rec.get("hours") or [None] * 31
                 if len(hours_list) != 31:
@@ -131,14 +138,26 @@ def replace_timesheet_rows(header_id: int, rows: List[Dict[str, Any]]):
                     if isinstance(d_ot, (int, float)): total_ot_day += float(d_ot)
                     if isinstance(n_ot, (int, float)): total_ot_night += float(n_ot)
 
-                cur.execute(
-                    """
-                    INSERT INTO timesheet_rows (header_id, fio, tbn, hours_raw, total_days, total_hours, overtime_day, overtime_night)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (header_id, rec["fio"], rec.get("tbn") or None, hours_list,
-                     total_days or None, total_hours or None, total_ot_day or None, total_ot_night or None),
-                )
+                # Собираем кортеж значений
+                values.append((
+                    header_id, 
+                    rec["fio"], 
+                    rec.get("tbn") or None, 
+                    hours_list,
+                    total_days or None, 
+                    total_hours or None, 
+                    total_ot_day or None, 
+                    total_ot_night or None
+                ))
+
+            # Один запрос вместо N запросов
+            insert_query = """
+                INSERT INTO timesheet_rows 
+                (header_id, fio, tbn, hours_raw, total_days, total_hours, overtime_day, overtime_night)
+                VALUES %s
+            """
+            execute_values(cur, insert_query, values)
+            
     finally:
         if conn:
             release_db_connection(conn)
