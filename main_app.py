@@ -45,6 +45,11 @@ import objects
 import settings_manager as Settings
 import timesheet_module  # <-- ИМПОРТ НОВОГО МОДУЛЯ
 
+try:
+    import timesheet_transformer
+except ImportError:
+    timesheet_transformer = None
+
 # --- КОНСТАНТЫ И ГЛОБАЛЬНЫЕ НАСТРОЙКИ ---
 APP_NAME = "Управление строительством (Главное меню)"
 
@@ -284,6 +289,11 @@ class MainApp(tk.Tk):
 
         # === Инструменты и Настройки ===
         m_tools = tk.Menu(self._menubar, tearoff=0)
+        if timesheet_transformer and hasattr(timesheet_transformer, "open_converter"):
+            m_tools.add_command(
+                label="Конвертер табеля (1С)",
+                command=lambda: timesheet_transformer.open_converter(self),
+            )
         if BudgetAnalyzer and hasattr(BudgetAnalyzer, "create_page"):
             m_tools.add_command(label="Анализ смет", command=lambda: self._show_page("budget", lambda p: BudgetAnalyzer.create_page(p)))
         self._menubar.add_cascade(label="Инструменты", menu=m_tools)
