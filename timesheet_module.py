@@ -873,9 +873,8 @@ class TimesheetPage(tk.Frame):
         ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=3, padx=4)
         ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=4, padx=4)
         ttk.Button(btns, text="Загрузить из Excel", command=self.import_from_excel).grid(row=0, column=5, padx=4)
-        ttk.Button(btns, text="Обновить справочник", command=self.reload_spravochnik).grid(row=0, column=6, padx=4)
-        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=7, padx=4)
-        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=8, padx=4)
+        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=6, padx=4)
+        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=7, padx=4)
 
 
         # Основной контейнер с прокруткой
@@ -1355,54 +1354,6 @@ class TimesheetPage(tk.Frame):
         self.ent_tbn.delete(0, "end")
         self.ent_tbn.insert(0, tbn)
         self.pos_var.set(pos)
-
-    def reload_spravochnik(self):
-        try:
-            cur_dep = (self.cmb_department.get() or "Все").strip()
-            cur_addr = (self.cmb_address.get() or "").strip()
-            cur_id = (self.cmb_object_id.get() or "").strip()
-            cur_fio = (self.fio_var.get() or "").strip()
-
-            self._load_spr_data_from_db()
-
-            self.cmb_department.config(values=self.departments)
-            if cur_dep in self.departments:
-                self.cmb_department.set(cur_dep)
-            else:
-                try:
-                    saved_dep = get_selected_department_from_config()
-                    self.cmb_department.set(saved_dep if saved_dep in self.departments else self.departments[0])
-                except Exception:
-                    self.cmb_department.set(self.departments[0] if self.departments else "Все")
-
-            self.cmb_address.set_completion_list(self.address_options)
-            if cur_addr in self.address_options:
-                self.cmb_address.set(cur_addr)
-            else:
-                self.cmb_address.set("")
-            self._on_address_change()
-            if cur_id and cur_id in (self.cmb_object_id.cget("values") or []):
-                self.cmb_object_id.set(cur_id)
-
-            self._on_department_select()
-            dep_sel = (self.cmb_department.get() or "Все").strip()
-            if dep_sel == "Все":
-                allowed = [e[0] for e in self.employees]
-            else:
-                allowed = [e[0] for e in self.employees if len(e) > 3 and (e[3] or "").strip() == dep_sel]
-            seen = set()
-            allowed = [n for n in allowed if (n not in seen and not seen.add(n))]
-            if cur_fio and cur_fio in allowed:
-                self.fio_var.set(cur_fio)
-                self._on_fio_select()
-            else:
-                self.fio_var.set("")
-                self.ent_tbn.delete(0, "end")
-                self.pos_var.set("")
-
-            messagebox.showinfo("Справочник", "Справочник обновлён.")
-        except Exception as e:
-            messagebox.showerror("Справочник", f"Ошибка перечтения справочника:\n{e}")
 
     def fill_52_all(self):
         if self.read_only:
