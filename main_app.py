@@ -38,6 +38,7 @@ logging.debug("=== main_app запущен ===")
 # --- ИМПОРТ ВСЕХ МОДУЛЕЙ ПРИЛОЖЕНИЯ ---
 import BudgetAnalyzer
 import assets_logo as _assets_logo
+_LOGO_BASE64 = getattr(_assets_logo, "LOGO_BASE64", None)
 import SpecialOrders
 import meals_module
 import objects
@@ -46,12 +47,6 @@ import timesheet_module  # <-- ИМПОРТ НОВОГО МОДУЛЯ
 
 # --- КОНСТАНТЫ И ГЛОБАЛЬНЫЕ НАСТРОЙКИ ---
 APP_NAME = "Управление строительством (Главное меню)"
-RAW_LOGO_URL = "https://raw.githubusercontent.com/alekseyvz-dotcom/TimesheetTransformer/main/logo.png"
-TINY_PNG_BASE64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
-    "/w8AAn8B9w3G2kIAAAAASUVORK5CYII="
-)
-_LOGO_BASE64 = getattr(_assets_logo, "LOGO_BASE64", None)
 
 db_connection_pool = None
 
@@ -135,29 +130,36 @@ def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
 # --- ГРАФИЧЕСКИЙ ИНТЕРФЕЙС ---
 
 def embedded_logo_image(parent, max_w=360, max_h=160):
-    """Загружает и отображает логотип."""
-    b64 = _LOGO_BASE64
-    if not b64:
-        try:
-            data = urllib.request.urlopen(RAW_LOGO_URL, timeout=5).read()
-            b64 = base64.b64encode(data).decode("ascii")
-        except Exception:
-            b64 = TINY_PNG_BASE64
+    """
+    Загружает логотип из встроенной переменной _LOGO_BASE64.
+    Если переменная не найдена, использует крошечную заглушку.
+    """
+    # Используем либо найденный логотип, либо заглушку, если импорт провалился
+    b64 = _LOGO_BASE64 or TINY_PNG_BASE64 
+
     if Image and ImageTk:
         try:
             raw = base64.b64decode(b64.strip())
             im = Image.open(BytesIO(raw))
             im.thumbnail((max_w, max_h), Image.LANCZOS)
             return ImageTk.PhotoImage(im, master=parent)
-        except Exception: pass
+        except Exception as e:
+            logging.error(f"Ошибка загрузки логотипа через PIL: {e}")
+            # Пытаемся загрузить как обычный PhotoImage на случай, если PIL не справился
+
     try:
+        # Пытаемся напрямую через tkinter, он менее требователен
         ph = tk.PhotoImage(data=b64.strip(), master=parent)
         w, h = ph.width(), ph.height()
-        k = max(w / max_w, h / max_h, 1)
-        if k > 1: k = max(1, int(k))
-        ph = ph.subsample(k, k)
+        # Масштабирование, если нужно
+        if w > max_w or h > max_h:
+            k = max(w / max_w, h / max_h, 1)
+            k = max(1, int(k))
+            ph = ph.subsample(k, k)
         return ph
-    except Exception: return None
+    except Exception as e:
+        logging.error(f"Критическая ошибка загрузки логотипа через tkinter: {e}")
+        return None # Если ничего не сработало
 
 class HomePage(tk.Frame):
     """Домашняя страница с логотипом и приветствием."""
