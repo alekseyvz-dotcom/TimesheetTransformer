@@ -75,7 +75,33 @@ def load_objects_full_from_db() -> List[Dict[str, Any]]:
     finally:
         if conn:
             release_db_connection(conn)
+# ВСТАВЬТЕ ЭТОТ КОД
 
+# НОВАЯ ФУНКЦИЯ: для получения списка программ
+def get_unique_program_names() -> List[str]:
+    """
+    Возвращает список уникальных непустых наименований программ из таблицы объектов.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT program_name
+                  FROM objects
+                 WHERE program_name IS NOT NULL AND program_name != ''
+              ORDER BY program_name
+                """
+            )
+            # cur.fetchall() вернёт список кортежей [(name1,), (name2,)]
+            return [row[0] for row in cur.fetchall()]
+    except Exception as e:
+        logging.error(f"Ошибка получения списка программ: {e}")
+        return []
+    finally:
+        if conn:
+            release_db_connection(conn)
 
 def create_or_update_object(
     obj_id: Optional[int],
