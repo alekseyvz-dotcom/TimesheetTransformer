@@ -2274,15 +2274,6 @@ class SpecialOrdersApp(tk.Tk):
 
 # ------------------------- API для встраивания -------------------------
 
-def create_page(parent) -> tk.Frame:
-    ensure_config()
-    try:
-        return SpecialOrdersPage(parent)
-    except Exception:
-        import traceback
-        messagebox.showerror("Заявка — ошибка", traceback.format_exc(), parent=parent)
-        return tk.Frame(parent)
-
 def create_planning_page(parent) -> tk.Frame:
     ensure_config()
     try:
