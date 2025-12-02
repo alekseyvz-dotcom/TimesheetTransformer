@@ -1,3 +1,5 @@
+# analytics_module.py
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime, timedelta
@@ -24,10 +26,12 @@ def set_db_pool(pool: pool.SimpleConnectionPool):
 class AnalyticsData:
     """Класс для выполнения SQL-запросов и получения данных для дашбордов."""
 
-    def __init__(self, start_date, end_date):
+    ### ИЗМЕНЕНИЕ: Конструктор теперь принимает фильтр по типу объекта ###
+    def __init__(self, start_date, end_date, object_type_filter: str):
         self.start_date = start_date
         self.end_date = end_date
-    
+        self.object_type_filter = object_type_filter
+
     def _execute_query(self, query: str, params: tuple = None) -> List[Dict[str, Any]]:
         """Универсальный метод для выполнения запросов к БД."""
         if not db_connection_pool:
@@ -46,9 +50,17 @@ class AnalyticsData:
             if conn:
                 db_connection_pool.putconn(conn)
     
+    ### ИЗМЕНЕНИЕ: Добавлен метод для получения списка типов объектов ###
+    def get_object_types(self) -> List[str]:
+        """Получает уникальные значения 'short_name' из таблицы объектов для фильтра."""
+        query = "SELECT DISTINCT short_name FROM objects WHERE short_name IS NOT NULL AND short_name != '' ORDER BY short_name;"
+        results = self._execute_query(query)
+        return [row['short_name'] for row in results]
+
     def get_labor_kpi(self) -> Dict[str, Any]:
         """Получает KPI для дашборда 'Трудозатраты'."""
-        query = """
+        # Модифицируем базовый запрос, чтобы можно было добавить фильтр
+        base_query = """
         SELECT
             COALESCE(SUM(tr.total_hours), 0) as total_hours,
             COALESCE(SUM(tr.total_days), 0) as total_days,
@@ -56,46 +68,80 @@ class AnalyticsData:
             COUNT(DISTINCT tr.fio) as unique_employees
         FROM timesheet_headers th
         JOIN timesheet_rows tr ON th.id = tr.header_id
-        WHERE th.year * 100 + th.month BETWEEN %s AND %s;
+        {join_clause}
+        WHERE th.year * 100 + th.month BETWEEN %s AND %s {filter_clause};
         """
-        # Преобразуем даты в формат YYYYMM для сравнения
+        
         start_period = self.start_date.year * 100 + self.start_date.month
         end_period = self.end_date.year * 100 + self.end_date.month
+        params = [start_period, end_period]
         
-        result = self._execute_query(query, (start_period, end_period))
+        # Добавляем фильтр, если он выбран
+        join_clause = ""
+        filter_clause = ""
+        if self.object_type_filter:
+            join_clause = "LEFT JOIN objects o ON th.object_db_id = o.id"
+            filter_clause = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
+
+        query = base_query.format(join_clause=join_clause, filter_clause=filter_clause)
+        result = self._execute_query(query, tuple(params))
         return result[0] if result else {}
 
     def get_labor_by_object(self) -> pd.DataFrame:
         """Получает данные по трудозатратам в разрезе объектов."""
-        query = """
+        ### ИЗМЕНЕНИЕ: Используем 'address' для имени и фильтруем по 'short_name' ###
+        base_query = """
         SELECT 
-            COALESCE(o.short_name, th.object_addr) as object_name,
+            o.address as object_name,
             SUM(tr.total_hours) as total_hours
         FROM timesheet_headers th
         JOIN timesheet_rows tr ON th.id = tr.header_id
         LEFT JOIN objects o ON th.object_db_id = o.id
-        WHERE th.year * 100 + th.month BETWEEN %s AND %s
+        WHERE th.year * 100 + th.month BETWEEN %s AND %s {filter_clause}
         GROUP BY object_name
+        HAVING o.address IS NOT NULL
         ORDER BY total_hours DESC;
         """
         start_period = self.start_date.year * 100 + self.start_date.month
         end_period = self.end_date.year * 100 + self.end_date.month
+        params = [start_period, end_period]
 
-        data = self._execute_query(query, (start_period, end_period))
+        filter_clause = ""
+        if self.object_type_filter:
+            filter_clause = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
+        
+        query = base_query.format(filter_clause=filter_clause)
+        data = self._execute_query(query, tuple(params))
         return pd.DataFrame(data)
+
+    # Запросы для транспорта и питания также нужно обновить для поддержки фильтра
+    def _get_filter_clauses(self, date_field_alias: str) -> tuple:
+        """Вспомогательная функция для генерации фильтров для SQL."""
+        params = [self.start_date, self.end_date]
+        join_clause = ""
+        filter_clause = ""
+        if self.object_type_filter:
+            join_clause = f"LEFT JOIN objects o ON {date_field_alias}.object_id = o.id"
+            filter_clause = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
+        return join_clause, filter_clause, tuple(params)
 
     def get_transport_kpi(self) -> Dict[str, Any]:
         """Получает KPI для дашборда 'Транспорт'."""
-        query = """
+        join_clause, filter_clause, params = self._get_filter_clauses('t')
+        query = f"""
         SELECT
             COALESCE(SUM(tp.hours), 0) as total_machine_hours,
             COUNT(DISTINCT t.id) as total_orders,
             COALESCE(SUM(tp.qty), 0) as total_units
         FROM transport_orders t
         JOIN transport_order_positions tp ON t.id = tp.order_id
-        WHERE t.date BETWEEN %s AND %s;
+        {join_clause}
+        WHERE t.date BETWEEN %s AND %s {filter_clause};
         """
-        result = self._execute_query(query, (self.start_date, self.end_date))
+        result = self._execute_query(query, params)
         kpi = result[0] if result else {}
         if kpi.get('total_orders', 0) > 0:
             kpi['avg_hours_per_order'] = kpi.get('total_machine_hours', 0) / kpi['total_orders']
@@ -105,17 +151,53 @@ class AnalyticsData:
 
     def get_transport_by_tech(self) -> pd.DataFrame:
         """Получает данные по машино-часам в разрезе техники."""
-        query = """
+        join_clause, filter_clause, params = self._get_filter_clauses('t')
+        query = f"""
         SELECT
             tp.tech,
             SUM(tp.hours) as total_hours
         FROM transport_orders t
         JOIN transport_order_positions tp ON t.id = tp.order_id
-        WHERE t.date BETWEEN %s AND %s
+        {join_clause}
+        WHERE t.date BETWEEN %s AND %s {filter_clause}
         GROUP BY tp.tech
         ORDER BY total_hours DESC;
         """
-        data = self._execute_query(query, (self.start_date, self.end_date))
+        data = self._execute_query(query, params)
+        return pd.DataFrame(data)
+
+    ### ИЗМЕНЕНИЕ: Новые методы для аналитики по питанию ###
+    def get_meals_kpi(self) -> Dict[str, Any]:
+        """Получает KPI для дашборда 'Питание'."""
+        join_clause, filter_clause, params = self._get_filter_clauses('mo')
+        query = f"""
+        SELECT
+            COUNT(moi.id) as total_portions,
+            COUNT(DISTINCT mo.id) as total_orders,
+            COUNT(DISTINCT moi.employee_id) as unique_employees
+        FROM meal_orders mo
+        JOIN meal_order_items moi ON mo.id = moi.order_id
+        {join_clause}
+        WHERE mo.date BETWEEN %s AND %s {filter_clause};
+        """
+        result = self._execute_query(query, params)
+        return result[0] if result else {}
+
+    def get_meals_by_type(self) -> pd.DataFrame:
+        """Получает данные по количеству порций в разрезе типов питания."""
+        join_clause, filter_clause, params = self._get_filter_clauses('mo')
+        query = f"""
+        SELECT
+            moi.meal_type_text,
+            COUNT(moi.id) as total_count
+        FROM meal_orders mo
+        JOIN meal_order_items moi ON mo.id = moi.order_id
+        {join_clause}
+        WHERE mo.date BETWEEN %s AND %s {filter_clause}
+        GROUP BY moi.meal_type_text
+        ORDER BY total_count DESC;
+        """
+        data = self._execute_query(query, params)
         return pd.DataFrame(data)
 
 class AnalyticsPage(ttk.Frame):
@@ -133,9 +215,16 @@ class AnalyticsPage(ttk.Frame):
         self.period_var = tk.StringVar(value="Текущий месяц")
         period_combo = ttk.Combobox(filter_frame, textvariable=self.period_var, 
                                     values=["Текущий месяц", "Прошлый месяц", "Текущий квартал", "Текущий год"],
-                                    state="readonly")
+                                    state="readonly", width=15)
         period_combo.pack(side="left", padx=5)
         period_combo.bind("<<ComboboxSelected>>", self.refresh_data)
+
+        ### ИЗМЕНЕНИЕ: Добавлен фильтр по типу объекта ###
+        ttk.Label(filter_frame, text="Тип объекта:").pack(side="left", padx=(10, 5))
+        self.object_type_var = tk.StringVar(value="Все типы")
+        self.object_type_combo = ttk.Combobox(filter_frame, textvariable=self.object_type_var, state="readonly", width=30)
+        self.object_type_combo.pack(side="left", padx=5)
+        self.object_type_combo.bind("<<ComboboxSelected>>", self.refresh_data)
 
         ttk.Button(filter_frame, text="Обновить", command=self.refresh_data).pack(side="left", padx=10)
 
@@ -145,12 +234,28 @@ class AnalyticsPage(ttk.Frame):
         
         self.tab_labor = ttk.Frame(self.notebook)
         self.tab_transport = ttk.Frame(self.notebook)
+        self.tab_meals = ttk.Frame(self.notebook) ### ИЗМЕНЕНИЕ: Новая вкладка
         
         self.notebook.add(self.tab_labor, text="  Трудозатраты  ")
         self.notebook.add(self.tab_transport, text="  Транспорт и Техника  ")
+        self.notebook.add(self.tab_meals, text="  Питание  ") ### ИЗМЕНЕНИЕ: Новая вкладка
 
-        # Инициализация и первое обновление
+        # Первое обновление и загрузка фильтров
+        self.load_filters()
         self.refresh_data()
+
+    ### ИЗМЕНЕНИЕ: Метод для загрузки значений в фильтр ###
+    def load_filters(self):
+        """Загружает уникальные типы объектов из БД."""
+        try:
+            # Используем временный data_provider без фильтров для получения списка
+            temp_provider = AnalyticsData(datetime.now(), datetime.now(), "")
+            types = temp_provider.get_object_types()
+            self.object_type_combo['values'] = ["Все типы"] + types
+        except Exception as e:
+            logging.error(f"Не удалось загрузить типы объектов для фильтра: {e}")
+            self.object_type_combo['values'] = ["Все типы"]
+
 
     def get_dates_from_period(self):
         """Возвращает начальную и конечную дату в зависимости от выбранного периода."""
@@ -178,10 +283,17 @@ class AnalyticsPage(ttk.Frame):
     def refresh_data(self, event=None):
         """Обновляет все данные и перерисовывает дашборды."""
         start_date, end_date = self.get_dates_from_period()
-        self.data_provider = AnalyticsData(start_date, end_date)
+        
+        ### ИЗМЕНЕНИЕ: Передаем значение фильтра ###
+        obj_type_filter = self.object_type_var.get()
+        if obj_type_filter == "Все типы":
+            obj_type_filter = "" # Пустая строка означает отсутствие фильтра
+
+        self.data_provider = AnalyticsData(start_date, end_date, obj_type_filter)
         
         self._build_labor_tab()
         self._build_transport_tab()
+        self._build_meals_tab() ### ИЗМЕНЕНИЕ: Вызываем отрисовку новой вкладки
 
     def _clear_tab(self, tab):
         for widget in tab.winfo_children():
@@ -197,13 +309,9 @@ class AnalyticsPage(ttk.Frame):
 
     def _build_labor_tab(self):
         self._clear_tab(self.tab_labor)
-        
-        # --- KPI ---
         kpi_frame = ttk.Frame(self.tab_labor)
         kpi_frame.pack(fill="x", pady=10, padx=5)
-        
         kpi_data = self.data_provider.get_labor_kpi()
-
         cards_data = [
             ("Всего чел.-часов", f"{kpi_data.get('total_hours', 0):.1f}", "час."),
             ("Всего чел.-дней", int(kpi_data.get('total_days', 0)), "дн."),
@@ -215,36 +323,27 @@ class AnalyticsPage(ttk.Frame):
             card.grid(row=0, column=i, padx=5, sticky="ew")
             kpi_frame.grid_columnconfigure(i, weight=1)
 
-        # --- График ---
         df = self.data_provider.get_labor_by_object()
         if not df.empty:
             fig = Figure(figsize=(10, 5), dpi=100)
             ax = fig.add_subplot(111)
-            
             df_plot = df.head(10).sort_values('total_hours', ascending=True)
             bars = ax.barh(df_plot['object_name'], df_plot['total_hours'], color='#0078D7')
-
             ax.set_title("ТОП-10 объектов по трудозатратам", fontsize=12, weight='bold')
             ax.set_xlabel("Человеко-часы")
             ax.grid(axis='x', linestyle='--', alpha=0.7)
             fig.tight_layout()
-
-            # Добавляем значения на бары
             for bar in bars:
                 width = bar.get_width()
                 ax.text(width + 5, bar.get_y() + bar.get_height()/2, f'{width:.0f}', va='center')
-
             canvas = FigureCanvasTkAgg(fig, master=self.tab_labor)
             canvas.draw()
             canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=10)
 
     def _build_transport_tab(self):
         self._clear_tab(self.tab_transport)
-        
-        # --- KPI ---
         kpi_frame = ttk.Frame(self.tab_transport)
         kpi_frame.pack(fill="x", pady=10, padx=5)
-        
         kpi_data = self.data_provider.get_transport_kpi()
         cards_data = [
             ("Всего маш.-часов", f"{kpi_data.get('total_machine_hours', 0):.1f}", "час."),
@@ -257,21 +356,62 @@ class AnalyticsPage(ttk.Frame):
             card.grid(row=0, column=i, padx=5, sticky="ew")
             kpi_frame.grid_columnconfigure(i, weight=1)
 
-        # --- График ---
         df = self.data_provider.get_transport_by_tech()
         if not df.empty:
             fig = Figure(figsize=(10, 5), dpi=100)
             ax = fig.add_subplot(111)
-
             df_plot = df.head(10).sort_values('total_hours', ascending=False)
             bars = ax.bar(df_plot['tech'], df_plot['total_hours'], color='#5E9A2C')
-            
             ax.set_title("ТОП-10 востребованной техники", fontsize=12, weight='bold')
             ax.set_ylabel("Машино-часы")
             ax.tick_params(axis='x', rotation=45, labelsize=9)
             ax.grid(axis='y', linestyle='--', alpha=0.7)
             fig.tight_layout(pad=2.0)
-            
             canvas = FigureCanvasTkAgg(fig, master=self.tab_transport)
             canvas.draw()
             canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=10)
+
+    ### ИЗМЕНЕНИЕ: Новый метод для отрисовки вкладки "Питание" ###
+    def _build_meals_tab(self):
+        self._clear_tab(self.tab_meals)
+        kpi_frame = ttk.Frame(self.tab_meals)
+        kpi_frame.pack(fill="x", pady=10, padx=5)
+        
+        kpi_data = self.data_provider.get_meals_kpi()
+        cards_data = [
+            ("Всего порций", kpi_data.get('total_portions', 0), "шт."),
+            ("Всего заявок", kpi_data.get('total_orders', 0), "шт."),
+            ("Накормлено людей", kpi_data.get('unique_employees', 0), "чел."),
+        ]
+        # Создаем 3 карточки
+        for i, (title, value, unit) in enumerate(cards_data):
+            card = self._create_kpi_card(kpi_frame, title, value, unit)
+            card.grid(row=0, column=i, padx=5, sticky="ew")
+            kpi_frame.grid_columnconfigure(i, weight=1)
+
+        # График
+        df = self.data_provider.get_meals_by_type()
+        if not df.empty:
+            fig = Figure(figsize=(10, 4.5), dpi=100)
+            ax = fig.add_subplot(111)
+            
+            # Круговая диаграмма
+            labels = df['meal_type_text']
+            sizes = df['total_count']
+            
+            def autopct_format(values):
+                def my_format(pct):
+                    total = sum(values)
+                    val = int(round(pct * total / 100.0))
+                    return f'{pct:.1f}%\n({val:d} шт.)'
+                return my_format
+
+            ax.pie(sizes, labels=labels, autopct=autopct_format(sizes), startangle=90,
+                   wedgeprops=dict(width=0.4), pctdistance=0.8)
+            ax.set_title("Популярность типов питания", fontsize=12, weight='bold')
+            ax.axis('equal') # Equal aspect ratio ensures that pie is drawn as a circle.
+            
+            canvas = FigureCanvasTkAgg(fig, master=self.tab_meals)
+            canvas.draw()
+            canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=10)
+
