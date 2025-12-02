@@ -36,20 +36,38 @@ logging.basicConfig(
 logging.debug("=== main_app запущен ===")
 
 # --- ИМПОРТ ВСЕХ МОДУЛЕЙ ПРИЛОЖЕНИЯ ---
-import BudgetAnalyzer
-import assets_logo as _assets_logo
-_LOGO_BASE64 = getattr(_assets_logo, "LOGO_BASE64", None)
-import SpecialOrders
-import meals_module
-import objects
-import settings_manager as Settings
-import timesheet_module 
-import analytics_module
+# Оставляем здесь только то, что нужно для самого старта
+BudgetAnalyzer = None
+_assets_logo = None
+_LOGO_BASE64 = None
+SpecialOrders = None
+meals_module = None
+objects = None
+Settings = None
+timesheet_module = None
+analytics_module = None
+timesheet_transformer = None
 
-try:
-    import timesheet_transformer
-except ImportError:
-    timesheet_transformer = None
+def perform_heavy_imports():
+    """Функция для загрузки всех тяжелых модулей приложения."""
+    global BudgetAnalyzer, _assets_logo, _LOGO_BASE64, SpecialOrders, \
+           meals_module, objects, Settings, timesheet_module, \
+           analytics_module, timesheet_transformer
+           
+    import BudgetAnalyzer
+    import assets_logo as _assets_logo
+    _LOGO_BASE64 = getattr(_assets_logo, "LOGO_BASE64", None)
+    import SpecialOrders
+    import meals_module
+    import objects
+    import settings_manager as Settings
+    import timesheet_module 
+    import analytics_module
+
+    try:
+        import timesheet_transformer
+    except ImportError:
+        timesheet_transformer = None
 
 # --- КОНСТАНТЫ И ГЛОБАЛЬНЫЕ НАСТРОЙКИ ---
 APP_NAME = "Управление строительством (Главное меню)"
@@ -212,6 +230,56 @@ class LoginPage(tk.Frame):
         self.app_ref.on_login_success(user)
     def _on_exit(self):
         self.app_ref.destroy()
+        
+class SplashScreen(tk.Toplevel):
+    """
+    Класс для создания и управления окном-заставкой (splash screen).
+    """
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Загрузка...")
+        
+        # Убираем рамки окна
+        self.overrideredirect(True)
+        
+        width = 450
+        height = 250
+
+        # Центрируем окно на экране
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        x = (screen_width // 2) - (width // 2)
+        y = (screen_height // 2) - (height // 2)
+        self.geometry(f'{width}x{height}+{x}+{y}')
+
+        # Дизайн
+        self.config(bg="#f0f0f0", relief="solid", borderwidth=1)
+        
+        tk.Label(
+            self, text="Управление строительством", 
+            font=("Segoe UI", 16, "bold"), bg="#f0f0f0"
+        ).pack(pady=(40, 10))
+
+        tk.Label(
+            self, text="Пожалуйста, подождите...", 
+            font=("Segoe UI", 10), bg="#f0f0f0"
+        ).pack()
+
+        self.status_label = tk.Label(
+            self, text="Инициализация...", 
+            font=("Segoe UI", 9), fg="#555", bg="#f0f0f0"
+        )
+        self.status_label.pack(side="bottom", fill="x", ipady=10)
+
+        # Прогресс-бар
+        self.progress = ttk.Progressbar(self, mode='indeterminate')
+        self.progress.pack(pady=20, padx=40, fill="x")
+        self.progress.start(10) # Запускаем анимацию
+
+    def update_status(self, text):
+        """Обновляет текст статуса на заставке."""
+        self.status_label.config(text=text)
+        self.update_idletasks() # Принудительно обновляем GUI
 
 class MainApp(tk.Tk):
     """Главный класс приложения (каркас)."""
@@ -433,27 +501,60 @@ class MainApp(tk.Tk):
         super().destroy()
 
 # --- ТОЧКА ВХОДА ПРИЛОЖЕНИЯ ---
+
 if __name__ == "__main__":
-    logging.debug("Старт приложения в __main__...")
-    try:
-        Settings.ensure_config()
-        initialize_db_pool()
+    # 1. Создаем временное корневое окно и сразу его скрываем.
+    # Оно нужно, чтобы наша заставка (Toplevel) могла существовать.
+    root = tk.Tk()
+    root.withdraw()
 
-        logging.debug("Передача пула соединений в дочерние модули...")
-        modules_to_init = [meals_module, SpecialOrders, objects, Settings, timesheet_module, analytics_module]
-        for module in modules_to_init:
-            if module and hasattr(module, "set_db_pool"):
-                module.set_db_pool(db_connection_pool)
-        logging.debug("Передача пула завершена.")
+    # 2. Создаем и отображаем заставку
+    splash = SplashScreen(root)
+    
+    # 3. Определяем функцию, которая выполнит всю тяжелую работу
+    def start_application():
+        try:
+            # Обновляем статус на заставке
+            splash.update_status("Загрузка модулей приложения...")
+            perform_heavy_imports() # Выполняем отложенные импорты
+            
+            splash.update_status("Проверка конфигурации...")
+            Settings.ensure_config()
 
-    except Exception as e:
-        logging.critical("Приложение не может быть запущено из-за ошибки инициализации.", exc_info=True)
-        root = tk.Tk(); root.withdraw()
-        messagebox.showerror("Критическая ошибка", f"Не удалось инициализировать приложение.\n\nОшибка: {e}\n\nПроверьте настройки и доступность БД.", parent=root)
-        root.destroy()
-        sys.exit(1)
+            splash.update_status("Подключение к базе данных...")
+            initialize_db_pool()
 
-    logging.debug("Инициализация успешна. Запускаем главный цикл приложения.")
-    app = MainApp()
-    app.protocol("WM_DELETE_WINDOW", app.destroy)
-    app.mainloop()
+            splash.update_status("Передача настроек в модули...")
+            modules_to_init = [meals_module, SpecialOrders, objects, Settings, timesheet_module, analytics_module]
+            for module in modules_to_init:
+                if module and hasattr(module, "set_db_pool"):
+                    module.set_db_pool(db_connection_pool)
+
+            # Вся инициализация прошла успешно.
+            # Уничтожаем заставку.
+            splash.destroy()
+
+            # Уничтожаем временное скрытое окно.
+            root.destroy()
+            
+            # И запускаем наше настоящее главное приложение!
+            logging.debug("Инициализация успешна. Запускаем главный цикл приложения.")
+            app = MainApp()
+            app.protocol("WM_DELETE_WINDOW", app.destroy)
+            app.mainloop()
+
+        except Exception as e:
+            # Если на этапе инициализации произошла ошибка
+            logging.critical("Приложение не может быть запущено из-за ошибки инициализации.", exc_info=True)
+            splash.destroy() # Сначала убираем заставку
+            messagebox.showerror("Критическая ошибка", f"Не удалось инициализировать приложение.\n\nОшибка: {e}\n\nПроверьте настройки и доступность БД.")
+            root.destroy() # Закрываем временное окно
+            sys.exit(1)
+
+    # 4. Запускаем тяжелую функцию с небольшой задержкой (например, 100 мс).
+    # Это дает tkinter время, чтобы гарантированно отрисовать окно заставки.
+    root.after(100, start_application)
+    
+    # 5. Запускаем главный цикл для временного окна. 
+    # Он будет работать, пока мы не запустим основной app.mainloop() или не закроем все по ошибке.
+    root.mainloop()
