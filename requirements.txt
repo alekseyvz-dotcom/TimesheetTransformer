@@ -6,3 +6,4 @@ Pillow  # Если вы используете логотип и PIL/ImageTk
 pandas
 psycopg2-binary
 pyinstaller
+matplotlib
