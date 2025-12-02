@@ -214,16 +214,30 @@ def load_timesheet_rows_by_header_id(header_id: int) -> List[Dict[str, Any]]:
         if conn:
             release_db_connection(conn)
 
-def load_user_timesheet_headers(user_id: int) -> List[Dict[str, Any]]:
-    """Возвращает список заголовков табелей, созданных пользователем."""
+def load_user_timesheet_headers(user_id: int, year: Optional[int], month: Optional[int],
+                                department: Optional[str], object_addr_substr: Optional[str]) -> List[Dict[str, Any]]:
+    """Возвращает список заголовков табелей, созданных пользователем, с фильтрами."""
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # ### ИЗМЕНЕНО: Добавляем блок WHERE с фильтрами ###
+            where, params = ["user_id = %s"], [user_id]
+            if year is not None: where.append("year = %s"); params.append(year)
+            if month is not None: where.append("month = %s"); params.append(month)
+            if department: where.append("COALESCE(department, '') = %s"); params.append(department)
+            if object_addr_substr: where.append("object_addr ILIKE %s"); params.append(f"%{object_addr_substr}%")
+
+            where_sql = " AND ".join(where)
+
             cur.execute(
-                "SELECT id, object_id, object_addr, department, year, month, created_at, updated_at "
-                "FROM timesheet_headers WHERE user_id = %s ORDER BY year DESC, month DESC, object_addr, COALESCE(department, '')",
-                (user_id,),
+                # ### ИЗМЕНЕНО: Используем where_sql в запросе ###
+                f"""SELECT id, object_id, object_addr, department, year, month, created_at, updated_at 
+                   FROM timesheet_headers 
+                   WHERE {where_sql} 
+                   ORDER BY year DESC, month DESC, object_addr, COALESCE(department, '')
+                """,
+                params,
             )
             return [dict(r) for r in cur.fetchall()]
     finally:
@@ -1675,45 +1689,74 @@ class TimesheetPage(tk.Frame):
 
 class MyTimesheetsPage(tk.Frame):
     """
-    Реестр табелей текущего пользователя.
+    Реестр табелей текущего пользователя с фильтрацией и экспортом.
     """
     def __init__(self, master, app_ref: "MainApp"):
         super().__init__(master)
         self.app_ref = app_ref
+        if get_output_dir_from_config:
+            self.out_dir = get_output_dir_from_config()
+        else:
+            self.out_dir = Path("./output")
+        self.out_dir.mkdir(parents=True, exist_ok=True)
 
         self.tree = None
         self._headers: List[Dict[str, Any]] = []
+
+        # Переменные для хранения значений фильтров
+        self.var_year = tk.StringVar()
+        self.var_month = tk.StringVar()
+        self.var_dep = tk.StringVar()
+        self.var_obj_addr = tk.StringVar()
 
         self._build_ui()
         self._load_data()
 
     def _build_ui(self):
+        # --- Верхняя панель с фильтрами ---
         top = tk.Frame(self)
         top.pack(fill="x", padx=8, pady=(8, 4))
 
-        tk.Label(
-            top,
-            text="Мои табели",
-            font=("Segoe UI", 12, "bold"),
-        ).pack(side="left")
+        tk.Label(top, text="Мои табели", font=("Segoe UI", 12, "bold")).grid(
+            row=0, column=0, columnspan=6, sticky="w", pady=(0, 8)
+        )
 
-        ttk.Button(
-            top,
-            text="Обновить",
-            command=self._load_data,
-        ).pack(side="right", padx=4)
+        row_f = 1
+        tk.Label(top, text="Год:").grid(row=row_f, column=0, sticky="e", padx=(0, 4))
+        spn_year = tk.Spinbox(top, from_=2000, to=2100, width=6, textvariable=self.var_year)
+        spn_year.grid(row=row_f, column=1, sticky="w")
+        self.var_year.set(str(datetime.now().year))
 
-        # Таблица
+        tk.Label(top, text="Месяц:").grid(row=row_f, column=2, sticky="e", padx=(12, 4))
+        cmb_month = ttk.Combobox(
+            top, state="readonly", width=12, textvariable=self.var_month,
+            values=["Все"] + [month_name_ru(i) for i in range(1, 13)],
+        )
+        cmb_month.grid(row=row_f, column=3, sticky="w")
+        self.var_month.set("Все")
+
+        row_f += 1
+        tk.Label(top, text="Подразделение:").grid(row=row_f, column=0, sticky="e", padx=(0, 4), pady=(4, 0))
+        ent_dep = ttk.Entry(top, width=24, textvariable=self.var_dep)
+        ent_dep.grid(row=row_f, column=1, sticky="w", pady=(4, 0))
+
+        tk.Label(top, text="Объект (адрес):").grid(row=row_f, column=2, sticky="e", padx=(12, 4), pady=(4, 0))
+        ent_addr = ttk.Entry(top, width=34, textvariable=self.var_obj_addr)
+        ent_addr.grid(row=row_f, column=3, sticky="w", pady=(4, 0))
+
+        # Панель с кнопками
+        btns_frame = tk.Frame(top)
+        btns_frame.grid(row=row_f + 1, column=0, columnspan=6, sticky="w", pady=(8, 0))
+        ttk.Button(btns_frame, text="Применить фильтр", command=self._load_data).pack(side="left", padx=(0, 4))
+        ttk.Button(btns_frame, text="Сбросить", command=self._reset_filters).pack(side="left", padx=4)
+        ttk.Button(btns_frame, text="Выгрузить в Excel", command=self._export_to_excel).pack(side="left", padx=4)
+
+        # --- Таблица ---
         frame = tk.Frame(self)
         frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
         cols = ("year", "month", "object", "department", "updated_at")
-        self.tree = ttk.Treeview(
-            frame,
-            columns=cols,
-            show="headings",
-            selectmode="browse",
-        )
+        self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="browse")
 
         self.tree.heading("year", text="Год")
         self.tree.heading("month", text="Месяц")
@@ -1721,11 +1764,11 @@ class MyTimesheetsPage(tk.Frame):
         self.tree.heading("department", text="Подразделение")
         self.tree.heading("updated_at", text="Обновлён")
 
-        self.tree.column("year", width=60, anchor="center")
-        self.tree.column("month", width=80, anchor="center")
-        self.tree.column("object", width=260, anchor="w")
-        self.tree.column("department", width=180, anchor="w")
-        self.tree.column("updated_at", width=140, anchor="center")
+        self.tree.column("year", width=80, anchor="center", stretch=False)
+        self.tree.column("month", width=100, anchor="center", stretch=False)
+        self.tree.column("object", width=350, anchor="w")
+        self.tree.column("department", width=200, anchor="w")
+        self.tree.column("updated_at", width=150, anchor="center", stretch=False)
 
         vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
@@ -1733,104 +1776,153 @@ class MyTimesheetsPage(tk.Frame):
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
-        # Двойной клик — открыть табель
         self.tree.bind("<Double-1>", self._on_open)
-        # Enter — тоже открыть
         self.tree.bind("<Return>", self._on_open)
 
-        # Нижняя панель с подсказкой
+        # --- Нижняя панель ---
         bottom = tk.Frame(self)
         bottom.pack(fill="x", padx=8, pady=(0, 8))
         tk.Label(
-            bottom,
-            text="Двойной щелчок или Enter по строке — открыть табель для редактирования.",
-            font=("Segoe UI", 9),
-            fg="#555",
+            bottom, text="Двойной щелчок или Enter — открыть табель для редактирования.",
+            font=("Segoe UI", 9), fg="#555"
         ).pack(side="left")
 
+    def _reset_filters(self):
+        """Сбрасывает все фильтры и перезагружает данные."""
+        self.var_year.set(str(datetime.now().year))
+        self.var_month.set("Все")
+        self.var_dep.set("")
+        self.var_obj_addr.set("")
+        self._load_data()
+
     def _load_data(self):
+        """Загружает данные из БД с учетом фильтров."""
         self.tree.delete(*self.tree.get_children())
         self._headers.clear()
 
-        user = getattr(self.app_ref, "current_user", None) if hasattr(self, "app_ref") else None
+        user = getattr(self.app_ref, "current_user", None)
         user_id = (user or {}).get("id")
         if not user_id:
             messagebox.showwarning("Мои табели", "Не определён текущий пользователь.")
             return
 
+        # Считываем значения фильтров
         try:
-            headers = load_user_timesheet_headers(user_id)
+            year = int(self.var_year.get().strip()) if self.var_year.get().strip() else None
+        except ValueError:
+            year = None
+
+        month_name = self.var_month.get().strip()
+        month = None
+        if month_name and month_name != "Все":
+            month = [month_name_ru(i) for i in range(1, 13)].index(month_name) + 1
+
+        department = self.var_dep.get().strip() or None
+        addr_substr = self.var_obj_addr.get().strip() or None
+
+        try:
+            # Используем обновленную функцию
+            headers = load_user_timesheet_headers(user_id, year, month, department, addr_substr)
         except Exception as e:
-            logging.exception("Ошибка загрузки списка табелей пользователя")
+            # Используем logging, если он доступен
+            try: import logging; logging.exception("Ошибка загрузки 'Моих табелей'")
+            except ImportError: pass
             messagebox.showerror("Мои табели", f"Ошибка загрузки списка табелей из БД:\n{e}")
             return
 
         self._headers = headers
 
         for h in headers:
-            year = h["year"]
-            month = h["month"]
-            addr = h["object_addr"] or ""
-            obj_id = h.get("object_id") or ""
-            dep = h.get("department") or ""
-            upd = h.get("updated_at")
+            month_ru = month_name_ru(h["month"]) if 1 <= h["month"] <= 12 else str(h["month"])
+            obj_display = h["object_addr"] or ""
+            if h.get("object_id"):
+                obj_display = f"[{h['object_id']}] {obj_display}"
 
-            month_ru = month_name_ru(month) if 1 <= month <= 12 else str(month)
-            obj_display = addr
-            if obj_id:
-                obj_display = f"[{obj_id}] {addr}"
+            upd_str = h["updated_at"].strftime("%d.%m.%Y %H:%M") if isinstance(h.get("updated_at"), datetime) else ""
+            
+            self.tree.insert("", "end", iid=str(h["id"]), values=(
+                h["year"], month_ru, obj_display, h.get("department") or "", upd_str
+            ))
 
-            if isinstance(upd, datetime):
-                upd_str = upd.strftime("%d.%m.%Y %H:%M")
-            else:
-                upd_str = str(upd or "")
+    def _export_to_excel(self):
+        """Выгружает отфильтрованный список табелей в Excel."""
+        if not self._headers:
+            messagebox.showinfo("Экспорт в Excel", "Нет данных для выгрузки.")
+            return
 
-            iid = str(h["id"])
-            self.tree.insert(
-                "",
-                "end",
-                iid=iid,
-                values=(year, month_ru, obj_display, dep, upd_str),
-            )
+        from tkinter import filedialog
+        default_name = f"Мои_табели_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        path = filedialog.asksaveasfilename(
+            parent=self, title="Сохранить мои табели в Excel", defaultextension=".xlsx",
+            initialfile=default_name, filetypes=[("Excel", "*.xlsx"), ("Все", "*.*")]
+        )
+        if not path:
+            return
+
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Мои табели"
+            
+            # Заголовки как в TimesheetRegistryPage
+            header = ["Год", "Месяц", "Адрес", "ID объекта", "Подразделение", "ФИО сотрудника", "Табельный №"] + \
+                     [str(i) for i in range(1, 32)] + \
+                     ["Итого дней", "Итого часов", "Переработка день", "Переработка ночь"]
+            ws.append(header)
+            
+            # Настраиваем ширину колонок
+            widths = [6, 10, 40, 14, 22, 28, 12] + [6]*31 + [10, 12, 16, 16]
+            for i, width in enumerate(widths, 1):
+                ws.column_dimensions[get_column_letter(i)].width = width
+            
+            total_rows = 0
+            for h in self._headers:
+                rows_data = load_timesheet_rows_by_header_id(h["id"])
+                for r in rows_data:
+                    excel_row = [
+                        h["year"], h["month"], h.get("object_addr", ""), h.get("object_id", ""),
+                        h.get("department", ""), r["fio"], r["tbn"]
+                    ] + (r.get("hours_raw") or [None]*31) + [
+                        r.get("total_days"), r.get("total_hours"),
+                        r.get("overtime_day"), r.get("overtime_night")
+                    ]
+                    ws.append(excel_row)
+                    total_rows += 1
+            
+            wb.save(path)
+            messagebox.showinfo("Экспорт в Excel", f"Выгрузка завершена.\nСохранено строк: {total_rows}\nФайл: {path}")
+
+        except Exception as e:
+            try: import logging; logging.exception("Ошибка экспорта 'Моих табелей'")
+            except ImportError: pass
+            messagebox.showerror("Экспорт в Excel", f"Ошибка при выгрузке:\n{e}")
 
     def _get_selected_header(self) -> Optional[Dict[str, Any]]:
         sel = self.tree.selection()
-        if not sel:
-            return None
-        iid = sel[0]
+        if not sel: return None
         try:
-            hid = int(iid)
-        except Exception:
+            hid = int(sel[0])
+            return next((h for h in self._headers if h["id"] == hid), None)
+        except (ValueError, IndexError):
             return None
-        for h in self._headers:
-            if int(h["id"]) == hid:
-                return h
-        return None
 
     def _on_open(self, event=None):
         h = self._get_selected_header()
-        if not h:
-            return
+        if not h: return
 
-        object_id = h.get("object_id") or None
-        object_addr = h.get("object_addr") or ""
-        department = h.get("department") or ""
-        year = int(h.get("year") or 0)
-        month = int(h.get("month") or 0)
-
-        # Табель из "Моих табелей" всегда редактируемый для владельца
+        # Табель из "Моих табелей" всегда открывается для редактирования
         self.app_ref._show_page(
             "timesheet",
             lambda parent: TimesheetPage(
                 parent,
                 app_ref=self.app_ref,
-                init_object_id=object_id,
-                init_object_addr=object_addr,
-                init_department=department,
-                init_year=year,
-                init_month=month,
-                read_only=False,
-                owner_user_id=None,
+                init_object_id=h.get("object_id"),
+                init_object_addr=h.get("object_addr"),
+                init_department=h.get("department"),
+                init_year=h.get("year"),
+                init_month=h.get("month"),
+                read_only=False, # Всегда редактируемый
+                owner_user_id=None, # Не требуется, т.к. мы уже знаем, что это табель текущего юзера
             ),
         )
 
