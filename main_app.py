@@ -43,7 +43,8 @@ import SpecialOrders
 import meals_module
 import objects
 import settings_manager as Settings
-import timesheet_module  # <-- ИМПОРТ НОВОГО МОДУЛЯ
+import timesheet_module 
+import analytics_module
 
 try:
     import timesheet_transformer
@@ -287,6 +288,15 @@ class MainApp(tk.Tk):
         self._menubar.add_cascade(label="Объекты", menu=m_objects)
         self._menu_objects = m_objects
 
+        # === АНАЛИТИКА (НОВЫЙ РАЗДЕЛ) ===
+        m_analytics = tk.Menu(self._menubar, tearoff=0)
+        m_analytics.add_command(
+            label="📊 Операционная аналитика",
+            command=lambda: self._show_page("analytics_dashboard", lambda p: analytics_module.AnalyticsPage(p, self))
+        )
+        self._menubar.add_cascade(label="Аналитика", menu=m_analytics)
+        self._menu_analytics = m_analytics
+
         # === Инструменты и Настройки ===
         m_tools = tk.Menu(self._menubar, tearoff=0)
         if timesheet_transformer and hasattr(timesheet_transformer, "open_converter"):
@@ -336,6 +346,7 @@ class MainApp(tk.Tk):
             "meals_planning": ("Планирование питания", ""), "meals_settings": ("Настройки питания", ""),
             "object_create": ("Объекты: Создание/Редактирование", ""), "objects_registry": ("Реестр объектов", ""),
             "budget": ("Анализ смет", ""), "login": ("Управление строительством", "Вход в систему")
+            "analytics_dashboard": ("Операционная аналитика", "Сводные показатели по ключевым метрикам")
         }
         title, hint = headers.get(key, (key.replace("_", " ").title(), ""))
         self._set_header(title, hint)
@@ -408,6 +419,9 @@ class MainApp(tk.Tk):
         # "Реестр" объектов доступен всем (для просмотра и выбора).
         set_state(self._menu_objects, "Реестр", True)
 
+        # --- Настройка меню "Аналитика" ---
+        set_state(self._menubar, "Аналитика", is_manager)
+
         # --- Настройка корневого меню ---
         # Главный пункт "Настройки" доступен только администратору.
         set_state(self._menubar, "Настройки", is_admin)
@@ -426,7 +440,7 @@ if __name__ == "__main__":
         initialize_db_pool()
 
         logging.debug("Передача пула соединений в дочерние модули...")
-        modules_to_init = [meals_module, SpecialOrders, objects, Settings, timesheet_module]
+        modules_to_init = [meals_module, SpecialOrders, objects, Settings, timesheet_module, analytics_module]
         for module in modules_to_init:
             if module and hasattr(module, "set_db_pool"):
                 module.set_db_pool(db_connection_pool)
