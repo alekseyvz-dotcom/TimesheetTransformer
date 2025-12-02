@@ -502,42 +502,128 @@ def import_employees_from_excel(path: Path) -> int:
 
 def import_objects_from_excel(path: Path) -> int:
     """
-    Импортирует объекты из Excel 'Справочник программ и объектов...'.
+    Импортирует/обновляет объекты из Excel 'Справочник программ и объектов...'.
     """
-    if not path.exists(): raise FileNotFoundError(f"Файл не найден: {path}")
+    if not path.exists():
+        raise FileNotFoundError(f"Файл не найден: {path}")
+
     wb = load_workbook(path, read_only=True, data_only=True)
     ws = wb.active
     header_row_idx = None
+    header_row = []
+
+    # Ищем строку заголовка по ключевой фразе
     for i, row in enumerate(ws.iter_rows(min_row=1, max_row=40, values_only=True), start=1):
         if row and any("id (код) номер объекта" in _s_val(c).lower() for c in row):
             header_row_idx, header_row = i, [_s_val(c).lower() for c in row]
             break
-    if header_row_idx is None: raise RuntimeError("Не найдена строка заголовка с колонкой 'ID (код) номер объекта'")
-    
+
+    if header_row_idx is None:
+        raise RuntimeError("Не найдена строка заголовка с колонкой 'ID (код) номер объекта'")
+
     def col_idx(substr: str) -> Opt[int]:
         substr = substr.lower()
         for i, h in enumerate(header_row):
-            if substr in h: return i
+            if substr in h:
+                return i
         return None
 
+    # Получаем индексы всех нужных колонок
     idx_excel_id = col_idx("id (код) номер объекта")
+    idx_year = col_idx("год")
+    idx_program = col_idx("наименование программы")
+    idx_customer = col_idx("наименование заказчика")
     idx_addr = col_idx("адрес")
-    if idx_excel_id is None or idx_addr is None: raise RuntimeError("Не найдены обязательные колонки ID и/или Адрес")
-    
-    # ... (остальные col_idx без изменений)
-    
+    idx_contract_no = col_idx("№ договора")
+    idx_contract_date = col_idx("дата договора")
+    idx_short_name = col_idx("сокращенное наименование объекта")
+    idx_department_name = col_idx("подразделение")
+    idx_contract_type = col_idx("тип договора")
+
+    if idx_excel_id is None or idx_addr is None:
+        raise RuntimeError("Не найдены обязательные колонки 'ID (код) номер объекта' и/или 'Адрес объекта'")
+
     conn = None
     processed = 0
     try:
         conn = get_db_connection()
-        with conn:
+        with conn:  # Открываем транзакцию
             with conn.cursor() as cur:
+                # Проходим по строкам данных, начиная со следующей после заголовка
                 for row in ws.iter_rows(min_row=header_row_idx + 1, values_only=True):
-                    # ... (весь код внутри цикла без изменений) ...
+                    # Пропускаем пустые строки
+                    if not row or all(c is None or _s_val(c) == "" for c in row):
+                        continue
+
+                    # Считываем данные из ячеек, проверяя наличие индекса и длину строки
+                    excel_id = _s_val(row[idx_excel_id]) if idx_excel_id < len(row) else ""
+                    if not excel_id:
+                        continue # Пропускаем строки без ID
+
+                    year = _s_val(row[idx_year]) if idx_year is not None and idx_year < len(row) else ""
+                    program = _s_val(row[idx_program]) if idx_program is not None and idx_program < len(row) else ""
+                    customer = _s_val(row[idx_customer]) if idx_customer is not None and idx_customer < len(row) else ""
+                    address = _s_val(row[idx_addr]) if idx_addr < len(row) else ""
+                    contract_no = _s_val(row[idx_contract_no]) if idx_contract_no is not None and idx_contract_no < len(row) else ""
+                    
+                    # Обработка даты (может быть числом, строкой или datetime)
+                    contract_date_raw = row[idx_contract_date] if idx_contract_date is not None and idx_contract_date < len(row) else None
+                    contract_date_val: Opt[date] = None
+                    if isinstance(contract_date_raw, datetime):
+                        contract_date_val = contract_date_raw.date()
+                    elif isinstance(contract_date_raw, (int, float)): # Excel хранит дату как число дней с 1900-01-01
+                         # openpyxl уже должен был преобразовать, но на всякий случай
+                         try:
+                            from datetime import timedelta
+                            contract_date_val = (datetime(1899, 12, 30) + timedelta(days=contract_date_raw)).date()
+                         except:
+                            pass # Если не удалось, останется None
+                    
+                    short_name = _s_val(row[idx_short_name]) if idx_short_name is not None and idx_short_name < len(row) else ""
+                    department_name = _s_val(row[idx_department_name]) if idx_department_name is not None and idx_department_name < len(row) else ""
+                    contract_type = _s_val(row[idx_contract_type]) if idx_contract_type is not None and idx_contract_type < len(row) else ""
+                    
+                    # Ищем существующий объект по excel_id
+                    cur.execute("SELECT id FROM construction_objects WHERE excel_id = %s", (excel_id,))
+                    existing_record = cur.fetchone()
+
+                    if existing_record:
+                        # Если объект найден - обновляем его
+                        db_id = existing_record[0]
+                        cur.execute(
+                            """
+                            UPDATE construction_objects SET
+                                address = %s, year = %s, program_name = %s, customer = %s, 
+                                contract_no = %s, contract_date = %s, short_name = %s, 
+                                department_name = %s, contract_type = %s, updated_at = NOW()
+                            WHERE id = %s
+                            """,
+                            (
+                                address, year or None, program or None, customer or None, 
+                                contract_no or None, contract_date_val, short_name or None, 
+                                department_name or None, contract_type or None,
+                                db_id
+                            )
+                        )
+                    else:
+                        # Если не найден - создаем новый
+                        cur.execute(
+                            """
+                            INSERT INTO construction_objects 
+                                (excel_id, address, year, program_name, customer, contract_no, contract_date, short_name, department_name, contract_type)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            (
+                                excel_id, address, year or None, program or None, customer or None, 
+                                contract_no or None, contract_date_val, short_name or None, 
+                                department_name or None, contract_type or None
+                            )
+                        )
                     processed += 1
     finally:
         if conn:
             release_db_connection(conn)
+            
     return processed
 
 def _hash_password(password: str, salt: Optional[bytes] = None) -> str:
