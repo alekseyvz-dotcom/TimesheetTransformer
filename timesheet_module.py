@@ -597,8 +597,9 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
         self.focus_set()
 
     def _create_checkbox_images(self):
-        """Создает изображения для чекбоксов после инициализации UI."""
-        self.img_checked = tk.PhotoImage(
+        """Создает и сохраняет изображения как атрибуты Treeview."""
+        # Создаем изображения и сразу присваиваем их как атрибуты self.tree
+        self.tree.img_checked = tk.PhotoImage(
             data=base64.b64decode(
                 'iVBORw0KGgoAAAANSUhEUgAAAA0AAAANCAYAAABy6+R8AAAABGdBTUEAALGPC/xhBQAAACBjSFJN'
                 'AAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABl0RVh0U29mdHdhcmUAd3d3'
@@ -609,7 +610,7 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
                 'AAE2h2n3z2ttAAAAAElFTkSuQmCC'
             )
         )
-        self.img_unchecked = tk.PhotoImage(
+        self.tree.img_unchecked = tk.PhotoImage(
             data=base64.b64decode(
                 'iVBORw0KGgoAAAANSUhEUgAAAA0AAAANCAYAAABy6+R8AAAABGdBTUEAALGPC/xhBQAAACBjSFJN'
                 'AAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABl0RVh0U29mdHdhcmUAd3d3'
@@ -725,7 +726,7 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
             self._iid_map[iid] = key
             
             is_checked = self.checked_state.get(key, False)
-            image = self.img_checked if is_checked else self.img_unchecked
+            image = self.tree.img_checked if is_checked else self.tree.img_unchecked
             
             self.tree.insert("", "end", iid=iid, image=image, values=(fio, tbn or '', pos or ''))
         
@@ -749,7 +750,7 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
             self.checked_state[key] = new_state
             
             # Обновляем иконку
-            new_image = self.img_checked if new_state else self.img_unchecked
+            new_image = self.tree.img_checked if is_checked else self.tree.img_unchecked
             self.tree.item(iid, image=new_image)
             
             self._update_counters()
@@ -802,7 +803,7 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
             key = self._iid_map.get(iid)
             if key:
                 self.checked_state[key] = new_state
-                image = self.img_checked if new_state else self.img_unchecked
+                image = self.tree.img_checked if is_checked else self.tree.img_unchecked 
                 self.tree.item(iid, image=image)
         self._update_counters()
     
