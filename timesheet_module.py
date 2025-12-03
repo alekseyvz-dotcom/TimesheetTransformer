@@ -663,27 +663,25 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
 
     def _on_toggle_check(self, event):
         """Обрабатывает клик по строке для переключения чекбокса."""
+
         region = self.tree.identify_region(event.x, event.y)
-        if region != "tree": # Кликнули не на иконку чекбокса
-            return
+        if region == "tree":
+            # Получаем ID строки, по которой кликнули
+            iid = self.tree.identify_row(event.y)
+            if not iid:
+                return
 
-        iid = self.tree.identify_row(event.y)
-        if not iid:
-            return
+            key = self._iid_map.get(iid)
+            if key is None:
+                return
 
-        key = self._iid_map.get(iid)
-        if key is None:
-            return
+            current_state = self.checked_state.get(key, False)
+            self.checked_state[key] = not current_state
 
-        # Переключаем состояние
-        current_state = self.checked_state.get(key, False)
-        self.checked_state[key] = not current_state
+            new_image = self.img_checked if not current_state else self.img_unchecked
+            self.tree.item(iid, image=new_image)
 
-        # Обновляем картинку
-        new_image = self.img_checked if not current_state else self.img_unchecked
-        self.tree.item(iid, image=new_image)
-        
-        self._update_counters()
+            self._update_counters()
 
     def _update_counters(self):
         """Обновляет счетчики выбранных/всего."""
@@ -1480,7 +1478,7 @@ class TimesheetPage(tk.Frame):
         if self.read_only:
             return
         dep_sel = (self.cmb_department.get() or "Все").strip()
-    
+
         # Определяем список кандидатов для выбора
         if dep_sel == "Все":
             candidates = self.employees[:]
@@ -1493,20 +1491,26 @@ class TimesheetPage(tk.Frame):
             messagebox.showinfo("Выбор сотрудников", f"В подразделении «{dep_sel}» нет сотрудников для добавления.")
             return
 
-        # Открываем диалоговое окно
+        # 1. Открываем наше новое диалоговое окно
         dialog = SelectEmployeesChecklistDialog(self, candidates, title=title)
-        self.wait_window(dialog)
-        # self.wait_window(dialog) # Это не нужно, так как grab_set() делает его модальным
-    
-        if not dialog.result: # Пользователь нажал "Отмена" или закрыл окно
+        self.wait_window(dialog) # Ждем, пока пользователь закроет окно
+
+        # 2. Проверяем результат. Если None, значит пользователь нажал "Отмена".
+        if dialog.result is None:
             return
-    
+
         selected_employees = dialog.result
+        if not selected_employees:
+            messagebox.showinfo("Объектный табель", "Ни один сотрудник не был выбран.")
+            return
+
+        self._sync_visible_to_model()
     
-        self._sync_visible_to_model() # Сохраняем текущие правки на странице
+        # Получаем список уже добавленных сотрудников, чтобы не дублировать
         existing = {(r["fio"].strip().lower(), r["tbn"].strip()) for r in self.model_rows}
         added_count = 0
 
+        # Добавляем в модель только тех, кого еще нет в списке
         for fio, tbn, _, _ in selected_employees:
             key = (fio.strip().lower(), (tbn or "").strip())
             if key not in existing:
@@ -1515,30 +1519,10 @@ class TimesheetPage(tk.Frame):
                 added_count += 1
 
         if added_count > 0:
-            self._render_page(1) # После добавления перерисовываем с первой страницы
+            self._render_page(1) # Перерисовываем таблицу с первой страницы
             messagebox.showinfo("Объектный табель", f"Добавлено новых сотрудников: {added_count}")
         else:
             messagebox.showinfo("Объектный табель", "Все выбранные сотрудники уже были в списке.")
-
-        def process_batch():
-            for fio, tbn, _, _ in candidates:
-                if dlg.cancelled: break
-                key = (fio.strip().lower(), (tbn or "").strip())
-                if key not in existing:
-                    self.model_rows.append({"fio": fio, "tbn": tbn, "hours": [None] * 31})
-                    existing.add(key)
-                    nonlocal added_count
-                    added_count += 1
-                dlg.step()
-
-            dlg.close()
-            if added_count > 0:
-                self._render_page(1) # После добавления перерисовываем с первой страницы
-                messagebox.showinfo("Объектный табель", f"Добавлено новых сотрудников: {added_count}")
-            else:
-                messagebox.showinfo("Объектный табель", "Все сотрудники из этого подразделения уже в списке.")
-        
-        self.after(50, process_batch) # Запускаем обработку с небольшой задержкой, чтобы диалог успел отрисоваться
 
     def _on_fio_select(self, *_):
         fio = self.fio_var.get().strip()
