@@ -598,7 +598,7 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
         tree_frame.grid(row=1, column=0, sticky="nsew")
         
         cols = ("fio", "tbn", "position")
-        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="none")
+        self.tree = ttk.Treeview(tree_frame, columns=cols, show="tree headings", selectmode="none")
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
