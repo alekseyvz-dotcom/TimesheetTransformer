@@ -1359,9 +1359,9 @@ class MealOrderPage(tk.Frame):
 
         bottom = tk.Frame(self)
         bottom.pack(fill="x", padx=10, pady=(0, 10))
-        ttk.Button(bottom, text="Сохранить заявку", command=self.save_order).pack(
-            side="left", padx=4
-        )
+        self.btn_save = ttk.Button(bottom, text="Сохранить заявку", command=self.save_order)
+        self.btn_save.pack(side="left", padx=4)
+        
         ttk.Button(bottom, text="Очистить форму", command=self.clear_form).pack(
             side="left", padx=4
         )
@@ -1603,156 +1603,231 @@ class MealOrderPage(tk.Frame):
         if not self._validate_form():
             return
 
-        data = self._build_order_dict()
-        total_items = len(data.get("employees", []))
-
-        # 1. Проверка пересечений
+        # блокируем кнопку, чтобы избежать повторных нажатий
         try:
-            conflicts = find_conflicting_meal_orders_same_date_other_object(data)
-        except Exception as e:
-            if not messagebox.askokcancel(
-                "Проверка пересечений",
-                f"Не удалось проверить пересечения по БД:\n{e}\n\n"
-                f"Нажмите «ОК», чтобы продолжить сохранение,\n"
-                f"или «Отмена», чтобы вернуться к заявке.",
-            ):
-                return
-            conflicts = []
+            self.btn_save.configure(state="disabled")
+        except Exception:
+            pass
 
-        if conflicts:
-            # Формируем и показываем сообщение о конфликтах
-            lines = []
-            for c in conflicts:
-                fio = c.get("fio") or "?"
-                tbn = c.get("tbn") or ""
-                who = f"{fio} ({tbn})" if tbn else fio
-                addr = c.get("address") or "неизвестный адрес"
-                date_str = c.get("date") or ""
-                team = c.get("team_name") or ""
-                dep = c.get("department") or ""
-                extra = f", бригада: {team}" if team else ""
-                if dep:
-                    extra += f", подразделение: {dep}"
-                lines.append(f"- {who}: {date_str}, объект: {addr}{extra}")
-
-            text = (
-                "Обнаружены сотрудники, на которых в ЭТУ ЖЕ дату уже заказано питание\n"
-                "на ДРУГОМ объекте:\n\n"
-                + "\n".join(lines[:20])
-                + ("\n\n(Показаны первые 20 совпадений)" if len(lines) > 20 else "")
-                + "\n\nНажмите «ОК», чтобы всё равно добавить текущую заявку в реестр,\n"
-                "или «Отмена», чтобы вернуться к редактированию заявки."
-            )
-
-            if not messagebox.askokcancel("Пересечение заявок по сотрудникам", text):
-                return
-
-        # 2. Сохранение в БД (выполняется всегда, если пользователь не нажал "Отмена")
-        order_db_id = None
-        conn = None
         try:
-            conn = get_db_connection()
-            with conn.cursor() as cur:
-                with conn:  # Начинаем транзакцию
-                    if self.edit_order_id:
-                        # --- РЕДАКТИРОВАНИЕ ---
-                        cur.execute("DELETE FROM meal_order_items WHERE order_id = %s", (self.edit_order_id,))
-                        
+            data = self._build_order_dict()
+            total_items = len(data.get("employees", []))
+
+            # 1. Проверка пересечений (другие объекты)
+            try:
+                conflicts = find_conflicting_meal_orders_same_date_other_object(data)
+            except Exception as e:
+                if not messagebox.askokcancel(
+                    "Проверка пересечений",
+                    f"Не удалось проверить пересечения по БД:\n{e}\n\n"
+                    f"Нажмите «ОК», чтобы продолжить сохранение,\n"
+                    f"или «Отмена», чтобы вернуться к заявке.",
+                ):
+                    return
+                conflicts = []
+
+            if conflicts:
+                lines = []
+                for c in conflicts:
+                    fio = c.get("fio") or "?"
+                    tbn = c.get("tbn") or ""
+                    who = f"{fio} ({tbn})" if tbn else fio
+                    addr = c.get("address") or "неизвестный адрес"
+                    date_str = c.get("date") or ""
+                    team = c.get("team_name") or ""
+                    dep = c.get("department") or ""
+                    extra = f", бригада: {team}" if team else ""
+                    if dep:
+                        extra += f", подразделение: {dep}"
+                    lines.append(f"- {who}: {date_str}, объект: {addr}{extra}")
+
+                text = (
+                    "Обнаружены сотрудники, на которых в ЭТУ ЖЕ дату уже заказано питание\n"
+                    "на ДРУГОМ объекте:\n\n"
+                    + "\n".join(lines[:20])
+                    + ("\n\n(Показаны первые 20 совпадений)" if len(lines) > 20 else "")
+                    + "\n\nНажмите «ОК», чтобы всё равно добавить текущую заявку в реестр,\n"
+                    "или «Отмена», чтобы вернуться к редактированию заявки."
+                )
+                if not messagebox.askokcancel("Пересечение заявок по сотрудникам", text):
+                    return
+
+            # 2. Сохранение в БД (с проверкой на уже существующую заявку)
+            order_db_id = None
+            conn = None
+            try:
+                conn = get_db_connection()
+                with conn.cursor() as cur:
+                    with conn:  # транзакция
                         dept_name = (data.get("department") or "").strip()
                         dept_id = get_or_create_department(cur, dept_name) if dept_name else None
+
                         obj = data.get("object") or {}
-                        object_id = get_or_create_object(cur, obj.get("id"), obj.get("address"))
-                        order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
-                        team_name = (data.get("team_name") or "").strip()
-                        
-                        cur.execute(
-                            "UPDATE meal_orders SET date = %s, department_id = %s, team_name = %s, object_id = %s WHERE id = %s",
-                            (order_date, dept_id, team_name, object_id, self.edit_order_id),
-                        )
-                        order_db_id = self.edit_order_id
-                    else:
-                        # --- СОЗДАНИЕ ---
-                        dept_name = (data.get("department") or "").strip()
-                        dept_id = get_or_create_department(cur, dept_name) if dept_name else None
-                        obj = data.get("object") or {}
-                        object_id = get_or_create_object(cur, obj.get("id"), obj.get("address"))
-                        created_at = datetime.strptime(data["created_at"], "%Y-%m-%dT%H:%M:%S")
+                        obj_excel_id = (obj.get("id") or "").strip()
+                        obj_address = (obj.get("address") or "").strip()
+                        object_id = get_or_create_object(cur, obj_excel_id, obj_address)
+
                         order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
                         team_name = (data.get("team_name") or "").strip()
                         user_id = data.get("user_id")
 
-                        cur.execute(
-                            "INSERT INTO meal_orders (created_at, date, department_id, team_name, object_id, user_id) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-                            (created_at, order_date, dept_id, team_name, object_id, user_id),
-                        )
-                        order_db_id = cur.fetchone()[0]
+                        # Если редактируем существующую заявку — работаем с self.edit_order_id
+                        if self.edit_order_id:
+                            existing_id = self.edit_order_id
+                        else:
+                            existing_id = None
+                            # Ищем "такую же" заявку этого пользователя
+                            cur.execute(
+                                """
+                                SELECT id
+                                  FROM meal_orders
+                                 WHERE date = %s
+                                   AND object_id = %s
+                                   AND COALESCE(department_id, 0) = COALESCE(%s, 0)
+                                   AND COALESCE(team_name, '') = COALESCE(%s, '')
+                                   AND COALESCE(user_id, 0) = COALESCE(%s, 0)
+                                 ORDER BY id DESC
+                                 LIMIT 1
+                                """,
+                                (order_date, object_id, dept_id, team_name, user_id),
+                            )
+                            row = cur.fetchone()
+                            if row:
+                                existing_id = row[0]
 
-                    # --- ОБЩАЯ ЧАСТЬ: вставка строк сотрудников ---
-                    for emp in data.get("employees", []):
-                        fio = (emp.get("fio") or "").strip()
-                        tbn = (emp.get("tbn") or "").strip()
-                        position = (emp.get("position") or "").strip()
-                        meal_type_name = (emp.get("meal_type") or "").strip()
-                        comment = (emp.get("comment") or "").strip()
+                        if existing_id:
+                            # Есть уже такая заявка. Спрашиваем пользователя: перезаписать или отменить.
+                            if not messagebox.askyesno(
+                                "Обновление заявки",
+                                "Заявка с такими параметрами (дата, объект, подразделение, бригада)\n"
+                                "от этого пользователя уже существует.\n\n"
+                                "Нажмите «Да», чтобы ПЕРЕЗАПИСАТЬ существующую заявку.\n"
+                                "Нажмите «Нет», чтобы отменить сохранение новой заявки.",
+                            ):
+                                return
 
-                        meal_type_id = get_or_create_meal_type(cur, meal_type_name)
-                        employee_id = find_employee(cur, fio, tbn)
+                            # Удаляем старые строки сотрудников и обновляем заголовок
+                            cur.execute(
+                                "DELETE FROM meal_order_items WHERE order_id = %s",
+                                (existing_id,),
+                            )
+                            cur.execute(
+                                """
+                                UPDATE meal_orders
+                                   SET date = %s,
+                                       department_id = %s,
+                                       team_name = %s,
+                                       object_id = %s
+                                 WHERE id = %s
+                                """,
+                                (order_date, dept_id, team_name, object_id, existing_id),
+                            )
+                            order_db_id = existing_id
+                        else:
+                            # Создаём новую
+                            created_at = datetime.strptime(
+                                data["created_at"], "%Y-%m-%dT%H:%M:%S"
+                            )
+                            cur.execute(
+                                """
+                                INSERT INTO meal_orders
+                                    (created_at, date, department_id, team_name, object_id, user_id)
+                                VALUES (%s, %s, %s, %s, %s, %s)
+                                RETURNING id
+                                """,
+                                (created_at, order_date, dept_id, team_name, object_id, user_id),
+                            )
+                            order_db_id = cur.fetchone()[0]
 
-                        cur.execute(
-                            """
-                            INSERT INTO meal_order_items
-                            (order_id, employee_id, fio_text, tbn_text, position_text,
-                             meal_type_id, meal_type_text, comment)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                            """,
-                            (order_db_id, employee_id, fio, tbn, position, meal_type_id, meal_type_name, comment),
-                        )
+                        # --- Вставка строк сотрудников ---
+                        for emp in data.get("employees", []):
+                            fio = (emp.get("fio") or "").strip()
+                            tbn = (emp.get("tbn") or "").strip()
+                            position = (emp.get("position") or "").strip()
+                            meal_type_name = (emp.get("meal_type") or "").strip()
+                            comment = (emp.get("comment") or "").strip()
 
-        except Exception as e:
-            messagebox.showerror("Сохранение в БД", f"Не удалось сохранить заявку:\n{e}")
-            return  # Выходим, если была ошибка БД
+                            meal_type_id = get_or_create_meal_type(cur, meal_type_name)
+                            employee_id = find_employee(cur, fio, tbn)
+
+                            cur.execute(
+                                """
+                                INSERT INTO meal_order_items
+                                (order_id, employee_id, fio_text, tbn_text, position_text,
+                                 meal_type_id, meal_type_text, comment)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                """,
+                                (
+                                    order_db_id,
+                                    employee_id,
+                                    fio,
+                                    tbn,
+                                    position,
+                                    meal_type_id,
+                                    meal_type_name,
+                                    comment,
+                                ),
+                            )
+
+            except Exception as e:
+                messagebox.showerror("Сохранение в БД", f"Не удалось сохранить заявку:\n{e}")
+                return
+            finally:
+                if conn:
+                    release_db_connection(conn)
+
+            # 3. Сохранение в Excel
+            ts = datetime.now().strftime("%H%M%S")
+            id_part = data["object"]["id"] or safe_filename(data["object"]["address"])
+            fname = f"Заявка_питание_{data['date']}_{ts}_{id_part or 'NOID'}.xlsx"
+            fpath = self.orders_dir / fname
+
+            try:
+                wb = Workbook()
+                ws = wb.active
+                ws.title = "Заявка"
+                ws.append(["Создано", data["created_at"]])
+                ws.append(["Дата", data["date"]])
+                ws.append(["Подразделение", data["department"]])
+                ws.append(["Наименование бригады", data.get("team_name", "")])
+                ws.append(["ID объекта", data["object"]["id"]])
+                ws.append(["Адрес", data["object"]["address"]])
+                ws.append([])
+                hdr = ["#", "ФИО", "Тип питания", "Комментарий"]
+                ws.append(hdr)
+                for i, emp in enumerate(data["employees"], start=1):
+                    ws.append([i, emp["fio"], emp["meal_type"], emp["comment"]])
+                for col, w in enumerate([4, 40, 20, 40], start=1):
+                    ws.column_dimensions[get_column_letter(col)].width = w
+                ws.freeze_panes = "A8"
+                wb.save(fpath)
+            except Exception as e:
+                messagebox.showerror(
+                    "Сохранение",
+                    f"Заявка сохранена в БД, но не удалось создать XLSX файл:\n{e}",
+                )
+                return
+
+            messagebox.showinfo(
+                "Сохранение",
+                f"Заявка сохранена в реестр.\n"
+                f"Файл:\n{fpath}\n\n"
+                f"Сохранено записей: {total_items}",
+            )
+
+            # Если это была новая заявка (не редактирование) — очищаем форму
+            if not self.edit_order_id:
+                self.clear_form()
+
+            if self.on_saved:
+                self.on_saved()
+
         finally:
-            if conn:
-                release_db_connection(conn)
-
-        # 3. Сохранение в Excel (выполняется, только если работа с БД прошла успешно)
-        ts = datetime.now().strftime("%H%M%S")
-        id_part = data["object"]["id"] or safe_filename(data["object"]["address"])
-        fname = f"Заявка_питание_{data['date']}_{ts}_{id_part or 'NOID'}.xlsx"
-        fpath = self.orders_dir / fname
-
-        try:
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Заявка"
-            ws.append(["Создано", data["created_at"]])
-            ws.append(["Дата", data["date"]])
-            ws.append(["Подразделение", data["department"]])
-            ws.append(["Наименование бригады", data.get("team_name", "")])
-            ws.append(["ID объекта", data["object"]["id"]])
-            ws.append(["Адрес", data["object"]["address"]])
-            ws.append([])
-            hdr = ["#", "ФИО", "Тип питания", "Комментарий"]
-            ws.append(hdr)
-            for i, emp in enumerate(data["employees"], start=1):
-                ws.append([i, emp["fio"], emp["meal_type"], emp["comment"]])
-            for col, w in enumerate([4, 40, 20, 40], start=1):
-                ws.column_dimensions[get_column_letter(col)].width = w
-            ws.freeze_panes = "A8"
-            wb.save(fpath)
-        except Exception as e:
-            messagebox.showerror("Сохранение", f"Заявка сохранена в БД, но не удалось создать XLSX файл:\n{e}")
-            return
-
-        messagebox.showinfo(
-            "Сохранение",
-            f"Заявка сохранена в реестр.\n"
-            f"Файл:\n{fpath}\n\n"
-            f"Сохранено записей: {total_items}",
-        )
-
-        if self.on_saved:
-            self.on_saved()
+            # в любом случае разблокируем кнопку
+            try:
+                self.btn_save.configure(state="normal")
+            except Exception:
+                pass
 
     def clear_form(self):
         self.ent_date.delete(0, "end")
