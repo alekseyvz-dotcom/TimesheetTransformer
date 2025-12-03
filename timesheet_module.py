@@ -549,8 +549,8 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
         self.checked_state: Dict[Tuple[str, str], bool] = {(emp[0], emp[1] or ''): False for emp in self._all_employees}
         self._iid_map: Dict[str, Tuple[str, str]] = {}
 
-        self._build_ui() # Сначала строим UI
-        self._populate_tree(self._all_employees) # Затем заполняем данными
+        self._build_ui()
+        self._populate_tree(self._all_employees)
 
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         self.geometry("750x500")
@@ -565,9 +565,8 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
         main_frame = tk.Frame(self, padx=10, pady=10)
         main_frame.pack(fill="both", expand=True)
         
-        # --- КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ №1: Настройка растягивания ---
         main_frame.grid_columnconfigure(0, weight=1)
-        main_frame.grid_rowconfigure(1, weight=1) # Говорим, что строка 1 (с Treeview) должна растягиваться
+        main_frame.grid_rowconfigure(1, weight=1)
 
         # Верхняя панель (строка 0)
         top_frame = tk.Frame(main_frame)
@@ -583,13 +582,13 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
         # Центральная панель с Treeview (строка 1)
         tree_frame = tk.Frame(main_frame)
         tree_frame.grid(row=1, column=0, sticky="nsew")
+        # --- КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Настройка grid для tree_frame ---
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
         
         cols = ("fio", "tbn", "position")
         self.tree = ttk.Treeview(tree_frame, columns=cols, show="tree headings", selectmode="none")
         
-        # Сохраняем изображения как атрибуты виджета, чтобы их не удалил сборщик мусора
         self.tree.img_checked = tk.PhotoImage(master=self.tree, data=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAA0AAAANCAYAAABy6+R8AAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAADdSURBVCgVY2AY/g/FxcV/YGBg+P/Hjx//379/GRgY/s/FRUWMjAwhvGHDhuH///8/u3fv/n9paen/R48e/b+srOw/oKCg/4ODgyGr/0xMTP+ZmZn/58+f/9+7d+8/oKCg/2tra/9PTk7+Hzt27D+ampr/YGBg+F+6dOl/xMTE/0+fPv3/wYMH/09OTv4/f/78PzAwMLQCXDEYGBg+FBYW/j969Oj/nz9//h8/fvyfnZ39HwwMDK3AVgAKYAFyQUEBTRkZGVHgoKiAKYBUbAEAAAE2h2n3z2ttAAAAAElFTkSuQmCC'))
         self.tree.img_unchecked = tk.PhotoImage(master=self.tree, data=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAA0AAAANCAYAAABy6+R8AAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAC+SURBVCgVY2AY/g/FxcV/YGBg+P9jYmKKZ2Rk/B8/fvx/bW3tP6CgoP9fvnz5/9OnT/9PTU39f3h4+H9ycvL/0dHR/0tLS/+XlZX937p16z9gYGD4v3Xr1n/g4OD4PzEx8X9mZuY/oKCg/w8PD/+fn5//PzAwMLQCXDEYGBg+FBYW/j948OB/Zmbmf0BAQPg/f/78PzAwMLQCXAEKYAFyQUEBTRkZGVHgoKiAKYBUbAEAAALSh2nnx3wIAAAAAElFTkSuQmCC'))
         
@@ -623,19 +622,19 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
             ttk.Button(bottom_frame, text="OK", command=self._on_ok).pack(side="right")
         ttk.Button(bottom_frame, text="Отмена", command=self._on_cancel).pack(side="right", padx=5)
 
-    # ... Остальные методы класса остаются без изменений ...
     def _populate_tree(self, employees_to_show: List[Tuple]):
         for iid in self.tree.get_children(): self.tree.delete(iid)
         self._iid_map.clear()
         for i, emp in enumerate(employees_to_show):
-            fio, tbn, pos = emp[0], emp[1] or '', emp[2] or ''
-            key = (fio, tbn)
+            fio, tbn, pos, _ = emp # Используем все 4 значения
+            key = (fio, tbn or '')
             iid = f"item_{i}"
             self._iid_map[iid] = key
             is_checked = self.checked_state.get(key, False)
             image = self.tree.img_checked if is_checked else self.tree.img_unchecked
             self.tree.insert("", "end", iid=iid, image=image, values=(fio, tbn, pos))
         self._update_counters()
+    
     def _on_toggle_check(self, event):
         if self.tree.identify_region(event.x, event.y) == "tree":
             iid = self.tree.identify_row(event.y)
@@ -647,20 +646,24 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
             new_image = self.tree.img_checked if not current_state else self.tree.img_unchecked
             self.tree.item(iid, image=new_image)
             self._update_counters()
+    
     def _update_counters(self):
         total = len(self._all_employees)
         selected = sum(1 for v in self.checked_state.values() if v)
         self.lbl_count.config(text=f"Выбрано: {selected} / Всего: {total}")
+    
     def _on_search(self, event=None):
         search_term = self.search_var.get().lower().strip()
         filtered = self._all_employees if not search_term else [e for e in self._all_employees if search_term in e[0].lower() or search_term in (e[1] or "").lower() or search_term in (e[2] or "").lower()]
         self._populate_tree(filtered)
+    
     def _sort_by_column(self, col):
         col_index = {"fio": 0, "tbn": 1, "position": 2}[col]
         search_term = self.search_var.get().lower().strip()
         current_list = self._all_employees if not search_term else [e for e in self._all_employees if search_term in e[0].lower() or search_term in (e[1] or "").lower()]
         current_list.sort(key=lambda x: (x[col_index] or "").lower())
         self._populate_tree(current_list)
+    
     def _change_visible_state(self, new_state: bool):
         for iid in self.tree.get_children():
             key = self._iid_map.get(iid)
@@ -668,11 +671,14 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
                 self.checked_state[key] = new_state
                 self.tree.item(iid, image=self.tree.img_checked if new_state else self.tree.img_unchecked)
         self._update_counters()
+    
     def _select_all_visible(self): self._change_visible_state(True)
     def _deselect_all_visible(self): self._change_visible_state(False)
+    
     def _on_ok(self):
         self.result = [emp for emp in self._all_employees if self.checked_state.get((emp[0], emp[1] or ''), False)]
         self.destroy()
+    
     def _on_cancel(self):
         self.result = None
         self.destroy()
