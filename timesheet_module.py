@@ -1093,56 +1093,90 @@ class TimesheetPage(tk.Frame):
         self._init_year = init_year
         self._init_month = init_month
 
-        # Убедимся, что get_output_dir_from_config существует и возвращает Path
+    # --- Инициализация справочников ПУСТЫМИ значениями ---
+    # Данные будут загружены позже через _lazy_load_all_spr_data
+        self.employees: List[Tuple[str, str, str, str]] = []
+        self.objects: List[Tuple[str, str]] = []
+        self.emp_names: List[str] = []
+        self.emp_info: Dict[str, Tuple[str, str]] = {}
+        self.departments: List[str] = ["Все"]
+        self.address_options: List[str] = []
+        self.addr_to_ids: Dict[str, List[str]] = {}
+    # ----------------------------------------------------
+
+    # Убедимся, что get_output_dir_from_config существует и возвращает Path
         if get_output_dir_from_config:
             self.out_dir = get_output_dir_from_config()
         else:
-            # Запасной вариант, если функция не найдена
+        # Запасной вариант, если функция не найдена
             self.out_dir = Path("./output")
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
         self.DAY_ENTRY_FONT = ("Segoe UI", 8)
         self._fit_job = None
 
-        self._load_spr_data_from_db()
-
-        # --- КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ: МОДЕЛЬ И ПАГИНАЦИЯ ---
+    # --- Модель и пагинация ---
         self.model_rows: List[Dict[str, Any]] = [] # Модель данных
         self.current_page = 1
         self.page_size = tk.IntVar(value=50) # Количество строк на странице
         self._suspend_sync = False # Флаг для предотвращения синхронизации при массовых операциях
-        # ---------------------------------------------
 
         self._build_ui()
-        # Загружаем данные из БД в модель, а затем рендерим первую страницу
+    
+    # Этот вызов загружает только строки табеля, он может остаться здесь
         self._load_existing_rows()
 
         self.bind("<Configure>", self._on_window_configure)
         self.after(120, self._auto_fit_columns)
 
-    def _load_spr_data_from_db(self):
-        # Эта функция остается без изменений
-        employees = load_employees_from_db()
-        objects = load_objects_from_db()
+        self.after(50, self._lazy_load_all_spr_data)
 
-        self.employees = employees
-        self.objects = objects
+    def _lazy_load_all_spr_data(self):
+        """
+        Отложенная загрузка всех справочников (сотрудники, объекты).
+        Вызывается один раз после создания страницы, когда пул БД уже доступен.
+        """
+        try:
+            # 1. Загружаем данные из БД
+            self.employees = load_employees_from_db()
+            self.objects = load_objects_from_db()
+        
+        # 2. Обновляем все связанные структуры данных
+            self.emp_names = [fio for (fio, _, _, _) in self.employees]
+            self.emp_info = {fio: (tbn, pos) for (fio, tbn, pos, _) in self.employees}
 
-        self.emp_names = [fio for (fio, _, _, _) in self.employees]
-        self.emp_info = {fio: (tbn, pos) for (fio, tbn, pos, _) in self.employees}
+            deps = sorted({(dep or "").strip() for (_, _, _, dep) in self.employees if (dep or "").strip()})
+            self.departments = ["Все"] + deps
 
-        deps = sorted({(dep or "").strip() for (_, _, _, dep) in self.employees if (dep or "").strip()})
-        self.departments = ["Все"] + deps
+            self.addr_to_ids.clear()
+            for oid, addr in self.objects:
+                if not addr: continue
+                self.addr_to_ids.setdefault(addr, [])
+                if oid and oid not in self.addr_to_ids[addr]:
+                    self.addr_to_ids[addr].append(oid)
+            addresses_set = set(self.addr_to_ids.keys()) | {addr for _, addr in self.objects if addr}
+            self.address_options = sorted(addresses_set)
 
-        self.addr_to_ids: Dict[str, List[str]] = {}
-        for oid, addr in self.objects:
-            if not addr:
-                continue
-            self.addr_to_ids.setdefault(addr, [])
-            if oid and oid not in self.addr_to_ids[addr]:
-                self.addr_to_ids[addr].append(oid)
-        addresses_set = set(self.addr_to_ids.keys()) | {addr for _, addr in self.objects if addr}
-        self.address_options = sorted(addresses_set)
+            # 3. Обновляем виджеты, которые зависят от этих данных
+            self.cmb_department.config(values=self.departments)
+            # Восстанавливаем значение, если оно было установлено при инициализации
+            if self._init_department and self._init_department in self.departments:
+                self.cmb_department.set(self._init_department)
+            
+            self.cmb_address.set_completion_list(self.address_options)
+            # Восстанавливаем значение адреса
+            if self._init_object_addr and self._init_object_addr in self.address_options:
+                self.cmb_address.set(self._init_object_addr)
+                self._on_address_change() # Обновляем список ID
+            
+            # 4. Вызываем _on_department_select, чтобы обновить список ФИО в cmb_fio
+            # и применить фильтр по подразделению, если он был задан.
+            self._on_department_select()
+        
+        except Exception as e:
+            import logging # Локальный импорт для безопасности
+            logging.error(f"Ошибка при отложенной загрузке справочников: {e}", exc_info=True)
+            messagebox.showerror("Ошибка загрузки данных", f"Не удалось загрузить справочники из БД:\n{e}")
 
     def _build_ui(self):
         # --- Верхняя панель (без изменений) ---
