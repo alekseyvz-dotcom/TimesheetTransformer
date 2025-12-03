@@ -576,6 +576,7 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
         main_frame.pack(fill="both", expand=True)
         main_frame.grid_rowconfigure(1, weight=1)
         main_frame.grid_columnconfigure(0, weight=1)
+        main_frame.grid_rowconfigure(1, weight=1)
 
         # Панель фильтрации и кнопок выбора
         top_frame = tk.Frame(main_frame)
