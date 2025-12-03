@@ -483,18 +483,18 @@ def save_order_to_db(data: dict) -> int:
         if conn:
             release_db_connection(conn)
 
-
 def get_registry_from_db(
     filter_date: Optional[str] = None,
     filter_address: Optional[str] = None,
     filter_department: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Возвращает агрегированный реестр по объектам.
-    Ключ: (date, address), внутри:
+    Возвращает агрегированный реестр по:
+      (date, address, department, team_name).
+    Для каждой комбинации:
       - total_count
-      - by_department
-      - order_ids: список id заявок (по этому объекту и дате)
+      - by_meal_type
+      - order_ids: список id заявок (по этому адресу/департаменту/бригаде и дате)
     """
     conn = None
     try:
@@ -525,6 +525,7 @@ def get_registry_from_db(
                     mo.date::text            AS date,
                     COALESCE(o.address, '')  AS address,
                     COALESCE(d.name, '')     AS department,
+                    COALESCE(mo.team_name, '') AS team_name,
                     COALESCE(mti.name, moi.meal_type_text, '') AS meal_type
                 FROM meal_orders mo
                 JOIN meal_order_items moi ON moi.order_id = mo.id
@@ -536,42 +537,41 @@ def get_registry_from_db(
             cur.execute(sql, params)
             rows = cur.fetchall()
 
-        result: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        # Ключ: (date, address, department, team_name)
+        result: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
 
-        for order_id, date_str, address, dept, meal_type in rows:
-            key = (date_str, address)
+        for order_id, date_str, address, dept, team_name, meal_type in rows:
+            dep_name = dept or "Без подразделения"
+            team_name = team_name or ""
+            key = (date_str, address, dep_name, team_name)
+
             rec = result.setdefault(
                 key,
                 {
                     "date": date_str,
                     "address": address,
+                    "department": dep_name,
+                    "team_name": team_name,
                     "total_count": 0,
-                    "by_department": {},
+                    "by_meal_type": {},
                     "order_ids": set(),  # множество id заявок
                 },
             )
             rec["total_count"] += 1
             rec["order_ids"].add(order_id)
 
-            dept_name = dept or "Без подразделения"
-            by_dep = rec["by_department"].setdefault(
-                dept_name,
-                {
-                    "total": 0,
-                    "by_meal_type": {},
-                },
-            )
-            by_dep["total"] += 1
-
             mt = meal_type or "Не указан"
-            by_mt = by_dep["by_meal_type"]
+            by_mt = rec["by_meal_type"]
             by_mt[mt] = by_mt.get(mt, 0) + 1
 
         # приводим order_ids к списку для сериализации
-        for rec in result.values():
-            rec["order_ids"] = list(rec["order_ids"])
-
-        return list(result.values())
+        return [
+            {
+                **rec,
+                "order_ids": list(rec["order_ids"]),
+            }
+            for rec in result.values()
+        ]
 
     finally:
         if conn:
@@ -2211,16 +2211,25 @@ class MealPlanningPage(tk.Frame):
         table_frame = tk.LabelFrame(self, text="Реестр заказа питания по объектам")
         table_frame.pack(fill="both", expand=True, padx=10, pady=8)
 
-        columns = ("date", "address", "total_count", "details")
+        columns = ("date", "address", "department", "team_name", "total_count", "details")
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=15)
 
         headers = {
             "date": "Дата",
             "address": "Адрес объекта",
-            "total_count": "Всего заявок",
-            "details": "Детали (двойной клик)",
+            "department": "Подразделение",
+            "team_name": "Бригада",
+            "total_count": "Всего чел.",
+            "details": "По типам питания",
         }
-        widths = {"date": 100, "address": 400, "total_count": 120, "details": 300}
+        widths = {
+            "date": 90,
+            "address": 260,
+            "department": 180,
+            "team_name": 180,
+            "total_count": 90,
+            "details": 260,
+        }
 
         for col in columns:
             self.tree.heading(col, text=headers.get(col, col))
@@ -2375,6 +2384,7 @@ class MealPlanningPage(tk.Frame):
             )
 
     def _populate_tree(self, registry: List[Dict]):
+        # очистка дерева
         for item in self.tree.get_children():
             self.tree.delete(item)
         self.row_meta = {}
@@ -2382,21 +2392,29 @@ class MealPlanningPage(tk.Frame):
         for entry in registry:
             req_date = entry.get("date", "")
             address = entry.get("address", "")
+            department = entry.get("department", "")
+            team_name = entry.get("team_name", "")
             total = entry.get("total_count", 0)
-            details_text = self._format_details(entry.get("by_department", {}))
+            details_text = self._format_details(entry.get("by_meal_type", {}))
+
             item_id = self.tree.insert(
-                "", "end", values=(req_date, address, total, details_text)
+                "",
+                "end",
+                values=(req_date, address, department, team_name, total, details_text),
             )
             self.row_meta[item_id] = entry
 
-    def _format_details(self, by_dept: Dict) -> str:
-        if not by_dept:
+    def _format_details(self, by_meal_type: Dict[str, int]) -> str:
+        """
+        Формирует краткое описание по типам питания: "Одноразовое: 10 | Двухразовое: 5 ..."
+        """
+        if not by_meal_type:
             return "Нет данных"
-        parts = []
-        for dept, data in by_dept.items():
-            total = data.get("total", 0)
-            parts.append(f"{dept}: {total} чел.")
-        return " | ".join(parts[:3]) + (" ..." if len(parts) > 3 else "")
+        parts = [f"{mt}: {cnt}" for mt, cnt in sorted(by_meal_type.items())]
+        # ограничим первые 3–4 для компактности
+        if len(parts) > 4:
+            return " | ".join(parts[:4]) + " ..."
+        return " | ".join(parts)
 
     def on_row_double_click(self, event):
         selection = self.tree.selection()
