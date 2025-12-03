@@ -557,12 +557,8 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
         self._iid_map: Dict[str, Tuple[str, str]] = {}
 
         # --- Изображения для чекбоксов (встроены в код) ---
-        self.img_checked = tk.PhotoImage(
-            data=base64.b64decode('R0lGODlhDQANAPIAAN3d3f///+/v79/f3+Pj4+vr6wAAAAAAAAAAACH5BAEAAAAALAAAAAANAA0AAAMsGLo8x12YmIPd6Xm2UeCSJrgcLi4b2xIofpgeSoWtf2hE4gABgOBrAJ83AgA7')
-        )
-        self.img_unchecked = tk.PhotoImage(
-            data=base64.b64decode('R0lGODlhDQANAPIAAAAAAP///+/v79/f3+Pj4+vr6wAAAAAAAAAAACH5BAEAAAAALAAAAAANAA0AAAMsGLo8z02YmYPdnXm2UeCSJrgcLi4b2xIofpgeSoWtf2hE4gABgOBrAJ83AgA7')
-        )
+        self.img_checked = None
+        self.img_unchecked = None
 
         self._build_ui()
         self._populate_tree(self._all_employees)
@@ -599,6 +595,14 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
         
         cols = ("fio", "tbn", "position")
         self.tree = ttk.Treeview(tree_frame, columns=cols, show="tree headings", selectmode="none")
+        self.tree.img_checked = tk.PhotoImage(
+            master=self.tree, # Привязываем к виджету
+            data=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAA0AAAANCAYAAABy6+R8AAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAADdSURBVCgVY2AY/g/FxcV/YGBg+P/Hjx//379/GRgY/s/FRUWMjAwhvGHDhuH///8/u3fv/n9paen/R48e/b+srOw/oKCg/4ODgyGr/0xMTP+ZmZn/58+f/9+7d+8/oKCg/2tra/9PTk7+Hzt27D+ampr/YGBg+F+6dOl/xMTE/0+fPv3/wYMH/09OTv4/f/78PzAwMLQCXDEYGBg+FBYW/j969Oj/nz9//h8/fvyfnZ39HwwMDK3AVgAKYAFyQUEBTRkZGVHgoKiAKYBUbAEAAAE2h2n3z2ttAAAAAElFTkSuQmCC')
+        )
+        self.tree.img_unchecked = tk.PhotoImage(
+            master=self.tree, # Привязываем к виджету
+            data=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAA0AAAANCAYAAABy6+R8AAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAC+SURBVCgVY2AY/g/FxcV/YGBg+P9jYmKKZ2Rk/B8/fvx/bW3tP6CgoP9fvnz5/9OnT/9PTU39f3h4+H9ycvL/0dHR/0tLS/+XlZX937p16z9gYGD4v3Xr1n/g4OD4PzEx8X9mZuY/oKCg/w8PD/+fn5//PzAwMLQCXDEYGBg+FBYW/j948OB/Zmbmf0BAQPg/f/78PzAwMLQCXAEKYAFyQUEBTRkZGVHgoKiAKYBUbAEAAALSh2nnx3wIAAAAAElFTkSuQmCC')
+        )
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
@@ -655,7 +659,7 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
             self._iid_map[iid] = key
 
             is_checked = self.checked_state.get(key, False)
-            image = self.img_checked if is_checked else self.img_unchecked
+            image = self.tree.img_checked if is_checked else self.tree.img_unchecked
 
             self.tree.insert("", "end", iid=iid, image=image, values=(fio, tbn, pos))
         
@@ -678,7 +682,7 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
             current_state = self.checked_state.get(key, False)
             self.checked_state[key] = not current_state
 
-            new_image = self.img_checked if not current_state else self.img_unchecked
+            new_image = self.tree.img_checked if not current_state else self.tree.img_unchecked
             self.tree.item(iid, image=new_image)
 
             self._update_counters()
@@ -725,7 +729,7 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
             key = self._iid_map.get(iid)
             if key:
                 self.checked_state[key] = new_state
-                self.tree.item(iid, image=self.img_checked if new_state else self.img_unchecked)
+                self.tree.item(iid, image=self.tree.img_checked if new_state else self.tree.img_unchecked)
         self._update_counters()
 
     def _select_all_visible(self):
