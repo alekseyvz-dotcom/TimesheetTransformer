@@ -889,6 +889,230 @@ EMP_COL_WIDTHS = {
     5: 80,
 }
 
+class SelectEmployeesDialog(tk.Toplevel):
+    """
+    Диалог выбора сотрудников в виде таблицы с "чекбоксами".
+    Вход:
+      employees: список словарей [{'fio','tbn','pos','dep'}, ...]
+      current_dep: текущее подразделение из формы
+    Результат:
+      self.result = список выбранных словарей или None (если Отмена)
+    """
+    def __init__(self, parent, employees: List[Dict[str, Any]], current_dep: str):
+        super().__init__(parent)
+        self.parent = parent
+        self.employees = employees
+        self.current_dep = (current_dep or "").strip()
+        self.result: Optional[List[Dict[str, Any]]] = None
+
+        self.title("Выбор сотрудников")
+        self.resizable(True, True)
+        self.grab_set()
+
+        self.var_only_dep = tk.BooleanVar(
+            value=bool(self.current_dep and self.current_dep != "Все")
+        )
+        self.var_search = tk.StringVar()
+
+        main = tk.Frame(self, padx=10, pady=10)
+        main.pack(fill="both", expand=True)
+
+        # --- Верхняя панель ---
+        top = tk.Frame(main)
+        top.pack(fill="x")
+
+        tk.Label(
+            top,
+            text=f"Подразделение: {self.current_dep or 'Все'}",
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        ttk.Checkbutton(
+            top,
+            text="Показывать только сотрудников этого подразделения",
+            variable=self.var_only_dep,
+            command=self._refilter,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 4))
+
+        tk.Label(top, text="Поиск (ФИО / таб.№):").grid(
+            row=2, column=0, sticky="w", pady=(4, 2)
+        )
+        ent_search = ttk.Entry(top, textvariable=self.var_search, width=40)
+        ent_search.grid(row=2, column=1, sticky="w", pady=(4, 2))
+        ent_search.bind("<KeyRelease>", lambda e: self._refilter())
+
+        # --- Таблица сотрудников ---
+        tbl_frame = tk.Frame(main)
+        tbl_frame.pack(fill="both", expand=True, pady=(8, 4))
+
+        columns = ("fio", "tbn", "pos", "dep")
+        self.tree = ttk.Treeview(
+            tbl_frame,
+            columns=columns,
+            show="headings",
+            selectmode="none",  # выбор только через клик (как чекбокс)
+        )
+
+        self.tree.heading("fio", text="ФИО")
+        self.tree.heading("tbn", text="Таб. №")
+        self.tree.heading("pos", text="Должность")
+        self.tree.heading("dep", text="Подразделение")
+
+        self.tree.column("fio", width=260, anchor="w")
+        self.tree.column("tbn", width=80, anchor="center", stretch=False)
+        self.tree.column("pos", width=200, anchor="w")
+        self.tree.column("dep", width=160, anchor="w")
+
+        vsb = ttk.Scrollbar(tbl_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        # Клик по строке — переключаем "галочку"
+        self.tree.bind("<Button-1>", self._on_tree_click)
+
+        # храним отображаемые и выбранные индексы
+        self._filtered_indices: List[int] = []      # индексы в self.employees
+        self._selected_indices: set[int] = set()    # глобальные индексы выбранных
+
+        self._refilter()
+
+        # --- Кнопки выделения ---
+        sel_frame = tk.Frame(main)
+        sel_frame.pack(fill="x")
+        ttk.Button(sel_frame, text="Отметить всех", command=self._select_all).pack(
+            side="left", padx=(0, 4)
+        )
+        ttk.Button(sel_frame, text="Снять все", command=self._clear_all).pack(
+            side="left", padx=4
+        )
+
+        # --- Нижняя панель: OK / Отмена ---
+        btns = tk.Frame(main)
+        btns.pack(fill="x", pady=(8, 0))
+        ttk.Button(btns, text="OK", command=self._on_ok).pack(
+            side="right", padx=(4, 0)
+        )
+        ttk.Button(btns, text="Отмена", command=self._on_cancel).pack(side="right")
+
+        # Расширяем таблицу при изменении размера окна
+        main.rowconfigure(2, weight=1)
+        main.columnconfigure(0, weight=1)
+
+        # Центрируем окно относительно родителя
+        try:
+            self.update_idletasks()
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            sw = self.winfo_width()
+            sh = self.winfo_height()
+            self.geometry(f"+{px + (pw - sw)//2}+{py + (ph - sh)//2}")
+        except Exception:
+            pass
+
+    # ---------- Фильтрация и отрисовка ----------
+
+    def _refilter(self):
+        """Перестроить список в treeview по фильтрам (поиск + подразделение)."""
+        search = self.var_search.get().strip().lower()
+        only_dep = self.var_only_dep.get()
+        dep_sel = self.current_dep
+
+        self.tree.delete(*self.tree.get_children())
+        self._filtered_indices.clear()
+
+        for idx, emp in enumerate(self.employees):
+            fio = emp.get("fio", "")
+            tbn = emp.get("tbn", "")
+            pos = emp.get("pos", "")
+            dep = emp.get("dep", "")
+
+            if only_dep and dep_sel and dep_sel != "Все":
+                if (dep or "").strip() != dep_sel:
+                    continue
+
+            if search:
+                if search not in fio.lower() and search not in tbn.lower():
+                    continue
+
+            checked = (idx in self._selected_indices)
+            display_fio = f"[{'x' if checked else ' '}] {fio}"
+
+            iid = f"emp_{idx}"
+            self.tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(display_fio, tbn, pos, dep),
+                tags=("checked" if checked else "unchecked",),
+            )
+            self._filtered_indices.append(idx)
+
+    def _toggle_index(self, idx: int):
+        """Переключить выбранность сотрудника по глобальному индексу."""
+        if idx in self._selected_indices:
+            self._selected_indices.remove(idx)
+        else:
+            self._selected_indices.add(idx)
+
+    def _on_tree_click(self, event):
+        """ЛКМ по строке — переключаем псевдочекбокс."""
+        region = self.tree.identify("region", event.x, event.y)
+        if region != "cell":
+            return
+
+        row_id = self.tree.identify_row(event.y)
+        if not row_id:
+            return
+
+        try:
+            list_index = self.tree.index(row_id)
+            emp_index = self._filtered_indices[list_index]
+        except Exception:
+            return
+
+        self._toggle_index(emp_index)
+
+        # обновляем текст первой колонки у строки
+        emp = self.employees[emp_index]
+        fio = emp.get("fio", "")
+        tbn = emp.get("tbn", "")
+        pos = emp.get("pos", "")
+        dep = emp.get("dep", "")
+        checked = (emp_index in self._selected_indices)
+        display_fio = f"[{'x' if checked else ' '}] {fio}"
+        self.tree.item(row_id, values=(display_fio, tbn, pos, dep))
+
+    def _select_all(self):
+        """Отметить всех в текущем фильтре."""
+        for idx in self._filtered_indices:
+            self._selected_indices.add(idx)
+        self._refilter()
+
+    def _clear_all(self):
+        """Снять все отметки (во всём списке)."""
+        self._selected_indices.clear()
+        self._refilter()
+
+    def _on_ok(self):
+        if not self._selected_indices:
+            if not messagebox.askyesno(
+                "Выбор сотрудников",
+                "Не выбрано ни одного сотрудника.\nЗакрыть окно?",
+                parent=self,
+            ):
+                return
+            self.result = []
+        else:
+            self.result = [self.employees[i] for i in sorted(self._selected_indices)]
+        self.destroy()
+
+    def _on_cancel(self):
+        self.result = None
+        self.destroy()
 
 # ========================= СТРОКА СОТРУДНИКА =========================
 
@@ -1122,10 +1346,14 @@ class MealOrderPage(tk.Frame):
         self.emp_rows: List[EmployeeRow] = []
         btns = tk.Frame(emp_wrap)
         btns.pack(fill="x")
+
         ttk.Button(btns, text="Добавить сотрудника", command=self.add_employee).pack(
             side="left", padx=2, pady=4
         )
         ttk.Button(btns, text="Добавить подразделение", command=self.add_department).pack(
+            side="left", padx=4, pady=4
+        )
+        ttk.Button(btns, text="Выбрать из подразделения…", command=self.add_department_partial).pack(
             side="left", padx=4, pady=4
         )
 
@@ -1579,6 +1807,69 @@ class MealOrderPage(tk.Frame):
 
         self._update_emp_list()
         messagebox.showinfo("Питание", f"Добавлено сотрудников: {added}")
+
+    def add_department_partial(self):
+        """
+        Открывает окно-реестр сотрудников и добавляет только отмеченных.
+        """
+        dep = (self.cmb_dep.get() or "Все").strip()
+
+        if not self.emps:
+            messagebox.showinfo("Питание", "Справочник сотрудников пуст.")
+            return
+
+        dlg = SelectEmployeesDialog(self, self.emps, dep)
+        self.wait_window(dlg)
+
+        if dlg.result is None:
+            # Отмена
+            return
+
+        selected_emps = dlg.result  # список словарей {'fio','tbn','pos','dep'}
+        if not selected_emps:
+            return
+
+        # Уже добавленные ФИО в заявке (чтобы не плодить дубликаты по ФИО)
+        existing_fio = {
+            row.cmb_fio.get().strip()
+            for row in self.emp_rows
+            if (row.cmb_fio.get() or "").strip()
+        }
+
+        added = 0
+        for emp in selected_emps:
+            fio = (emp.get("fio") or "").strip()
+            if not fio:
+                continue
+            if fio in existing_fio:
+                # Если нужны дубликаты — можно убрать это условие или
+                # заменить на диалог-подтверждение.
+                continue
+
+            row = EmployeeRow(
+                self.rows_holder,
+                len(self.emp_rows) + 1,
+                [],             # список подсказок по ФИО мы обновим ниже через _update_emp_list
+                self.meal_types,
+                self.delete_employee,
+            )
+            row.grid(len(self.emp_rows))
+            row.apply_zebra(len(self.emp_rows))
+
+            row.fio_var.set(fio)
+            self._fill_emp_info(row)  # проставит таб.№ и должность по self.emp_by_fio
+
+            self.emp_rows.append(row)
+            existing_fio.add(fio)
+            added += 1
+
+        # Обновим списки автодополнения под текущее подразделение
+        self._update_emp_list()
+
+        if added:
+            messagebox.showinfo("Питание", f"Добавлено сотрудников: {added}")
+        else:
+            messagebox.showinfo("Питание", "Все выбранные сотрудники уже есть в заявке.")
 
     def open_orders_dir(self):
         try:
