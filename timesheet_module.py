@@ -564,11 +564,9 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
     def _build_ui(self):
         main_frame = tk.Frame(self, padx=10, pady=10)
         main_frame.pack(fill="both", expand=True)
-        
         main_frame.grid_columnconfigure(0, weight=1)
         main_frame.grid_rowconfigure(1, weight=1)
 
-        # Верхняя панель (строка 0)
         top_frame = tk.Frame(main_frame)
         top_frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
         tk.Label(top_frame, text="Поиск:").pack(side="left")
@@ -579,16 +577,17 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
         ttk.Button(top_frame, text="Выбрать всех видимых", command=self._select_all_visible).pack(side="left", padx=(5,0))
         ttk.Button(top_frame, text="Снять со всех видимых", command=self._deselect_all_visible).pack(side="left", padx=5)
 
-        # Центральная панель с Treeview (строка 1)
         tree_frame = tk.Frame(main_frame)
         tree_frame.grid(row=1, column=0, sticky="nsew")
-        # --- КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Настройка grid для tree_frame ---
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
         
         cols = ("fio", "tbn", "position")
+        
+        # --- ИСПРАВЛЕНИЕ №1 ---
         self.tree = ttk.Treeview(tree_frame, columns=cols, show="tree headings", selectmode="none")
         
+        # --- ИСПРАВЛЕНИЕ №2 ---
         self.tree.img_checked = tk.PhotoImage(master=self.tree, data=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAA0AAAANCAYAAABy6+R8AAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAADdSURBVCgVY2AY/g/FxcV/YGBg+P/Hjx//379/GRgY/s/FRUWMjAwhvGHDhuH///8/u3fv/n9paen/R48e/b+srOw/oKCg/4ODgyGr/0xMTP+ZmZn/58+f/9+7d+8/oKCg/2tra/9PTk7+Hzt27D+ampr/YGBg+F+6dOl/xMTE/0+fPv3/wYMH/09OTv4/f/78PzAwMLQCXDEYGBg+FBYW/j969Oj/nz9//h8/fvyfnZ39HwwMDK3AVgAKYAFyQUEBTRkZGVHgoKiAKYBUbAEAAAE2h2n3z2ttAAAAAElFTkSuQmCC'))
         self.tree.img_unchecked = tk.PhotoImage(master=self.tree, data=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAA0AAAANCAYAAABy6+R8AAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAC+SURBVCgVY2AY/g/FxcV/YGBg+P9jYmKKZ2Rk/B8/fvx/bW3tP6CgoP9fvnz5/9OnT/9PTU39f3h4+H9ycvL/0dHR/0tLS/+XlZX937p16z9gYGD4v3Xr1n/g4OD4PzEx8X9mZuY/oKCg/w8PD/+fn5//PzAwMLQCXDEYGBg+FBYW/j948OB/Zmbmf0BAQPg/f/78PzAwMLQCXAEKYAFyQUEBTRkZGVHgoKiAKYBUbAEAAALSh2nnx3wIAAAAAElFTkSuQmCC'))
         
@@ -610,7 +609,6 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
         
         self.tree.bind("<Button-1>", self._on_toggle_check)
         
-        # Нижняя панель (строка 2)
         bottom_frame = tk.Frame(main_frame)
         bottom_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         self.lbl_count = tk.Label(bottom_frame, text="Выбрано: 0 / Всего: 0")
@@ -626,7 +624,7 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
         for iid in self.tree.get_children(): self.tree.delete(iid)
         self._iid_map.clear()
         for i, emp in enumerate(employees_to_show):
-            fio, tbn, pos, _ = emp # Используем все 4 значения
+            fio, tbn, pos, _ = emp
             key = (fio, tbn or '')
             iid = f"item_{i}"
             self._iid_map[iid] = key
@@ -682,7 +680,7 @@ class SelectEmployeesChecklistDialog(tk.Toplevel):
     def _on_cancel(self):
         self.result = None
         self.destroy()
-
+        
 class AutoCompleteCombobox(ttk.Combobox):
     def __init__(self, master=None, **kw):
         super().__init__(master, **kw)
