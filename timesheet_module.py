@@ -399,83 +399,118 @@ class CopyFromDialog(simpledialog.Dialog):
 
 class SelectEmployeesDialog(tk.Toplevel):
     """
-    Диалог выбора сотрудников (с фильтром по подразделению и поиском).
-    Результат: список кортежей (fio, tbn, position, dep).
+    Диалог выбора сотрудников в виде таблицы с чекбоксами.
+    employees: список кортежей (fio, tbn, position, dep)
+    result: список выбранных кортежей (fio, tbn, position, dep) или None (Отмена)
     """
     def __init__(self, parent, employees, current_dep: str):
         super().__init__(parent)
         self.parent = parent
-        self.employees = employees  # полный список: [(fio, tbn, pos, dep), ...]
+        self.employees = employees
         self.current_dep = (current_dep or "").strip()
         self.result = None
 
         self.title("Выбор сотрудников")
-        self.resizable(False, False)
+        self.resizable(True, True)
         self.grab_set()
 
-        self.var_only_dep = tk.BooleanVar(value=bool(self.current_dep and self.current_dep != "Все"))
+        self.var_only_dep = tk.BooleanVar(
+            value=bool(self.current_dep and self.current_dep != "Все")
+        )
         self.var_search = tk.StringVar()
 
-        frm = tk.Frame(self, padx=10, pady=10)
-        frm.pack(fill="both", expand=True)
+        main = tk.Frame(self, padx=10, pady=10)
+        main.pack(fill="both", expand=True)
 
-        # Верхняя строка: подразделение + чекбокс
-        row = 0
-        tk.Label(frm, text=f"Подразделение: {self.current_dep or 'Все'}").grid(
-            row=row, column=0, columnspan=2, sticky="w"
-        )
-        row += 1
+        # --- Верхняя панель ---
+        top = tk.Frame(main)
+        top.pack(fill="x")
 
-        chk = ttk.Checkbutton(
-            frm,
+        tk.Label(
+            top,
+            text=f"Подразделение: {self.current_dep or 'Все'}",
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        ttk.Checkbutton(
+            top,
             text="Показывать только сотрудников этого подразделения",
             variable=self.var_only_dep,
             command=self._refilter,
-        )
-        chk.grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 4))
-        row += 1
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 4))
 
-        # Поиск
-        tk.Label(frm, text="Поиск (ФИО/таб.№):").grid(row=row, column=0, sticky="w", pady=(4, 2))
-        ent_search = ttk.Entry(frm, textvariable=self.var_search, width=40)
-        ent_search.grid(row=row, column=1, sticky="w", pady=(4, 2))
+        tk.Label(top, text="Поиск (ФИО / таб.№):").grid(
+            row=2, column=0, sticky="w", pady=(4, 2)
+        )
+        ent_search = ttk.Entry(top, textvariable=self.var_search, width=40)
+        ent_search.grid(row=2, column=1, sticky="w", pady=(4, 2))
         ent_search.bind("<KeyRelease>", lambda e: self._refilter())
-        row += 1
 
-        # Список сотрудников
-        self.lst = tk.Listbox(
-            frm,
-            width=60,
-            height=18,
-            selectmode="extended",
-            exportselection=False,
+        # --- Таблица сотрудников ---
+        tbl_frame = tk.Frame(main)
+        tbl_frame.pack(fill="both", expand=True, pady=(8, 4))
+
+        columns = ("fio", "tbn", "pos", "dep")
+        # первая псевдо-колонка "#" под чекбокс
+        self.tree = ttk.Treeview(
+            tbl_frame,
+            columns=columns,
+            show="headings",
+            selectmode="none",  # выбор только через чекбокс
         )
-        self.lst.grid(row=row, column=0, columnspan=2, sticky="nsew", pady=(4, 4))
-        row += 1
 
-        # Кнопки управления списком
-        btns_sel = tk.Frame(frm)
-        btns_sel.grid(row=row, column=0, columnspan=2, sticky="w")
-        ttk.Button(btns_sel, text="Выбрать всех", command=self._select_all).pack(side="left", padx=(0, 4))
-        ttk.Button(btns_sel, text="Снять выделение", command=self._clear_sel).pack(side="left", padx=4)
-        row += 1
+        # "Чекбокс" будет отображаться в колонке fio, а сама галка хранится в tags
+        self.tree.heading("fio", text="ФИО")
+        self.tree.heading("tbn", text="Таб.№")
+        self.tree.heading("pos", text="Должность")
+        self.tree.heading("dep", text="Подразделение")
 
-        # Кнопки OK / Отмена
-        btns = tk.Frame(frm)
-        btns.grid(row=row, column=0, columnspan=2, sticky="e", pady=(8, 0))
-        ttk.Button(btns, text="OK", command=self._on_ok).pack(side="right", padx=(4, 0))
-        ttk.Button(btns, text="Отмена", command=self._on_cancel).pack(side="right")
-        row += 1
+        self.tree.column("fio", width=260, anchor="w")
+        self.tree.column("tbn", width=80, anchor="center", stretch=False)
+        self.tree.column("pos", width=180, anchor="w")
+        self.tree.column("dep", width=140, anchor="w")
 
-        # Возможность растягивать список, если окно изменят (на будущее)
-        frm.grid_rowconfigure(3, weight=1)
-        frm.grid_columnconfigure(1, weight=1)
+        vsb = ttk.Scrollbar(tbl_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
 
-        # Массив отфильтрованных сотрудников (с индексами в self.employees)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        # Обработчик клика для имитации чекбокса
+        self.tree.bind("<Button-1>", self._on_tree_click)
+
+        # Массив индексов self.employees, попавших в текущий фильтр
         self._filtered_indices = []
+        # Множество индексов выбранных в исходном списке employees
+        self._selected_indices = set()
+
         self._refilter()
 
-        # Центрирование окна
+        # --- Кнопки управления выбором ---
+        sel_frame = tk.Frame(main)
+        sel_frame.pack(fill="x")
+        ttk.Button(sel_frame, text="Отметить всех", command=self._select_all).pack(
+            side="left", padx=(0, 4)
+        )
+        ttk.Button(sel_frame, text="Снять все", command=self._clear_all).pack(
+            side="left", padx=4
+        )
+
+        # --- Низ: OK / Отмена ---
+        btns = tk.Frame(main)
+        btns.pack(fill="x", pady=(8, 0))
+        ttk.Button(btns, text="OK", command=self._on_ok).pack(
+            side="right", padx=(4, 0)
+        )
+        ttk.Button(btns, text="Отмена", command=self._on_cancel).pack(
+            side="right"
+        )
+
+        # Позволим окну растягиваться
+        main.rowconfigure(2, weight=1)
+        main.columnconfigure(0, weight=1)
+
+        # Центрируем
         try:
             self.update_idletasks()
             px = parent.winfo_rootx()
@@ -488,43 +523,104 @@ class SelectEmployeesDialog(tk.Toplevel):
         except Exception:
             pass
 
+    # ---------- Вспомогательные методы ----------
+
     def _refilter(self):
-        """Перестраивает список в listbox по текущим фильтрам."""
+        """Перестроить список в treeview по фильтрам."""
         search = self.var_search.get().strip().lower()
         only_dep = self.var_only_dep.get()
         dep_sel = self.current_dep
 
-        self.lst.delete(0, tk.END)
+        # Запоминаем, какие уже были выбраны, чтобы после фильтрации не потерять
+        # (выбор хранится по глобальным индексам employees в self._selected_indices)
+
+        self.tree.delete(*self.tree.get_children())
         self._filtered_indices.clear()
 
         for idx, (fio, tbn, pos, dep) in enumerate(self.employees):
             if only_dep and dep_sel and dep_sel != "Все":
                 if (dep or "").strip() != dep_sel:
                     continue
-            text = f"{fio}  |  {tbn}  |  {pos or ''}  |  {dep or ''}"
+
             if search:
                 if search not in fio.lower() and search not in (tbn or "").lower():
                     continue
-            self.lst.insert(tk.END, text)
+
+            # Отобразим строку
+            # "чекбокс" будем рисовать через префикс [x]/[ ] у ФИО либо через tag
+            checked = (idx in self._selected_indices)
+            display_fio = f"[{'x' if checked else ' '}] {fio}"
+
+            iid = f"emp_{idx}"
+            self.tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(display_fio, tbn, pos, dep),
+                tags=("checked" if checked else "unchecked",),
+            )
             self._filtered_indices.append(idx)
 
-    def _select_all(self):
-        self.lst.select_set(0, tk.END)
+    def _toggle_index(self, idx: int):
+        """Переключает выбранность сотрудника по глобальному индексу employees."""
+        if idx in self._selected_indices:
+            self._selected_indices.remove(idx)
+        else:
+            self._selected_indices.add(idx)
 
-    def _clear_sel(self):
-        self.lst.select_clear(0, tk.END)
+    def _on_tree_click(self, event):
+        """
+        ЛКМ по строке — переключаем чекбокс.
+        """
+        region = self.tree.identify("region", event.x, event.y)
+        if region != "cell":
+            return
+
+        row_id = self.tree.identify_row(event.y)
+        if not row_id:
+            return
+
+        # Ищем индекс в _filtered_indices
+        try:
+            # i — позиция в текущем отфильтрованном списке
+            i = self.tree.index(row_id)
+            emp_index = self._filtered_indices[i]
+        except Exception:
+            return
+
+        self._toggle_index(emp_index)
+        # Обновим отображение только этой строки
+        fio, tbn, pos, dep = self.employees[emp_index]
+        checked = (emp_index in self._selected_indices)
+        display_fio = f"[{'x' if checked else ' '}] {fio}"
+        self.tree.item(
+            row_id,
+            values=(display_fio, tbn, pos, dep),
+            tags=("checked" if checked else "unchecked",),
+        )
+
+    def _select_all(self):
+        """Отметить всех в текущей выборке."""
+        for emp_index in self._filtered_indices:
+            self._selected_indices.add(emp_index)
+        self._refilter()
+
+    def _clear_all(self):
+        """Снять все отметки (по всему списку)."""
+        self._selected_indices.clear()
+        self._refilter()
 
     def _on_ok(self):
-        sel = self.lst.curselection()
-        if not sel:
-            if not messagebox.askyesno("Выбор сотрудников", "Ни один сотрудник не выбран. Закрыть диалог?"):
+        if not self._selected_indices:
+            if not messagebox.askyesno(
+                "Выбор сотрудников",
+                "Не выбрано ни одного сотрудника.\nЗакрыть окно?",
+                parent=self,
+            ):
                 return
             self.result = []
         else:
-            chosen = []
-            for listbox_index in sel:
-                emp_index = self._filtered_indices[listbox_index]
-                chosen.append(self.employees[emp_index])
+            chosen = [self.employees[i] for i in sorted(self._selected_indices)]
             self.result = chosen
         self.destroy()
 
