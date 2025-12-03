@@ -397,6 +397,140 @@ class CopyFromDialog(simpledialog.Dialog):
             "mode": self.var_mode.get(),
         }
 
+class SelectEmployeesDialog(tk.Toplevel):
+    """
+    Диалог выбора сотрудников (с фильтром по подразделению и поиском).
+    Результат: список кортежей (fio, tbn, position, dep).
+    """
+    def __init__(self, parent, employees, current_dep: str):
+        super().__init__(parent)
+        self.parent = parent
+        self.employees = employees  # полный список: [(fio, tbn, pos, dep), ...]
+        self.current_dep = (current_dep or "").strip()
+        self.result = None
+
+        self.title("Выбор сотрудников")
+        self.resizable(False, False)
+        self.grab_set()
+
+        self.var_only_dep = tk.BooleanVar(value=bool(self.current_dep and self.current_dep != "Все"))
+        self.var_search = tk.StringVar()
+
+        frm = tk.Frame(self, padx=10, pady=10)
+        frm.pack(fill="both", expand=True)
+
+        # Верхняя строка: подразделение + чекбокс
+        row = 0
+        tk.Label(frm, text=f"Подразделение: {self.current_dep or 'Все'}").grid(
+            row=row, column=0, columnspan=2, sticky="w"
+        )
+        row += 1
+
+        chk = ttk.Checkbutton(
+            frm,
+            text="Показывать только сотрудников этого подразделения",
+            variable=self.var_only_dep,
+            command=self._refilter,
+        )
+        chk.grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 4))
+        row += 1
+
+        # Поиск
+        tk.Label(frm, text="Поиск (ФИО/таб.№):").grid(row=row, column=0, sticky="w", pady=(4, 2))
+        ent_search = ttk.Entry(frm, textvariable=self.var_search, width=40)
+        ent_search.grid(row=row, column=1, sticky="w", pady=(4, 2))
+        ent_search.bind("<KeyRelease>", lambda e: self._refilter())
+        row += 1
+
+        # Список сотрудников
+        self.lst = tk.Listbox(
+            frm,
+            width=60,
+            height=18,
+            selectmode="extended",
+            exportselection=False,
+        )
+        self.lst.grid(row=row, column=0, columnspan=2, sticky="nsew", pady=(4, 4))
+        row += 1
+
+        # Кнопки управления списком
+        btns_sel = tk.Frame(frm)
+        btns_sel.grid(row=row, column=0, columnspan=2, sticky="w")
+        ttk.Button(btns_sel, text="Выбрать всех", command=self._select_all).pack(side="left", padx=(0, 4))
+        ttk.Button(btns_sel, text="Снять выделение", command=self._clear_sel).pack(side="left", padx=4)
+        row += 1
+
+        # Кнопки OK / Отмена
+        btns = tk.Frame(frm)
+        btns.grid(row=row, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        ttk.Button(btns, text="OK", command=self._on_ok).pack(side="right", padx=(4, 0))
+        ttk.Button(btns, text="Отмена", command=self._on_cancel).pack(side="right")
+        row += 1
+
+        # Возможность растягивать список, если окно изменят (на будущее)
+        frm.grid_rowconfigure(3, weight=1)
+        frm.grid_columnconfigure(1, weight=1)
+
+        # Массив отфильтрованных сотрудников (с индексами в self.employees)
+        self._filtered_indices = []
+        self._refilter()
+
+        # Центрирование окна
+        try:
+            self.update_idletasks()
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            sw = self.winfo_width()
+            sh = self.winfo_height()
+            self.geometry(f"+{px + (pw - sw)//2}+{py + (ph - sh)//2}")
+        except Exception:
+            pass
+
+    def _refilter(self):
+        """Перестраивает список в listbox по текущим фильтрам."""
+        search = self.var_search.get().strip().lower()
+        only_dep = self.var_only_dep.get()
+        dep_sel = self.current_dep
+
+        self.lst.delete(0, tk.END)
+        self._filtered_indices.clear()
+
+        for idx, (fio, tbn, pos, dep) in enumerate(self.employees):
+            if only_dep and dep_sel and dep_sel != "Все":
+                if (dep or "").strip() != dep_sel:
+                    continue
+            text = f"{fio}  |  {tbn}  |  {pos or ''}  |  {dep or ''}"
+            if search:
+                if search not in fio.lower() and search not in (tbn or "").lower():
+                    continue
+            self.lst.insert(tk.END, text)
+            self._filtered_indices.append(idx)
+
+    def _select_all(self):
+        self.lst.select_set(0, tk.END)
+
+    def _clear_sel(self):
+        self.lst.select_clear(0, tk.END)
+
+    def _on_ok(self):
+        sel = self.lst.curselection()
+        if not sel:
+            if not messagebox.askyesno("Выбор сотрудников", "Ни один сотрудник не выбран. Закрыть диалог?"):
+                return
+            self.result = []
+        else:
+            chosen = []
+            for listbox_index in sel:
+                emp_index = self._filtered_indices[listbox_index]
+                chosen.append(self.employees[emp_index])
+            self.result = chosen
+        self.destroy()
+
+    def _on_cancel(self):
+        self.result = None
+        self.destroy()
 
 class BatchAddDialog(tk.Toplevel):
     def __init__(self, parent, total: int, title: str = "Добавление сотрудников"):
@@ -906,12 +1040,13 @@ class TimesheetPage(tk.Frame):
         btns.grid(row=3, column=0, columnspan=8, sticky="w", pady=(8, 0))
         ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
         ttk.Button(btns, text="Добавить подразделение", command=self.add_department_all).grid(row=0, column=1, padx=4)
-        ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=2, padx=4)
-        ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=3, padx=4)
-        ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=4, padx=4)
-        ttk.Button(btns, text="Загрузить из Excel", command=self.import_from_excel).grid(row=0, column=5, padx=4)
-        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=6, padx=4)
-        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=7, padx=4)
+        ttk.Button(btns, text="Выбрать из подразделения…", command=self.add_department_partial).grid(row=0, column=2, padx=4)
+        ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=3, padx=4)
+        ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=4, padx=4)
+        ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=5, padx=4)
+        ttk.Button(btns, text="Загрузить из Excel", command=self.import_from_excel).grid(row=0, column=6, padx=4)
+        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=7, padx=4)
+        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=8, padx=4)
 
         # --- Основной контейнер (без изменений) ---
         main_frame = tk.Frame(self)
@@ -1222,6 +1357,58 @@ class TimesheetPage(tk.Frame):
         # Переходим на последнюю страницу, где появится новая запись, и рендерим ее
         last_page = self._page_count()
         self._render_page(last_page)
+
+    def add_department_partial(self):
+        """
+        Открывает диалог выбора сотрудников из текущего подразделения
+        и добавляет только выбранных.
+        """
+        if self.read_only:
+            return
+
+        dep_sel = (self.cmb_department.get() or "Все").strip()
+        if not self.employees:
+            messagebox.showinfo("Объектный табель", "Справочник сотрудников пуст.")
+            return
+
+        # Открываем диалог
+        dlg = SelectEmployeesDialog(self, self.employees, dep_sel)
+        self.wait_window(dlg)
+
+        if dlg.result is None:
+            # Отмена
+            return
+
+        selected_emps = dlg.result  # список (fio, tbn, pos, dep)
+        if not selected_emps:
+            # Пользователь явно согласился выйти без выбора
+            return
+
+        self._sync_visible_to_model()  # сохраняем текущие правки с экрана
+
+        existing = {(r["fio"].strip().lower(), r["tbn"].strip()) for r in self.model_rows}
+        added_count = 0
+
+        for fio, tbn, pos, dep in selected_emps:
+            key = (fio.strip().lower(), (tbn or "").strip())
+            if key in existing:
+                # Если дубликаты не нужны — просто пропускаем
+                continue
+            self.model_rows.append({
+                "fio": fio,
+                "tbn": tbn,
+                "hours": [None] * 31,
+            })
+            existing.add(key)
+            added_count += 1
+
+        if added_count > 0:
+            # Переходим на последнюю страницу, чтобы увидеть "хвост" добавленных сотрудников
+            last_page = self._page_count()
+            self._render_page(last_page)
+            messagebox.showinfo("Объектный табель", f"Добавлено сотрудников: {added_count}")
+        else:
+            messagebox.showinfo("Объектный табель", "Все выбранные сотрудники уже есть в табеле.")
 
     def add_department_all(self):
         """Массово добавляет сотрудников в модель."""
