@@ -528,308 +528,7 @@ class HoursFillDialog(simpledialog.Dialog):
             "clear": self._clear,
         }
 
-# <<< КЛАСС ДЛЯ ВЫБОРА СОТРУДНИКОВ С ЧЕКБОКСАМИ >>>
 
-class SelectEmployeesChecklistDialog(tk.Toplevel):
-    """
-    Диалоговое окно для выбора сотрудников из списка с чекбоксами,
-    фильтрацией и отображением в виде таблицы.
-    """
-    def __init__(self, parent, employees: List[Tuple[str, str, str, str]], title="Выбор сотрудников"):
-        super().__init__(parent)
-        self.parent = parent
-        self.title(title)
-        self.resizable(True, True)
-        
-        # Устанавливаем минимальный размер сразу
-        self.minsize(600, 400)
-        
-        self._all_employees = sorted(employees, key=lambda x: x[0])
-        self.result: Optional[List[Tuple[str, str, str, str]]] = None
-        self.checked_state: Dict[Tuple[str, str], bool] = {(emp[0], emp[1] or ''): False for emp in self._all_employees}
-        self._iid_map: Dict[str, Tuple[str, str]] = {}
-
-        # Изображения создадим позже
-        self.img_checked = None
-        self.img_unchecked = None
-
-        self._build_ui()
-        
-        # ВАЖНО: обновляем окно перед созданием изображений
-        self.update_idletasks()
-        
-        # Создаем изображения ПОСЛЕ создания всех виджетов
-        self._create_checkbox_images()
-        
-        # Заполняем дерево
-        self._populate_tree(self._all_employees)
-
-        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
-        
-        # Устанавливаем размер и центрируем окно
-        self.geometry("750x500")
-        self.update_idletasks()  # Важно: обновляем после установки размера
-        
-        # Центрируем окно
-        try:
-            px = parent.winfo_rootx()
-            py = parent.winfo_rooty()
-            pw = parent.winfo_width()
-            ph = parent.winfo_height()
-            sw = self.winfo_width()
-            sh = self.winfo_height()
-            x = px + (pw - sw) // 2
-            y = py + (ph - sh) // 2
-            self.geometry(f"+{x}+{y}")
-        except Exception:
-            # Если не удалось центрировать, просто размещаем в центре экрана
-            self.update_idletasks()
-            sw = self.winfo_width()
-            sh = self.winfo_height()
-            screen_width = self.winfo_screenwidth()
-            screen_height = self.winfo_screenheight()
-            x = (screen_width - sw) // 2
-            y = (screen_height - sh) // 2
-            self.geometry(f"+{x}+{y}")
-        
-        # Делаем окно модальным в самом конце
-        self.grab_set()
-        self.focus_set()
-
-    def _create_checkbox_images(self):
-        """Создает и сохраняет изображения как атрибуты Treeview."""
-        # Создаем изображения и сразу присваиваем их как атрибуты self.tree
-        self.tree.img_checked = tk.PhotoImage(
-            data=base64.b64decode(
-                'iVBORw0KGgoAAAANSUhEUgAAAA0AAAANCAYAAABy6+R8AAAABGdBTUEAALGPC/xhBQAAACBjSFJN'
-                'AAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABl0RVh0U29mdHdhcmUAd3d3'
-                'Lmlua3NjYXBlLm9yZ5vuPBoAAADdSURBVCgVY2AY/g/FxcV/YGBg+P/Hjx//379/GRgY/s/FRUWM'
-                'jAwhvGHDhuH///8/u3fv/n9paen/R48e/b+srOw/oKCg/4ODgyGr/0xMTP+ZmZn/58+f/9+7d+8/'
-                'oKCg/2tra/9PTk7+Hxt27D+ampr/YGBg+F+6dOl/xMTE/0+fPv3/wYMH/09OTv4/f/78PzAwMLQC'
-                'XDEYGBg+FBYW/j969Oj/nz9//h8/fvyfnZ39HwwMDK3AVgAKYAFyQUEBTRkZGVHgoKiAKYBUbAEA'
-                'AAE2h2n3z2ttAAAAAElFTkSuQmCC'
-            )
-        )
-        self.tree.img_unchecked = tk.PhotoImage(
-            data=base64.b64decode(
-                'iVBORw0KGgoAAAANSUhEUgAAAA0AAAANCAYAAABy6+R8AAAABGdBTUEAALGPC/xhBQAAACBjSFJN'
-                'AAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABl0RVh0U29mdHdhcmUAd3d3'
-                'Lmlua3NjYXBlLm9yZ5vuPBoAAAC+SURBVCgVY2AY/g/FxcV/YGBg+P9jYmKKZ2Rk/B8/fvx/bW3t'
-                'P6CgoP9fvnz5/9OnT/9PTU39f3h4+H9ycvL/0dHR/0tLS/+XlZX937p16z9gYGD4v3Xr1n/g4OD4'
-                'PzEx8X9mZuY/oKCg/w8PD/+fn5//PzAwMLQCXDEYGBg+FBYW/j948OB/Zmbmf0BAQPg/f/78PzAw'
-                'MLQCXAEKYAFyQUEBTRkZGVHgoKiAKYBUbAEAAALSh2nnx3wIAAAAAElFTkSuQmCC'
-            )
-        )
-
-    def _build_ui(self):
-        """Строит интерфейс диалогового окна."""
-        # Главный контейнер
-        main_container = tk.Frame(self)
-        main_container.pack(fill="both", expand=True)
-        
-        # -- Верхняя панель (поиск и кнопки) --
-        top_frame = tk.Frame(main_container, padx=10, pady=10)
-        top_frame.pack(fill="x", side="top")
-        
-        tk.Label(top_frame, text="Поиск:").pack(side="left", padx=(0, 5))
-        
-        self.search_var = tk.StringVar()
-        search_entry = ttk.Entry(top_frame, textvariable=self.search_var, width=30)
-        search_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        search_entry.bind("<KeyRelease>", self._on_search)
-        
-        ttk.Button(
-            top_frame, 
-            text="Выбрать всех", 
-            command=self._select_all_visible
-        ).pack(side="left", padx=2)
-        
-        ttk.Button(
-            top_frame, 
-            text="Снять всех", 
-            command=self._deselect_all_visible
-        ).pack(side="left", padx=2)
-        
-        # -- Центральная панель (таблица с прокруткой) --
-        tree_frame = tk.Frame(main_container, padx=10)
-        tree_frame.pack(fill="both", expand=True, pady=(0, 10))
-        
-        # Создаем Treeview
-        cols = ("fio", "tbn", "position")
-        self.tree = ttk.Treeview(
-            tree_frame, 
-            columns=cols, 
-            show="tree headings", 
-            selectmode="none",
-            height=15  # Явно задаем высоту
-        )
-        
-        # Настраиваем заголовки
-        self.tree.heading("#0", text="☑", anchor="center")
-        self.tree.heading("fio", text="ФИО", command=lambda: self._sort_by_column("fio"))
-        self.tree.heading("tbn", text="Табельный №", command=lambda: self._sort_by_column("tbn"))
-        self.tree.heading("position", text="Должность", command=lambda: self._sort_by_column("position"))
-        
-        # Настраиваем колонки
-        self.tree.column("#0", width=40, stretch=False, anchor="center")
-        self.tree.column("fio", width=250, stretch=True, anchor="w")
-        self.tree.column("tbn", width=100, stretch=False, anchor="center")
-        self.tree.column("position", width=300, stretch=True, anchor="w")
-        
-        # Скроллбары
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        
-        # Размещаем виджеты
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-        
-        tree_frame.grid_rowconfigure(0, weight=1)
-        tree_frame.grid_columnconfigure(0, weight=1)
-        
-        # Привязываем клик
-        self.tree.bind("<Button-1>", self._on_toggle_check)
-        
-        # -- Нижняя панель (счетчик и кнопки) --
-        bottom_frame = tk.Frame(main_container, padx=10, pady=(0, 10))
-        bottom_frame.pack(fill="x", side="bottom")
-        
-        self.lbl_count = tk.Label(bottom_frame, text="Выбрано: 0 / Всего: 0")
-        self.lbl_count.pack(side="left", fill="x", expand=True)
-        
-        ttk.Button(
-            bottom_frame, 
-            text="Отмена", 
-            command=self._on_cancel
-        ).pack(side="right", padx=(5, 0))
-        
-        ttk.Button(
-            bottom_frame, 
-            text="OK", 
-            command=self._on_ok
-        ).pack(side="right")
-
-    def _populate_tree(self, employees_to_show: List[Tuple]):
-        """Заполняет таблицу данными."""
-        # Очищаем дерево
-        for iid in self.tree.get_children():
-            self.tree.delete(iid)
-        self._iid_map.clear()
-        
-        # Добавляем элементы
-        for i, emp in enumerate(employees_to_show):
-            fio, tbn, pos, _ = emp
-            key = (fio, tbn or '')
-            iid = f"item_{i}"
-            self._iid_map[iid] = key
-            
-            is_checked = self.checked_state.get(key, False)
-            image = self.tree.img_checked if is_checked else self.tree.img_unchecked
-            
-            self.tree.insert("", "end", iid=iid, image=image, values=(fio, tbn or '', pos or ''))
-        
-        self._update_counters()
-    
-    def _on_toggle_check(self, event):
-        """Обрабатывает клик по чекбоксу."""
-        region = self.tree.identify_region(event.x, event.y)
-        if region == "tree":
-            iid = self.tree.identify_row(event.y)
-            if not iid:
-                return
-            
-            key = self._iid_map.get(iid)
-            if key is None:
-                return
-            
-            # Переключаем состояние
-            current_state = self.checked_state.get(key, False)
-            new_state = not current_state
-            self.checked_state[key] = new_state
-            
-            # Обновляем иконку
-            new_image = self.tree.img_checked if is_checked else self.tree.img_unchecked
-            self.tree.item(iid, image=new_image)
-            
-            self._update_counters()
-    
-    def _update_counters(self):
-        """Обновляет счетчик выбранных сотрудников."""
-        total = len(self._all_employees)
-        selected = sum(1 for v in self.checked_state.values() if v)
-        self.lbl_count.config(text=f"Выбрано: {selected} / Всего: {total}")
-    
-    def _on_search(self, event=None):
-        """Фильтрует список по поисковому запросу."""
-        search_term = self.search_var.get().lower().strip()
-        
-        if not search_term:
-            filtered = self._all_employees
-        else:
-            filtered = [
-                e for e in self._all_employees 
-                if search_term in e[0].lower() 
-                or search_term in (e[1] or "").lower() 
-                or search_term in (e[2] or "").lower()
-            ]
-        
-        self._populate_tree(filtered)
-    
-    def _sort_by_column(self, col):
-        """Сортирует список по выбранной колонке."""
-        col_index = {"fio": 0, "tbn": 1, "position": 2}[col]
-        search_term = self.search_var.get().lower().strip()
-        
-        # Определяем текущий отображаемый список
-        if not search_term:
-            current_list = self._all_employees[:]
-        else:
-            current_list = [
-                e for e in self._all_employees 
-                if search_term in e[0].lower() 
-                or search_term in (e[1] or "").lower()
-                or search_term in (e[2] or "").lower()
-            ]
-        
-        # Сортируем
-        current_list.sort(key=lambda x: (x[col_index] or "").lower())
-        self._populate_tree(current_list)
-    
-    def _change_visible_state(self, new_state: bool):
-        """Изменяет состояние всех видимых чекбоксов."""
-        for iid in self.tree.get_children():
-            key = self._iid_map.get(iid)
-            if key:
-                self.checked_state[key] = new_state
-                image = self.tree.img_checked if is_checked else self.tree.img_unchecked 
-                self.tree.item(iid, image=image)
-        self._update_counters()
-    
-    def _select_all_visible(self):
-        """Выбирает всех видимых сотрудников."""
-        self._change_visible_state(True)
-    
-    def _deselect_all_visible(self):
-        """Снимает выбор со всех видимых сотрудников."""
-        self._change_visible_state(False)
-    
-    def _on_ok(self):
-        """Подтверждает выбор и закрывает окно."""
-        self.result = [
-            emp for emp in self._all_employees 
-            if self.checked_state.get((emp[0], emp[1] or ''), False)
-        ]
-        self.grab_release()
-        self.destroy()
-    
-    def _on_cancel(self):
-        """Отменяет выбор и закрывает окно."""
-        self.result = None
-        self.grab_release()
-        self.destroy()
-        
 class AutoCompleteCombobox(ttk.Combobox):
     def __init__(self, master=None, **kw):
         super().__init__(master, **kw)
@@ -1093,90 +792,56 @@ class TimesheetPage(tk.Frame):
         self._init_year = init_year
         self._init_month = init_month
 
-    # --- Инициализация справочников ПУСТЫМИ значениями ---
-    # Данные будут загружены позже через _lazy_load_all_spr_data
-        self.employees: List[Tuple[str, str, str, str]] = []
-        self.objects: List[Tuple[str, str]] = []
-        self.emp_names: List[str] = []
-        self.emp_info: Dict[str, Tuple[str, str]] = {}
-        self.departments: List[str] = ["Все"]
-        self.address_options: List[str] = []
-        self.addr_to_ids: Dict[str, List[str]] = {}
-    # ----------------------------------------------------
-
-    # Убедимся, что get_output_dir_from_config существует и возвращает Path
+        # Убедимся, что get_output_dir_from_config существует и возвращает Path
         if get_output_dir_from_config:
             self.out_dir = get_output_dir_from_config()
         else:
-        # Запасной вариант, если функция не найдена
+            # Запасной вариант, если функция не найдена
             self.out_dir = Path("./output")
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
         self.DAY_ENTRY_FONT = ("Segoe UI", 8)
         self._fit_job = None
 
-    # --- Модель и пагинация ---
+        self._load_spr_data_from_db()
+
+        # --- КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ: МОДЕЛЬ И ПАГИНАЦИЯ ---
         self.model_rows: List[Dict[str, Any]] = [] # Модель данных
         self.current_page = 1
         self.page_size = tk.IntVar(value=50) # Количество строк на странице
         self._suspend_sync = False # Флаг для предотвращения синхронизации при массовых операциях
+        # ---------------------------------------------
 
         self._build_ui()
-    
-    # Этот вызов загружает только строки табеля, он может остаться здесь
+        # Загружаем данные из БД в модель, а затем рендерим первую страницу
         self._load_existing_rows()
 
         self.bind("<Configure>", self._on_window_configure)
         self.after(120, self._auto_fit_columns)
 
-        self.after(50, self._lazy_load_all_spr_data)
+    def _load_spr_data_from_db(self):
+        # Эта функция остается без изменений
+        employees = load_employees_from_db()
+        objects = load_objects_from_db()
 
-    def _lazy_load_all_spr_data(self):
-        """
-        Отложенная загрузка всех справочников (сотрудники, объекты).
-        Вызывается один раз после создания страницы, когда пул БД уже доступен.
-        """
-        try:
-            # 1. Загружаем данные из БД
-            self.employees = load_employees_from_db()
-            self.objects = load_objects_from_db()
-        
-        # 2. Обновляем все связанные структуры данных
-            self.emp_names = [fio for (fio, _, _, _) in self.employees]
-            self.emp_info = {fio: (tbn, pos) for (fio, tbn, pos, _) in self.employees}
+        self.employees = employees
+        self.objects = objects
 
-            deps = sorted({(dep or "").strip() for (_, _, _, dep) in self.employees if (dep or "").strip()})
-            self.departments = ["Все"] + deps
+        self.emp_names = [fio for (fio, _, _, _) in self.employees]
+        self.emp_info = {fio: (tbn, pos) for (fio, tbn, pos, _) in self.employees}
 
-            self.addr_to_ids.clear()
-            for oid, addr in self.objects:
-                if not addr: continue
-                self.addr_to_ids.setdefault(addr, [])
-                if oid and oid not in self.addr_to_ids[addr]:
-                    self.addr_to_ids[addr].append(oid)
-            addresses_set = set(self.addr_to_ids.keys()) | {addr for _, addr in self.objects if addr}
-            self.address_options = sorted(addresses_set)
+        deps = sorted({(dep or "").strip() for (_, _, _, dep) in self.employees if (dep or "").strip()})
+        self.departments = ["Все"] + deps
 
-            # 3. Обновляем виджеты, которые зависят от этих данных
-            self.cmb_department.config(values=self.departments)
-            # Восстанавливаем значение, если оно было установлено при инициализации
-            if self._init_department and self._init_department in self.departments:
-                self.cmb_department.set(self._init_department)
-            
-            self.cmb_address.set_completion_list(self.address_options)
-            # Восстанавливаем значение адреса
-            if self._init_object_addr and self._init_object_addr in self.address_options:
-                self.cmb_address.set(self._init_object_addr)
-                self._on_address_change() # Обновляем список ID
-            
-            # 4. Вызываем _on_department_select, чтобы обновить список ФИО в cmb_fio
-            # и применить фильтр по подразделению, если он был задан.
-            self._on_department_select()
-        
-        except Exception as e:
-            import logging # Локальный импорт для безопасности
-            logging.error(f"Ошибка при отложенной загрузке справочников: {e}", exc_info=True)
-            messagebox.showerror("Ошибка загрузки данных", f"Не удалось загрузить справочники из БД:\n{e}")
+        self.addr_to_ids: Dict[str, List[str]] = {}
+        for oid, addr in self.objects:
+            if not addr:
+                continue
+            self.addr_to_ids.setdefault(addr, [])
+            if oid and oid not in self.addr_to_ids[addr]:
+                self.addr_to_ids[addr].append(oid)
+        addresses_set = set(self.addr_to_ids.keys()) | {addr for _, addr in self.objects if addr}
+        self.address_options = sorted(addresses_set)
 
     def _build_ui(self):
         # --- Верхняя панель (без изменений) ---
@@ -1241,17 +906,12 @@ class TimesheetPage(tk.Frame):
         btns.grid(row=3, column=0, columnspan=8, sticky="w", pady=(8, 0))
         ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
         ttk.Button(btns, text="Добавить подразделение", command=self.add_department_all).grid(row=0, column=1, padx=4)
-
-        ### НОВОЕ: Кнопка для выборочного добавления ###
-        ttk.Button(btns, text="Выбрать из подразделения", command=self.add_department_selective).grid(row=0, column=2, padx=4)
-
-        # Сдвигаем остальные кнопки, меняя их column
-        ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=3, padx=4)
-        ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=4, padx=4)
-        ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=5, padx=4)
-        ttk.Button(btns, text="Загрузить из Excel", command=self.import_from_excel).grid(row=0, column=6, padx=4)
-        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=7, padx=4)
-        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=8, padx=4)
+        ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=2, padx=4)
+        ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=3, padx=4)
+        ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=4, padx=4)
+        ttk.Button(btns, text="Загрузить из Excel", command=self.import_from_excel).grid(row=0, column=5, padx=4)
+        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=6, padx=4)
+        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=7, padx=4)
 
         # --- Основной контейнер (без изменений) ---
         main_frame = tk.Frame(self)
@@ -1564,7 +1224,7 @@ class TimesheetPage(tk.Frame):
         self._render_page(last_page)
 
     def add_department_all(self):
-        """Массово добавляет сотрудников в модель с использованием BatchAddDialog."""
+        """Массово добавляет сотрудников в модель."""
         if self.read_only:
             return
         dep_sel = (self.cmb_department.get() or "Все").strip()
@@ -1581,85 +1241,33 @@ class TimesheetPage(tk.Frame):
             if not candidates:
                 messagebox.showinfo("Объектный табель", f"В подразделении «{dep_sel}» нет сотрудников.")
                 return
-    
+        
         self._sync_visible_to_model() # Сохраняем текущие правки
         existing = {(r["fio"].strip().lower(), r["tbn"].strip()) for r in self.model_rows}
-    
-        # Отдельная функция для обработки, чтобы не блокировать GUI
+        added_count = 0
+        
+        # Используем BatchAddDialog для визуализации процесса
+        dlg = BatchAddDialog(self, total=len(candidates), title="Добавление сотрудников")
+
         def process_batch():
-            added_count = 0
             for fio, tbn, _, _ in candidates:
-                if dlg.cancelled:
-                    break
+                if dlg.cancelled: break
                 key = (fio.strip().lower(), (tbn or "").strip())
                 if key not in existing:
                     self.model_rows.append({"fio": fio, "tbn": tbn, "hours": [None] * 31})
                     existing.add(key)
+                    nonlocal added_count
                     added_count += 1
                 dlg.step()
-        
-            dlg.close() # Закрываем диалог после завершения
+
+            dlg.close()
             if added_count > 0:
-                self._render_page(1)
+                self._render_page(1) # После добавления перерисовываем с первой страницы
                 messagebox.showinfo("Объектный табель", f"Добавлено новых сотрудников: {added_count}")
-            elif not dlg.cancelled:
-                 messagebox.showinfo("Объектный табель", "Все сотрудники из этого подразделения уже в списке.")
-
-        # Сначала создаем и показываем окно прогресса
-        dlg = BatchAddDialog(self, total=len(candidates), title="Добавление сотрудников")
-        # А затем, с небольшой задержкой, запускаем "тяжелую" обработку
-        self.after(100, process_batch)
-
-    def add_department_selective(self):
-        """Открывает диалог для выборочного добавления сотрудников из подразделения."""
-        if self.read_only:
-            return
-        dep_sel = (self.cmb_department.get() or "Все").strip()
-
-        # Определяем список кандидатов для выбора
-        if dep_sel == "Все":
-            candidates = self.employees[:]
-            title = "Выбор сотрудников (все подразделения)"
-        else:
-            candidates = [e for e in self.employees if len(e) > 3 and (e[3] or "").strip() == dep_sel]
-            title = f"Выбор из «{dep_sel}»"
-
-        if not candidates:
-            messagebox.showinfo("Выбор сотрудников", f"В подразделении «{dep_sel}» нет сотрудников для добавления.")
-            return
-
-        # 1. Открываем наше новое диалоговое окно
-        dialog = SelectEmployeesChecklistDialog(self, candidates, title=title)
-        self.wait_window(dialog) # Ждем, пока пользователь закроет окно
-
-        # 2. Проверяем результат. Если None, значит пользователь нажал "Отмена".
-        if dialog.result is None:
-            return
-
-        selected_employees = dialog.result
-        if not selected_employees:
-            messagebox.showinfo("Объектный табель", "Ни один сотрудник не был выбран.")
-            return
-
-        self._sync_visible_to_model()
-    
-        # Получаем список уже добавленных сотрудников, чтобы не дублировать
-        existing = {(r["fio"].strip().lower(), r["tbn"].strip()) for r in self.model_rows}
-        added_count = 0
-
-        # Добавляем в модель только тех, кого еще нет в списке
-        for fio, tbn, _, _ in selected_employees:
-            key = (fio.strip().lower(), (tbn or "").strip())
-            if key not in existing:
-                self.model_rows.append({"fio": fio, "tbn": tbn, "hours": [None] * 31})
-                existing.add(key)
-                added_count += 1
-
-        if added_count > 0:
-            self._render_page(1) # Перерисовываем таблицу с первой страницы
-            messagebox.showinfo("Объектный табель", f"Добавлено новых сотрудников: {added_count}")
-        else:
-            messagebox.showinfo("Объектный табель", "Все выбранные сотрудники уже были в списке.")
+            else:
+                messagebox.showinfo("Объектный табель", "Все сотрудники из этого подразделения уже в списке.")
+        
+        self.after(50, process_batch) # Запускаем обработку с небольшой задержкой, чтобы диалог успел отрисоваться
 
     def _on_fio_select(self, *_):
         fio = self.fio_var.get().strip()
