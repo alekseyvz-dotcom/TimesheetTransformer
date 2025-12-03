@@ -528,6 +528,225 @@ class HoursFillDialog(simpledialog.Dialog):
             "clear": self._clear,
         }
 
+# <<< КЛАСС ДЛЯ ВЫБОРА СОТРУДНИКОВ С ЧЕКБОКСАМИ >>>
+
+import base64
+
+class SelectEmployeesChecklistDialog(tk.Toplevel):
+    """
+    Диалоговое окно для выбора сотрудников из списка с чекбоксами,
+    фильтрацией и отображением в виде таблицы.
+    """
+    def __init__(self, parent, employees: List[Tuple[str, str, str, str]], title="Выбор сотрудников"):
+        super().__init__(parent)
+        self.parent = parent
+        self.title(title)
+        self.resizable(True, True) # Разрешим изменение размера
+        self.grab_set()
+
+        # Исходный список всех кандидатов
+        self._all_employees = sorted(employees, key=lambda x: x[0])
+        self.result: Optional[List[Tuple[str, str, str, str]]] = None
+
+        # --- Состояние чекбоксов ---
+        # Ключ - (fio, tbn), значение - Boolean (True, если выбран)
+        self.checked_state: Dict[Tuple[str, str], bool] = {
+            (emp[0], emp[1] or ''): False for emp in self._all_employees
+        }
+        # Карта для связи iid Treeview с ключом в checked_state
+        self._iid_map: Dict[str, Tuple[str, str]] = {}
+
+        # --- Изображения для чекбоксов (встроены в код) ---
+        self.img_checked = tk.PhotoImage(
+            data=base64.b64decode('R0lGODlhDQANAPIAAN3d3f///+/v79/f3+Pj4+vr6wAAAAAAAAAAACH5BAEAAAAALAAAAAANAA0AAAMsGLo8x12YmIPd6Xm2UeCSJrgcLi4b2xIofpgeSoWtf2hE4gABgOBrAJ83AgA7')
+        )
+        self.img_unchecked = tk.PhotoImage(
+            data=base64.b64decode('R0lGODlhDQANAPIAAAAAAP///+/v79/f3+Pj4+vr6wAAAAAAAAAAACH5BAEAAAAALAAAAAANAA0AAAMsGLo8z02YmYPdnXm2UeCSJrgcLi4b2xIofpgeSoWtf2hE4gABgOBrAJ83AgA7')
+        )
+
+        self._build_ui()
+        self._populate_tree(self._all_employees)
+
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        self.geometry("750x500") # Стартовый размер окна
+        self.update_idletasks()
+        px, py = parent.winfo_rootx(), parent.winfo_rooty()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        sw, sh = self.winfo_width(), self.winfo_height()
+        self.geometry(f"+{px + (pw - sw) // 2}+{py + (ph - sh) // 2}")
+
+    def _build_ui(self):
+        main_frame = tk.Frame(self, padx=10, pady=10)
+        main_frame.pack(fill="both", expand=True)
+        main_frame.grid_rowconfigure(1, weight=1)
+        main_frame.grid_columnconfigure(0, weight=1)
+
+        # Панель фильтрации и кнопок выбора
+        top_frame = tk.Frame(main_frame)
+        top_frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+        tk.Label(top_frame, text="Поиск:").pack(side="left")
+        self.search_var = tk.StringVar()
+        search_entry = ttk.Entry(top_frame, textvariable=self.search_var, width=40)
+        search_entry.pack(side="left", fill="x", expand=True, padx=5)
+        search_entry.bind("<KeyRelease>", self._on_search)
+
+        ttk.Button(top_frame, text="Выбрать всех видимых", command=self._select_all_visible).pack(side="left", padx=(5,0))
+        ttk.Button(top_frame, text="Снять со всех видимых", command=self._deselect_all_visible).pack(side="left", padx=5)
+
+        # Treeview для отображения списка
+        tree_frame = tk.Frame(main_frame)
+        tree_frame.grid(row=1, column=0, sticky="nsew")
+        
+        cols = ("fio", "tbn", "position")
+        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="none")
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        self.tree.heading("fio", text="ФИО", command=lambda: self._sort_by_column("fio"))
+        self.tree.heading("tbn", text="Табельный №", command=lambda: self._sort_by_column("tbn"))
+        self.tree.heading("position", text="Должность", command=lambda: self._sort_by_column("position"))
+
+        self.tree.column("fio", width=250, stretch=True)
+        self.tree.column("tbn", width=100, stretch=False, anchor="center")
+        self.tree.column("position", width=300, stretch=True)
+
+        # Настраиваем специальную колонку #0 для чекбоксов
+        self.tree.column("#0", width=40, stretch=False, anchor="center")
+
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+
+        self.tree.bind("<Button-1>", self._on_toggle_check)
+
+        # Нижняя панель с кнопками и счетчиком
+        bottom_frame = tk.Frame(main_frame)
+        bottom_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        
+        self.lbl_count = tk.Label(bottom_frame, text="Выбрано: 0 / Всего: 0")
+        self.lbl_count.pack(side="left", fill="x", expand=True)
+
+        ttk.Button(bottom_frame, text="OK", command=self._on_ok, style="Accent.TButton").pack(side="right")
+        ttk.Button(bottom_frame, text="Отмена", command=self._on_cancel).pack(side="right", padx=5)
+        # Для кнопки "ОК" можно добавить стиль, если он есть в вашем приложении
+        try:
+            s = ttk.Style()
+            s.configure('Accent.TButton', font=('Segoe UI', 9, 'bold'))
+        except tk.TclError:
+            pass
+
+
+    def _populate_tree(self, employees_to_show: List[Tuple]):
+        """Заполняет Treeview данными."""
+        # Очищаем перед заполнением
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+        self._iid_map.clear()
+
+        for emp in employees_to_show:
+            fio, tbn, pos = emp[0], emp[1] or '', emp[2] or ''
+            key = (fio, tbn)
+            
+            # Генерируем уникальный iid и сохраняем его
+            iid = f"item_{len(self._iid_map)}"
+            self._iid_map[iid] = key
+
+            is_checked = self.checked_state.get(key, False)
+            image = self.img_checked if is_checked else self.img_unchecked
+
+            self.tree.insert("", "end", iid=iid, image=image, values=(fio, tbn, pos))
+        
+        self._update_counters()
+
+    def _on_toggle_check(self, event):
+        """Обрабатывает клик по строке для переключения чекбокса."""
+        region = self.tree.identify_region(event.x, event.y)
+        if region != "tree": # Кликнули не на иконку чекбокса
+            return
+
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+
+        key = self._iid_map.get(iid)
+        if key is None:
+            return
+
+        # Переключаем состояние
+        current_state = self.checked_state.get(key, False)
+        self.checked_state[key] = not current_state
+
+        # Обновляем картинку
+        new_image = self.img_checked if not current_state else self.img_unchecked
+        self.tree.item(iid, image=new_image)
+        
+        self._update_counters()
+
+    def _update_counters(self):
+        """Обновляет счетчики выбранных/всего."""
+        total = len(self._all_employees)
+        selected = sum(1 for v in self.checked_state.values() if v)
+        self.lbl_count.config(text=f"Выбрано: {selected} / Всего: {total}")
+
+    def _on_search(self, event=None):
+        """Фильтрует список при вводе текста."""
+        search_term = self.search_var.get().lower().strip()
+        if not search_term:
+            filtered = self._all_employees
+        else:
+            filtered = [
+                emp for emp in self._all_employees
+                if search_term in emp[0].lower()  # ФИО
+                or search_term in (emp[1] or "").lower()  # Табельный
+                or search_term in (emp[2] or "").lower()  # Должность
+            ]
+        self._populate_tree(filtered)
+
+    def _sort_by_column(self, col):
+        """Сортировка списка по клику на заголовок колонки."""
+        # Простая реализация сортировки, можно усложнить для учета направления (asc/desc)
+        col_index = {"fio": 0, "tbn": 1, "position": 2}[col]
+        
+        # Получаем текущий видимый список
+        search_term = self.search_var.get().lower().strip()
+        if not search_term:
+            current_list = self._all_employees
+        else:
+            current_list = [emp for emp in self._all_employees if search_term in emp[0].lower() or search_term in (emp[1] or "").lower()]
+        
+        # Сортируем
+        current_list.sort(key=lambda x: (x[col_index] or "").lower())
+        self._populate_tree(current_list)
+
+    def _change_visible_state(self, new_state: bool):
+        """Устанавливает состояние (checked/unchecked) для всех видимых элементов."""
+        for iid in self.tree.get_children():
+            key = self._iid_map.get(iid)
+            if key:
+                self.checked_state[key] = new_state
+                self.tree.item(iid, image=self.img_checked if new_state else self.img_unchecked)
+        self._update_counters()
+
+    def _select_all_visible(self):
+        self._change_visible_state(True)
+
+    def _deselect_all_visible(self):
+        self._change_visible_state(False)
+
+    def _on_ok(self):
+        """Формирует результат и закрывает окно."""
+        self.result = [
+            emp for emp in self._all_employees 
+            if self.checked_state.get((emp[0], emp[1] or ''), False)
+        ]
+        self.destroy()
+
+    def _on_cancel(self):
+        self.result = None
+        self.destroy()
 
 class AutoCompleteCombobox(ttk.Combobox):
     def __init__(self, master=None, **kw):
@@ -906,12 +1125,17 @@ class TimesheetPage(tk.Frame):
         btns.grid(row=3, column=0, columnspan=8, sticky="w", pady=(8, 0))
         ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
         ttk.Button(btns, text="Добавить подразделение", command=self.add_department_all).grid(row=0, column=1, padx=4)
-        ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=2, padx=4)
-        ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=3, padx=4)
-        ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=4, padx=4)
-        ttk.Button(btns, text="Загрузить из Excel", command=self.import_from_excel).grid(row=0, column=5, padx=4)
-        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=6, padx=4)
-        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=7, padx=4)
+
+        ### НОВОЕ: Кнопка для выборочного добавления ###
+        ttk.Button(btns, text="Выбрать из подразделения", command=self.add_department_selective).grid(row=0, column=2, padx=4)
+
+        # Сдвигаем остальные кнопки, меняя их column
+        ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=3, padx=4)
+        ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=4, padx=4)
+        ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=5, padx=4)
+        ttk.Button(btns, text="Загрузить из Excel", command=self.import_from_excel).grid(row=0, column=6, padx=4)
+        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=7, padx=4)
+        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=8, padx=4)
 
         # --- Основной контейнер (без изменений) ---
         main_frame = tk.Frame(self)
@@ -1248,6 +1472,53 @@ class TimesheetPage(tk.Frame):
         
         # Используем BatchAddDialog для визуализации процесса
         dlg = BatchAddDialog(self, total=len(candidates), title="Добавление сотрудников")
+
+        # <<< НАЧАЛО НОВОГО КОДА: МЕТОД В КЛАССЕ TimesheetPage >>>
+
+    def add_department_selective(self):
+        """Открывает диалог для выборочного добавления сотрудников из подразделения."""
+        if self.read_only:
+            return
+        dep_sel = (self.cmb_department.get() or "Все").strip()
+    
+        # Определяем список кандидатов для выбора
+        if dep_sel == "Все":
+            candidates = self.employees[:]
+            title = "Выбор сотрудников (все подразделения)"
+        else:
+            candidates = [e for e in self.employees if len(e) > 3 and (e[3] or "").strip() == dep_sel]
+            title = f"Выбор из «{dep_sel}»"
+
+        if not candidates:
+            messagebox.showinfo("Выбор сотрудников", f"В подразделении «{dep_sel}» нет сотрудников для добавления.")
+            return
+
+        # Открываем диалоговое окно
+        dialog = SelectEmployeesChecklistDialog(self, candidates, title=title)
+        self.wait_window(dialog)
+        # self.wait_window(dialog) # Это не нужно, так как grab_set() делает его модальным
+    
+        if not dialog.result: # Пользователь нажал "Отмена" или закрыл окно
+            return
+    
+        selected_employees = dialog.result
+    
+        self._sync_visible_to_model() # Сохраняем текущие правки на странице
+        existing = {(r["fio"].strip().lower(), r["tbn"].strip()) for r in self.model_rows}
+        added_count = 0
+
+        for fio, tbn, _, _ in selected_employees:
+            key = (fio.strip().lower(), (tbn or "").strip())
+            if key not in existing:
+                self.model_rows.append({"fio": fio, "tbn": tbn, "hours": [None] * 31})
+                existing.add(key)
+                added_count += 1
+
+        if added_count > 0:
+            self._render_page(1) # После добавления перерисовываем с первой страницы
+            messagebox.showinfo("Объектный табель", f"Добавлено новых сотрудников: {added_count}")
+        else:
+            messagebox.showinfo("Объектный табель", "Все выбранные сотрудники уже были в списке.")
 
         def process_batch():
             for fio, tbn, _, _ in candidates:
