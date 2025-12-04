@@ -951,6 +951,11 @@ class SelectEmployeesDialog(tk.Toplevel):
         self.tree.column("pos", width=200, anchor="w")
         self.tree.column("dep", width=160, anchor="w")
 
+        normal_font = ("Segoe UI", 9)
+        bold_font = ("Segoe UI", 9, "bold")
+        self.tree.tag_configure("checked", font=bold_font)
+        self.tree.tag_configure("unchecked", font=normal_font)
+
         vsb = ttk.Scrollbar(tbl_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
 
@@ -1074,8 +1079,11 @@ class SelectEmployeesDialog(tk.Toplevel):
         dep = emp.get("dep", "")
         checked = (emp_index in self._selected_indices)
         display_fio = f"[{'x' if checked else ' '}] {fio}"
-        self.tree.item(row_id, values=(display_fio, tbn, pos, dep))
-
+        self.tree.item(
+            row_id,
+            values=(display_fio, tbn, pos, dep),
+            tags=("checked" if checked else "unchecked",),
+        )
     def _select_all(self):
         for idx in self._filtered_indices:
             self._selected_indices.add(idx)
