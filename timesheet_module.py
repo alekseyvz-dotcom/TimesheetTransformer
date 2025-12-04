@@ -470,6 +470,11 @@ class SelectEmployeesDialog(tk.Toplevel):
         self.tree.column("pos", width=180, anchor="w")
         self.tree.column("dep", width=140, anchor="w")
 
+        bold_font = ("Segoe UI", 9, "bold")
+        normal_font = ("Segoe UI", 9)
+        self.tree.tag_configure("checked", font=bold_font)
+        self.tree.tag_configure("unchecked", font=normal_font)
+
         vsb = ttk.Scrollbar(tbl_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
 
