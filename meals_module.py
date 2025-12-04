@@ -830,6 +830,11 @@ def safe_filename(s: str, maxlen: int = 60) -> str:
     s = re.sub(r"_+", "_", s)
     return s[:maxlen] if len(s) > maxlen else s
 
+def disable_mousewheel(widget: tk.Widget):
+    """Запрещает прокрутку колёсиком для данного виджета (Windows)."""
+    def _block(event):
+        return "break"
+    widget.bind("<MouseWheel>", _block)
 
 # ========================= ВИДЖЕТЫ =========================
 
@@ -958,6 +963,7 @@ class SelectEmployeesDialog(tk.Toplevel):
         self._selected_indices: set[int] = set()
 
         self._refilter()
+        self._update_selected_count()
 
         sel_frame = tk.Frame(main)
         sel_frame.pack(fill="x")
@@ -967,6 +973,12 @@ class SelectEmployeesDialog(tk.Toplevel):
         ttk.Button(sel_frame, text="Снять все", command=self._clear_all).pack(
             side="left", padx=4
         )
+        self.lbl_selected = tk.Label(
+            sel_frame,
+            text="Выбрано: 0",
+            bg=sel_frame["bg"],
+        )
+        self.lbl_selected.pack(side="right")
 
         btns = tk.Frame(main)
         btns.pack(fill="x", pady=(8, 0))
@@ -987,6 +999,12 @@ class SelectEmployeesDialog(tk.Toplevel):
             sw = self.winfo_width()
             sh = self.winfo_height()
             self.geometry(f"+{px + (pw - sw)//2}+{py + (ph - sh)//2}")
+        except Exception:
+            pass
+
+    def _update_selected_count(self):
+        try:
+            self.lbl_selected.config(text=f"Выбрано: {len(self._selected_indices)}")
         except Exception:
             pass
 
@@ -1030,6 +1048,7 @@ class SelectEmployeesDialog(tk.Toplevel):
             self._selected_indices.remove(idx)
         else:
             self._selected_indices.add(idx)
+        self._update_selected_count()
 
     def _on_tree_click(self, event):
         region = self.tree.identify("region", event.x, event.y)
@@ -1061,10 +1080,12 @@ class SelectEmployeesDialog(tk.Toplevel):
         for idx in self._filtered_indices:
             self._selected_indices.add(idx)
         self._refilter()
+        self._update_selected_count()
 
     def _clear_all(self):
         self._selected_indices.clear()
         self._refilter()
+        self._update_selected_count()
 
     def _on_ok(self):
         if not self._selected_indices:
@@ -1119,6 +1140,9 @@ class EmployeeRow:
         if meal_types:
             self.cmb_meal_type.set(meal_types[0])
         self.cmb_meal_type.grid(row=0, column=3, padx=2)
+
+        # блокируем прокрутку типа питания
+        disable_mousewheel(self.cmb_meal_type)
 
         self.ent_comment = ttk.Entry(self.frame, width=32)
         self.ent_comment.grid(row=0, column=4, padx=2, sticky="w")
@@ -1251,6 +1275,9 @@ class MealOrderPage(tk.Frame):
         self.cmb_dep.set(saved_dep if saved_dep in self.deps else self.deps[0])
         self.cmb_dep.grid(row=0, column=3, columnspan=3, sticky="we", padx=(4, 12))
 
+        disable_mousewheel(self.cmb_dep)  # блокируем прокрутку подразделения
+
+
         def on_dep_changed(event=None):
             set_saved_dep(self.cmb_dep.get())
             self._update_emp_list()
@@ -1261,6 +1288,7 @@ class MealOrderPage(tk.Frame):
         self.cmb_address = AutoCompleteCombobox(top, width=40)
         self.cmb_address.set_completion_list(self.addresses)
         self.cmb_address.grid(row=1, column=1, columnspan=2, sticky="we", padx=(4, 12), pady=(8, 0))
+        disable_mousewheel(self.cmb_address)  # блокируем прокрутку адреса        
         self.cmb_address.bind("<<ComboboxSelected>>", lambda e: self._sync_ids_by_address())
         self.cmb_address.bind("<FocusOut>", lambda e: self._sync_ids_by_address())
         self.cmb_address.bind("<Return>", lambda e: self._sync_ids_by_address())
@@ -1277,6 +1305,7 @@ class MealOrderPage(tk.Frame):
 
         self.lbl_date_hint = tk.Label(top, text="", fg="#555", bg="#f7f7f7")
         self.lbl_date_hint.grid(row=1, column=5, sticky="w", padx=(12, 0), pady=(8, 0))
+        disable_mousewheel(self.cmb_object_id)  # блокируем прокрутку ID объекта
 
         tk.Label(top, text="Наименование бригады*:", bg="#f7f7f7").grid(
             row=2, column=0, sticky="w", pady=(8, 0)
@@ -1344,6 +1373,15 @@ class MealOrderPage(tk.Frame):
             side="left", padx=4
         )
 
+        # --- новый счётчик сотрудников ---
+        self.lbl_emp_count = tk.Label(
+            bottom,
+            text="Сотрудников в заявке: 0",
+            bg="#f7f7f7",
+            fg="#333",
+        )
+        self.lbl_emp_count.pack(side="right", padx=4)
+
         for c in range(6):
             top.grid_columnconfigure(c, weight=0)
         top.grid_columnconfigure(1, weight=1)
@@ -1399,6 +1437,7 @@ class MealOrderPage(tk.Frame):
             row.ent_comment.insert(0, emp.get("comment", ""))
 
         self._update_date_hint()
+        self._update_emp_count()
 
     def _build_order_dict_core(self) -> Dict:
         req_date = parse_date_any(self.ent_date.get()) or date.today()
@@ -1507,6 +1546,8 @@ class MealOrderPage(tk.Frame):
         row.cmb_fio.bind("<FocusOut>", lambda e, r=row: self._fill_emp_info(r))
 
         self.emp_rows.append(row)
+        self._update_emp_list()
+        self._update_emp_count()   # <<< добавить
 
     def delete_employee(self, emp_row: EmployeeRow):
         try:
@@ -1517,6 +1558,7 @@ class MealOrderPage(tk.Frame):
         for i, r in enumerate(self.emp_rows, start=0):
             r.grid(i)
             r.apply_zebra(i)
+        self._update_emp_count()
 
     def _validate_form(self) -> bool:
         req = parse_date_any(self.ent_date.get())
@@ -1563,6 +1605,13 @@ class MealOrderPage(tk.Frame):
             )
             return False
         return True
+
+    def _update_emp_count(self):
+        cnt = len(self.emp_rows)
+        try:
+            self.lbl_emp_count.config(text=f"Сотрудников в заявке: {cnt}")
+        except Exception:
+            pass
 
     def _fill_emp_info(self, row: EmployeeRow):
         fio = row.fio_var.get().strip()
@@ -1815,6 +1864,7 @@ class MealOrderPage(tk.Frame):
         self.emp_rows.clear()
         self._update_emp_list()
         self._update_date_hint()
+        self._update_emp_count()
 
     def add_department(self):
         dep = (self.cmb_dep.get() or "Все").strip()
@@ -1855,6 +1905,7 @@ class MealOrderPage(tk.Frame):
             added += 1
 
         self._update_emp_list()
+        self._update_emp_count()
         messagebox.showinfo("Питание", f"Добавлено сотрудников: {added}")
 
     def add_department_partial(self):
@@ -1906,6 +1957,7 @@ class MealOrderPage(tk.Frame):
             added += 1
 
         self._update_emp_list()
+        self._update_emp_count() 
 
         if added:
             messagebox.showinfo("Питание", f"Добавлено сотрудников: {added}")
@@ -2109,7 +2161,7 @@ class MyMealsOrdersPage(tk.Frame):
 
         win = tk.Toplevel(self)
         win.title(title)
-        win.geometry("1100x720")
+        win.geometry("1300x720")
 
         if hasattr(self, "app_ref"):
             setattr(win, "app_ref", self.app_ref)
@@ -2409,7 +2461,7 @@ class MealPlanningPage(tk.Frame):
         # Окно с формой заявки
         win = tk.Toplevel(self)
         win.title(f"Редактирование заявки #{order_id}")
-        win.geometry("1100x720")
+        win.geometry("1300x720")
 
         def on_saved_callback():
             # после сохранения перезагружаем реестр
