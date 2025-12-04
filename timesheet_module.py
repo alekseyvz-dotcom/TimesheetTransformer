@@ -485,6 +485,7 @@ class SelectEmployeesDialog(tk.Toplevel):
         self._selected_indices = set()
 
         self._refilter()
+        self._update_selected_count()
 
         # --- Кнопки управления выбором ---
         sel_frame = tk.Frame(main)
@@ -495,6 +496,14 @@ class SelectEmployeesDialog(tk.Toplevel):
         ttk.Button(sel_frame, text="Снять все", command=self._clear_all).pack(
             side="left", padx=4
         )
+
+        # Счётчик выбранных сотрудников
+        self.lbl_selected = tk.Label(
+            sel_frame,
+            text="Выбрано: 0",
+            bg=sel_frame["bg"],
+        )
+        self.lbl_selected.pack(side="right")
 
         # --- Низ: OK / Отмена ---
         btns = tk.Frame(main)
@@ -524,6 +533,13 @@ class SelectEmployeesDialog(tk.Toplevel):
             pass
 
     # ---------- Вспомогательные методы ----------
+
+    def _update_selected_count(self):
+        """Обновляет текст 'Выбрано: N'."""
+        try:
+            self.lbl_selected.config(text=f"Выбрано: {len(self._selected_indices)}")
+        except Exception:
+            pass
 
     def _refilter(self):
         """Перестроить список в treeview по фильтрам."""
@@ -567,6 +583,7 @@ class SelectEmployeesDialog(tk.Toplevel):
             self._selected_indices.remove(idx)
         else:
             self._selected_indices.add(idx)
+        self._update_selected_count()
 
     def _on_tree_click(self, event):
         """
@@ -604,11 +621,13 @@ class SelectEmployeesDialog(tk.Toplevel):
         for emp_index in self._filtered_indices:
             self._selected_indices.add(emp_index)
         self._refilter()
+        self._update_selected_count()
 
     def _clear_all(self):
         """Снять все отметки (по всему списку)."""
         self._selected_indices.clear()
         self._refilter()
+        self._update_selected_count()
 
     def _on_ok(self):
         if not self._selected_indices:
