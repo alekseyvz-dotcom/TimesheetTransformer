@@ -165,55 +165,56 @@ def get_or_create_department(cur, name: str):
     return cur.fetchone()[0]
 
 
-def get_or_create_object(cur, excel_id: str, address: str):
+# ------- НОВАЯ ЛОГИКА ПОИСКА/СОЗДАНИЯ ОБЪЕКТОВ --------
+
+def get_object_id(cur, excel_id: str, address: str) -> Optional[int]:
     """
-    Поддержка схемы с excel_id/ excel_id.
+    Возвращает id объекта, если найден.
+    Если excel_id указан — ищем по нему.
+    Если нет — ищем только по адресу.
+    НИКАКИХ вставок здесь нет.
     """
     excel_id = (excel_id or "").strip()
     address = (address or "").strip()
-    if excel_id:
-        # новая схема
-        try:
-            cur.execute("SELECT id FROM objects WHERE excel_id = %s", (excel_id,))
-            row = cur.fetchone()
-            if row:
-                return row[0]
-        except Exception:
-            pass
 
+    if excel_id:
         cur.execute("SELECT id FROM objects WHERE excel_id = %s", (excel_id,))
         row = cur.fetchone()
         if row:
             return row[0]
-        # вставка
-        try:
-            cur.execute(
-                "INSERT INTO objects (excel_id, address) VALUES (%s, %s) RETURNING id",
-                (excel_id, address),
-            )
-        except Exception:
-            cur.execute(
-                "INSERT INTO objects (excel_id, address) VALUES (%s, %s) RETURNING id",
-                (excel_id, address),
-            )
-        return cur.fetchone()[0]
 
-    # без кода — по адресу
-    cur.execute("SELECT id FROM objects WHERE address = %s", (address,))
+    if address:
+        cur.execute("SELECT id FROM objects WHERE address = %s", (address,))
+        row = cur.fetchone()
+        if row:
+            return row[0]
+
+    return None
+
+
+def get_or_create_object_by_excel_id(cur, excel_id: str, address: str) -> int:
+    """
+    Создаёт объект ТОЛЬКО если есть excel_id.
+    По одному адресу без ID объект не создаём.
+    """
+    excel_id = (excel_id or "").strip()
+    address = (address or "").strip()
+
+    if not excel_id:
+        raise ValueError("excel_id is required to create object")
+
+    cur.execute("SELECT id FROM objects WHERE excel_id = %s", (excel_id,))
     row = cur.fetchone()
     if row:
         return row[0]
-    try:
-        cur.execute(
-            "INSERT INTO objects (excel_id, address) VALUES (NULL, %s) RETURNING id",
-            (address,),
-        )
-    except Exception:
-        cur.execute(
-            "INSERT INTO objects (excel_id, address) VALUES (NULL, %s) RETURNING id",
-            (address,),
-        )
+
+    cur.execute(
+        "INSERT INTO objects (excel_id, address) VALUES (%s, %s) RETURNING id",
+        (excel_id, address),
+    )
     return cur.fetchone()[0]
+
+# ------------------------------------------------------
 
 
 def get_or_create_meal_type(cur, name: str):
@@ -361,24 +362,15 @@ def get_current_user_id() -> Optional[int]:
     """
     Возвращает id текущего пользователя, если модуль питания
     запущен внутри главного приложения.
-
-    Здесь мы НЕ видим MainApp напрямую, поэтому базовый способ:
-    - если settings_manager когда‑нибудь начнёт хранить текущего пользователя,
-      можно будет брать оттуда;
-    - сейчас в practice user_id передаётся в MainApp.current_user и используется только там,
-      поэтому для сохранения user_id лучше передавать его явно в данные заявки (data['user_id']).
     """
-    # Пока этот хелпер не используется напрямую — user_id будем брать из data.
     return None
 
 def save_order_to_db(data: dict) -> int:
     """
     Сохраняет заявку (dict из _build_order_dict) в PostgreSQL.
 
-    Правила:
-      - Если для того же сотрудника на ТУ ЖЕ дату и ТОТ ЖЕ объект уже есть строки,
-        они удаляются и записываются заново (перезапись по объекту).
-      - Записи на другие объекты не трогаем.
+    Старый вариант использовался автономно; оставляем,
+    но приводим к новой логике объектов.
     """
     conn = None
     try:
@@ -391,7 +383,17 @@ def save_order_to_db(data: dict) -> int:
                 obj = data.get("object") or {}
                 obj_excel_id = (obj.get("id") or "").strip()
                 obj_address = (obj.get("address") or "").strip()
-                object_id = get_or_create_object(cur, obj_excel_id, obj_address)
+
+                # новая логика: сначала ищем объект
+                object_id = get_object_id(cur, obj_excel_id, obj_address)
+                if object_id is None:
+                    # если есть код — можно создать
+                    if obj_excel_id:
+                        object_id = get_or_create_object_by_excel_id(cur, obj_excel_id, obj_address)
+                    else:
+                        raise ValueError(
+                            "Не удаётся сохранить заявку: не найден объект для указанного адреса и ID."
+                        )
 
                 created_at = datetime.strptime(data["created_at"], "%Y-%m-%dT%H:%M:%S")
                 order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
@@ -491,10 +493,6 @@ def get_registry_from_db(
     """
     Возвращает агрегированный реестр по:
       (date, address, department, team_name).
-    Для каждой комбинации:
-      - total_count
-      - by_meal_type
-      - order_ids: список id заявок (по этому адресу/департаменту/бригаде и дате)
     """
     conn = None
     try:
@@ -537,7 +535,6 @@ def get_registry_from_db(
             cur.execute(sql, params)
             rows = cur.fetchall()
 
-        # Ключ: (date, address, department, team_name)
         result: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
 
         for order_id, date_str, address, dept, team_name, meal_type in rows:
@@ -554,7 +551,7 @@ def get_registry_from_db(
                     "team_name": team_name,
                     "total_count": 0,
                     "by_meal_type": {},
-                    "order_ids": set(),  # множество id заявок
+                    "order_ids": set(),
                 },
             )
             rec["total_count"] += 1
@@ -564,7 +561,6 @@ def get_registry_from_db(
             by_mt = rec["by_meal_type"]
             by_mt[mt] = by_mt.get(mt, 0) + 1
 
-        # приводим order_ids к списку для сериализации
         return [
             {
                 **rec,
@@ -580,17 +576,6 @@ def get_registry_from_db(
 def load_user_meal_orders(user_id: int) -> List[Dict[str, Any]]:
     """
     Возвращает список заголовков заявок на питание, созданных пользователем.
-    Формат:
-      {
-        'id': int,
-        'date': 'YYYY-MM-DD',
-        'created_at': datetime,
-        'department': str,
-        'team_name': str,
-        'object_id': str,
-        'object_address': str,
-        'employees_count': int,
-      }
     """
     if not user_id:
         return []
@@ -736,7 +721,10 @@ def find_conflicting_meal_orders_same_date_other_object(data: dict) -> List[Dict
             obj_excel_id = (obj.get("id") or "").strip()
             obj_address = (obj.get("address") or "").strip()
 
-            current_object_id = get_or_create_object(cur, obj_excel_id, obj_address)
+            # только ищем объект, не создаём
+            current_object_id = get_object_id(cur, obj_excel_id, obj_address)
+            if current_object_id is None:
+                return []
 
             conflicts: List[Dict[str, Any]] = []
 
@@ -892,11 +880,6 @@ EMP_COL_WIDTHS = {
 class SelectEmployeesDialog(tk.Toplevel):
     """
     Диалог выбора сотрудников в виде таблицы с "чекбоксами".
-    Вход:
-      employees: список словарей [{'fio','tbn','pos','dep'}, ...]
-      current_dep: текущее подразделение из формы
-    Результат:
-      self.result = список выбранных словарей или None (если Отмена)
     """
     def __init__(self, parent, employees: List[Dict[str, Any]], current_dep: str):
         super().__init__(parent)
@@ -950,7 +933,7 @@ class SelectEmployeesDialog(tk.Toplevel):
             tbl_frame,
             columns=columns,
             show="headings",
-            selectmode="none",  # выбор только через клик (как чекбокс)
+            selectmode="none",
         )
 
         self.tree.heading("fio", text="ФИО")
@@ -969,16 +952,13 @@ class SelectEmployeesDialog(tk.Toplevel):
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
-        # Клик по строке — переключаем "галочку"
         self.tree.bind("<Button-1>", self._on_tree_click)
 
-        # храним отображаемые и выбранные индексы
-        self._filtered_indices: List[int] = []      # индексы в self.employees
-        self._selected_indices: set[int] = set()    # глобальные индексы выбранных
+        self._filtered_indices: List[int] = []
+        self._selected_indices: set[int] = set()
 
         self._refilter()
 
-        # --- Кнопки выделения ---
         sel_frame = tk.Frame(main)
         sel_frame.pack(fill="x")
         ttk.Button(sel_frame, text="Отметить всех", command=self._select_all).pack(
@@ -988,7 +968,6 @@ class SelectEmployeesDialog(tk.Toplevel):
             side="left", padx=4
         )
 
-        # --- Нижняя панель: OK / Отмена ---
         btns = tk.Frame(main)
         btns.pack(fill="x", pady=(8, 0))
         ttk.Button(btns, text="OK", command=self._on_ok).pack(
@@ -996,11 +975,9 @@ class SelectEmployeesDialog(tk.Toplevel):
         )
         ttk.Button(btns, text="Отмена", command=self._on_cancel).pack(side="right")
 
-        # Расширяем таблицу при изменении размера окна
         main.rowconfigure(2, weight=1)
         main.columnconfigure(0, weight=1)
 
-        # Центрируем окно относительно родителя
         try:
             self.update_idletasks()
             px = parent.winfo_rootx()
@@ -1013,10 +990,7 @@ class SelectEmployeesDialog(tk.Toplevel):
         except Exception:
             pass
 
-    # ---------- Фильтрация и отрисовка ----------
-
     def _refilter(self):
-        """Перестроить список в treeview по фильтрам (поиск + подразделение)."""
         search = self.var_search.get().strip().lower()
         only_dep = self.var_only_dep.get()
         dep_sel = self.current_dep
@@ -1052,14 +1026,12 @@ class SelectEmployeesDialog(tk.Toplevel):
             self._filtered_indices.append(idx)
 
     def _toggle_index(self, idx: int):
-        """Переключить выбранность сотрудника по глобальному индексу."""
         if idx in self._selected_indices:
             self._selected_indices.remove(idx)
         else:
             self._selected_indices.add(idx)
 
     def _on_tree_click(self, event):
-        """ЛКМ по строке — переключаем псевдочекбокс."""
         region = self.tree.identify("region", event.x, event.y)
         if region != "cell":
             return
@@ -1076,7 +1048,6 @@ class SelectEmployeesDialog(tk.Toplevel):
 
         self._toggle_index(emp_index)
 
-        # обновляем текст первой колонки у строки
         emp = self.employees[emp_index]
         fio = emp.get("fio", "")
         tbn = emp.get("tbn", "")
@@ -1087,13 +1058,11 @@ class SelectEmployeesDialog(tk.Toplevel):
         self.tree.item(row_id, values=(display_fio, tbn, pos, dep))
 
     def _select_all(self):
-        """Отметить всех в текущем фильтре."""
         for idx in self._filtered_indices:
             self._selected_indices.add(idx)
         self._refilter()
 
     def _clear_all(self):
-        """Снять все отметки (во всём списке)."""
         self._selected_indices.clear()
         self._refilter()
 
@@ -1133,6 +1102,12 @@ class EmployeeRow:
         self.cmb_fio = AutoCompleteCombobox(self.frame, textvariable=self.fio_var, width=40)
         self.cmb_fio.set_completion_list(emp_names)
         self.cmb_fio.grid(row=0, column=0, padx=2, pady=1, sticky="w")
+
+        # Блокируем прокрутку списка ФИО колёсиком мыши (Windows)
+        def _block_mousewheel(event):
+            return "break"
+
+        self.cmb_fio.bind("<MouseWheel>", _block_mousewheel)
 
         self.lbl_tbn = tk.Label(self.frame, text="", width=12, anchor="w", bg=self.ZEBRA_EVEN)
         self.lbl_tbn.grid(row=0, column=1, padx=2, sticky="w")
@@ -1221,8 +1196,8 @@ class MealOrderPage(tk.Frame):
         self.orders_dir = self.base_dir / ORDERS_DIR
         self.orders_dir.mkdir(parents=True, exist_ok=True)
 
-        self.edit_order_id = order_id       # id редактируемой заявки (или None)
-        self.on_saved = on_saved            # callback для обновления реестра
+        self.edit_order_id = order_id
+        self.on_saved = on_saved
 
         self._load_refs_from_db()
         self._build_ui()
@@ -1375,22 +1350,17 @@ class MealOrderPage(tk.Frame):
         top.grid_columnconfigure(3, weight=1)
         top.grid_columnconfigure(5, weight=0)
 
-        # при открытии формы только обновляем списки, но НЕ добавляем строку сотрудника
         self._update_emp_list()
         self._update_date_hint()
-        # строка сотрудника появится только после нажатия «Добавить сотрудника» или «Добавить подразделение»
 
     def _fill_from_existing(self, data: dict):
-        # дата
         self.ent_date.delete(0, "end")
         self.ent_date.insert(0, data.get("date", ""))
-        # подразделение
         dep = data.get("department", "") or "Все"
         if dep not in self.deps:
             self.deps.append(dep)
             self.cmb_dep["values"] = self.deps
         self.cmb_dep.set(dep)
-        # адрес и ID объекта
         obj = data.get("object") or {}
         addr = obj.get("address", "") or ""
         oid = obj.get("id", "") or ""
@@ -1401,18 +1371,15 @@ class MealOrderPage(tk.Frame):
         self.cmb_address.set(addr)
         self._sync_ids_by_address()
         if oid:
-            # добавить id в список, если его там нет
             ids = list(self.cmb_object_id["values"])
             if oid and oid not in ids:
                 ids.append(oid)
                 self.cmb_object_id["values"] = ids
             self.cmb_object_id.set(oid)
 
-        # бригада
         self.ent_team.delete(0, "end")
         self.ent_team.insert(0, data.get("team_name", ""))
 
-        # сотрудники
         for r in self.emp_rows:
             r.destroy()
         self.emp_rows.clear()
@@ -1422,14 +1389,12 @@ class MealOrderPage(tk.Frame):
             row = self.emp_rows[-1]
             row.fio_var.set(emp.get("fio", ""))
             self._fill_emp_info(row)
-            # тип питания
             mt = (emp.get("meal_type") or "").strip()
             if mt and mt not in self.meal_types:
                 self.meal_types.append(mt)
                 for r in self.emp_rows:
                     r.cmb_meal_type["values"] = self.meal_types
             row.cmb_meal_type.set(mt or self.meal_types[0])
-            # комментарий
             row.ent_comment.delete(0, "end")
             row.ent_comment.insert(0, emp.get("comment", ""))
 
@@ -1442,7 +1407,6 @@ class MealOrderPage(tk.Frame):
         employees = [r.get_dict() for r in self.emp_rows]
 
         user_id = None
-        # если страница открыта из MainApp, у неё может быть атрибут app_ref
         app_ref = getattr(self, "app_ref", None)
         if app_ref is not None and hasattr(app_ref, "current_user"):
             try:
@@ -1571,6 +1535,17 @@ class MealOrderPage(tk.Frame):
         if not addr:
             messagebox.showwarning("Заявка", "Укажите Адрес объекта.")
             return False
+
+        # новая проверка: без ID объекта сохранять нельзя
+        oid = (self.cmb_object_id.get() or "").strip()
+        if not oid:
+            messagebox.showwarning(
+                "Заявка",
+                "Для указанного адреса не выбран ID объекта.\n"
+                "Выберите адрес из списка и укажите ID объекта.",
+            )
+            return False
+
         team_name = (self.ent_team.get() or "").strip()
         if not team_name:
             messagebox.showwarning("Заявка", "Укажите Наименование бригады.")
@@ -1603,7 +1578,6 @@ class MealOrderPage(tk.Frame):
         if not self._validate_form():
             return
 
-        # блокируем кнопку, чтобы избежать повторных нажатий
         try:
             self.btn_save.configure(state="disabled")
         except Exception:
@@ -1613,7 +1587,6 @@ class MealOrderPage(tk.Frame):
             data = self._build_order_dict()
             total_items = len(data.get("employees", []))
 
-            # 1. Проверка пересечений (другие объекты)
             try:
                 conflicts = find_conflicting_meal_orders_same_date_other_object(data)
             except Exception as e:
@@ -1652,31 +1625,39 @@ class MealOrderPage(tk.Frame):
                 if not messagebox.askokcancel("Пересечение заявок по сотрудникам", text):
                     return
 
-            # 2. Сохранение в БД (с проверкой на уже существующую заявку)
             order_db_id = None
             conn = None
             try:
                 conn = get_db_connection()
                 with conn.cursor() as cur:
-                    with conn:  # транзакция
+                    with conn:
                         dept_name = (data.get("department") or "").strip()
                         dept_id = get_or_create_department(cur, dept_name) if dept_name else None
 
                         obj = data.get("object") or {}
                         obj_excel_id = (obj.get("id") or "").strip()
                         obj_address = (obj.get("address") or "").strip()
-                        object_id = get_or_create_object(cur, obj_excel_id, obj_address)
+
+                        # новая логика работы с объектами
+                        object_id = get_object_id(cur, obj_excel_id, obj_address)
+                        if object_id is None:
+                            if obj_excel_id:
+                                object_id = get_or_create_object_by_excel_id(
+                                    cur, obj_excel_id, obj_address
+                                )
+                            else:
+                                raise ValueError(
+                                    "Не найден объект для указанного адреса и ID. Обратитесь к администратору."
+                                )
 
                         order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
                         team_name = (data.get("team_name") or "").strip()
                         user_id = data.get("user_id")
 
-                        # Если редактируем существующую заявку — работаем с self.edit_order_id
                         if self.edit_order_id:
                             existing_id = self.edit_order_id
                         else:
                             existing_id = None
-                            # Ищем "такую же" заявку этого пользователя
                             cur.execute(
                                 """
                                 SELECT id
@@ -1696,7 +1677,6 @@ class MealOrderPage(tk.Frame):
                                 existing_id = row[0]
 
                         if existing_id:
-                            # Есть уже такая заявка. Спрашиваем пользователя: перезаписать или отменить.
                             if not messagebox.askyesno(
                                 "Обновление заявки",
                                 "Заявка с такими параметрами (дата, объект, подразделение, бригада)\n"
@@ -1706,7 +1686,6 @@ class MealOrderPage(tk.Frame):
                             ):
                                 return
 
-                            # Удаляем старые строки сотрудников и обновляем заголовок
                             cur.execute(
                                 "DELETE FROM meal_order_items WHERE order_id = %s",
                                 (existing_id,),
@@ -1724,7 +1703,6 @@ class MealOrderPage(tk.Frame):
                             )
                             order_db_id = existing_id
                         else:
-                            # Создаём новую
                             created_at = datetime.strptime(
                                 data["created_at"], "%Y-%m-%dT%H:%M:%S"
                             )
@@ -1739,7 +1717,6 @@ class MealOrderPage(tk.Frame):
                             )
                             order_db_id = cur.fetchone()[0]
 
-                        # --- Вставка строк сотрудников ---
                         for emp in data.get("employees", []):
                             fio = (emp.get("fio") or "").strip()
                             tbn = (emp.get("tbn") or "").strip()
@@ -1776,7 +1753,6 @@ class MealOrderPage(tk.Frame):
                 if conn:
                     release_db_connection(conn)
 
-            # 3. Сохранение в Excel
             ts = datetime.now().strftime("%H%M%S")
             id_part = data["object"]["id"] or safe_filename(data["object"]["address"])
             fname = f"Заявка_питание_{data['date']}_{ts}_{id_part or 'NOID'}.xlsx"
@@ -1815,7 +1791,6 @@ class MealOrderPage(tk.Frame):
                 f"Сохранено записей: {total_items}",
             )
 
-            # Если это была новая заявка (не редактирование) — очищаем форму
             if not self.edit_order_id:
                 self.clear_form()
 
@@ -1823,7 +1798,6 @@ class MealOrderPage(tk.Frame):
                 self.on_saved()
 
         finally:
-            # в любом случае разблокируем кнопку
             try:
                 self.btn_save.configure(state="normal")
             except Exception:
@@ -1884,9 +1858,6 @@ class MealOrderPage(tk.Frame):
         messagebox.showinfo("Питание", f"Добавлено сотрудников: {added}")
 
     def add_department_partial(self):
-        """
-        Открывает окно-реестр сотрудников и добавляет только отмеченных.
-        """
         dep = (self.cmb_dep.get() or "Все").strip()
 
         if not self.emps:
@@ -1897,14 +1868,12 @@ class MealOrderPage(tk.Frame):
         self.wait_window(dlg)
 
         if dlg.result is None:
-            # Отмена
             return
 
-        selected_emps = dlg.result  # список словарей {'fio','tbn','pos','dep'}
+        selected_emps = dlg.result
         if not selected_emps:
             return
 
-        # Уже добавленные ФИО в заявке (чтобы не плодить дубликаты по ФИО)
         existing_fio = {
             row.cmb_fio.get().strip()
             for row in self.emp_rows
@@ -1917,14 +1886,12 @@ class MealOrderPage(tk.Frame):
             if not fio:
                 continue
             if fio in existing_fio:
-                # Если нужны дубликаты — можно убрать это условие или
-                # заменить на диалог-подтверждение.
                 continue
 
             row = EmployeeRow(
                 self.rows_holder,
                 len(self.emp_rows) + 1,
-                [],             # список подсказок по ФИО мы обновим ниже через _update_emp_list
+                [],
                 self.meal_types,
                 self.delete_employee,
             )
@@ -1932,13 +1899,12 @@ class MealOrderPage(tk.Frame):
             row.apply_zebra(len(self.emp_rows))
 
             row.fio_var.set(fio)
-            self._fill_emp_info(row)  # проставит таб.№ и должность по self.emp_by_fio
+            self._fill_emp_info(row)
 
             self.emp_rows.append(row)
             existing_fio.add(fio)
             added += 1
 
-        # Обновим списки автодополнения под текущее подразделение
         self._update_emp_list()
 
         if added:
@@ -1954,7 +1920,7 @@ class MealOrderPage(tk.Frame):
 
 class MyMealsOrdersPage(tk.Frame):
     """
-    Реестр заявок на питание текущего пользователя (как 'Мои табели').
+    Реестр заявок на питание текущего пользователя.
     """
     def __init__(self, master, app_ref=None):
         super().__init__(master, bg="#f7f7f7")
@@ -2129,7 +2095,6 @@ class MyMealsOrdersPage(tk.Frame):
             return
 
         if choice is False:
-            # создаём копию: увеличиваем дату на 1 день
             try:
                 old_date = datetime.strptime(order_data["date"], "%Y-%m-%d").date()
                 new_date = old_date + timedelta(days=1)
@@ -2146,7 +2111,6 @@ class MyMealsOrdersPage(tk.Frame):
         win.title(title)
         win.geometry("1100x720")
 
-        # прокинем app_ref дальше, чтобы форма могла взять user_id
         if hasattr(self, "app_ref"):
             setattr(win, "app_ref", self.app_ref)
 
@@ -2159,10 +2123,8 @@ class MyMealsOrdersPage(tk.Frame):
             order_id=edit_id,
             on_saved=on_saved_callback,
         )
-        # чтобы _build_order_dict_core увидел app_ref
         page.app_ref = self.app_ref
         page.pack(fill="both", expand=True)
-
 # ========================= СТРАНИЦА ПЛАНИРОВАНИЯ ПИТАНИЯ =========================
 
 class MealPlanningPage(tk.Frame):
