@@ -573,6 +573,68 @@ def get_registry_from_db(
         if conn:
             release_db_connection(conn)
 
+def load_all_meal_orders(
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Возвращает список заголовков всех заявок на питание
+    с опциональным фильтром по периоду.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            where_clauses = []
+            params: List[Any] = []
+
+            if date_from:
+                where_clauses.append("mo.date >= %s")
+                params.append(date_from)
+            if date_to:
+                where_clauses.append("mo.date <= %s")
+                params.append(date_to)
+
+            where_sql = ""
+            if where_clauses:
+                where_sql = "WHERE " + " AND ".join(where_clauses)
+
+            sql = f"""
+                SELECT
+                    mo.id,
+                    mo.date,
+                    mo.created_at,
+                    COALESCE(d.name, '')       AS department,
+                    COALESCE(mo.team_name, '') AS team_name,
+                    COALESCE(o.excel_id, '')   AS object_id,
+                    COALESCE(o.address, '')    AS object_address,
+                    COUNT(moi.id)              AS employees_count,
+                    COALESCE(u.login, '')      AS user_login
+                FROM meal_orders mo
+                JOIN meal_order_items moi ON moi.order_id = mo.id
+                LEFT JOIN departments d    ON d.id = mo.department_id
+                LEFT JOIN objects o        ON o.id = mo.object_id
+                -- если есть таблица users, можно подцепить логин/ФИО:
+                LEFT JOIN users u          ON u.id = mo.user_id
+                {where_sql}
+                GROUP BY
+                    mo.id,
+                    mo.date,
+                    mo.created_at,
+                    d.name,
+                    mo.team_name,
+                    o.excel_id,
+                    o.address,
+                    u.login
+                ORDER BY mo.date DESC, mo.id DESC
+            """
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+    finally:
+        if conn:
+            release_db_connection(conn)
+
 def load_user_meal_orders(user_id: int) -> List[Dict[str, Any]]:
     """
     Возвращает список заголовков заявок на питание, созданных пользователем.
@@ -2185,6 +2247,249 @@ class MyMealsOrdersPage(tk.Frame):
         )
         page.app_ref = self.app_ref
         page.pack(fill="both", expand=True)
+
+class AllMealsOrdersPage(tk.Frame):
+    """
+    Реестр заявок на питание всех пользователей
+    с фильтром по периоду.
+    """
+    def __init__(self, master, app_ref=None):
+        super().__init__(master, bg="#f7f7f7")
+        self.app_ref = app_ref
+        self.tree = None
+        self._orders: List[Dict[str, Any]] = []
+        self._build_ui()
+        self._load_data()  # стартовая загрузка без фильтра (или за сегодня/месяц при желании)
+
+    def _build_ui(self):
+        top = tk.Frame(self, bg="#f7f7f7")
+        top.pack(fill="x", padx=8, pady=(8, 4))
+
+        tk.Label(
+            top,
+            text="Реестр заявок (все пользователи)",
+            font=("Segoe UI", 12, "bold"),
+            bg="#f7f7f7",
+        ).grid(row=0, column=0, columnspan=4, sticky="w")
+
+        # Период: Дата с / по
+        tk.Label(top, text="Дата с:", bg="#f7f7f7").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.ent_date_from = ttk.Entry(top, width=12)
+        self.ent_date_from.grid(row=1, column=1, sticky="w", padx=(4, 12), pady=(4, 0))
+
+        tk.Label(top, text="по:", bg="#f7f7f7").grid(row=1, column=2, sticky="w", pady=(4, 0))
+        self.ent_date_to = ttk.Entry(top, width=12)
+        self.ent_date_to.grid(row=1, column=3, sticky="w", padx=(4, 12), pady=(4, 0))
+
+        # Кнопки справа
+        btn_frame = tk.Frame(top, bg="#f7f7f7")
+        btn_frame.grid(row=0, column=5, rowspan=2, sticky="e")
+
+        ttk.Button(
+            btn_frame,
+            text="Применить фильтр",
+            command=self._load_data,
+        ).pack(side="right", padx=4)
+
+        ttk.Button(
+            btn_frame,
+            text="Обновить",
+            command=self._load_data,
+        ).pack(side="right", padx=4)
+
+        # Таблица
+        frame = tk.Frame(self, bg="#f7f7f7")
+        frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+
+        # Добавим колонку "Пользователь"
+        cols = ("date", "object", "department", "team", "count", "user", "created_at")
+        self.tree = ttk.Treeview(
+            frame,
+            columns=cols,
+            show="headings",
+            selectmode="browse",
+        )
+
+        self.tree.heading("date", text="Дата")
+        self.tree.heading("object", text="Объект")
+        self.tree.heading("department", text="Подразделение")
+        self.tree.heading("team", text="Бригада")
+        self.tree.heading("count", text="Сотр., чел.")
+        self.tree.heading("user", text="Пользователь")
+        self.tree.heading("created_at", text="Создана")
+
+        self.tree.column("date", width=90, anchor="center")
+        self.tree.column("object", width=260, anchor="w")
+        self.tree.column("department", width=150, anchor="w")
+        self.tree.column("team", width=200, anchor="w")
+        self.tree.column("count", width=80, anchor="center")
+        self.tree.column("user", width=120, anchor="w")
+        self.tree.column("created_at", width=140, anchor="center")
+
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        self.tree.bind("<Double-1>", self._on_open)
+        self.tree.bind("<Return>", self._on_open)
+
+        bottom = tk.Frame(self, bg="#f7f7f7")
+        bottom.pack(fill="x", padx=8, pady=(0, 8))
+        tk.Label(
+            bottom,
+            text="Двойной щелчок или Enter по строке — открыть заявку для редактирования или дублирования.",
+            font=("Segoe UI", 9),
+            fg="#555",
+            bg="#f7f7f7",
+        ).pack(side="left")
+
+    def _parse_period(self) -> Tuple[Optional[date], Optional[date]]:
+        """
+        Читает поля 'Дата с' / 'по' и возвращает (date_from, date_to).
+        Пустое поле = без ограничения.
+        """
+        txt_from = (self.ent_date_from.get() or "").strip()
+        txt_to = (self.ent_date_to.get() or "").strip()
+
+        d_from = parse_date_any(txt_from) if txt_from else None
+        d_to = parse_date_any(txt_to) if txt_to else None
+
+        return d_from, d_to
+
+    def _load_data(self):
+        # очищаем таблицу
+        self.tree.delete(*self.tree.get_children())
+        self._orders.clear()
+
+        date_from, date_to = self._parse_period()
+
+        # защитимся от перепутанного периода
+        if date_from and date_to and date_from > date_to:
+            messagebox.showwarning(
+                "Реестр заявок",
+                "Дата 'с' больше даты 'по'. Исправьте период.",
+                parent=self,
+            )
+            return
+
+        try:
+            orders = load_all_meal_orders(date_from=date_from, date_to=date_to)
+        except Exception as e:
+            messagebox.showerror(
+                "Реестр заявок",
+                f"Ошибка загрузки списка заявок из БД:\n{e}",
+                parent=self,
+            )
+            return
+
+        self._orders = orders
+
+        for o in orders:
+            oid = o["id"]
+            date_val = o.get("date")
+            if isinstance(date_val, datetime):
+                date_str = date_val.date().strftime("%Y-%m-%d")
+            else:
+                date_str = str(date_val or "")
+
+            addr = o.get("object_address") or ""
+            obj_code = o.get("object_id") or ""
+            obj_display = f"[{obj_code}] {addr}" if obj_code else addr
+
+            dep = o.get("department") or ""
+            team = o.get("team_name") or ""
+            cnt = o.get("employees_count") or 0
+            user_login = o.get("user_login") or ""
+            created_at = o.get("created_at")
+            if isinstance(created_at, datetime):
+                created_str = created_at.strftime("%d.%m.%Y %H:%M")
+            else:
+                created_str = str(created_at or "")
+
+            iid = str(oid)
+            self.tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(date_str, obj_display, dep, team, cnt, user_login, created_str),
+            )
+
+    def _get_selected_order(self) -> Optional[Dict[str, Any]]:
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        iid = sel[0]
+        try:
+            oid = int(iid)
+        except Exception:
+            return None
+        for o in self._orders:
+            if int(o["id"]) == oid:
+                return o
+        return None
+
+    def _on_open(self, event=None):
+        info = self._get_selected_order()
+        if not info:
+            return
+
+        order_id = int(info["id"])
+
+        try:
+            order_data = get_order_with_items_from_db(order_id)
+        except Exception as e:
+            messagebox.showerror(
+                "Реестр заявок",
+                f"Не удалось загрузить заявку id={order_id}:\n{e}",
+                parent=self,
+            )
+            return
+
+        choice = messagebox.askyesnocancel(
+            "Открыть заявку",
+            "Нажмите «Да», чтобы ОТКРЫТЬ заявку для РЕДАКТИРОВАНИЯ.\n"
+            "Нажмите «Нет», чтобы СОЗДАТЬ КОПИЮ заявки (на другой день).\n"
+            "Отмена — закрыть.",
+            parent=self,
+        )
+        if choice is None:
+            return
+
+        if choice is False:
+            # создаём копию на следующий день
+            try:
+                old_date = datetime.strptime(order_data["date"], "%Y-%m-%d").date()
+                new_date = old_date + timedelta(days=1)
+                order_data["date"] = new_date.strftime("%Y-%m-%d")
+            except Exception:
+                pass
+            edit_id = None
+            title = f"Новая заявка (копия #{order_id})"
+        else:
+            edit_id = order_id
+            title = f"Редактирование заявки #{order_id}"
+
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.geometry("1300x720")
+
+        if hasattr(self, "app_ref"):
+            setattr(win, "app_ref", self.app_ref)
+
+        def on_saved_callback():
+            self._load_data()
+
+        page = MealOrderPage(
+            win,
+            existing_data=order_data,
+            order_id=edit_id,
+            on_saved=on_saved_callback,
+        )
+        page.app_ref = self.app_ref
+        page.pack(fill="both", expand=True)
+
 # ========================= СТРАНИЦА ПЛАНИРОВАНИЯ ПИТАНИЯ =========================
 
 class MealPlanningPage(tk.Frame):
@@ -3001,6 +3306,21 @@ def create_meals_order_page(parent, app_ref=None) -> tk.Frame:
         import traceback
         messagebox.showerror(
             "Питание — ошибка", traceback.format_exc(), parent=parent
+        )
+        return tk.Frame(parent)
+
+def create_all_meals_orders_page(parent, app_ref=None) -> tk.Frame:
+    """
+    Вкладка 'Реестр заявок' (все пользователи) для главного приложения.
+    """
+    ensure_config()
+    try:
+        page = AllMealsOrdersPage(parent, app_ref=app_ref)
+        return page
+    except Exception:
+        import traceback
+        messagebox.showerror(
+            "Питание — реестр заявок", traceback.format_exc(), parent=parent
         )
         return tk.Frame(parent)
 
