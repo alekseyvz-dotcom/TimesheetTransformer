@@ -576,10 +576,12 @@ def get_registry_from_db(
 def load_all_meal_orders(
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
+    department: Optional[str] = None,
+    address_substr: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Возвращает список заголовков всех заявок на питание
-    с опциональным фильтром по периоду.
+    с опциональными фильтрами по периоду, подразделению и адресу.
     """
     conn = None
     try:
@@ -594,6 +596,14 @@ def load_all_meal_orders(
             if date_to:
                 where_clauses.append("mo.date <= %s")
                 params.append(date_to)
+
+            if department and department.strip() and department.strip().lower() != "все":
+                where_clauses.append("d.name = %s")
+                params.append(department.strip())
+
+            if address_substr and address_substr.strip():
+                where_clauses.append("o.address ILIKE %s")
+                params.append(f"%{address_substr.strip()}%")
 
             where_sql = ""
             if where_clauses:
@@ -2272,20 +2282,30 @@ class AllMealsOrdersPage(tk.Frame):
             text="Реестр заявок (все пользователи)",
             font=("Segoe UI", 12, "bold"),
             bg="#f7f7f7",
-        ).grid(row=0, column=0, columnspan=4, sticky="w")
+        ).grid(row=0, column=0, columnspan=8, sticky="w")
 
         # Период: Дата с / по
         tk.Label(top, text="Дата с:", bg="#f7f7f7").grid(row=1, column=0, sticky="w", pady=(4, 0))
         self.ent_date_from = ttk.Entry(top, width=12)
-        self.ent_date_from.grid(row=1, column=1, sticky="w", padx=(4, 12), pady=(4, 0))
+        self.ent_date_from.grid(row=1, column=1, sticky="w", padx=(4, 8), pady=(4, 0))
 
         tk.Label(top, text="по:", bg="#f7f7f7").grid(row=1, column=2, sticky="w", pady=(4, 0))
         self.ent_date_to = ttk.Entry(top, width=12)
-        self.ent_date_to.grid(row=1, column=3, sticky="w", padx=(4, 12), pady=(4, 0))
+        self.ent_date_to.grid(row=1, column=3, sticky="w", padx=(4, 8), pady=(4, 0))
+
+        # Фильтр по подразделению
+        tk.Label(top, text="Подразделение:", bg="#f7f7f7").grid(row=1, column=4, sticky="w", pady=(4, 0))
+        self.cmb_dep_filter = ttk.Combobox(top, state="readonly", width=22)
+        self.cmb_dep_filter.grid(row=1, column=5, sticky="w", padx=(4, 8), pady=(4, 0))
+
+        # Фильтр по адресу
+        tk.Label(top, text="Адрес (часть):", bg="#f7f7f7").grid(row=1, column=6, sticky="w", pady=(4, 0))
+        self.ent_address_filter = ttk.Entry(top, width=24)
+        self.ent_address_filter.grid(row=1, column=7, sticky="w", padx=(4, 8), pady=(4, 0))
 
         # Кнопки справа
         btn_frame = tk.Frame(top, bg="#f7f7f7")
-        btn_frame.grid(row=0, column=5, rowspan=2, sticky="e")
+        btn_frame.grid(row=0, column=9, rowspan=2, sticky="e")
 
         ttk.Button(
             btn_frame,
@@ -2299,11 +2319,13 @@ class AllMealsOrdersPage(tk.Frame):
             command=self._load_data,
         ).pack(side="right", padx=4)
 
+        # Инициализируем список подразделений
+        self._init_dep_filter()
+
         # Таблица
         frame = tk.Frame(self, bg="#f7f7f7")
         frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
-        # Добавим колонку "Пользователь"
         cols = ("date", "object", "department", "team", "count", "user", "created_at")
         self.tree = ttk.Treeview(
             frame,
@@ -2348,7 +2370,6 @@ class AllMealsOrdersPage(tk.Frame):
             bg="#f7f7f7",
         ).pack(side="left")
 
-        # Кнопка удаления заявки (доступна только администратору)
         self.btn_delete = ttk.Button(
             bottom,
             text="Удалить заявку",
@@ -2356,7 +2377,6 @@ class AllMealsOrdersPage(tk.Frame):
         )
         self.btn_delete.pack(side="right")
 
-        # Настроим доступность кнопки по роли
         self._update_delete_button_state()
 
     def _get_current_role(self) -> str:
@@ -2395,6 +2415,30 @@ class AllMealsOrdersPage(tk.Frame):
 
         return d_from, d_to
 
+    def _init_dep_filter(self):
+        """
+        Загружает список подразделений из БД для фильтра.
+        """
+        conn = None
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cur:
+                cur.execute("SELECT name FROM departments ORDER BY name;")
+                rows = cur.fetchall()
+                deps = ["Все"]
+                for (name,) in rows:
+                    if name:
+                        deps.append(name)
+                self.cmb_dep_filter["values"] = deps
+                self.cmb_dep_filter.set("Все")
+        except Exception:
+            # В случае любой ошибки просто оставляем "Все"
+            self.cmb_dep_filter["values"] = ["Все"]
+            self.cmb_dep_filter.set("Все")
+        finally:
+            if conn:
+                release_db_connection(conn)
+
     def _load_data(self):
         # очищаем таблицу
         self.tree.delete(*self.tree.get_children())
@@ -2410,8 +2454,16 @@ class AllMealsOrdersPage(tk.Frame):
             )
             return
 
+        dep_filter = (self.cmb_dep_filter.get() or "").strip() if hasattr(self, "cmb_dep_filter") else ""
+        addr_filter = (self.ent_address_filter.get() or "").strip() if hasattr(self, "ent_address_filter") else ""
+
         try:
-            orders = load_all_meal_orders(date_from=date_from, date_to=date_to)
+            orders = load_all_meal_orders(
+                date_from=date_from,
+                date_to=date_to,
+                department=dep_filter or None,
+                address_substr=addr_filter or None,
+            )
         except Exception as e:
             messagebox.showerror(
                 "Реестр заявок",
