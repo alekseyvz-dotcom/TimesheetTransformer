@@ -2295,7 +2295,7 @@ class AllMealsOrdersPage(tk.Frame):
 
         # Фильтр по подразделению
         tk.Label(top, text="Подразделение:", bg="#f7f7f7").grid(row=1, column=4, sticky="w", pady=(4, 0))
-        self.cmb_dep_filter = ttk.Combobox(top, state="readonly", width=22)
+        self.cmb_dep_filter = ttk.Combobox(top, state="readonly", width=40)
         self.cmb_dep_filter.grid(row=1, column=5, sticky="w", padx=(4, 8), pady=(4, 0))
 
         # Фильтр по адресу
