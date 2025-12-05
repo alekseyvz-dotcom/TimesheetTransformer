@@ -341,8 +341,8 @@ class MainApp(tk.Tk):
         m_meals = tk.Menu(self._menubar, tearoff=0)
         m_meals.add_command(label="📝 Создать заявку", command=lambda: self._show_page("meals_order", lambda p: meals_module.create_meals_order_page(p, self)))
         m_meals.add_command(label="📄 Мои заявки", command=lambda: self._show_page("my_meals_orders", lambda p: meals_module.create_my_meals_orders_page(p, self)))
-        self._menu_meals_planning_index = m_meals.index("end")
         m_meals.add_command(label="🍽️ Планирование", command=lambda: self._show_page("meals_planning", lambda p: meals_module.create_meals_planning_page(p, self)))
+        m_meals.add_command(label="📚 Реестр", command=lambda: self._show_page("meals_registry", lambda p: meals_module.create_all_meals_orders_page(p, self)))
         self._menu_meals_settings_index = m_meals.index("end")
         m_meals.add_command(label="⚙️ Настройки", command=lambda: self._show_page("meals_settings", lambda p: meals_module.create_meals_settings_page(p, self.current_user.get('role'))))
         self._menubar.add_cascade(label="Питание", menu=m_meals)
@@ -352,7 +352,7 @@ class MainApp(tk.Tk):
         m_objects = tk.Menu(self._menubar, tearoff=0)
         self._menu_objects_create_index = m_objects.index("end")
         m_objects.add_command(label="Создать/Редактировать", command=lambda: self._show_page("object_create", lambda p: objects.ObjectCreatePage(p, self)))
-        m_objects.add_command(label="Реестр", command=lambda: self._show_page("objects_registry", lambda p: objects.ObjectsRegistryPage(p, self)))
+        m_objects.add_command(label="Реестр", command=lambda: self.("objects_registry", lambda p: objects.ObjectsRegistryPage(p, self)))
         self._menubar.add_cascade(label="Объекты", menu=m_objects)
         self._menu_objects = m_objects
 
@@ -360,7 +360,7 @@ class MainApp(tk.Tk):
         m_analytics = tk.Menu(self._menubar, tearoff=0)
         m_analytics.add_command(
             label="📊 Операционная аналитика",
-            command=lambda: self._show_page("analytics_dashboard", lambda p: analytics_module.AnalyticsPage(p, self))
+            command=lambda: self.("analytics_dashboard", lambda p: analytics_module.AnalyticsPage(p, self))
         )
         self._menubar.add_cascade(label="Аналитика", menu=m_analytics)
         self._menu_analytics = m_analytics
@@ -373,7 +373,7 @@ class MainApp(tk.Tk):
                 command=lambda: timesheet_transformer.open_converter(self),
             )
         if BudgetAnalyzer and hasattr(BudgetAnalyzer, "create_page"):
-            m_tools.add_command(label="Анализ смет", command=lambda: self._show_page("budget", lambda p: BudgetAnalyzer.create_page(p)))
+            m_tools.add_command(label="Анализ смет", command=lambda: self.("budget", lambda p: BudgetAnalyzer.create_page(p)))
         self._menubar.add_cascade(label="Инструменты", menu=m_tools)
         
         self._menu_settings_index = self._menubar.index("end")
@@ -411,7 +411,9 @@ class MainApp(tk.Tk):
             "transport": ("Заявка на спецтехнику", ""), "my_transport_orders": ("Мои заявки на транспорт", ""),
             "planning": ("Планирование транспорта", ""), "transport_registry": ("Реестр транспорта", ""),
             "meals_order": ("Заказ питания", ""), "my_meals_orders": ("Мои заявки на питание", ""),
-            "meals_planning": ("Планирование питания", ""), "meals_settings": ("Настройки питания", ""),
+            "meals_planning": ("Планирование питания", ""),
+            "meals_registry": ("Реестр заявок на питание", ""),
+            "meals_settings": ("Настройки питания", ""),
             "object_create": ("Объекты: Создание/Редактирование", ""), "objects_registry": ("Реестр объектов", ""),
             "budget": ("Анализ смет", ""), "login": ("Управление строительством", "Вход в систему"),
             "analytics_dashboard": ("Операционная аналитика", "Сводные показатели по ключевым метрикам")
@@ -478,6 +480,7 @@ class MainApp(tk.Tk):
         set_state(self._menu_meals, "📄 Мои заявки", True)
         # "Планирование" доступно планировщикам, менеджерам и админам.
         set_state(self._menu_meals, "🍽️ Планирование", is_planner)
+        set_state(self._menu_meals, "📚 Реестр", is_planner)
         # "Настройки" доступны только администратору.
         set_state(self._menu_meals, "⚙️ Настройки", is_admin)
 
