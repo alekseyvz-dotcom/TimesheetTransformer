@@ -2339,6 +2339,7 @@ class AllMealsOrdersPage(tk.Frame):
 
         bottom = tk.Frame(self, bg="#f7f7f7")
         bottom.pack(fill="x", padx=8, pady=(0, 8))
+
         tk.Label(
             bottom,
             text="Двойной щелчок или Enter по строке — открыть заявку для редактирования или дублирования.",
@@ -2346,6 +2347,40 @@ class AllMealsOrdersPage(tk.Frame):
             fg="#555",
             bg="#f7f7f7",
         ).pack(side="left")
+
+        # Кнопка удаления заявки (доступна только администратору)
+        self.btn_delete = ttk.Button(
+            bottom,
+            text="Удалить заявку",
+            command=self._on_delete_clicked,
+        )
+        self.btn_delete.pack(side="right")
+
+        # Настроим доступность кнопки по роли
+        self._update_delete_button_state()
+
+    def _get_current_role(self) -> str:
+        """
+        Возвращает роль текущего пользователя из app_ref, если она есть.
+        """
+        if self.app_ref is not None and hasattr(self.app_ref, "current_user"):
+            try:
+                return str((self.app_ref.current_user or {}).get("role") or "").lower()
+            except Exception:
+                return ""
+        return ""
+
+    def _update_delete_button_state(self):
+        """
+        Делает кнопку 'Удалить заявку' активной только для роли admin.
+        """
+        role = self._get_current_role()
+        is_admin = (role == "admin")
+        state = "normal" if is_admin else "disabled"
+        try:
+            self.btn_delete.configure(state=state)
+        except Exception:
+            pass
 
     def _parse_period(self) -> Tuple[Optional[date], Optional[date]]:
         """
@@ -2430,6 +2465,76 @@ class AllMealsOrdersPage(tk.Frame):
             if int(o["id"]) == oid:
                 return o
         return None
+
+    def _on_delete_clicked(self):
+        """
+        Обработчик кнопки 'Удалить заявку'.
+        Доступен только для администратора (кнопка у остальных отключена).
+        """
+        role = self._get_current_role()
+        if role != "admin":
+            messagebox.showwarning(
+                "Удаление заявки",
+                "Удалять заявки может только администратор.",
+                parent=self,
+            )
+            return
+
+        info = self._get_selected_order()
+        if not info:
+            messagebox.showinfo(
+                "Удаление заявки",
+                "Не выбрана ни одна заявка.",
+                parent=self,
+            )
+            return
+
+        order_id = int(info["id"])
+        date_val = info.get("date")
+        if isinstance(date_val, datetime):
+            date_str = date_val.date().strftime("%Y-%m-%d")
+        else:
+            date_str = str(date_val or "")
+
+        addr = info.get("object_address") or ""
+        dep = info.get("department") or ""
+        team = info.get("team_name") or ""
+
+        text = (
+            f"Вы действительно хотите ПОЛНОСТЬЮ удалить заявку #{order_id}?\n\n"
+            f"Дата: {date_str}\n"
+            f"Объект: {addr}\n"
+            f"Подразделение: {dep}\n"
+            f"Бригада: {team}\n\n"
+            f"Будут удалены все сотрудники и сам заголовок заявки.\n"
+            f"Отменить это действие будет невозможно."
+        )
+
+        if not messagebox.askyesno(
+            "Подтверждение удаления заявки",
+            text,
+            parent=self,
+        ):
+            return
+
+        try:
+            delete_meal_order_from_db(order_id)
+        except Exception as e:
+            messagebox.showerror(
+                "Удаление заявки",
+                f"Не удалось удалить заявку #{order_id}:\n{e}",
+                parent=self,
+            )
+            return
+
+        messagebox.showinfo(
+            "Удаление заявки",
+            f"Заявка #{order_id} успешно удалена.",
+            parent=self,
+        )
+
+        # Перезагрузим реестр с теми же фильтрами
+        self._load_data()
 
     def _on_open(self, event=None):
         info = self._get_selected_order()
@@ -3358,6 +3463,30 @@ def delete_order_items_from_db(order_id: int):
         with conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM meal_order_items WHERE order_id = %s", (order_id,))
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+def delete_meal_order_from_db(order_id: int):
+    """
+    Полностью удаляет заявку на питание:
+    сначала строки meal_order_items, затем сам meal_orders.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn:
+            with conn.cursor() as cur:
+                # сначала удалим строки
+                cur.execute(
+                    "DELETE FROM meal_order_items WHERE order_id = %s",
+                    (order_id,),
+                )
+                # затем заголовок
+                cur.execute(
+                    "DELETE FROM meal_orders WHERE id = %s",
+                    (order_id,),
+                )
     finally:
         if conn:
             release_db_connection(conn)
