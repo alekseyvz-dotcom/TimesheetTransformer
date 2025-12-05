@@ -2309,6 +2309,12 @@ class AllMealsOrdersPage(tk.Frame):
 
         ttk.Button(
             btn_frame,
+            text="Выгрузить в Excel",
+            command=self._export_to_excel,
+        ).pack(side="right", padx=4)
+
+        ttk.Button(
+            btn_frame,
             text="Применить фильтр",
             command=self._load_data,
         ).pack(side="right", padx=4)
@@ -2318,6 +2324,7 @@ class AllMealsOrdersPage(tk.Frame):
             text="Обновить",
             command=self._load_data,
         ).pack(side="right", padx=4)
+
 
         # Инициализируем список подразделений
         self._init_dep_filter()
@@ -2502,6 +2509,176 @@ class AllMealsOrdersPage(tk.Frame):
                 "end",
                 iid=iid,
                 values=(date_str, obj_display, dep, team, cnt, user_name, created_str),
+            )
+
+    def _export_to_excel(self):
+        """
+        Выгружает текущий реестр заявок в Excel с учётом фильтров
+        (дата с/по, подразделение, адрес).
+        """
+        try:
+            date_from, date_to = self._parse_period()
+
+            if date_from and date_to and date_from > date_to:
+                messagebox.showwarning(
+                    "Экспорт в Excel",
+                    "Дата 'с' больше даты 'по'. Исправьте период.",
+                    parent=self,
+                )
+                return
+
+            dep_filter = (self.cmb_dep_filter.get() or "").strip() if hasattr(self, "cmb_dep_filter") else ""
+            addr_filter = (self.ent_address_filter.get() or "").strip() if hasattr(self, "ent_address_filter") else ""
+
+            # Загружаем заявки повторно, чтобы быть уверенными, что данные свежие
+            try:
+                orders = load_all_meal_orders(
+                    date_from=date_from,
+                    date_to=date_to,
+                    department=dep_filter or None,
+                    address_substr=addr_filter or None,
+                )
+            except Exception as e:
+                messagebox.showerror(
+                    "Экспорт в Excel",
+                    f"Ошибка загрузки данных из БД:\n{e}",
+                    parent=self,
+                )
+                return
+
+            if not orders:
+                messagebox.showinfo(
+                    "Экспорт в Excel",
+                    "Нет данных для выгрузки (по заданным фильтрам).",
+                    parent=self,
+                )
+                return
+
+            # Формируем Excel
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Реестр заявок"
+
+            # Шапка с указанием фильтров
+            period_str = ""
+            if date_from:
+                period_str += f"с {date_from.strftime('%Y-%m-%d')} "
+            if date_to:
+                period_str += f"по {date_to.strftime('%Y-%m-%d')}"
+            period_str = period_str.strip() or "все даты"
+
+            dep_str = dep_filter or "Все"
+            addr_str = addr_filter or "(любой адрес)"
+
+            ws.append([f"Реестр заявок на питание ({period_str})"])
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=8)
+
+            ws.append([f"Подразделение: {dep_str}"])
+            ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=8)
+
+            ws.append([f"Адрес содержит: {addr_str}"])
+            ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=8)
+
+            ws.append([])
+
+            # Заголовки таблицы
+            headers = [
+                "ID заявки",
+                "Дата",
+                "Объект (код)",
+                "Адрес",
+                "Подразделение",
+                "Бригада",
+                "Сотрудников, чел.",
+                "Пользователь",
+                "Создана",
+            ]
+            ws.append(headers)
+
+            for o in orders:
+                oid = o.get("id")
+                date_val = o.get("date")
+                if isinstance(date_val, datetime):
+                    date_str = date_val.date().strftime("%Y-%m-%d")
+                else:
+                    date_str = str(date_val or "")
+
+                obj_code = o.get("object_id") or ""
+                addr = o.get("object_address") or ""
+                dep = o.get("department") or ""
+                team = o.get("team_name") or ""
+                cnt = o.get("employees_count") or 0
+                user_name = o.get("user_name") or ""
+                created_at = o.get("created_at")
+                if isinstance(created_at, datetime):
+                    created_str = created_at.strftime("%d.%m.%Y %H:%M")
+                else:
+                    created_str = str(created_at or "")
+
+                ws.append([
+                    oid,
+                    date_str,
+                    obj_code,
+                    addr,
+                    dep,
+                    team,
+                    cnt,
+                    user_name,
+                    created_str,
+                ])
+
+            # Ширины колонок
+            widths = [
+                8,   # ID
+                12,  # Дата
+                12,  # Объект (код)
+                40,  # Адрес
+                25,  # Подразделение
+                25,  # Бригада
+                16,  # Сотр., чел.
+                25,  # Пользователь
+                20,  # Создана
+            ]
+            for col, width in enumerate(widths, start=1):
+                ws.column_dimensions[get_column_letter(col)].width = width
+
+            # Заморозим шапку таблицы (после служебных строк)
+            # Строка с заголовками таблицы сейчас на 5-й строке
+            ws.freeze_panes = "A6"
+
+            # Имя файла
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Формируем человекочитаемую часть периода
+            period_part = ""
+            if date_from:
+                period_part += date_from.strftime("%Y%m%d")
+            if date_to:
+                period_part += f"-{date_to.strftime('%Y%m%d')}"
+            if not period_part:
+                period_part = "все"
+
+            fname = f"Реестр_заявок_питание_{period_part}_{ts}.xlsx"
+            fpath = exe_dir() / "Заявки_питание" / fname
+            fpath.parent.mkdir(parents=True, exist_ok=True)
+
+            wb.save(fpath)
+
+            messagebox.showinfo(
+                "Экспорт в Excel",
+                f"Файл успешно сформирован:\n{fpath}\n\nЗаписей: {len(orders)}",
+                parent=self,
+            )
+
+            try:
+                os.startfile(fpath)
+            except Exception:
+                pass
+
+        except Exception as e:
+            messagebox.showerror(
+                "Экспорт в Excel",
+                f"Ошибка при формировании файла:\n{e}",
+                parent=self,
             )
 
     def _get_selected_order(self) -> Optional[Dict[str, Any]]:
