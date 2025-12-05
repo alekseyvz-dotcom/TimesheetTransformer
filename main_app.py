@@ -350,7 +350,6 @@ class MainApp(tk.Tk):
 
         # === Объекты ===
         m_objects = tk.Menu(self._menubar, tearoff=0)
-        self._menu_objects_create_index = m_objects.index("end")
         m_objects.add_command(label="Создать/Редактировать", command=lambda: self._show_page("object_create", lambda p: objects.ObjectCreatePage(p, self)))
         m_objects.add_command(label="Реестр", command=lambda: self._show_page("objects_registry", lambda p: objects.ObjectsRegistryPage(p, self)))
         self._menubar.add_cascade(label="Объекты", menu=m_objects)
@@ -358,10 +357,7 @@ class MainApp(tk.Tk):
 
         # === АНАЛИТИКА (НОВЫЙ РАЗДЕЛ) ===
         m_analytics = tk.Menu(self._menubar, tearoff=0)
-        m_analytics.add_command(
-            label="📊 Операционная аналитика",
-            command=lambda: self.("analytics_dashboard", lambda p: analytics_module.AnalyticsPage(p, self))
-        )
+        m_analytics.add_command(label="📊 Операционная аналитика", command=lambda: self._show_page("analytics_dashboard", lambda p: analytics_module.AnalyticsPage(p, self)))
         self._menubar.add_cascade(label="Аналитика", menu=m_analytics)
         self._menu_analytics = m_analytics
 
@@ -373,7 +369,7 @@ class MainApp(tk.Tk):
                 command=lambda: timesheet_transformer.open_converter(self),
             )
         if BudgetAnalyzer and hasattr(BudgetAnalyzer, "create_page"):
-            m_tools.add_command(label="Анализ смет", command=lambda: self.("budget", lambda p: BudgetAnalyzer.create_page(p)))
+            m_tools.add_command(label="Анализ смет", command=lambda: self._show_page("budget", lambda p: BudgetAnalyzer.create_page(p)))
         self._menubar.add_cascade(label="Инструменты", menu=m_tools)
         
         self._menu_settings_index = self._menubar.index("end")
