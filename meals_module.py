@@ -604,18 +604,19 @@ def load_all_meal_orders(
                     mo.id,
                     mo.date,
                     mo.created_at,
-                    COALESCE(d.name, '')       AS department,
-                    COALESCE(mo.team_name, '') AS team_name,
-                    COALESCE(o.excel_id, '')   AS object_id,
-                    COALESCE(o.address, '')    AS object_address,
-                    COUNT(moi.id)              AS employees_count,
-                    COALESCE(u.login, '')      AS user_login
+                    COALESCE(d.name, '')        AS department,
+                    COALESCE(mo.team_name, '')  AS team_name,
+                    COALESCE(o.excel_id, '')    AS object_id,
+                    COALESCE(o.address, '')     AS object_address,
+                    COUNT(moi.id)               AS employees_count,
+                    COALESCE(au.full_name,
+                             au.username,
+                             '')                 AS user_name
                 FROM meal_orders mo
                 JOIN meal_order_items moi ON moi.order_id = mo.id
                 LEFT JOIN departments d    ON d.id = mo.department_id
                 LEFT JOIN objects o        ON o.id = mo.object_id
-                -- если есть таблица users, можно подцепить логин/ФИО:
-                LEFT JOIN users u          ON u.id = mo.user_id
+                LEFT JOIN app_users au     ON au.id = mo.user_id
                 {where_sql}
                 GROUP BY
                     mo.id,
@@ -625,7 +626,8 @@ def load_all_meal_orders(
                     mo.team_name,
                     o.excel_id,
                     o.address,
-                    u.login
+                    au.full_name,
+                    au.username
                 ORDER BY mo.date DESC, mo.id DESC
             """
             cur.execute(sql, params)
@@ -2323,7 +2325,7 @@ class AllMealsOrdersPage(tk.Frame):
         self.tree.column("department", width=150, anchor="w")
         self.tree.column("team", width=200, anchor="w")
         self.tree.column("count", width=80, anchor="center")
-        self.tree.column("user", width=120, anchor="w")
+        self.tree.column("user", width=160, anchor="w")
         self.tree.column("created_at", width=140, anchor="center")
 
         vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
@@ -2365,7 +2367,6 @@ class AllMealsOrdersPage(tk.Frame):
 
         date_from, date_to = self._parse_period()
 
-        # защитимся от перепутанного периода
         if date_from and date_to and date_from > date_to:
             messagebox.showwarning(
                 "Реестр заявок",
@@ -2401,7 +2402,7 @@ class AllMealsOrdersPage(tk.Frame):
             dep = o.get("department") or ""
             team = o.get("team_name") or ""
             cnt = o.get("employees_count") or 0
-            user_login = o.get("user_login") or ""
+            user_name = o.get("user_name") or ""
             created_at = o.get("created_at")
             if isinstance(created_at, datetime):
                 created_str = created_at.strftime("%d.%m.%Y %H:%M")
@@ -2413,7 +2414,7 @@ class AllMealsOrdersPage(tk.Frame):
                 "",
                 "end",
                 iid=iid,
-                values=(date_str, obj_display, dep, team, cnt, user_login, created_str),
+                values=(date_str, obj_display, dep, team, cnt, user_name, created_str),
             )
 
     def _get_selected_order(self) -> Optional[Dict[str, Any]]:
