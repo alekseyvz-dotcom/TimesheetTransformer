@@ -341,7 +341,7 @@ class MainApp(tk.Tk):
         m_meals = tk.Menu(self._menubar, tearoff=0)
         m_meals.add_command(label="📝 Создать заявку", command=lambda: self._show_page("meals_order", lambda p: meals_module.create_meals_order_page(p, self)))
         m_meals.add_command(label="📄 Мои заявки", command=lambda: self._show_page("my_meals_orders", lambda p: meals_module.create_my_meals_orders_page(p, self)))
-        m_meals.add_command(label="Планирование", command=lambda: self._show_page("meals_planning", lambda p: meals_module.create_meals_planning_page(p, self)))
+        m_meals.add_command(label="🍽️ Планирование", command=lambda: self._show_page("meals_planning", lambda p: meals_module.create_meals_planning_page(p, self)))
         m_meals.add_command(label="📚 Реестр", command=lambda: self._show_page("meals_registry", lambda p: meals_module.create_all_meals_orders_page(p, self)))
         self._menu_meals_settings_index = m_meals.index("end")
         m_meals.add_command(label="⚙️ Настройки", command=lambda: self._show_page("meals_settings", lambda p: meals_module.create_meals_settings_page(p, self.current_user.get('role'))))
