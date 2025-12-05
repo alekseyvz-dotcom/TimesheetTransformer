@@ -328,23 +328,23 @@ class MainApp(tk.Tk):
 
         # === Автотранспорт ===
         m_transport = tk.Menu(self._menubar, tearoff=0)
-        m_transport.add_command(label="📝 Создать заявку", command=lambda: self._show_page("transport", lambda p: SpecialOrders.create_page(p, self)))
-        m_transport.add_command(label="📄 Мои заявки", command=lambda: self._show_page("my_transport_orders", lambda p: SpecialOrders.create_my_transport_orders_page(p, self)))
+        m_transport.add_command(label="Создать заявку", command=lambda: self._show_page("transport", lambda p: SpecialOrders.create_page(p, self)))
+        m_transport.add_command(label="Мои заявки", command=lambda: self._show_page("my_transport_orders", lambda p: SpecialOrders.create_my_transport_orders_page(p, self)))
         self._menu_transport_planning_index = m_transport.index("end")
-        m_transport.add_command(label="🚛 Планирование", command=lambda: self._show_page("planning", lambda p: SpecialOrders.create_planning_page(p)))
+        m_transport.add_command(label="Планирование", command=lambda: self._show_page("planning", lambda p: SpecialOrders.create_planning_page(p)))
         self._menu_transport_registry_index = m_transport.index("end")
-        m_transport.add_command(label="🚘 Реестр", command=lambda: self._show_page("transport_registry", lambda p: SpecialOrders.create_transport_registry_page(p)))
+        m_transport.add_command(label="Реестр", command=lambda: self._show_page("transport_registry", lambda p: SpecialOrders.create_transport_registry_page(p)))
         self._menubar.add_cascade(label="Автотранспорт", menu=m_transport)
         self._menu_transport = m_transport
 
         # === Питание ===
         m_meals = tk.Menu(self._menubar, tearoff=0)
-        m_meals.add_command(label="📝 Создать заявку", command=lambda: self._show_page("meals_order", lambda p: meals_module.create_meals_order_page(p, self)))
-        m_meals.add_command(label="📄 Мои заявки", command=lambda: self._show_page("my_meals_orders", lambda p: meals_module.create_my_meals_orders_page(p, self)))
-        m_meals.add_command(label="🍽️ Планирование", command=lambda: self._show_page("meals_planning", lambda p: meals_module.create_meals_planning_page(p, self)))
-        m_meals.add_command(label="📚 Реестр", command=lambda: self._show_page("meals_registry", lambda p: meals_module.create_all_meals_orders_page(p, self)))
+        m_meals.add_command(label="Создать заявку", command=lambda: self._show_page("meals_order", lambda p: meals_module.create_meals_order_page(p, self)))
+        m_meals.add_command(label="Мои заявки", command=lambda: self._show_page("my_meals_orders", lambda p: meals_module.create_my_meals_orders_page(p, self)))
+        m_meals.add_command(label="Планирование", command=lambda: self._show_page("meals_planning", lambda p: meals_module.create_meals_planning_page(p, self)))
+        m_meals.add_command(label="Реестр", command=lambda: self._show_page("meals_registry", lambda p: meals_module.create_all_meals_orders_page(p, self)))
         self._menu_meals_settings_index = m_meals.index("end")
-        m_meals.add_command(label="⚙️ Настройки", command=lambda: self._show_page("meals_settings", lambda p: meals_module.create_meals_settings_page(p, self.current_user.get('role'))))
+        m_meals.add_command(label="Настройки", command=lambda: self._show_page("meals_settings", lambda p: meals_module.create_meals_settings_page(p, self.current_user.get('role'))))
         self._menubar.add_cascade(label="Питание", menu=m_meals)
         self._menu_meals = m_meals
 
@@ -357,7 +357,7 @@ class MainApp(tk.Tk):
 
         # === АНАЛИТИКА (НОВЫЙ РАЗДЕЛ) ===
         m_analytics = tk.Menu(self._menubar, tearoff=0)
-        m_analytics.add_command(label="📊 Операционная аналитика", command=lambda: self._show_page("analytics_dashboard", lambda p: analytics_module.AnalyticsPage(p, self)))
+        m_analytics.add_command(label="Операционная аналитика", command=lambda: self._show_page("analytics_dashboard", lambda p: analytics_module.AnalyticsPage(p, self)))
         self._menubar.add_cascade(label="Аналитика", menu=m_analytics)
         self._menu_analytics = m_analytics
 
@@ -464,21 +464,21 @@ class MainApp(tk.Tk):
 
         # --- Настройка меню "Автотранспорт" ---
         # "Создать заявку" и "Мои заявки" доступны всем.
-        set_state(self._menu_transport, "📝 Создать заявку", True)
-        set_state(self._menu_transport, "📄 Мои заявки", True)
+        set_state(self._menu_transport, "Создать заявку", True)
+        set_state(self._menu_transport, "Мои заявки", True)
         # "Планирование" и "Реестр" доступны планировщикам, менеджерам и админам.
-        set_state(self._menu_transport, "🚛 Планирование", is_planner)
-        set_state(self._menu_transport, "🚘 Реестр", is_planner)
+        set_state(self._menu_transport, "Планирование", is_planner)
+        set_state(self._menu_transport, "Реестр", is_planner)
 
         # --- Настройка меню "Питание" ---
         # "Создать заявку" и "Мои заявки" доступны всем.
-        set_state(self._menu_meals, "📝 Создать заявку", True)
-        set_state(self._menu_meals, "📄 Мои заявки", True)
+        set_state(self._menu_meals, "Создать заявку", True)
+        set_state(self._menu_meals, "Мои заявки", True)
         # "Планирование" доступно планировщикам, менеджерам и админам.
-        set_state(self._menu_meals, "🍽️ Планирование", is_planner)
-        set_state(self._menu_meals, "📚 Реестр", is_planner)
+        set_state(self._menu_meals, "Планирование", is_planner)
+        set_state(self._menu_meals, "Реестр", is_planner)
         # "Настройки" доступны только администратору.
-        set_state(self._menu_meals, "⚙️ Настройки", is_admin)
+        set_state(self._menu_meals, "Настройки", is_admin)
 
         # --- Настройка меню "Объекты" ---
         # "Создавать/Редактировать" объекты могут менеджеры и админы.
