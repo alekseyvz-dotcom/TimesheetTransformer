@@ -427,10 +427,14 @@ class MainApp(tk.Tk):
             page.pack(fill="both", expand=True)
             self._pages[key] = page
         except Exception as e:
-            traceback.print_exc()
+            # Логируем полную трассировку в файл
+            logging.exception(f"Ошибка при открытии страницы '{key}'")
+            # И показываем пользователю краткое сообщение
             messagebox.showerror("Ошибка", f"Не удалось открыть страницу '{key}':\n{e}")
-            if self.is_authenticated: self.show_home()
-            else: self.show_login()
+            if self.is_authenticated:
+                self.show_home()
+            else:
+                self.show_login()
             
     def _set_header(self, title: str, hint: str = ""):
         """Обновляет заголовок над содержимым."""
