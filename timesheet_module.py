@@ -55,6 +55,102 @@ except Exception:
 
 # ------------------------- Функции для работы с БД (перенесены из main_app.py) -------------------------
 
+def find_duplicate_employees_for_timesheet(
+    object_id: Optional[str],
+    object_addr: str,
+    department: str,
+    year: int,
+    month: int,
+    user_id: int,
+    employees: List[Tuple[str, str]],
+) -> List[Dict[str, Any]]:
+    """
+    Ищет сотрудников, которые уже есть в табелях других пользователей
+    по тому же объекту/подразделению/периоду.
+
+    employees: список (fio, tbn) из текущего табеля.
+    Возвращает список словарей с информацией о найденных дублях.
+    """
+    if not employees:
+        return []
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # подготовим набор ФИО/таб№ для поиска
+            # используем только тех, у кого есть либо fio, либо tbn
+            fio_tbn_pairs = [(fio.strip(), (tbn or "").strip())
+                             for fio, tbn in employees
+                             if fio.strip() or (tbn or "").strip()]
+
+            if not fio_tbn_pairs:
+                return []
+
+            # будем искать по (fio,tbn). Если tbn пустой, ищем только по fio.
+            # Для простоты разобьём на две группы.
+            with_tbn = [(fio, tbn) for fio, tbn in fio_tbn_pairs if tbn]
+            without_tbn = [fio for fio, tbn in fio_tbn_pairs if not tbn]
+
+            results: List[Dict[str, Any]] = []
+
+            # Общие условия по объекту/подразделению/периоду и не наш user_id
+            base_where = """
+                COALESCE(h.object_id, '') = COALESCE(%s, '')
+                AND h.object_addr = %s
+                AND COALESCE(h.department, '') = COALESCE(%s, '')
+                AND h.year = %s
+                AND h.month = %s
+                AND h.user_id <> %s
+            """
+            base_params = [object_id or None, object_addr, department or None, year, month, user_id]
+
+            # 1) Ищем совпадения по (fio, tbn)
+            if with_tbn:
+                cur.execute(
+                    f"""
+                    SELECT h.id AS header_id,
+                           h.user_id,
+                           u.username,
+                           u.full_name,
+                           r.fio,
+                           r.tbn
+                    FROM timesheet_headers h
+                    JOIN app_users u      ON u.id = h.user_id
+                    JOIN timesheet_rows r ON r.header_id = h.id
+                    WHERE {base_where}
+                      AND (r.fio, COALESCE(r.tbn, '')) IN %s
+                    """,
+                    base_params + [tuple(with_tbn)],
+                )
+                results.extend(cur.fetchall())
+
+            # 2) Ищем совпадения по одному ФИО (где в нашем списке tbn пустой)
+            if without_tbn:
+                cur.execute(
+                    f"""
+                    SELECT h.id AS header_id,
+                           h.user_id,
+                           u.username,
+                           u.full_name,
+                           r.fio,
+                           r.tbn
+                    FROM timesheet_headers h
+                    JOIN app_users u      ON u.id = h.user_id
+                    JOIN timesheet_rows r ON r.header_id = h.id
+                    WHERE {base_where}
+                      AND r.fio = ANY(%s)
+                    """,
+                    base_params + [without_tbn],
+                )
+                results.extend(cur.fetchall())
+
+            return results
+
+    finally:
+        if conn:
+            release_db_connection(conn)
+
 def find_object_db_id_by_excel_or_address(
     cur,  # теперь курсор передается явно
     excel_id: Optional[str],
@@ -1752,7 +1848,7 @@ class TimesheetPage(tk.Frame):
         self._render_page(1)
 
     def save_all(self):
-        """Сохраняет всю модель в БД и Excel."""
+        """Сохраняет всю модель в БД"""
         if self.read_only:
             messagebox.showinfo("Объектный табель", "Сохранение недоступно в режиме просмотра.")
             return
@@ -1772,6 +1868,51 @@ class TimesheetPage(tk.Frame):
         user_id = (self.app_ref.current_user or {}).get("id") if hasattr(self, "app_ref") else None
         if not user_id:
             messagebox.showerror("Сохранение", "Не удалось определить пользователя."); return
+
+        # Собираем (fio, tbn) из текущего табеля
+        employees_for_check = []
+        for rec in self.model_rows:
+            fio = (rec.get("fio") or "").strip()
+            tbn = (rec.get("tbn") or "").strip()
+            if fio or tbn:
+                employees_for_check.append((fio, tbn))
+
+        try:
+            duplicates = find_duplicate_employees_for_timesheet(
+                object_id=oid or None,
+                object_addr=addr,
+                department=current_dep,
+                year=y,
+                month=m,
+                user_id=user_id,
+                employees=employees_for_check,
+            )
+        except Exception as e:
+            try:
+                import logging
+                logging.exception("Ошибка проверки дублей сотрудников между табелями")
+            except ImportError:
+                print("Ошибка проверки дублей:", e)
+            messagebox.showerror("Сохранение", f"Ошибка при проверке дублей сотрудников:\n{e}")
+            return
+
+        if duplicates:
+            # Формируем понятное сообщение
+            lines = []
+            for d in duplicates:
+                emp_fio = d.get("fio") or ""
+                emp_tbn = d.get("tbn") or ""
+                uname = d.get("full_name") or d.get("username") or f"id={d.get('user_id')}"
+                lines.append(f"- {emp_fio} (таб.№ {emp_tbn}) — уже есть в табеле пользователя {uname}")
+
+            msg = (
+                "Найдены сотрудники, которые уже есть в табелях других пользователей "
+                "по этому объекту/подразделению/месяцу:\n\n"
+                + "\n".join(lines)
+                + "\n\nСохранение отменено. Удалите этих сотрудников из табеля."
+            )
+            messagebox.showwarning("Дубли сотрудников", msg)
+            return
         
         # Сохранение в БД
         try:
