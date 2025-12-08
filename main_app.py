@@ -27,16 +27,25 @@ except ImportError:
     Image = ImageTk = None
 
 # --- НАСТРОЙКИ ЛОГИРОВАНИЯ ---
+def exe_dir() -> Path:
+    """Определяет директорию запущенного .exe или .py файла."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+LOG_FILE = exe_dir() / "main_app_log.txt"
+
 logging.basicConfig(
-    filename="main_app_log.txt",
+    filename=str(LOG_FILE),
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
     encoding="utf-8",
 )
 logging.debug("=== main_app запущен ===")
 
+
 # --- ИМПОРТ ВСЕХ МОДУЛЕЙ ПРИЛОЖЕНИЯ ---
-# Оставляем здесь только то, что нужно для самого старта
+
 BudgetAnalyzer = None
 _assets_logo = None
 _LOGO_BASE64 = None
@@ -75,11 +84,6 @@ APP_NAME = "Управление строительством (Главное м
 db_connection_pool = None
 
 # --- ГЛАВНЫЕ УТИЛИТЫ ПРИЛОЖЕНИЯ ---
-
-def exe_dir() -> Path:
-    """Определяет директорию запущенного .exe или .py файла."""
-    if getattr(sys, "frozen", False): return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent
 
 def initialize_db_pool():
     """Создает пул соединений с БД. Вызывается один раз при старте приложения."""
