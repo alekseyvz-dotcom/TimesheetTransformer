@@ -1,1229 +1,1175 @@
-# settings_manager.py
-import os
-import json
-import hmac
-import base64
-import hashlib
-import os as _os
-import configparser
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
-from pathlib import Path
-from typing import Any, Dict, Optional, List
-from urllib.parse import urlparse, parse_qs
+# analytics_module.py
 
-import psycopg2
+import tkinter as tk
+from tkinter import ttk, messagebox
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Any, Tuple
 from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
+import logging
+import pandas as pd
 
-from openpyxl import load_workbook
-from datetime import datetime, date
-from typing import Optional as Opt  # чтобы не путаться с уже использованным Optional
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-# ------------------------- Логика работы с пулом соединений -------------------------
-db_connection_pool = None
+# Глобальная переменная для хранения пула соединений
+db_connection_pool: Optional[pool.SimpleConnectionPool] = None
 
-def set_db_pool(pool):
-    """Функция для установки пула соединений извне."""
+
+def set_db_pool(db_pool: pool.SimpleConnectionPool):
+    """Принимает пул соединений от главного приложения."""
     global db_connection_pool
-    db_connection_pool = pool
-
-def release_db_connection(conn):
-    """Возвращает соединение обратно в пул."""
-    if db_connection_pool:
-        db_connection_pool.putconn(conn)
-
-def get_db_connection():
-    """Получает соединение из установленного пула."""
-    if db_connection_pool is None:
-         raise RuntimeError("Пул соединений не был установлен в settings_manager из главного приложения.")
-    return db_connection_pool.getconn()
-
-# ------------------------- Утилиты (копии для разрыва зависимостей) -------------------------
-def month_name_ru(month: int) -> str:
-    names = [
-        "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
-        "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
-    ]
-    if 1 <= month <= 12:
-        return names[month - 1]
-    return str(month)
-    
-# ------------------------- Константы -------------------------
-CONFIG_FILE = "tabel_config.ini"
-CONFIG_SECTION_PATHS = "Paths"
-CONFIG_SECTION_UI = "UI"
-CONFIG_SECTION_INTEGR = "Integrations"
-
-KEY_SPR = "spravochnik_path"
-KEY_OUTPUT_DIR = "output_dir"
-KEY_MEALS_ORDERS_DIR = "meals_orders_dir"
-
-KEY_EXPORT_PWD = "export_password"
-KEY_PLANNING_PASSWORD = "planning_password"
-KEY_SELECTED_DEP = "selected_department"
-
-KEY_ORDERS_MODE = "orders_mode"
-KEY_ORDERS_WEBHOOK_URL = "orders_webhook_url"
-KEY_PLANNING_ENABLED = "planning_enabled"
-KEY_DRIVER_DEPARTMENTS = "driver_departments"
-
-KEY_MEALS_MODE = "meals_mode"
-KEY_MEALS_WEBHOOK_URL = "meals_webhook_url"
-KEY_MEALS_WEBHOOK_TOKEN = "meals_webhook_token"
-KEY_MEALS_PLANNING_ENABLED = "meals_planning_enabled"
-KEY_MEALS_PLANNING_PASSWORD = "meals_planning_password"
-
-SETTINGS_FILENAME = "settings.dat"
-APP_SECRET = "KIwcVIWqzrPoBzrlTdN1lvnTcpX7sikf"
+    db_connection_pool = db_pool
+    logging.info("Analytics Module: Пул соединений с БД установлен.")
 
 
-def exe_dir() -> Path:
-    if getattr(__import__("sys"), "frozen", False):
-        return Path(__import__("sys").executable).resolve().parent
-    return Path(__file__).resolve().parent
+# ============================================================
+#                      DATA PROVIDER
+# ============================================================
 
+class AnalyticsData:
+    """Класс для выполнения SQL-запросов и получения данных для дашбордов."""
 
-SETTINGS_PATH = exe_dir() / SETTINGS_FILENAME
-INI_PATH = exe_dir() / CONFIG_FILE
+    def __init__(self, start_date, end_date, object_type_filter: str):
+        self.start_date = start_date
+        self.end_date = end_date
+        self.object_type_filter = object_type_filter  # short_name из objects
 
-# ------------------------- ШИФРОВАНИЕ (без изменений) -------------------------
+    # ---------- Внутренние утилиты ----------
 
-def _is_windows() -> bool:
-    import platform
-    return platform.system().lower().startswith("win")
-
-def _dpapi_protect(data: bytes) -> bytes:
-    import ctypes
-    from ctypes import wintypes
-    class DATA_BLOB(ctypes.Structure):
-        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
-    CryptProtectData = ctypes.windll.crypt32.CryptProtectData
-    CryptProtectData.argtypes = [ctypes.POINTER(DATA_BLOB), wintypes.LPWSTR, ctypes.POINTER(DATA_BLOB), ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(DATA_BLOB)]
-    CryptProtectData.restype = wintypes.BOOL
-    in_blob = DATA_BLOB(cbData=len(data), pbData=ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_char)))
-    out_blob = DATA_BLOB()
-    if not CryptProtectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
-        raise RuntimeError("DPAPI protect failed")
-    try:
-        return ctypes.string_at(out_blob.pbData, out_blob.cbData)
-    finally:
-        ctypes.windll.kernel32.LocalFree(out_blob.pbData)
-
-def _dpapi_unprotect(data: bytes) -> bytes:
-    import ctypes
-    from ctypes import wintypes
-    class DATA_BLOB(ctypes.Structure):
-        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
-    CryptUnprotectData = ctypes.windll.crypt32.CryptUnprotectData
-    CryptUnprotectData.argtypes = [ctypes.POINTER(DATA_BLOB), ctypes.POINTER(wintypes.LPWSTR), ctypes.POINTER(DATA_BLOB), ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(DATA_BLOB)]
-    CryptUnprotectData.restype = wintypes.BOOL
-    in_blob = DATA_BLOB(cbData=len(data), pbData=ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_char)))
-    out_blob = DATA_BLOB()
-    if not CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
-        raise RuntimeError("DPAPI unprotect failed")
-    try:
-        return ctypes.string_at(out_blob.pbData, out_blob.cbData)
-    finally:
-        ctypes.windll.kernel32.LocalFree(out_blob.pbData)
-
-def _fallback_key() -> bytes:
-    return hashlib.sha256(APP_SECRET.encode("utf-8")).digest()
-
-def _fallback_encrypt(data: bytes) -> bytes:
-    key = _fallback_key()
-    mac = hmac.new(key, data, hashlib.sha256).digest()
-    return base64.b64encode(mac + data)
-
-def _fallback_decrypt(packed: bytes) -> bytes:
-    raw = base64.b64decode(packed)
-    key = _fallback_key()
-    mac = raw[:32]
-    data = raw[32:]
-    if not hmac.compare_digest(mac, hmac.new(key, data, hashlib.sha256).digest()):
-        raise RuntimeError("Settings integrity check failed")
-    return data
-
-def _encrypt_dict(d: Dict[str, Any]) -> bytes:
-    data = json.dumps(d, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    if _is_windows():
+    def _execute_query(self, query: str, params: tuple = None) -> List[Dict[str, Any]]:
+        """Универсальный метод для выполнения запросов к БД."""
+        if not db_connection_pool:
+            raise ConnectionError("Пул соединений с БД не был инициализирован.")
+        conn = None
         try:
-            return b"WDP1" + _dpapi_protect(data)
-        except Exception:
-            pass
-    return b"FBK1" + _fallback_encrypt(data)
-
-def _decrypt_dict(blob: bytes) -> Dict[str, Any]:
-    if not blob: return {}
-    try:
-        if blob.startswith(b"WDP1"): return json.loads(_dpapi_unprotect(blob[4:]).decode("utf-8"))
-        if blob.startswith(b"FBK1"): return json.loads(_fallback_decrypt(blob[4:]).decode("utf-8"))
-        return json.loads(blob.decode("utf-8", errors="replace"))
-    except Exception:
-        return {}
-
-# ---------------- ХРАНИЛИЩЕ НАСТРОЕК ----------------
-
-_defaults: Dict[str, Dict[str, Any]] = {
-    "Paths": {
-        KEY_SPR: str(exe_dir() / "Справочник.xlsx"),
-        KEY_OUTPUT_DIR: str(exe_dir() / "Объектные_табели"),
-        KEY_MEALS_ORDERS_DIR: str(exe_dir() / "Заявки_питание"),
-    },
-    "DB": {
-        "provider": "postgres",
-        "database_url": "postgresql://myappuser:QweRty123!change@185.55.58.31:5432/myappdb?sslmode=disable",
-        "sqlite_path": str(exe_dir() / "app_data.sqlite3"),
-        "sslmode": "require",
-    },
-    "UI": {
-        KEY_SELECTED_DEP: "Все",
-    },
-    "Integrations": {
-        KEY_EXPORT_PWD: "2025",
-        KEY_PLANNING_PASSWORD: "2025",
-        KEY_ORDERS_MODE: "webhook",
-        KEY_ORDERS_WEBHOOK_URL: "",
-        KEY_PLANNING_ENABLED: "false",
-        KEY_DRIVER_DEPARTMENTS: "",
-        KEY_MEALS_MODE: "webhook",
-        KEY_MEALS_WEBHOOK_URL: "",
-        KEY_MEALS_WEBHOOK_TOKEN: "",
-        KEY_MEALS_PLANNING_ENABLED: "true",
-        KEY_MEALS_PLANNING_PASSWORD: "2025",
-    },
-}
-
-_store: Dict[str, Dict[str, Any]] = {}
-
-
-def _ensure_sections():
-    for sec, vals in _defaults.items():
-        _store.setdefault(sec, {})
-        for k, v in vals.items():
-            if k not in _store[sec]:
-                _store[sec][k] = v
-
-
-def load_settings():
-    global _store
-    if SETTINGS_PATH.exists():
-        try:
-            raw = SETTINGS_PATH.read_bytes()
-            _store = _decrypt_dict(raw)
-            if not isinstance(_store, dict):
-                _store = {}
-        except Exception:
-            _store = {}
-    else:
-        _store = {}
-    _ensure_sections()
-    if not SETTINGS_PATH.exists():
-        save_settings()
-
-
-def save_settings():
-    _ensure_sections()
-    blob = _encrypt_dict(_store)
-    SETTINGS_PATH.write_bytes(blob)
-
-
-def migrate_from_ini_or_create():
-    global _store
-    cfg = configparser.ConfigParser()
-    if INI_PATH.exists():
-        try:
-            cfg.read(INI_PATH, encoding="utf-8")
-        except Exception:
-            pass
-    _store = json.loads(json.dumps(_defaults))
-    for sec in _store.keys():
-        if cfg.has_section(sec):
-            for key in _store[sec].keys():
-                val = cfg.get(sec, key, fallback=_store[sec][key])
-                _store[sec][key] = val
-    save_settings()
-
-
-# Публичные API
-
-def ensure_config():
-    load_settings()
-
-
-class _ProxyConfig:
-    def get(self, section: str, key: str, fallback: Opt[str] = None) -> str:
-        try:
-            v = _store.get(section, {}).get(key, None)
-            if v is None or v == "":
-                return fallback if fallback is not None else ""
-            return str(v)
-        except Exception:
-            return fallback if fallback is not None else ""
-
-
-def read_config() -> _ProxyConfig:
-    ensure_config()
-    return _ProxyConfig()
-
-
-def write_config(_cfg=None):
-    save_settings()
-
-
-def get_spr_path_from_config() -> Path:
-    ensure_config()
-    raw = _store["Paths"].get(KEY_SPR) or _defaults["Paths"][KEY_SPR]
-    return Path(os.path.expandvars(str(raw)))
-
-
-def get_output_dir_from_config() -> Path:
-    ensure_config()
-    raw = _store["Paths"].get(KEY_OUTPUT_DIR) or _defaults["Paths"][KEY_OUTPUT_DIR]
-    return Path(os.path.expandvars(str(raw)))
-
-
-def get_meals_orders_dir_from_config() -> Path:
-    ensure_config()
-    raw = _store["Paths"].get(KEY_MEALS_ORDERS_DIR) or _defaults["Paths"][KEY_MEALS_ORDERS_DIR]
-    return Path(os.path.expandvars(str(raw)))
-
-
-def get_export_password_from_config() -> str:
-    ensure_config()
-    return str(_store["Integrations"].get(KEY_EXPORT_PWD, _defaults["Integrations"][KEY_EXPORT_PWD]))
-
-
-def get_selected_department_from_config() -> str:
-    ensure_config()
-    return str(_store["UI"].get(KEY_SELECTED_DEP, _defaults["UI"][KEY_SELECTED_DEP]))
-
-
-def set_selected_department_in_config(dep: str):
-    ensure_config()
-    _store["UI"][KEY_SELECTED_DEP] = dep or "Все"
-    save_settings()
-
-
-def get_db_provider() -> str:
-    ensure_config()
-    return str(_store["DB"].get("provider", _defaults["DB"]["provider"]))
-
-
-def get_database_url() -> str:
-    ensure_config()
-    return str(_store["DB"].get("database_url", ""))
-
-
-def get_sqlite_path() -> str:
-    ensure_config()
-    return str(_store["DB"].get("sqlite_path", _defaults["DB"]["sqlite_path"]))
-
-
-def get_db_sslmode() -> str:
-    ensure_config()
-    return str(_store["DB"].get("sslmode", _defaults["DB"]["sslmode"]))
-
-
-def get_meals_mode_from_config() -> str:
-    ensure_config()
-    return str(
-        _store["Integrations"].get(KEY_MEALS_MODE, _defaults["Integrations"][KEY_MEALS_MODE])
-    ).strip().lower()
-
-
-def set_meals_mode_in_config(mode: str):
-    ensure_config()
-    _store["Integrations"][KEY_MEALS_MODE] = mode or "webhook"
-    save_settings()
-
-
-def get_meals_webhook_url_from_config() -> str:
-    ensure_config()
-    return str(_store["Integrations"].get(KEY_MEALS_WEBHOOK_URL, _defaults["Integrations"][KEY_MEALS_WEBHOOK_URL]))
-
-
-def set_meals_webhook_url_in_config(url: str):
-    ensure_config()
-    _store["Integrations"][KEY_MEALS_WEBHOOK_URL] = url or ""
-    save_settings()
-
-
-def get_meals_webhook_token_from_config() -> str:
-    ensure_config()
-    return str(_store["Integrations"].get(KEY_MEALS_WEBHOOK_TOKEN, _defaults["Integrations"][KEY_MEALS_WEBHOOK_TOKEN]))
-
-
-def get_meals_planning_enabled_from_config() -> bool:
-    ensure_config()
-    v = str(
-        _store["Integrations"].get(
-            KEY_MEALS_PLANNING_ENABLED,
-            _defaults["Integrations"][KEY_MEALS_PLANNING_ENABLED],
-        )
-    ).strip().lower()
-    return v in ("1", "true", "yes", "on")
-
-
-def set_meals_planning_enabled_in_config(enabled: bool):
-    ensure_config()
-    _store["Integrations"][KEY_MEALS_PLANNING_ENABLED] = "true" if enabled else "false"
-    save_settings()
-
-
-def get_meals_planning_password_from_config() -> str:
-    ensure_config()
-    return str(
-        _store["Integrations"].get(
-            KEY_MEALS_PLANNING_PASSWORD,
-            _defaults["Integrations"][KEY_MEALS_PLANNING_PASSWORD],
-        )
-    )
-
-
-def set_meals_planning_password_in_config(pwd: str):
-    ensure_config()
-    _store["Integrations"][KEY_MEALS_PLANNING_PASSWORD] = pwd or ""
-    save_settings()
-
-
-def set_meals_webhook_token_in_config(tok: str):
-    ensure_config()
-    _store["Integrations"][KEY_MEALS_WEBHOOK_TOKEN] = tok or ""
-    save_settings()
-
-
-# ---------------- РАБОТА С БД ДЛЯ ПОЛЬЗОВАТЕЛЕЙ ----------------
-
-    provider = get_db_provider().strip().lower()
-    if provider != "postgres":
-        raise RuntimeError(
-            f"Поддерживается только provider=postgres для работы с пользователями, сейчас: {provider!r}"
-        )
-
-    db_url = get_database_url().strip()
-    if not db_url:
-        raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
-
-    url = urlparse(db_url)
-    if url.scheme not in ("postgresql", "postgres"):
-        raise RuntimeError(f"Неверная схема в DATABASE_URL: {url.scheme}")
-
-    user = url.username
-    password = url.password
-    host = url.hostname or "localhost"
-    port = url.port or 5432
-    dbname = url.path.lstrip("/")
-
-    q = parse_qs(url.query)
-    sslmode = (q.get("sslmode", [get_db_sslmode()])[0] or "require")
-
-    conn = psycopg2.connect(
-        host=host,
-        port=port,
-        dbname=dbname,
-        user=user,
-        password=password,
-        sslmode=sslmode,
-    )
-    return conn
-
-
-# ---------------- ИМПОРТ СОТРУДНИКОВ/ОБЪЕКТОВ ИЗ EXCEL ----------------
-
-def _s_val(val) -> str:
-    """Вспомогательная функция приведения значений ячеек к строке."""
-    if val is None: return ""
-    if isinstance(val, float) and val.is_integer(): val = int(val)
-    return str(val).strip()
-
-
-def import_employees_from_excel(path: Path) -> int:
-    """
-    Импортирует сотрудников из Excel-файла (как 'ШТАТ на ...').
-    Обновляет таблицы departments и employees.
-    """
-    if not path.exists(): raise FileNotFoundError(f"Файл не найден: {path}")
-    wb = load_workbook(path, read_only=True, data_only=True)
-    ws = wb.active
-    header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
-    hdr = [_s_val(c).lower() for c in header_row]
-
-    def col_idx(substr: str) -> Opt[int]:
-        substr = substr.lower()
-        for i, h in enumerate(hdr):
-            if substr in h: return i
-        return None
-
-    idx_tbn = col_idx("табельный номер")
-    idx_fio = col_idx("сотрудник")
-    idx_pos = col_idx("должность")
-    idx_dep = col_idx("подразделение")
-    idx_dismissal = col_idx("увольн")
-
-    if idx_fio is None or idx_tbn is None:
-        raise RuntimeError("Не найдены обязательные колонки 'Табельный номер' и/или 'Сотрудник'")
-
-    conn = None
-    processed = 0
-    try:
-        conn = get_db_connection()
-        with conn:
-            with conn.cursor() as cur:
-                for row in ws.iter_rows(min_row=2, values_only=True):
-                    if not row: continue
-                    fio = _s_val(row[idx_fio]) if idx_fio < len(row) else ""
-                    tbn = _s_val(row[idx_tbn]) if idx_tbn < len(row) else ""
-                    pos = _s_val(row[idx_pos]) if idx_pos is not None and idx_pos < len(row) else ""
-                    dep_name = _s_val(row[idx_dep]) if idx_dep is not None and idx_dep < len(row) else ""
-                    dismissal_raw = row[idx_dismissal] if idx_dismissal is not None and idx_dismissal < len(row) else None
-                    if not fio and not tbn: continue
-                    is_fired = bool(dismissal_raw and _s_val(dismissal_raw))
-                    department_id = None
-                    if dep_name:
-                        cur.execute("SELECT id FROM departments WHERE name = %s", (dep_name,))
-                        r = cur.fetchone()
-                        if r: department_id = r[0]
-                        else:
-                            cur.execute("INSERT INTO departments (name) VALUES (%s) RETURNING id", (dep_name,))
-                            department_id = cur.fetchone()[0]
-
-                    cur.execute("SELECT id FROM employees WHERE tbn = %s", (tbn,)) if tbn else cur.execute("SELECT id FROM employees WHERE fio = %s", (fio,))
-                    r = cur.fetchone()
-                    if r:
-                        cur.execute("UPDATE employees SET fio = %s, tbn = %s, position = %s, department_id = %s, is_fired = %s WHERE id = %s", (fio or None, tbn or None, pos or None, department_id, is_fired, r[0]))
-                    else:
-                        cur.execute("INSERT INTO employees (fio, tbn, position, department_id, is_fired) VALUES (%s, %s, %s, %s, %s)", (fio or None, tbn or None, pos or None, department_id, is_fired))
-                    processed += 1
-    finally:
-        if conn:
-            release_db_connection(conn)
-    return processed
-
-def import_objects_from_excel(path: Path) -> int:
-    """
-    Импортирует/обновляет объекты из Excel 'Справочник программ и объектов...'.
-    """
-    if not path.exists():
-        raise FileNotFoundError(f"Файл не найден: {path}")
-
-    wb = load_workbook(path, read_only=True, data_only=True)
-    ws = wb.active
-    header_row_idx = None
-    header_row = []
-
-    # Ищем строку заголовка по ключевой фразе
-    for i, row in enumerate(ws.iter_rows(min_row=1, max_row=40, values_only=True), start=1):
-        if row and any("id (код) номер объекта" in _s_val(c).lower() for c in row):
-            header_row_idx, header_row = i, [_s_val(c).lower() for c in row]
-            break
-
-    if header_row_idx is None:
-        raise RuntimeError("Не найдена строка заголовка с колонкой 'ID (код) номер объекта'")
-
-    def col_idx(substr: str) -> Opt[int]:
-        substr = substr.lower()
-        for i, h in enumerate(header_row):
-            if substr in h:
-                return i
-        return None
-
-    # Получаем индексы всех нужных колонок
-    idx_excel_id = col_idx("id (код) номер объекта")
-    idx_year = col_idx("год")
-    idx_program = col_idx("наименование программы")
-    idx_customer = col_idx("наименование заказчика")
-    idx_addr = col_idx("адрес")
-    idx_contract_no = col_idx("№ договора")
-    idx_contract_date = col_idx("дата договора")
-    idx_short_name = col_idx("сокращенное наименование объекта")
-    idx_department_name = col_idx("подразделение")
-    idx_contract_type = col_idx("тип договора")
-
-    if idx_excel_id is None or idx_addr is None:
-        raise RuntimeError("Не найдены обязательные колонки 'ID (код) номер объекта' и/или 'Адрес объекта'")
-
-    conn = None
-    processed = 0
-    try:
-        conn = get_db_connection()
-        with conn:
-            with conn.cursor() as cur:
-                for row in ws.iter_rows(min_row=header_row_idx + 1, values_only=True):
-                    # ... (код чтения данных из строки row остается без изменений) ...
-
-                    excel_id = _s_val(row[idx_excel_id]) if idx_excel_id < len(row) else ""
-                    if not excel_id: continue
-
-                    year = _s_val(row[idx_year]) if idx_year is not None and idx_year < len(row) else ""
-                    program = _s_val(row[idx_program]) if idx_program is not None and idx_program < len(row) else ""
-                    customer_name = _s_val(row[idx_customer]) if idx_customer is not None and idx_customer < len(row) else ""
-                    address = _s_val(row[idx_addr]) if idx_addr < len(row) else ""
-                    contract_number = _s_val(row[idx_contract_no]) if idx_contract_no is not None and idx_contract_no < len(row) else ""
-                    
-                    contract_date_raw = row[idx_contract_date] if idx_contract_date is not None and idx_contract_date < len(row) else None
-                    contract_date_val: Opt[date] = None
-                    if isinstance(contract_date_raw, datetime):
-                        contract_date_val = contract_date_raw.date()
-                    
-                    short_name = _s_val(row[idx_short_name]) if idx_short_name is not None and idx_short_name < len(row) else ""
-                    executor_department = _s_val(row[idx_department_name]) if idx_department_name is not None and idx_department_name < len(row) else ""
-                    contract_type = _s_val(row[idx_contract_type]) if idx_contract_type is not None and idx_contract_type < len(row) else ""
-                    
-                    # ИСПРАВЛЕНО: имя таблицы на 'objects'
-                    cur.execute("SELECT id FROM objects WHERE excel_id = %s", (excel_id,))
-                    existing_record = cur.fetchone()
-
-                    if existing_record:
-                        db_id = existing_record[0]
-                        # ИСПРАВЛЕНО: имя таблицы на 'objects'
-                        cur.execute(
-                            """
-                            UPDATE objects SET
-                                address = %s, year = %s, program_name = %s, customer_name = %s, 
-                                contract_number = %s, contract_date = %s, short_name = %s, 
-                                executor_department = %s, contract_type = %s, updated_at = NOW()
-                            WHERE id = %s
-                            """,
-                            (address, year or None, program or None, customer_name or None, contract_number or None, 
-                             contract_date_val, short_name or None, executor_department or None, contract_type or None, db_id)
-                        )
-                    else:
-                        # ИСПРАВЛЕНО: имя таблицы на 'objects'
-                        cur.execute(
-                            """
-                            INSERT INTO objects 
-                                (excel_id, address, year, program_name, customer_name, contract_number, contract_date, 
-                                short_name, executor_department, contract_type, status)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                            """,
-                            (excel_id, address, year or None, program or None, customer_name or None, contract_number or None,
-                            contract_date_val, short_name or None, executor_department or None, contract_type or None, 'Новый')
-                        )
-                    processed += 1
-    finally:
-        if conn:
-            release_db_connection(conn)
-    return processed
-
-def _hash_password(password: str, salt: Optional[bytes] = None) -> str:
-    """Хеширует пароль с использованием PBKDF2."""
-    if salt is None:
-        salt = _os.urandom(16)
-    iterations = 260000
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
-    return f"pbkdf2_sha256${iterations}${salt.hex()}${dk.hex()}"
-
-def _verify_password(password: str, stored_hash: str) -> bool:
-    """Проверяет пароль по хешу."""
-    try:
-        if stored_hash.startswith("pbkdf2_sha256$"):
-            _, it_str, salt_hex, hash_hex = stored_hash.split("$", 3)
-            iterations = int(it_str)
-            salt = bytes.fromhex(salt_hex)
-            dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
-            return dk.hex() == hash_hex
-        return password == stored_hash
-    except Exception:
-        return False
-        
-def get_roles_list() -> List[Dict]:
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT code, name FROM roles ORDER BY name;")
-            return list(cur.fetchall())
-    finally:
-        if conn:
-            release_db_connection(conn)
-
-def get_app_users() -> List[Dict]:
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute('SELECT id, username, full_name, "role", is_active FROM app_users ORDER BY username;')
-            return list(cur.fetchall())
-    finally:
-        if conn:
-            release_db_connection(conn)
-
-def create_app_user(username: str, password: str, full_name: str, role_code: str, is_active: bool = True):
-    username, full_name, role_code = (username or "").strip(), (full_name or "").strip(), (role_code or "").strip().lower()
-    if not username: raise ValueError("Логин не может быть пустым")
-    if not password: raise ValueError("Пароль не может быть пустым")
-    if not role_code: raise ValueError("Роль не указана")
-    pwd_hash = _hash_password(password)
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn, conn.cursor() as cur:
-            cur.execute('INSERT INTO app_users (username, password_hash, is_active, full_name, "role") VALUES (%s, %s, %s, %s, %s)', (username, pwd_hash, is_active, full_name, role_code))
-    finally:
-        if conn:
-            release_db_connection(conn)
-
-def update_app_user(user_id: int, username: str, full_name: str, role_code: str, is_active: bool, new_password: Optional[str] = None):
-    username, full_name, role_code = (username or "").strip(), (full_name or "").strip(), (role_code or "").strip().lower()
-    if not username: raise ValueError("Логин не может быть пустым")
-    if not role_code: raise ValueError("Роль не указана")
-    pwd_hash = _hash_password(new_password) if new_password else None
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn, conn.cursor() as cur:
-            if pwd_hash:
-                cur.execute('UPDATE app_users SET username = %s, full_name = %s, "role" = %s, is_active = %s, password_hash = %s WHERE id = %s', (username, full_name, role_code, is_active, pwd_hash, user_id))
-            else:
-                cur.execute('UPDATE app_users SET username = %s, full_name = %s, "role" = %s, is_active = %s WHERE id = %s', (username, full_name, role_code, is_active, user_id))
-    finally:
-        if conn:
-            release_db_connection(conn)
-
-def delete_app_user(user_id: int):
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn, conn.cursor() as cur:
-            cur.execute("DELETE FROM app_users WHERE id = %s", (user_id,))
-    finally:
-        if conn:
-            release_db_connection(conn)
-
-# ---------------- UI ДЛЯ ПОЛЬЗОВАТЕЛЕЙ ----------------
-
-_vars: Dict[str, Dict[str, Any]] = {}
-
-
-def _add_context_menu(widget: tk.Widget):
-    menu = tk.Menu(widget, tearoff=0)
-    menu.add_command(label="Вырезать", command=lambda: widget.event_generate("<<Cut>>"))
-    menu.add_command(label="Копировать", command=lambda: widget.event_generate("<<Copy>>"))
-    menu.add_command(label="Вставить", command=lambda: widget.event_generate("<<Paste>>"))
-    menu.add_separator()
-    menu.add_command(label="Выделить всё", command=lambda: widget.event_generate("<<SelectAll>>"))
-
-    def show_menu(event):
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
+            conn = db_connection_pool.getconn()
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(query, params)
+                return cur.fetchall()
+        except Exception as e:
+            logging.error(f"Ошибка выполнения SQL-запроса в модуле аналитики: {e}")
+            messagebox.showerror("Ошибка БД", f"Не удалось получить данные для аналитики:\n{e}")
+            return []
         finally:
-            menu.grab_release()
+            if conn:
+                db_connection_pool.putconn(conn)
 
-    widget.bind("<Button-3>", show_menu)
+    def get_object_types(self) -> List[str]:
+        """Получает уникальные значения 'short_name' из таблицы объектов для фильтра."""
+        query = """
+        SELECT DISTINCT short_name
+        FROM objects
+        WHERE short_name IS NOT NULL AND short_name <> ''
+        ORDER BY short_name;
+        """
+        results = self._execute_query(query)
+        return [row['short_name'] for row in results]
 
+    def _get_filter_clauses_by_object_id(
+        self, table_alias: str, field: str = "object_id"
+    ) -> Tuple[str, str, list]:
+        """
+        Вернёт join_clause, filter_clause, params_list
+        для фильтрации по типу объекта (objects.short_name) по полю <alias>.<field>.
+        """
+        params: List[Any] = []
+        join_clause = ""
+        filter_clause = ""
 
-class CreateUserDialog(simpledialog.Dialog):
-    def __init__(self, parent):
-        self.result = None
-        super().__init__(parent, title="Создать пользователя")
+        if self.object_type_filter:
+            join_clause = f"LEFT JOIN objects o ON {table_alias}.{field} = o.id"
+            filter_clause = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
 
-    def body(self, master):
-        tk.Label(master, text="Логин:").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.ent_username = ttk.Entry(master, width=26)
-        self.ent_username.grid(row=0, column=1, sticky="w", pady=4)
+        return join_clause, filter_clause, params
 
-        tk.Label(master, text="ФИО:").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.ent_fullname = ttk.Entry(master, width=26)
-        self.ent_fullname.grid(row=1, column=1, sticky="w", pady=4)
+    # ============================================================
+    #                      1. ТРУДОЗАТРАТЫ
+    # ============================================================
 
-        tk.Label(master, text="Пароль:").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.ent_pwd = ttk.Entry(master, width=26, show="*")
-        self.ent_pwd.grid(row=2, column=1, sticky="w", pady=4)
+    def get_labor_kpi(self) -> Dict[str, Any]:
+        """KPI по трудозатратам за период."""
+        base_query = """
+        SELECT
+            COALESCE(SUM(tr.total_hours), 0)                      AS total_hours,
+            COALESCE(SUM(tr.total_days), 0)                       AS total_days,
+            COALESCE(SUM(tr.overtime_day + tr.overtime_night), 0) AS total_overtime,
+            COUNT(DISTINCT tr.fio)                                AS unique_employees
+        FROM timesheet_headers th
+        JOIN timesheet_rows tr ON th.id = tr.header_id
+        {join_clause}
+        WHERE (th.year * 100 + th.month) BETWEEN %s AND %s
+        {filter_clause};
+        """
 
-        tk.Label(master, text="Роль:").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=4)
-        try:
-            roles = get_roles_list()
-        except Exception as e:
-            messagebox.showerror("Роли", f"Ошибка чтения списка ролей:\n{e}", parent=self)
-            roles = []
+        start_period = self.start_date.year * 100 + self.start_date.month
+        end_period = self.end_date.year * 100 + self.end_date.month
+        params: List[Any] = [start_period, end_period]
 
-        self.role_map = {f'{r["name"]} ({r["code"]})': r["code"] for r in roles}
-        self.cmb_role = ttk.Combobox(master, state="readonly", width=24, values=list(self.role_map.keys()))
-        self.cmb_role.grid(row=3, column=1, sticky="w", pady=4)
-        if self.role_map:
-            self.cmb_role.current(0)
+        join_clause = ""
+        filter_clause = ""
+        if self.object_type_filter:
+            join_clause = "LEFT JOIN objects o ON th.object_db_id = o.id"
+            filter_clause = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
 
-        return self.ent_username
+        query = base_query.format(join_clause=join_clause, filter_clause=filter_clause)
+        result = self._execute_query(query, tuple(params))
+        return result[0] if result else {}
 
-    def validate(self):
-        u = self.ent_username.get().strip()
-        p = self.ent_pwd.get().strip()
-        if not u:
-            messagebox.showwarning("Создать пользователя", "Укажите логин.", parent=self)
-            return False
-        if not p:
-            messagebox.showwarning("Создать пользователя", "Укажите пароль.", parent=self)
-            return False
-        if not self.cmb_role.get():
-            messagebox.showwarning("Создать пользователя", "Выберите роль.", parent=self)
-            return False
-        return True
+    def get_labor_by_object(self) -> pd.DataFrame:
+        """Трудозатраты в разрезе объектов."""
+        base_query = """
+        SELECT 
+            o.address AS object_name,
+            SUM(tr.total_hours) AS total_hours
+        FROM timesheet_headers th
+        JOIN timesheet_rows tr ON th.id = tr.header_id
+        LEFT JOIN objects o ON th.object_db_id = o.id
+        WHERE (th.year * 100 + th.month) BETWEEN %s AND %s
+        {filter_clause}
+        GROUP BY o.address
+        HAVING o.address IS NOT NULL
+        ORDER BY total_hours DESC;
+        """
+        start_period = self.start_date.year * 100 + self.start_date.month
+        end_period = self.end_date.year * 100 + self.end_date.month
+        params: List[Any] = [start_period, end_period]
 
-    def apply(self):
-        self.result = {
-            "username": self.ent_username.get().strip(),
-            "full_name": self.ent_fullname.get().strip(),
-            "password": self.ent_pwd.get().strip(),
-            "role": self.role_map[self.cmb_role.get()],
-        }
+        filter_clause = ""
+        if self.object_type_filter:
+            filter_clause = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
 
-class EditUserDialog(simpledialog.Dialog):
-    def __init__(self, parent, user: dict):
-        self.user = user
-        self.result = None
-        super().__init__(parent, title=f"Редактировать пользователя: {user.get('username', '')}")
+        query = base_query.format(filter_clause=filter_clause)
+        data = self._execute_query(query, tuple(params))
+        return pd.DataFrame(data)
 
-    def body(self, master):
-        tk.Label(master, text="Логин:").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.ent_username = ttk.Entry(master, width=26)
-        self.ent_username.grid(row=0, column=1, sticky="w", pady=4)
-        self.ent_username.insert(0, self.user.get("username", ""))
+    # 1.1. Динамика трудозатрат по месяцам
+    def get_labor_trend_by_month(self) -> pd.DataFrame:
+        """Возвращает суммарные человеко-часы по месяцам в выбранном периоде."""
+        base_query = """
+        SELECT
+            th.year,
+            th.month,
+            SUM(tr.total_hours) AS total_hours
+        FROM timesheet_headers th
+        JOIN timesheet_rows tr ON th.id = tr.header_id
+        {join_clause}
+        WHERE (th.year * 100 + th.month) BETWEEN %s AND %s
+        {filter_clause}
+        GROUP BY th.year, th.month
+        ORDER BY th.year, th.month;
+        """
+        start_period = self.start_date.year * 100 + self.start_date.month
+        end_period = self.end_date.year * 100 + self.end_date.month
+        params: List[Any] = [start_period, end_period]
 
-        tk.Label(master, text="ФИО:").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.ent_fullname = ttk.Entry(master, width=26)
-        self.ent_fullname.grid(row=1, column=1, sticky="w", pady=4)
-        self.ent_fullname.insert(0, self.user.get("full_name") or "")
+        join_clause = ""
+        filter_clause = ""
+        if self.object_type_filter:
+            join_clause = "LEFT JOIN objects o ON th.object_db_id = o.id"
+            filter_clause = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
 
-        tk.Label(master, text="Новый пароль (оставьте пустым, чтобы не менять):").grid(
-            row=2, column=0, sticky="e", padx=(0, 6), pady=4
+        query = base_query.format(join_clause=join_clause, filter_clause=filter_clause)
+        data = self._execute_query(query, tuple(params))
+        return pd.DataFrame(data)
+
+    # 1.2. ТОП‑сотрудники по часам
+    def get_top_employees_by_hours(self, limit: int = 10) -> pd.DataFrame:
+        """ТОП сотрудников по суммарным часам за период."""
+        base_query = """
+        SELECT
+            tr.fio,
+            SUM(tr.total_hours) AS total_hours,
+            SUM(tr.overtime_day + tr.overtime_night) AS total_overtime
+        FROM timesheet_headers th
+        JOIN timesheet_rows tr ON th.id = tr.header_id
+        {join_clause}
+        WHERE (th.year * 100 + th.month) BETWEEN %s AND %s
+        {filter_clause}
+        GROUP BY tr.fio
+        ORDER BY total_hours DESC
+        LIMIT {limit};
+        """
+        start_period = self.start_date.year * 100 + self.start_date.month
+        end_period = self.end_date.year * 100 + self.end_date.month
+        params: List[Any] = [start_period, end_period]
+
+        join_clause = ""
+        filter_clause = ""
+        if self.object_type_filter:
+            join_clause = "LEFT JOIN objects o ON th.object_db_id = o.id"
+            filter_clause = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
+
+        query = base_query.format(join_clause=join_clause,
+                                  filter_clause=filter_clause,
+                                  limit=limit)
+        data = self._execute_query(query, tuple(params))
+        return pd.DataFrame(data)
+
+    # 1.3. Нагрузка по подразделениям
+    def get_labor_by_department(self) -> pd.DataFrame:
+        """Суммарные человеко-часы по подразделениям."""
+        base_query = """
+        SELECT
+            d.name AS department_name,
+            SUM(tr.total_hours) AS total_hours
+        FROM timesheet_headers th
+        JOIN timesheet_rows tr ON th.id = tr.header_id
+        LEFT JOIN departments d ON th.department_id = d.id
+        {join_clause}
+        WHERE (th.year * 100 + th.month) BETWEEN %s AND %s
+        {filter_clause}
+        GROUP BY d.name
+        ORDER BY total_hours DESC;
+        """
+        start_period = self.start_date.year * 100 + self.start_date.month
+        end_period = self.end_date.year * 100 + self.end_date.month
+        params: List[Any] = [start_period, end_period]
+
+        join_clause = ""
+        filter_clause = ""
+        if self.object_type_filter:
+            join_clause = "LEFT JOIN objects o ON th.object_db_id = o.id"
+            filter_clause = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
+
+        query = base_query.format(join_clause=join_clause, filter_clause=filter_clause)
+        data = self._execute_query(query, tuple(params))
+        return pd.DataFrame(data)
+
+    # ============================================================
+    #                      2. ТРАНСПОРТ
+    # ============================================================
+
+    def get_transport_kpi(self) -> Dict[str, Any]:
+        """KPI по транспорту и технике."""
+        join_clause, filter_clause, extra_params = self._get_filter_clauses_by_object_id(
+            't', 'object_id'
         )
-        self.ent_pwd = ttk.Entry(master, width=26, show="*")
-        self.ent_pwd.grid(row=2, column=1, sticky="w", pady=4)
 
-        tk.Label(master, text="Роль:").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=4)
-        try:
-            roles = get_roles_list()
-        except Exception as e:
-            messagebox.showerror("Роли", f"Ошибка чтения списка ролей:\n{e}", parent=self)
-            roles = []
+        query = """
+        SELECT
+            COALESCE(SUM(tp.hours), 0) AS total_machine_hours,
+            COUNT(DISTINCT t.id)      AS total_orders,
+            COALESCE(SUM(tp.qty), 0)  AS total_units
+        FROM transport_orders t
+        JOIN transport_order_positions tp ON t.id = tp.order_id
+        {join_clause}
+        WHERE t.date BETWEEN %s AND %s
+        {filter_clause};
+        """.format(join_clause=join_clause, filter_clause=filter_clause)
 
-        self.role_map = {f'{r["name"]} ({r["code"]})': r["code"] for r in roles}
-        self.cmb_role = ttk.Combobox(master, state="readonly", width=24, values=list(self.role_map.keys()))
-        self.cmb_role.grid(row=3, column=1, sticky="w", pady=4)
+        params: List[Any] = [self.start_date, self.end_date]
+        params.extend(extra_params)
 
-        # выберем текущую роль
-        current_role_code = (self.user.get("role") or "").lower()
-        idx = 0
-        for i, (label, code) in enumerate(self.role_map.items()):
-            if code.lower() == current_role_code:
-                idx = i
-                break
-        if self.role_map:
-            self.cmb_role.current(idx)
+        result = self._execute_query(query, tuple(params))
+        kpi = result[0] if result else {}
+        if kpi.get('total_orders', 0) > 0:
+            kpi['avg_hours_per_order'] = kpi.get('total_machine_hours', 0) / kpi['total_orders']
+        else:
+            kpi['avg_hours_per_order'] = 0
+        return kpi
 
-        tk.Label(master, text="Активен:").grid(row=4, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.var_active = tk.BooleanVar(value=bool(self.user.get("is_active")))
-        self.cb_active = ttk.Checkbutton(master, variable=self.var_active)
-        self.cb_active.grid(row=4, column=1, sticky="w", pady=4)
+    def get_transport_by_tech(self) -> pd.DataFrame:
+        """Машино-часы в разрезе техники."""
+        join_clause, filter_clause, extra_params = self._get_filter_clauses_by_object_id(
+            't', 'object_id'
+        )
 
-        return self.ent_username
+        query = """
+        SELECT
+            tp.tech,
+            SUM(tp.hours) AS total_hours
+        FROM transport_orders t
+        JOIN transport_order_positions tp ON t.id = tp.order_id
+        {join_clause}
+        WHERE t.date BETWEEN %s AND %s
+        {filter_clause}
+        GROUP BY tp.tech
+        ORDER BY total_hours DESC;
+        """.format(join_clause=join_clause, filter_clause=filter_clause)
 
-    def validate(self):
-        u = self.ent_username.get().strip()
-        if not u:
-            messagebox.showwarning("Редактировать пользователя", "Укажите логин.", parent=self)
-            return False
-        if not self.cmb_role.get():
-            messagebox.showwarning("Редактировать пользователя", "Выберите роль.", parent=self)
-            return False
-        return True
+        params: List[Any] = [self.start_date, self.end_date]
+        params.extend(extra_params)
 
-    def apply(self):
-        self.result = {
-            "id": self.user["id"],
-            "username": self.ent_username.get().strip(),
-            "full_name": self.ent_fullname.get().strip(),
-            "password": self.ent_pwd.get().strip(),  # может быть пустым
-            "role": self.role_map[self.cmb_role.get()],
-            "is_active": self.var_active.get(),
-        }
+        data = self._execute_query(query, tuple(params))
+        return pd.DataFrame(data)
 
-class UsersPage(tk.Frame):
-    def __init__(self, master):
+    # ============================================================
+    #                      3. ПИТАНИЕ
+    # ============================================================
+
+    def get_meals_kpi(self) -> Dict[str, Any]:
+        """KPI по питанию."""
+        join_clause, filter_clause, extra_params = self._get_filter_clauses_by_object_id(
+            'mo', 'object_id'
+        )
+
+        query = """
+        SELECT
+            COUNT(moi.id)                   AS total_portions,
+            COUNT(DISTINCT mo.id)           AS total_orders,
+            COUNT(DISTINCT moi.employee_id) AS unique_employees
+        FROM meal_orders mo
+        JOIN meal_order_items moi ON mo.id = moi.order_id
+        {join_clause}
+        WHERE mo.date BETWEEN %s AND %s
+        {filter_clause};
+        """.format(join_clause=join_clause, filter_clause=filter_clause)
+
+        params: List[Any] = [self.start_date, self.end_date]
+        params.extend(extra_params)
+
+        result = self._execute_query(query, tuple(params))
+        return result[0] if result else {}
+
+    def get_meals_by_type(self) -> pd.DataFrame:
+        """Количество порций в разрезе типов питания."""
+        join_clause, filter_clause, extra_params = self._get_filter_clauses_by_object_id(
+            'mo', 'object_id'
+        )
+
+        query = """
+        SELECT
+            moi.meal_type_text,
+            COUNT(moi.id) AS total_count
+        FROM meal_orders mo
+        JOIN meal_order_items moi ON mo.id = moi.order_id
+        {join_clause}
+        WHERE mo.date BETWEEN %s AND %s
+        {filter_clause}
+        GROUP BY moi.meal_type_text
+        ORDER BY total_count DESC;
+        """.format(join_clause=join_clause, filter_clause=filter_clause)
+
+        params: List[Any] = [self.start_date, self.end_date]
+        params.extend(extra_params)
+
+        data = self._execute_query(query, tuple(params))
+        return pd.DataFrame(data)
+
+    # 3.1 Динамика по дням/месяцам (порции)
+    def get_meals_trend_by_month(self) -> pd.DataFrame:
+        """Количество порций по месяцам в периоде."""
+        join_clause, filter_clause, extra_params = self._get_filter_clauses_by_object_id(
+            'mo', 'object_id'
+        )
+
+        query = """
+        SELECT
+            date_trunc('month', mo.date) AS period,
+            COUNT(moi.id) AS total_portions
+        FROM meal_orders mo
+        JOIN meal_order_items moi ON mo.id = moi.order_id
+        {join_clause}
+        WHERE mo.date BETWEEN %s AND %s
+        {filter_clause}
+        GROUP BY period
+        ORDER BY period;
+        """.format(join_clause=join_clause, filter_clause=filter_clause)
+
+        params: List[Any] = [self.start_date, self.end_date]
+        params.extend(extra_params)
+
+        data = self._execute_query(query, tuple(params))
+        return pd.DataFrame(data)
+
+    # 3.2 Питание по объектам
+    def get_meals_by_object(self, limit: int = 10) -> pd.DataFrame:
+        """Количество порций и людей по объектам."""
+        join_clause, filter_clause, extra_params = self._get_filter_clauses_by_object_id(
+            'mo', 'object_id'
+        )
+
+        query = """
+        SELECT
+            o.address AS object_name,
+            COUNT(moi.id) AS total_portions,
+            COUNT(DISTINCT moi.employee_id) AS unique_employees
+        FROM meal_orders mo
+        JOIN meal_order_items moi ON mo.id = moi.order_id
+        LEFT JOIN objects o ON mo.object_id = o.id
+        {join_clause}
+        WHERE mo.date BETWEEN %s AND %s
+        {filter_clause}
+        GROUP BY o.address
+        HAVING o.address IS NOT NULL
+        ORDER BY total_portions DESC
+        LIMIT {limit};
+        """.format(join_clause=join_clause, filter_clause=filter_clause, limit=limit)
+
+        params: List[Any] = [self.start_date, self.end_date]
+        params.extend(extra_params)
+
+        data = self._execute_query(query, tuple(params))
+        return pd.DataFrame(data)
+
+    # 3.3 Питание по подразделениям
+    def get_meals_by_department(self) -> pd.DataFrame:
+        """Питание по подразделениям: порции и люди."""
+        join_clause, filter_clause, extra_params = self._get_filter_clauses_by_object_id(
+            'mo', 'object_id'
+        )
+
+        query = """
+        SELECT
+            d.name AS department_name,
+            COUNT(moi.id) AS total_portions,
+            COUNT(DISTINCT moi.employee_id) AS unique_employees
+        FROM meal_orders mo
+        JOIN meal_order_items moi ON mo.id = moi.order_id
+        LEFT JOIN departments d ON mo.department_id = d.id
+        {join_clause}
+        WHERE mo.date BETWEEN %s AND %s
+        {filter_clause}
+        GROUP BY d.name
+        ORDER BY total_portions DESC;
+        """.format(join_clause=join_clause, filter_clause=filter_clause)
+
+        params: List[Any] = [self.start_date, self.end_date]
+        params.extend(extra_params)
+
+        data = self._execute_query(query, tuple(params))
+        return pd.DataFrame(data)
+
+    # ============================================================
+    #        4. СКВОЗНАЯ АНАЛИТИКА ПО ОБЪЕКТАМ (TOP-N)
+    # ============================================================
+
+    def get_objects_overview(self, limit: int = 20) -> pd.DataFrame:
+        """
+        Сводная информация по объектам: человеко-часы, машино-часы, порции.
+        Ограничивается TOP-N по человеко-часам.
+        """
+        start_period = self.start_date.year * 100 + self.start_date.month
+        end_period = self.end_date.year * 100 + self.end_date.month
+
+        type_filter_clause = ""
+        params: List[Any] = [
+            start_period, end_period,           # labor
+            self.start_date, self.end_date,     # transport
+            self.start_date, self.end_date      # meals
+        ]
+
+        if self.object_type_filter:
+            type_filter_clause = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
+
+        query = """
+        WITH labor AS (
+            SELECT
+                th.object_db_id AS object_id,
+                SUM(tr.total_hours) AS labor_hours
+            FROM timesheet_headers th
+            JOIN timesheet_rows tr ON th.id = tr.header_id
+            WHERE (th.year * 100 + th.month) BETWEEN %s AND %s
+            GROUP BY th.object_db_id
+        ),
+        transport AS (
+            SELECT
+                t.object_id,
+                SUM(tp.hours) AS machine_hours
+            FROM transport_orders t
+            JOIN transport_order_positions tp ON t.id = tp.order_id
+            WHERE t.date BETWEEN %s AND %s
+            GROUP BY t.object_id
+        ),
+        meals AS (
+            SELECT
+                mo.object_id,
+                COUNT(moi.id) AS portions
+            FROM meal_orders mo
+            JOIN meal_order_items moi ON mo.id = moi.order_id
+            WHERE mo.date BETWEEN %s AND %s
+            GROUP BY mo.object_id
+        )
+        SELECT
+            o.id,
+            o.address,
+            COALESCE(l.labor_hours, 0)     AS labor_hours,
+            COALESCE(trp.machine_hours, 0) AS machine_hours,
+            COALESCE(m.portions, 0)        AS portions
+        FROM objects o
+        LEFT JOIN labor     l   ON o.id = l.object_id
+        LEFT JOIN transport trp ON o.id = trp.object_id
+        LEFT JOIN meals     m   ON o.id = m.object_id
+        WHERE (COALESCE(l.labor_hours, 0)
+           +  COALESCE(trp.machine_hours, 0)
+           +  COALESCE(m.portions, 0)) > 0
+        {type_filter_clause}
+        ORDER BY labor_hours DESC
+        LIMIT {limit};
+        """.format(type_filter_clause=type_filter_clause, limit=limit)
+
+        data = self._execute_query(query, tuple(params))
+        return pd.DataFrame(data)
+
+    # ============================================================
+    #        5. АКТИВНОСТЬ ПОЛЬЗОВАТЕЛЕЙ
+    # ============================================================
+
+    def get_users_activity(self) -> pd.DataFrame:
+        """
+        Активность пользователей: сколько табелей, заявок на транспорт и питание
+        ввёл каждый пользователь за период.
+        """
+        query = """
+        SELECT
+            u.username,
+            u.full_name,
+            COALESCE(th_cnt, 0)  AS timesheets_created,
+            COALESCE(trp_cnt, 0) AS transport_orders_created,
+            COALESCE(mo_cnt, 0)  AS meal_orders_created
+        FROM app_users u
+        LEFT JOIN (
+            SELECT user_id, COUNT(*) AS th_cnt
+            FROM timesheet_headers
+            WHERE created_at::date BETWEEN %s AND %s
+            GROUP BY user_id
+        ) th ON u.id = th.user_id
+        LEFT JOIN (
+            SELECT user_id, COUNT(*) AS trp_cnt
+            FROM transport_orders
+            WHERE date BETWEEN %s AND %s
+            GROUP BY user_id
+        ) to2 ON u.id = to2.user_id
+        LEFT JOIN (
+            SELECT user_id, COUNT(*) AS mo_cnt
+            FROM meal_orders
+            WHERE date BETWEEN %s AND %s
+            GROUP BY user_id
+        ) mo ON u.id = mo.user_id
+        WHERE u.is_active = TRUE
+        ORDER BY (COALESCE(th_cnt,0)+COALESCE(trp_cnt,0)+COALESCE(mo_cnt,0)) DESC;
+        """
+        params = (
+            self.start_date, self.end_date,
+            self.start_date, self.end_date,
+            self.start_date, self.end_date,
+        )
+        data = self._execute_query(query, params)
+        return pd.DataFrame(data)
+
+
+# ============================================================
+#                      UI: ANALYTICS PAGE
+# ============================================================
+
+class AnalyticsPage(ttk.Frame):
+    """Главный фрейм для страницы аналитики."""
+
+    def __init__(self, master, app_ref):
         super().__init__(master)
-        self._build_ui()
-        self.reload_users()
+        self.app_ref = app_ref
 
-    def _build_ui(self):
-        top = tk.Frame(self)
-        top.pack(fill="x", padx=8, pady=8)
+        # ——— Панель фильтров ———
+        filter_frame = ttk.Frame(self, padding="10")
+        filter_frame.pack(fill="x", side="top")
 
-        ttk.Button(top, text="Создать пользователя", command=self._on_create_user).pack(side="left")
-        ttk.Button(top, text="Изменить", command=self._on_edit_user).pack(side="left", padx=4)
-        ttk.Button(top, text="Удалить", command=self._on_delete_user).pack(side="left")
-
-        self.tree = ttk.Treeview(
-            self,
-            columns=("id", "username", "full_name", "role", "is_active"),
-            show="headings",
-            height=12,
+        ttk.Label(filter_frame, text="Период:").pack(side="left", padx=(0, 5))
+        self.period_var = tk.StringVar(value="Текущий месяц")
+        period_combo = ttk.Combobox(
+            filter_frame,
+            textvariable=self.period_var,
+            values=["Текущий месяц", "Прошлый месяц", "Текущий квартал", "Текущий год"],
+            state="readonly",
+            width=18,
         )
-        self.tree.heading("id", text="ID")
-        self.tree.heading("username", text="Логин")
-        self.tree.heading("full_name", text="ФИО")
-        self.tree.heading("role", text="Роль")
-        self.tree.heading("is_active", text="Активен")
+        period_combo.pack(side="left", padx=5)
+        period_combo.bind("<<ComboboxSelected>>", self.refresh_data)
 
-        self.tree.column("id", width=40, anchor="center")
-        self.tree.column("username", width=140)
-        self.tree.column("full_name", width=220)
-        self.tree.column("role", width=100)
-        self.tree.column("is_active", width=70, anchor="center")
+        ttk.Label(filter_frame, text="Тип объекта:").pack(side="left", padx=(10, 5))
+        self.object_type_var = tk.StringVar(value="Все типы")
+        self.object_type_combo = ttk.Combobox(
+            filter_frame,
+            textvariable=self.object_type_var,
+            state="readonly",
+            width=30,
+        )
+        self.object_type_combo.pack(side="left", padx=5)
+        self.object_type_combo.bind("<<ComboboxSelected>>", self.refresh_data)
 
-        self.tree.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        ttk.Button(filter_frame, text="Обновить", command=self.refresh_data).pack(
+            side="left", padx=10
+        )
 
-    def reload_users(self):
-        for row in self.tree.get_children():
-            self.tree.delete(row)
+        # ——— Табы ———
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=5)
+
+        self.tab_labor = ttk.Frame(self.notebook)
+        self.tab_transport = ttk.Frame(self.notebook)
+        self.tab_meals = ttk.Frame(self.notebook)
+        self.tab_objects = ttk.Frame(self.notebook)
+        self.tab_users = ttk.Frame(self.notebook)
+
+        self.notebook.add(self.tab_labor, text="  Трудозатраты  ")
+        self.notebook.add(self.tab_transport, text="  Транспорт и Техника  ")
+        self.notebook.add(self.tab_meals, text="  Питание  ")
+        self.notebook.add(self.tab_objects, text="  Объекты  ")
+        self.notebook.add(self.tab_users, text="  Активность пользователей  ")
+
+        self.data_provider: Optional[AnalyticsData] = None
+        self.load_filters()
+        self.refresh_data()
+
+    # ---------- Фильтры ----------
+
+    def load_filters(self):
+        """Загружает уникальные типы объектов из БД."""
         try:
-            users = get_app_users()
+            temp_provider = AnalyticsData(datetime.now().date(), datetime.now().date(), "")
+            types = temp_provider.get_object_types()
+            self.object_type_combo["values"] = ["Все типы"] + types
         except Exception as e:
-            messagebox.showerror("Пользователи", f"Ошибка загрузки списка:\n{e}", parent=self)
+            logging.error(f"Не удалось загрузить типы объектов для фильтра: {e}")
+            self.object_type_combo["values"] = ["Все типы"]
+
+    def get_dates_from_period(self):
+        """Возвращает начальную и конечную дату в зависимости от выбранного периода."""
+        period = self.period_var.get()
+        today = datetime.today()
+        if period == "Текущий месяц":
+            start_date = today.replace(day=1)
+            end_date = (start_date + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        elif period == "Прошлый месяц":
+            end_date = today.replace(day=1) - timedelta(days=1)
+            start_date = end_date.replace(day=1)
+        elif period == "Текущий квартал":
+            current_quarter = (today.month - 1) // 3 + 1
+            start_date = datetime(today.year, 3 * current_quarter - 2, 1)
+            end_date = (start_date + timedelta(days=95)).replace(day=1) - timedelta(days=1)
+        elif period == "Текущий год":
+            start_date = datetime(today.year, 1, 1)
+            end_date = datetime(today.year, 12, 31)
+        else:
+            start_date = today.replace(day=1)
+            end_date = (start_date + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+
+        return start_date.date(), end_date.date()
+
+    def refresh_data(self, event=None):
+        """Обновляет все данные и перерисовывает дашборды."""
+        start_date, end_date = self.get_dates_from_period()
+
+        obj_type_filter = self.object_type_var.get()
+        if obj_type_filter == "Все типы":
+            obj_type_filter = ""
+
+        self.data_provider = AnalyticsData(start_date, end_date, obj_type_filter)
+
+        self._build_labor_tab()
+        self._build_transport_tab()
+        self._build_meals_tab()
+        self._build_objects_tab()
+        self._build_users_tab()
+
+    # ---------- Вспомогательные методы UI ----------
+
+    def _clear_tab(self, tab):
+        for widget in tab.winfo_children():
+            widget.destroy()
+
+    def _create_kpi_card(self, parent, title, value, unit):
+        card = ttk.Frame(parent, borderwidth=2, relief="groove", padding=10)
+        ttk.Label(card, text=title, font=("Segoe UI", 10, "bold")).pack()
+        ttk.Label(
+            card,
+            text=f"{value}",
+            font=("Segoe UI", 18, "bold"),
+            foreground="#0078D7",
+        ).pack(pady=(5, 0))
+        ttk.Label(card, text=unit, font=("Segoe UI", 9)).pack()
+        return card
+
+    def _create_treeview(
+        self,
+        parent,
+        columns: List[tuple],
+        show: str = "headings",
+        height: int = 10,
+    ) -> ttk.Treeview:
+        tree = ttk.Treeview(parent, columns=[c[0] for c in columns], show=show, height=height)
+        for col_id, col_text in columns:
+            tree.heading(col_id, text=col_text)
+            tree.column(col_id, anchor="w", width=120)
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        parent.grid_rowconfigure(0, weight=1)
+        parent.grid_columnconfigure(0, weight=1)
+        return tree
+
+    # ============================================================
+    #                   TAB 1: ТРУДОЗАТРАТЫ
+    # ============================================================
+
+    def _build_labor_tab(self):
+        self._clear_tab(self.tab_labor)
+
+        # KPI
+        kpi_frame = ttk.Frame(self.tab_labor)
+        kpi_frame.pack(fill="x", pady=10, padx=5)
+
+        kpi_data = self.data_provider.get_labor_kpi()
+        cards_data = [
+            ("Всего чел.-часов", f"{kpi_data.get('total_hours', 0):.1f}", "час."),
+            ("Всего чел.-дней", int(kpi_data.get("total_days", 0)), "дн."),
+            ("Часы переработок", f"{kpi_data.get('total_overtime', 0):.1f}", "час."),
+            ("Сотрудников", kpi_data.get("unique_employees", 0), "чел."),
+        ]
+        for i, (title, value, unit) in enumerate(cards_data):
+            card = self._create_kpi_card(kpi_frame, title, value, unit)
+            card.grid(row=0, column=i, padx=5, sticky="ew")
+            kpi_frame.grid_columnconfigure(i, weight=1)
+
+        charts_frame = ttk.Frame(self.tab_labor)
+        charts_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # левая часть — ТОП объектов
+        left_frame = ttk.LabelFrame(charts_frame, text="ТОП-10 объектов по трудозатратам")
+        left_frame.pack(side="left", fill="both", expand=True, padx=(0, 5))
+
+        df_objects = self.data_provider.get_labor_by_object()
+        if not df_objects.empty:
+            from matplotlib.figure import Figure
+            fig1 = Figure(figsize=(5, 4), dpi=100)
+            ax1 = fig1.add_subplot(111)
+            df_plot = df_objects.head(10).sort_values("total_hours", ascending=True)
+            bars = ax1.barh(df_plot["object_name"], df_plot["total_hours"], color="#0078D7")
+            ax1.set_xlabel("Человеко-часы")
+            ax1.grid(axis="x", linestyle="--", alpha=0.7)
+            fig1.tight_layout()
+            for bar in bars:
+                width = bar.get_width()
+                ax1.text(
+                    width + 5,
+                    bar.get_y() + bar.get_height() / 2,
+                    f"{width:.0f}",
+                    va="center",
+                )
+            canvas1 = FigureCanvasTkAgg(fig1, master=left_frame)
+            canvas1.draw()
+            canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # правая часть — тренд + топ сотрудников
+        right_frame = ttk.Frame(charts_frame)
+        right_frame.pack(side="left", fill="both", expand=True, padx=(5, 0))
+
+        trend_frame = ttk.LabelFrame(right_frame, text="Динамика трудозатрат по месяцам")
+        trend_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
+
+        df_trend = self.data_provider.get_labor_trend_by_month()
+        if not df_trend.empty:
+            df_trend["period"] = df_trend.apply(
+                lambda r: f"{int(r['year'])}-{int(r['month']):02d}", axis=1
+            )
+            fig2 = Figure(figsize=(5, 2.5), dpi=100)
+            ax2 = fig2.add_subplot(111)
+            ax2.plot(df_trend["period"], df_trend["total_hours"], marker="o", color="#5E9A2C")
+            ax2.set_ylabel("Человеко-часы")
+            ax2.set_xticks(range(len(df_trend["period"])))
+            ax2.set_xticklabels(df_trend["period"], rotation=45, ha="right")
+            ax2.grid(True, linestyle="--", alpha=0.5)
+            fig2.tight_layout()
+            canvas2 = FigureCanvasTkAgg(fig2, master=trend_frame)
+            canvas2.draw()
+            canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        top_emp_frame = ttk.LabelFrame(right_frame, text="ТОП-10 сотрудников по часам")
+        top_emp_frame.pack(fill="both", expand=True, padx=5, pady=(5, 0))
+
+        df_emp = self.data_provider.get_top_employees_by_hours(limit=10)
+        if not df_emp.empty:
+            fig3 = Figure(figsize=(5, 2.5), dpi=100)
+            ax3 = fig3.add_subplot(111)
+            df_plot_emp = df_emp.sort_values("total_hours", ascending=True)
+            bars_emp = ax3.barh(df_plot_emp["fio"], df_plot_emp["total_hours"], color="#FF8C00")
+            ax3.set_xlabel("Человеко-часы")
+            ax3.grid(axis="x", linestyle="--", alpha=0.7)
+            fig3.tight_layout()
+            for bar in bars_emp:
+                width = bar.get_width()
+                ax3.text(
+                    width + 2,
+                    bar.get_y() + bar.get_height() / 2,
+                    f"{width:.0f}",
+                    va="center",
+                )
+            canvas3 = FigureCanvasTkAgg(fig3, master=top_emp_frame)
+            canvas3.draw()
+            canvas3.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        dept_frame = ttk.LabelFrame(self.tab_labor, text="Нагрузка по подразделениям")
+        dept_frame.pack(fill="both", expand=False, padx=5, pady=5)
+
+        df_dept = self.data_provider.get_labor_by_department()
+        if not df_dept.empty:
+            tree = self._create_treeview(
+                dept_frame,
+                columns=[("department", "Подразделение"), ("hours", "Чел.-часы")],
+                height=8,
+            )
+            tree.column("department", width=200)
+            tree.column("hours", width=100, anchor="e")
+            for _, row in df_dept.iterrows():
+                dept_name = row["department_name"] if row["department_name"] else "—"
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        dept_name,
+                        f"{row['total_hours']:.1f}",
+                    ),
+                )
+
+    # ============================================================
+    #                   TAB 2: ТРАНСПОРТ
+    # ============================================================
+
+    def _build_transport_tab(self):
+        self._clear_tab(self.tab_transport)
+
+        kpi_frame = ttk.Frame(self.tab_transport)
+        kpi_frame.pack(fill="x", pady=10, padx=5)
+
+        kpi_data = self.data_provider.get_transport_kpi()
+        cards_data = [
+            ("Всего маш.-часов", f"{kpi_data.get('total_machine_hours', 0):.1f}", "час."),
+            ("Всего заявок", kpi_data.get("total_orders", 0), "шт."),
+            ("Единиц техники", kpi_data.get("total_units", 0), "шт."),
+            ("Среднее время", f"{kpi_data.get('avg_hours_per_order', 0):.1f}", "час./заявку"),
+        ]
+        for i, (title, value, unit) in enumerate(cards_data):
+            card = self._create_kpi_card(kpi_frame, title, value, unit)
+            card.grid(row=0, column=i, padx=5, sticky="ew")
+            kpi_frame.grid_columnconfigure(i, weight=1)
+
+        df = self.data_provider.get_transport_by_tech()
+        if not df.empty:
+            fig = Figure(figsize=(10, 5), dpi=100)
+            ax = fig.add_subplot(111)
+            df_plot = df.head(10).sort_values("total_hours", ascending=False)
+            ax.bar(df_plot["tech"], df_plot["total_hours"], color="#5E9A2C")
+            ax.set_title("ТОП-10 востребованной техники", fontsize=12, weight="bold")
+            ax.set_ylabel("Машино-часы")
+            ax.tick_params(axis="x", rotation=45, labelsize=9)
+            ax.grid(axis="y", linestyle="--", alpha=0.7)
+            fig.tight_layout(pad=2.0)
+            canvas = FigureCanvasTkAgg(fig, master=self.tab_transport)
+            canvas.draw()
+            canvas.get_tk_widget().pack(
+                side=tk.TOP, fill=tk.BOTH, expand=True, pady=10, padx=5
+            )
+
+    # ============================================================
+    #                   TAB 3: ПИТАНИЕ
+    # ============================================================
+
+    def _build_meals_tab(self):
+        self._clear_tab(self.tab_meals)
+
+        kpi_frame = ttk.Frame(self.tab_meals)
+        kpi_frame.pack(fill="x", pady=10, padx=5)
+
+        kpi_data = self.data_provider.get_meals_kpi()
+        cards_data = [
+            ("Всего порций", kpi_data.get("total_portions", 0), "шт."),
+            ("Всего заявок", kpi_data.get("total_orders", 0), "шт."),
+            ("Накормлено людей", kpi_data.get("unique_employees", 0), "чел."),
+        ]
+        for i, (title, value, unit) in enumerate(cards_data):
+            card = self._create_kpi_card(kpi_frame, title, value, unit)
+            card.grid(row=0, column=i, padx=5, sticky="ew")
+            kpi_frame.grid_columnconfigure(i, weight=1)
+
+        top_frame = ttk.Frame(self.tab_meals)
+        top_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        left_frame = ttk.LabelFrame(top_frame, text="Популярность типов питания")
+        left_frame.pack(side="left", fill="both", expand=True, padx=(0, 5))
+
+        df_types = self.data_provider.get_meals_by_type()
+        if not df_types.empty:
+            fig1 = Figure(figsize=(5, 4), dpi=100)
+            ax1 = fig1.add_subplot(111)
+            labels = df_types["meal_type_text"]
+            sizes = df_types["total_count"]
+
+            def autopct_format(values):
+                def my_format(pct):
+                    total = sum(values)
+                    val = int(round(pct * total / 100.0))
+                    return f"{pct:.1f}%\n({val:d} шт.)"
+                return my_format
+
+            ax1.pie(
+                sizes,
+                labels=labels,
+                autopct=autopct_format(sizes),
+                startangle=90,
+                wedgeprops=dict(width=0.4),
+                pctdistance=0.8,
+            )
+            ax1.axis("equal")
+            fig1.tight_layout()
+            canvas1 = FigureCanvasTkAgg(fig1, master=left_frame)
+            canvas1.draw()
+            canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        right_frame = ttk.LabelFrame(top_frame, text="Динамика количества порций (по месяцам)")
+        right_frame.pack(side="left", fill="both", expand=True, padx=(5, 0))
+
+        df_trend = self.data_provider.get_meals_trend_by_month()
+        if not df_trend.empty:
+            df_trend["period"] = df_trend["period"].dt.strftime("%Y-%m")
+            fig2 = Figure(figsize=(5, 4), dpi=100)
+            ax2 = fig2.add_subplot(111)
+            ax2.plot(df_trend["period"], df_trend["total_portions"], marker="o", color="#0078D7")
+            ax2.set_ylabel("Порций")
+            ax2.set_xticks(range(len(df_trend["period"])))
+            ax2.set_xticklabels(df_trend["period"], rotation=45, ha="right")
+            ax2.grid(True, linestyle="--", alpha=0.5)
+            fig2.tight_layout()
+            canvas2 = FigureCanvasTkAgg(fig2, master=right_frame)
+            canvas2.draw()
+            canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        bottom_frame = ttk.Frame(self.tab_meals)
+        bottom_frame.pack(fill="both", expand=False, padx=5, pady=5)
+
+        obj_frame = ttk.LabelFrame(bottom_frame, text="ТОП-объекты по количеству порций")
+        obj_frame.pack(side="left", fill="both", expand=True, padx=(0, 5))
+
+        df_obj = self.data_provider.get_meals_by_object(limit=10)
+        if not df_obj.empty:
+            tree1 = self._create_treeview(
+                obj_frame,
+                columns=[
+                    ("object", "Объект"),
+                    ("portions", "Порций"),
+                    ("people", "Людей"),
+                ],
+                height=8,
+            )
+            tree1.column("object", width=220)
+            tree1.column("portions", width=80, anchor="e")
+            tree1.column("people", width=80, anchor="e")
+            for _, row in df_obj.iterrows():
+                tree1.insert(
+                    "",
+                    "end",
+                    values=(
+                        row["object_name"],
+                        row["total_portions"],
+                        row["unique_employees"],
+                    ),
+                )
+
+        dept_frame = ttk.LabelFrame(bottom_frame, text="Питание по подразделениям")
+        dept_frame.pack(side="left", fill="both", expand=True, padx=(5, 0))
+
+        df_dept = self.data_provider.get_meals_by_department()
+        if not df_dept.empty:
+            tree2 = self._create_treeview(
+                dept_frame,
+                columns=[
+                    ("dept", "Подразделение"),
+                    ("portions", "Порций"),
+                    ("people", "Людей"),
+                ],
+                height=8,
+            )
+            tree2.column("dept", width=200)
+            tree2.column("portions", width=80, anchor="e")
+            tree2.column("people", width=80, anchor="e")
+            for _, row in df_dept.iterrows():
+                dept_name = row["department_name"] if row["department_name"] else "—"
+                tree2.insert(
+                    "",
+                    "end",
+                    values=(
+                        dept_name,
+                        row["total_portions"],
+                        row["unique_employees"],
+                    ),
+                )
+
+    # ============================================================
+    #                   TAB 4: ОБЪЕКТЫ
+    # ============================================================
+
+    def _build_objects_tab(self):
+        self._clear_tab(self.tab_objects)
+
+        frame = ttk.Frame(self.tab_objects)
+        frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        df = self.data_provider.get_objects_overview(limit=20)
+        if df.empty:
+            ttk.Label(frame, text="Нет данных по объектам за выбранный период.").pack(
+                padx=10, pady=10
+            )
             return
 
-        for u in users:
-            self.tree.insert(
+        table_frame = ttk.LabelFrame(frame, text="ТОП объектов по трудозатратам")
+        table_frame.pack(side="left", fill="both", expand=True, padx=(0, 5), pady=5)
+
+        tree = self._create_treeview(
+            table_frame,
+            columns=[
+                ("address", "Объект"),
+                ("labor", "Чел.-часы"),
+                ("machine", "Маш.-часы"),
+                ("meals", "Порции"),
+            ],
+            height=15,
+        )
+        tree.column("address", width=260)
+        tree.column("labor", width=80, anchor="e")
+        tree.column("machine", width=80, anchor="e")
+        tree.column("meals", width=80, anchor="e")
+
+        for _, row in df.iterrows():
+            tree.insert(
                 "",
                 "end",
                 values=(
-                    u["id"],
-                    u["username"],
-                    u.get("full_name") or "",
-                    u.get("role") or "",
-                    "Да" if u.get("is_active") else "Нет",
+                    row["address"],
+                    f"{row['labor_hours']:.1f}",
+                    f"{row['machine_hours']:.1f}",
+                    row["portions"],
                 ),
             )
 
-    def _get_selected_user(self) -> Optional[dict]:
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showwarning("Пользователи", "Выберите пользователя в списке.", parent=self)
-            return None
-        item_id = sel[0]
-        values = self.tree.item(item_id, "values")
-        # порядок: id, username, full_name, role, is_active
-        user = {
-            "id": int(values[0]),
-            "username": values[1],
-            "full_name": values[2],
-            "role": values[3],
-            "is_active": (values[4] == "Да"),
-        }
-        return user
+        chart_frame = ttk.LabelFrame(frame, text="Сравнение по объектам (ТОП-10)")
+        chart_frame.pack(side="left", fill="both", expand=True, padx=(5, 0), pady=5)
 
-    def _on_edit_user(self):
-        user = self._get_selected_user()
-        if not user:
-            return
+        df_top = df.head(10)
+        fig = Figure(figsize=(6, 4), dpi=100)
+        ax = fig.add_subplot(111)
 
-        dlg = EditUserDialog(self, user)
-        if not dlg.result:
-            return
+        x = list(range(len(df_top)))
+        width = 0.25
 
-        data = dlg.result
-        try:
-            update_app_user(
-                user_id=data["id"],
-                username=data["username"],
-                full_name=data["full_name"],
-                role_code=data["role"],
-                is_active=data["is_active"],
-                new_password=data["password"] or None,
-            )
-        except Exception as e:
-            messagebox.showerror("Редактировать пользователя", f"Ошибка сохранения:\n{e}", parent=self)
-            return
-
-        self.reload_users()
-        messagebox.showinfo("Редактировать пользователя", "Изменения сохранены.", parent=self)
-
-    def _on_create_user(self):
-        dlg = CreateUserDialog(self)
-        if not dlg.result:
-            return
-        data = dlg.result
-        try:
-            create_app_user(
-                username=data["username"],
-                password=data["password"],
-                full_name=data["full_name"],
-                role_code=data["role"],
-                is_active=True,
-            )
-        except Exception as e:
-            messagebox.showerror("Создать пользователя", f"Ошибка создания пользователя:\n{e}", parent=self)
-            return
-        self.reload_users()
-        messagebox.showinfo("Создать пользователя", "Пользователь создан.", parent=self)
-
-    def _on_delete_user(self):
-        user = self._get_selected_user()
-        if not user:
-            return
-
-        if not messagebox.askyesno(
-            "Удалить пользователя",
-            f"Удалить пользователя '{user['username']}'?",
-            parent=self,
-        ):
-            return
-
-        try:
-            delete_app_user(user["id"])
-        except Exception as e:
-            messagebox.showerror("Удалить пользователя", f"Ошибка удаления:\n{e}", parent=self)
-            return
-
-        self.reload_users()
-        messagebox.showinfo("Удалить пользователя", "Пользователь удалён.", parent=self)
-
-# ---------------- UI ОКНО НАСТРОЕК ----------------
-
-def open_settings_window(parent: tk.Tk):
-    ensure_config()
-
-    win = tk.Toplevel(parent)
-    win.title("Настройки")
-    win.resizable(False, False)
-    nb = ttk.Notebook(win)
-    nb.pack(fill="both", expand=True, padx=10, pady=10)
-
-    # Настройки папок
-    tab_paths = ttk.Frame(nb)
-    nb.add(tab_paths, text="Настройки папок")
-    _mk_entry_with_btn(tab_paths, "Справочник (xlsx):", "Paths", KEY_SPR, is_dir=False, row=0)
-    _mk_entry_with_btn(tab_paths, "Папка табелей:", "Paths", KEY_OUTPUT_DIR, is_dir=True, row=1)
-    _mk_entry_with_btn(tab_paths, "Папка заявок на питание:", "Paths", KEY_MEALS_ORDERS_DIR, is_dir=True, row=2)
-
-    # Основное
-    tab_ui = ttk.Frame(nb)
-    nb.add(tab_ui, text="Основное")
-    _mk_entry(tab_ui, "Подразделение по умолчанию:", "UI", KEY_SELECTED_DEP, row=0, width=40)
-    _mk_entry(
-        tab_ui,
-        "Подразделения водителей:",
-        "Integrations",
-        KEY_DRIVER_DEPARTMENTS,
-        row=1,
-        width=64,
-    )
-
-    # База данных
-    tab_db = ttk.Frame(nb)
-    nb.add(tab_db, text="База данных")
-
-    ttk.Label(tab_db, text="Провайдер:").grid(row=0, column=0, sticky="e", padx=(6, 6), pady=4)
-    provider_var = tk.StringVar(value=str(_store["DB"].get("provider", "sqlite")))
-    cmb_provider = ttk.Combobox(
-        tab_db, textvariable=provider_var, state="readonly", width=18, values=["sqlite", "postgres", "mysql"]
-    )
-    cmb_provider.grid(row=0, column=1, sticky="w", padx=(0, 6), pady=4)
-    _vars.setdefault("DB", {})["provider"] = provider_var
-
-    ttk.Label(tab_db, text="Строка подключения (DATABASE_URL):").grid(
-        row=1, column=0, sticky="e", padx=(6, 6), pady=4
-    )
-    v_url = tk.StringVar(value=str(_store["DB"].get("database_url", "")))
-    ent_url = ttk.Entry(tab_db, textvariable=v_url, width=64)
-    ent_url.grid(row=1, column=1, sticky="w", padx=(0, 6), pady=4, columnspan=2)
-    _add_context_menu(ent_url)
-    _vars.setdefault("DB", {})["database_url"] = v_url
-
-    ttk.Label(tab_db, text="SQLite файл:").grid(row=2, column=0, sticky="e", padx=(6, 6), pady=4)
-    v_sqlite = tk.StringVar(value=str(_store["DB"].get("sqlite_path", _defaults["DB"]["sqlite_path"])))
-    ent_sqlite = ttk.Entry(tab_db, textvariable=v_sqlite, width=56)
-    ent_sqlite.grid(row=2, column=1, sticky="w", padx=(0, 6), pady=4)
-    _add_context_menu(ent_sqlite)
-
-    def browse_sqlite():
-        p = filedialog.asksaveasfilename(
-            title="Файл SQLite",
-            defaultextension=".sqlite3",
-            filetypes=[("SQLite DB", "*.sqlite3 *.db"), ("Все файлы", "*.*")],
+        ax.bar(
+            [i - width for i in x],
+            df_top["labor_hours"],
+            width=width,
+            label="Чел.-часы",
+            color="#0078D7",
         )
-        if p:
-            v_sqlite.set(p)
-
-    ttk.Button(tab_db, text="...", width=3, command=browse_sqlite).grid(row=2, column=2, sticky="w")
-    _vars.setdefault("DB", {})["sqlite_path"] = v_sqlite
-
-    ttk.Label(tab_db, text="SSL mode (Postgres):").grid(row=3, column=0, sticky="e", padx=(6, 6), pady=4)
-    v_ssl = tk.StringVar(value=str(_store["DB"].get("sslmode", "require")))
-    cmb_ssl = ttk.Combobox(
-        tab_db, textvariable=v_ssl, state="readonly", width=18, values=["require", "verify-full", "prefer", "disable"]
-    )
-    cmb_ssl.grid(row=3, column=1, sticky="w", padx=(0, 6), pady=4)
-    _vars.setdefault("DB", {})["sslmode"] = v_ssl
-
-    def _toggle_db_fields(*_):
-        prov = provider_var.get()
-        if prov == "sqlite":
-            ent_url.configure(state="disabled")
-            ent_sqlite.configure(state="normal")
-        else:
-            ent_url.configure(state="normal")
-            ent_sqlite.configure(state="disabled")
-
-    provider_var.trace_add("write", _toggle_db_fields)
-    _toggle_db_fields()
-
-    # Пользователи
-    tab_users = ttk.Frame(nb)
-    nb.add(tab_users, text="Пользователи")
-    users_page = UsersPage(tab_users)
-    users_page.pack(fill="both", expand=True)
-
-    # Данные (импорт)
-    tab_data = ttk.Frame(nb)
-    nb.add(tab_data, text="Данные")
-
-    row_idx = 0
-    ttk.Label(
-        tab_data,
-        text="Загрузка сотрудников из Excel в базу данных:\n"
-        "Ожидается файл со штатным расписанием\n"
-        "(колонки: 'Табельный номер (с префиксами)', 'Сотрудник', "
-        "'Должность', 'Подразделение', 'Дата увольнения').",
-    ).grid(row=row_idx, column=0, columnspan=3, sticky="w", padx=6, pady=(6, 4))
-    row_idx += 1
-
-    def on_import_employees():
-        file_path = filedialog.askopenfilename(
-            parent=win,
-            title="Выберите файл со штатным расписанием",
-            filetypes=[("Excel", "*.xlsx;*.xls"), ("Все файлы", "*.*")],
+        ax.bar(
+            x,
+            df_top["machine_hours"],
+            width=width,
+            label="Маш.-часы",
+            color="#5E9A2C",
         )
-        if not file_path:
-            return
-        try:
-            cnt = import_employees_from_excel(Path(file_path))
-            messagebox.showinfo(
-                "Импорт сотрудников",
-                f"Импорт завершён.\nОбработано записей: {cnt}",
-                parent=win,
-            )
-        except Exception as e:
-            messagebox.showerror("Импорт сотрудников", f"Ошибка при импорте:\n{e}", parent=win)
-
-    ttk.Button(tab_data, text="Загрузить сотрудников из Excel...", command=on_import_employees).grid(
-        row=row_idx, column=0, sticky="w", padx=6, pady=(0, 8)
-    )
-    row_idx += 1
-
-    ttk.Separator(tab_data, orient="horizontal").grid(
-        row=row_idx, column=0, columnspan=3, sticky="ew", padx=6, pady=4
-    )
-    row_idx += 1
-
-    ttk.Label(
-        tab_data,
-        text="Загрузка объектов из Excel в базу данных:\n"
-        "Ожидается файл 'Справочник программ и объектов' "
-        "(колонки: ID объекта, год, программа, заказчик, адрес, № договора,\n"
-        "дата договора, сокращённое наименование объекта, подразделение исполнителя, тип договора).",
-    ).grid(row=row_idx, column=0, columnspan=3, sticky="w", padx=6, pady=(6, 4))
-    row_idx += 1
-
-    def on_import_objects():
-        file_path = filedialog.askopenfilename(
-            parent=win,
-            title="Выберите файл справочника объектов",
-            filetypes=[("Excel", "*.xlsx;*.xls"), ("Все файлы", "*.*")],
+        ax.bar(
+            [i + width for i in x],
+            df_top["portions"],
+            width=width,
+            label="Порции",
+            color="#FF8C00",
         )
-        if not file_path:
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(
+            [a[:15] + "..." if len(a) > 15 else a for a in df_top["address"]],
+            rotation=45,
+            ha="right",
+        )
+        ax.legend()
+        ax.grid(axis="y", alpha=0.3, linestyle="--")
+        fig.tight_layout()
+
+        canvas = FigureCanvasTkAgg(fig, master=chart_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+    # ============================================================
+    #                   TAB 5: АКТИВНОСТЬ ПОЛЬЗОВАТЕЛЕЙ
+    # ============================================================
+
+    def _build_users_tab(self):
+        self._clear_tab(self.tab_users)
+
+        frame = ttk.Frame(self.tab_users)
+        frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        df = self.data_provider.get_users_activity()
+        if df.empty:
+            ttk.Label(frame, text="Нет активности пользователей за выбранный период.").pack(
+                padx=10, pady=10
+            )
             return
-        try:
-            cnt = import_objects_from_excel(Path(file_path))
-            messagebox.showinfo(
-                "Импорт объектов",
-                f"Импорт завершён.\nОбработано записей: {cnt}",
-                parent=win,
+
+        top_frame = ttk.Frame(frame)
+        top_frame.pack(fill="both", expand=True, pady=(0, 5))
+
+        table_frame = ttk.LabelFrame(top_frame, text="Активность пользователей")
+        table_frame.pack(side="left", fill="both", expand=True, padx=(0, 5))
+
+        tree = self._create_treeview(
+            table_frame,
+            columns=[
+                ("user", "Логин"),
+                ("name", "ФИО"),
+                ("th", "Табелей"),
+                ("tr", "Заявок на транспорт"),
+                ("mo", "Заявок на питание"),
+            ],
+            height=15,
+        )
+        tree.column("user", width=100)
+        tree.column("name", width=180)
+        tree.column("th", width=80, anchor="e")
+        tree.column("tr", width=120, anchor="e")
+        tree.column("mo", width=120, anchor="e")
+
+        df["total_ops"] = (
+            df["timesheets_created"]
+            + df["transport_orders_created"]
+            + df["meal_orders_created"]
+        )
+
+        for _, row in df.iterrows():
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    row["username"],
+                    row["full_name"] or "",
+                    row["timesheets_created"],
+                    row["transport_orders_created"],
+                    row["meal_orders_created"],
+                ),
             )
-        except Exception as e:
-            messagebox.showerror("Импорт объектов", f"Ошибка при импорте:\n{e}", parent=win)
 
-    ttk.Button(tab_data, text="Загрузить объекты из Excel...", command=on_import_objects).grid(
-        row=row_idx, column=0, sticky="w", padx=6, pady=(0, 8)
-    )
+        chart_frame = ttk.LabelFrame(
+            top_frame, text="ТОП пользователей по количеству операций"
+        )
+        chart_frame.pack(side="left", fill="both", expand=True, padx=(5, 0))
 
-    # Кнопки
-    btns = ttk.Frame(win)
-    btns.pack(fill="x", padx=10, pady=(0, 10))
-    ttk.Button(
-        btns,
-        text="Сохранить",
-        command=lambda: (_save_from_vars(win), messagebox.showinfo("Настройки", "Сохранено")),
-    ).pack(side="right", padx=4)
-    ttk.Button(btns, text="Отмена", command=win.destroy).pack(side="right")
+        df_top = df.sort_values("total_ops", ascending=False).head(10)
+        fig = Figure(figsize=(5, 4), dpi=100)
+        ax = fig.add_subplot(111)
+        bars = ax.barh(df_top["username"], df_top["total_ops"], color="#0078D7")
+        ax.set_xlabel("Операций (табели + заявки)")
+        ax.invert_yaxis()
+        ax.grid(axis="x", alpha=0.3, linestyle="--")
+        for bar in bars:
+            width = bar.get_width()
+            ax.text(width + 0.5, bar.get_y() + bar.get_height() / 2, f"{int(width)}", va="center")
+        fig.tight_layout()
 
-    # Центрирование окна
-    try:
-        win.update_idletasks()
-        px, py = parent.winfo_rootx(), parent.winfo_rooty()
-        pw, ph = parent.winfo_width(), parent.winfo_height()
-        sw, sh = win.winfo_width(), win.winfo_height()
-        win.geometry(f"+{px + (pw - sw) // 2}+{py + (ph - sh) // 2}")
-    except Exception:
-        pass
-
-
-def _mk_entry(parent, label, section, key, row, width=30, show=None):
-    ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", padx=(6, 6), pady=4)
-    v = tk.StringVar(value=str(_store.get(section, {}).get(key, _defaults[section][key])))
-    ent = ttk.Entry(parent, textvariable=v, width=width, show=show)
-    ent.grid(row=row, column=1, sticky="w", padx=(0, 6), pady=4)
-    _add_context_menu(ent)
-    _vars.setdefault(section, {})[key] = v
-
-
-def _mk_check(parent, label, section, key, row):
-    ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", padx=(6, 6), pady=4)
-    cur = (
-        str(_store.get(section, {}).get(key, _defaults[section][key]))
-        .strip()
-        .lower()
-        in ("1", "true", "yes", "on")
-    )
-    v = tk.BooleanVar(value=cur)
-    cb = ttk.Checkbutton(parent, variable=v)
-    cb.grid(row=row, column=1, sticky="w", padx=(0, 6), pady=4)
-    _vars.setdefault(section, {})[key] = v
-
-
-def _mk_entry_with_btn(parent, label, section, key, is_dir, row):
-    ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", padx=(6, 6), pady=4)
-    v = tk.StringVar(value=str(_store.get(section, {}).get(key, _defaults[section][key])))
-    ent = ttk.Entry(parent, textvariable=v, width=60)
-    ent.grid(row=row, column=1, sticky="w", padx=(0, 6), pady=4)
-    _add_context_menu(ent)
-
-    def browse():
-        if is_dir:
-            d = filedialog.askdirectory(title="Выбор папки")
-            if d:
-                v.set(d)
-        else:
-            p = filedialog.askopenfilename(
-                title="Выбор файла",
-                filetypes=[("Excel", "*.xlsx;*.xls"), ("Все файлы", "*.*")],
-            )
-            if p:
-                v.set(p)
-
-    ttk.Button(parent, text="...", width=3, command=browse).grid(row=row, column=2, sticky="w")
-    _vars.setdefault(section, {})[key] = v
-
-
-def _save_from_vars(win):
-    for sec, kv in _vars.items():
-        for k, var in kv.items():
-            if isinstance(var, tk.BooleanVar):
-                _store[sec][k] = "true" if var.get() else "false"
-            else:
-                _store[sec][k] = str(var.get())
-    save_settings()
-    try:
-        win.destroy()
-    except Exception:
-        pass
+        canvas = FigureCanvasTkAgg(fig, master=chart_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
