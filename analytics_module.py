@@ -66,24 +66,6 @@ class AnalyticsData:
         results = self._execute_query(query)
         return [row['short_name'] for row in results]
 
-    def _get_filter_clauses_by_object_id(
-        self, table_alias: str, field: str = "object_id"
-    ) -> Tuple[str, str, list]:
-        """
-        Вернёт join_clause, filter_clause, params_list
-        для фильтрации по типу объекта (objects.short_name) по полю <alias>.<field>.
-        """
-        params: List[Any] = []
-        join_clause = ""
-        filter_clause = ""
-
-        if self.object_type_filter:
-            join_clause = f"LEFT JOIN objects o ON {table_alias}.{field} = o.id"
-            filter_clause = "AND o.short_name = %s"
-            params.append(self.object_type_filter)
-
-        return join_clause, filter_clause, params
-
     # ============================================================
     #                      1. ТРУДОЗАТРАТЫ
     # ============================================================
@@ -248,25 +230,25 @@ class AnalyticsData:
 
     def get_transport_kpi(self) -> Dict[str, Any]:
         """KPI по транспорту и технике."""
-        join_clause, filter_clause, extra_params = self._get_filter_clauses_by_object_id(
-            't', 'object_id'
-        )
-
-        query = """
+        base_query = """
         SELECT
             COALESCE(SUM(tp.hours), 0) AS total_machine_hours,
             COUNT(DISTINCT t.id)      AS total_orders,
             COALESCE(SUM(tp.qty), 0)  AS total_units
         FROM transport_orders t
         JOIN transport_order_positions tp ON t.id = tp.order_id
-        {join_clause}
+        LEFT JOIN objects o ON t.object_id = o.id
         WHERE t.date BETWEEN %s AND %s
         {filter_clause};
-        """.format(join_clause=join_clause, filter_clause=filter_clause)
+        """
 
         params: List[Any] = [self.start_date, self.end_date]
-        params.extend(extra_params)
+        filter_clause = ""
+        if self.object_type_filter:
+            filter_clause = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
 
+        query = base_query.format(filter_clause=filter_clause)
         result = self._execute_query(query, tuple(params))
         kpi = result[0] if result else {}
         if kpi.get('total_orders', 0) > 0:
@@ -277,26 +259,26 @@ class AnalyticsData:
 
     def get_transport_by_tech(self) -> pd.DataFrame:
         """Машино-часы в разрезе техники."""
-        join_clause, filter_clause, extra_params = self._get_filter_clauses_by_object_id(
-            't', 'object_id'
-        )
-
-        query = """
+        base_query = """
         SELECT
             tp.tech,
             SUM(tp.hours) AS total_hours
         FROM transport_orders t
         JOIN transport_order_positions tp ON t.id = tp.order_id
-        {join_clause}
+        LEFT JOIN objects o ON t.object_id = o.id
         WHERE t.date BETWEEN %s AND %s
         {filter_clause}
         GROUP BY tp.tech
         ORDER BY total_hours DESC;
-        """.format(join_clause=join_clause, filter_clause=filter_clause)
+        """
 
         params: List[Any] = [self.start_date, self.end_date]
-        params.extend(extra_params)
+        filter_clause = ""
+        if self.object_type_filter:
+            filter_clause = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
 
+        query = base_query.format(filter_clause=filter_clause)
         data = self._execute_query(query, tuple(params))
         return pd.DataFrame(data)
 
@@ -306,87 +288,82 @@ class AnalyticsData:
 
     def get_meals_kpi(self) -> Dict[str, Any]:
         """KPI по питанию."""
-        join_clause, filter_clause, extra_params = self._get_filter_clauses_by_object_id(
-            'mo', 'object_id'
-        )
-
-        query = """
+        base_query = """
         SELECT
             COUNT(moi.id)                   AS total_portions,
             COUNT(DISTINCT mo.id)           AS total_orders,
             COUNT(DISTINCT moi.employee_id) AS unique_employees
         FROM meal_orders mo
         JOIN meal_order_items moi ON mo.id = moi.order_id
-        {join_clause}
+        LEFT JOIN objects o ON mo.object_id = o.id
         WHERE mo.date BETWEEN %s AND %s
         {filter_clause};
-        """.format(join_clause=join_clause, filter_clause=filter_clause)
+        """
 
         params: List[Any] = [self.start_date, self.end_date]
-        params.extend(extra_params)
+        filter_clause = ""
+        if self.object_type_filter:
+            filter_clause = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
 
+        query = base_query.format(filter_clause=filter_clause)
         result = self._execute_query(query, tuple(params))
         return result[0] if result else {}
 
     def get_meals_by_type(self) -> pd.DataFrame:
         """Количество порций в разрезе типов питания."""
-        join_clause, filter_clause, extra_params = self._get_filter_clauses_by_object_id(
-            'mo', 'object_id'
-        )
-
-        query = """
+        base_query = """
         SELECT
             moi.meal_type_text,
             COUNT(moi.id) AS total_count
         FROM meal_orders mo
         JOIN meal_order_items moi ON mo.id = moi.order_id
-        {join_clause}
+        LEFT JOIN objects o ON mo.object_id = o.id
         WHERE mo.date BETWEEN %s AND %s
         {filter_clause}
         GROUP BY moi.meal_type_text
         ORDER BY total_count DESC;
-        """.format(join_clause=join_clause, filter_clause=filter_clause)
+        """
 
         params: List[Any] = [self.start_date, self.end_date]
-        params.extend(extra_params)
+        filter_clause = ""
+        if self.object_type_filter:
+            filter_clause = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
 
+        query = base_query.format(filter_clause=filter_clause)
         data = self._execute_query(query, tuple(params))
         return pd.DataFrame(data)
 
-    # 3.1 Динамика по дням/месяцам (порции)
     def get_meals_trend_by_month(self) -> pd.DataFrame:
         """Количество порций по месяцам в периоде."""
-        join_clause, filter_clause, extra_params = self._get_filter_clauses_by_object_id(
-            'mo', 'object_id'
-        )
-
-        query = """
+        base_query = """
         SELECT
             date_trunc('month', mo.date) AS period,
             COUNT(moi.id) AS total_portions
         FROM meal_orders mo
         JOIN meal_order_items moi ON mo.id = moi.order_id
-        {join_clause}
+        LEFT JOIN objects o ON mo.object_id = o.id
         WHERE mo.date BETWEEN %s AND %s
         {filter_clause}
         GROUP BY period
         ORDER BY period;
-        """.format(join_clause=join_clause, filter_clause=filter_clause)
+        """
 
         params: List[Any] = [self.start_date, self.end_date]
-        params.extend(extra_params)
+        filter_clause = ""
+        if self.object_type_filter:
+            filter_clause = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
 
+        query = base_query.format(filter_clause=filter_clause)
         data = self._execute_query(query, tuple(params))
         return pd.DataFrame(data)
 
     # 3.2 Питание по объектам
     def get_meals_by_object(self, limit: int = 10) -> pd.DataFrame:
         """Количество порций и людей по объектам."""
-        join_clause, filter_clause, extra_params = self._get_filter_clauses_by_object_id(
-            'mo', 'object_id'
-        )
-
-        query = """
+        base_query = """
         SELECT
             o.address AS object_name,
             COUNT(moi.id) AS total_portions,
@@ -394,29 +371,29 @@ class AnalyticsData:
         FROM meal_orders mo
         JOIN meal_order_items moi ON mo.id = moi.order_id
         LEFT JOIN objects o ON mo.object_id = o.id
-        {join_clause}
         WHERE mo.date BETWEEN %s AND %s
         {filter_clause}
         GROUP BY o.address
         HAVING o.address IS NOT NULL
         ORDER BY total_portions DESC
         LIMIT {limit};
-        """.format(join_clause=join_clause, filter_clause=filter_clause, limit=limit)
+        """
 
         params: List[Any] = [self.start_date, self.end_date]
-        params.extend(extra_params)
 
+        filter_clause = ""
+        if self.object_type_filter:
+            filter_clause = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
+
+        query = base_query.format(filter_clause=filter_clause, limit=limit)
         data = self._execute_query(query, tuple(params))
         return pd.DataFrame(data)
-
+        
     # 3.3 Питание по подразделениям
     def get_meals_by_department(self) -> pd.DataFrame:
         """Питание по подразделениям: порции и люди."""
-        join_clause, filter_clause, extra_params = self._get_filter_clauses_by_object_id(
-            'mo', 'object_id'
-        )
-
-        query = """
+        base_query = """
         SELECT
             d.name AS department_name,
             COUNT(moi.id) AS total_portions,
@@ -424,17 +401,13 @@ class AnalyticsData:
         FROM meal_orders mo
         JOIN meal_order_items moi ON mo.id = moi.order_id
         LEFT JOIN departments d ON mo.department_id = d.id
-        {join_clause}
         WHERE mo.date BETWEEN %s AND %s
-        {filter_clause}
         GROUP BY d.name
         ORDER BY total_portions DESC;
-        """.format(join_clause=join_clause, filter_clause=filter_clause)
+        """
 
         params: List[Any] = [self.start_date, self.end_date]
-        params.extend(extra_params)
-
-        data = self._execute_query(query, tuple(params))
+        data = self._execute_query(base_query, tuple(params))
         return pd.DataFrame(data)
 
     # ============================================================
