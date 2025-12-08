@@ -738,6 +738,9 @@ class AnalyticsPage(ttk.Frame):
 
         df_objects = self.data_provider.get_labor_by_object()
         if not df_objects.empty:
+            df_objects = df_objects.copy()
+            df_objects["total_hours"] = df_objects["total_hours"].fillna(0)
+            df_objects["object_name"] = df_objects["object_name"].fillna("—")
             from matplotlib.figure import Figure
             fig1 = Figure(figsize=(5, 4), dpi=100)
             ax1 = fig1.add_subplot(111)
@@ -782,11 +785,17 @@ class AnalyticsPage(ttk.Frame):
             canvas2.draw()
             canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
+        # 1.2 Топ сотрудников по часам
         top_emp_frame = ttk.LabelFrame(right_frame, text="ТОП-10 сотрудников по часам")
         top_emp_frame.pack(fill="both", expand=True, padx=5, pady=(5, 0))
 
         df_emp = self.data_provider.get_top_employees_by_hours(limit=10)
         if not df_emp.empty:
+            # подчищаем возможные None/NaN
+            df_emp = df_emp.copy()
+            df_emp["total_hours"] = df_emp["total_hours"].fillna(0)
+            df_emp["fio"] = df_emp["fio"].fillna("—")
+
             fig3 = Figure(figsize=(5, 2.5), dpi=100)
             ax3 = fig3.add_subplot(111)
             df_plot_emp = df_emp.sort_values("total_hours", ascending=True)
@@ -795,7 +804,7 @@ class AnalyticsPage(ttk.Frame):
             ax3.grid(axis="x", linestyle="--", alpha=0.7)
             fig3.tight_layout()
             for bar in bars_emp:
-                width = bar.get_width()
+                width = bar.get_width() or 0
                 ax3.text(
                     width + 2,
                     bar.get_y() + bar.get_height() / 2,
@@ -853,6 +862,9 @@ class AnalyticsPage(ttk.Frame):
 
         df = self.data_provider.get_transport_by_tech()
         if not df.empty:
+            df = df.copy()
+            df["total_hours"] = df["total_hours"].fillna(0)
+            df["tech"] = df["tech"].fillna("—")
             fig = Figure(figsize=(10, 5), dpi=100)
             ax = fig.add_subplot(111)
             df_plot = df.head(10).sort_values("total_hours", ascending=False)
@@ -897,6 +909,9 @@ class AnalyticsPage(ttk.Frame):
 
         df_types = self.data_provider.get_meals_by_type()
         if not df_types.empty:
+            df_types = df_types.copy()
+            df_types["total_count"] = df_types["total_count"].fillna(0)
+            df_types["meal_type_text"] = df_types["meal_type_text"].fillna("—")
             fig1 = Figure(figsize=(5, 4), dpi=100)
             ax1 = fig1.add_subplot(111)
             labels = df_types["meal_type_text"]
@@ -928,6 +943,8 @@ class AnalyticsPage(ttk.Frame):
 
         df_trend = self.data_provider.get_meals_trend_by_month()
         if not df_trend.empty:
+            df_trend = df_trend.copy()
+            df_trend["total_portions"] = df_trend["total_portions"].fillna(0)
             df_trend["period"] = df_trend["period"].dt.strftime("%Y-%m")
             fig2 = Figure(figsize=(5, 4), dpi=100)
             ax2 = fig2.add_subplot(111)
@@ -1017,6 +1034,13 @@ class AnalyticsPage(ttk.Frame):
                 padx=10, pady=10
             )
             return
+
+        # подчищаем данные
+        df = df.copy()
+        df["labor_hours"] = df["labor_hours"].fillna(0)
+        df["machine_hours"] = df["machine_hours"].fillna(0)
+        df["portions"] = df["portions"].fillna(0)
+        df["address"] = df["address"].fillna("—")
 
         table_frame = ttk.LabelFrame(frame, text="ТОП объектов по трудозатратам")
         table_frame.pack(side="left", fill="both", expand=True, padx=(0, 5), pady=5)
@@ -1111,6 +1135,18 @@ class AnalyticsPage(ttk.Frame):
             )
             return
 
+        # подчищаем данные
+        df = df.copy()
+        for col in ("timesheets_created", "transport_orders_created", "meal_orders_created"):
+            df[col] = df[col].fillna(0)
+        df["username"] = df["username"].fillna("—")
+        df["full_name"] = df["full_name"].fillna("")
+        df["total_ops"] = (
+            df["timesheets_created"]
+            + df["transport_orders_created"]
+            + df["meal_orders_created"]
+        )
+
         top_frame = ttk.Frame(frame)
         top_frame.pack(fill="both", expand=True, pady=(0, 5))
 
@@ -1133,12 +1169,6 @@ class AnalyticsPage(ttk.Frame):
         tree.column("th", width=80, anchor="e")
         tree.column("tr", width=120, anchor="e")
         tree.column("mo", width=120, anchor="e")
-
-        df["total_ops"] = (
-            df["timesheets_created"]
-            + df["transport_orders_created"]
-            + df["meal_orders_created"]
-        )
 
         for _, row in df.iterrows():
             tree.insert(
