@@ -270,6 +270,17 @@ def read_config() -> _ProxyConfig:
 def write_config(_cfg=None):
     save_settings()
 
+def get_departments_list() -> List[Dict]:
+    """Список подразделений для комбобоксов."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT id, name FROM departments ORDER BY name;")
+            return list(cur.fetchall())
+    finally:
+        if conn:
+            release_db_connection(conn)
 
 def get_spr_path_from_config() -> Path:
     ensure_config()
@@ -391,43 +402,6 @@ def set_meals_webhook_token_in_config(tok: str):
     ensure_config()
     _store["Integrations"][KEY_MEALS_WEBHOOK_TOKEN] = tok or ""
     save_settings()
-
-
-# ---------------- РАБОТА С БД ДЛЯ ПОЛЬЗОВАТЕЛЕЙ ----------------
-
-    provider = get_db_provider().strip().lower()
-    if provider != "postgres":
-        raise RuntimeError(
-            f"Поддерживается только provider=postgres для работы с пользователями, сейчас: {provider!r}"
-        )
-
-    db_url = get_database_url().strip()
-    if not db_url:
-        raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
-
-    url = urlparse(db_url)
-    if url.scheme not in ("postgresql", "postgres"):
-        raise RuntimeError(f"Неверная схема в DATABASE_URL: {url.scheme}")
-
-    user = url.username
-    password = url.password
-    host = url.hostname or "localhost"
-    port = url.port or 5432
-    dbname = url.path.lstrip("/")
-
-    q = parse_qs(url.query)
-    sslmode = (q.get("sslmode", [get_db_sslmode()])[0] or "require")
-
-    conn = psycopg2.connect(
-        host=host,
-        port=port,
-        dbname=dbname,
-        user=user,
-        password=password,
-        sslmode=sslmode,
-    )
-    return conn
-
 
 # ---------------- ИМПОРТ СОТРУДНИКОВ/ОБЪЕКТОВ ИЗ EXCEL ----------------
 
@@ -643,40 +617,113 @@ def get_app_users() -> List[Dict]:
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute('SELECT id, username, full_name, "role", is_active FROM app_users ORDER BY username;')
+            cur.execute(
+                """
+                SELECT u.id,
+                       u.username,
+                       u.full_name,
+                       u."role",
+                       u.is_active,
+                       u.department_id,
+                       d.name AS department_name
+                FROM app_users u
+                LEFT JOIN departments d ON d.id = u.department_id
+                ORDER BY u.username;
+                """
+            )
             return list(cur.fetchall())
     finally:
         if conn:
             release_db_connection(conn)
 
-def create_app_user(username: str, password: str, full_name: str, role_code: str, is_active: bool = True):
-    username, full_name, role_code = (username or "").strip(), (full_name or "").strip(), (role_code or "").strip().lower()
-    if not username: raise ValueError("Логин не может быть пустым")
-    if not password: raise ValueError("Пароль не может быть пустым")
-    if not role_code: raise ValueError("Роль не указана")
+def create_app_user(
+    username: str,
+    password: str,
+    full_name: str,
+    role_code: str,
+    is_active: bool = True,
+    department_id: Optional[int] = None,
+):
+    username, full_name, role_code = (
+        (username or "").strip(),
+        (full_name or "").strip(),
+        (role_code or "").strip().lower(),
+    )
+    if not username:
+        raise ValueError("Логин не может быть пустым")
+    if not password:
+        raise ValueError("Пароль не может быть пустым")
+    if not role_code:
+        raise ValueError("Роль не указана")
+
     pwd_hash = _hash_password(password)
     conn = None
     try:
         conn = get_db_connection()
         with conn, conn.cursor() as cur:
-            cur.execute('INSERT INTO app_users (username, password_hash, is_active, full_name, "role") VALUES (%s, %s, %s, %s, %s)', (username, pwd_hash, is_active, full_name, role_code))
+            cur.execute(
+                """
+                INSERT INTO app_users (username, password_hash, is_active, full_name, "role", department_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (username, pwd_hash, is_active, full_name, role_code, department_id),
+            )
     finally:
         if conn:
             release_db_connection(conn)
 
-def update_app_user(user_id: int, username: str, full_name: str, role_code: str, is_active: bool, new_password: Optional[str] = None):
-    username, full_name, role_code = (username or "").strip(), (full_name or "").strip(), (role_code or "").strip().lower()
-    if not username: raise ValueError("Логин не может быть пустым")
-    if not role_code: raise ValueError("Роль не указана")
+def update_app_user(
+    user_id: int,
+    username: str,
+    full_name: str,
+    role_code: str,
+    is_active: bool,
+    new_password: Optional[str] = None,
+    department_id: Optional[int] = None,
+):
+    username, full_name, role_code = (
+        (username or "").strip(),
+        (full_name or "").strip(),
+        (role_code or "").strip().lower(),
+    )
+    if not username:
+        raise ValueError("Логин не может быть пустым")
+    if not role_code:
+        raise ValueError("Роль не указана")
+
     pwd_hash = _hash_password(new_password) if new_password else None
+
     conn = None
     try:
         conn = get_db_connection()
         with conn, conn.cursor() as cur:
             if pwd_hash:
-                cur.execute('UPDATE app_users SET username = %s, full_name = %s, "role" = %s, is_active = %s, password_hash = %s WHERE id = %s', (username, full_name, role_code, is_active, pwd_hash, user_id))
+                cur.execute(
+                    """
+                    UPDATE app_users
+                    SET username = %s,
+                        full_name = %s,
+                        "role" = %s,
+                        is_active = %s,
+                        password_hash = %s,
+                        department_id = %s
+                    WHERE id = %s
+                    """,
+                    (username, full_name, role_code, is_active, pwd_hash, department_id, user_id),
+                )
             else:
-                cur.execute('UPDATE app_users SET username = %s, full_name = %s, "role" = %s, is_active = %s WHERE id = %s', (username, full_name, role_code, is_active, user_id))
+                cur.execute(
+                    """
+                    UPDATE app_users
+                    SET username = %s,
+                        full_name = %s,
+                        "role" = %s,
+                        is_active = %s,
+                        department_id = %s
+                    WHERE id = %s
+                    """,
+                    (username, full_name, role_code, is_active, department_id, user_id),
+                )
     finally:
         if conn:
             release_db_connection(conn)
@@ -744,6 +791,23 @@ class CreateUserDialog(simpledialog.Dialog):
         if self.role_map:
             self.cmb_role.current(0)
 
+        # --- Подразделение ---
+        tk.Label(master, text="Подразделение:").grid(row=4, column=0, sticky="e", padx=(0, 6), pady=4)
+        try:
+            deps = get_departments_list()
+        except Exception as e:
+            messagebox.showerror("Подразделения", f"Ошибка чтения списка подразделений:\n{e}", parent=self)
+            deps = []
+
+        self.dep_map = {"(нет)": None}
+        for d in deps:
+            self.dep_map[d["name"]] = d["id"]
+
+        self.cmb_dep = ttk.Combobox(master, state="readonly", width=24, values=list(self.dep_map.keys()))
+        self.cmb_dep.grid(row=4, column=1, sticky="w", pady=4)
+        if self.dep_map:
+            self.cmb_dep.set("(нет)")
+
         return self.ent_username
 
     def validate(self):
@@ -761,11 +825,13 @@ class CreateUserDialog(simpledialog.Dialog):
         return True
 
     def apply(self):
+        sel_dep = self.cmb_dep.get()
         self.result = {
             "username": self.ent_username.get().strip(),
             "full_name": self.ent_fullname.get().strip(),
             "password": self.ent_pwd.get().strip(),
             "role": self.role_map[self.cmb_role.get()],
+            "department_id": self.dep_map.get(sel_dep),
         }
 
 class EditUserDialog(simpledialog.Dialog):
@@ -802,7 +868,6 @@ class EditUserDialog(simpledialog.Dialog):
         self.cmb_role = ttk.Combobox(master, state="readonly", width=24, values=list(self.role_map.keys()))
         self.cmb_role.grid(row=3, column=1, sticky="w", pady=4)
 
-        # выберем текущую роль
         current_role_code = (self.user.get("role") or "").lower()
         idx = 0
         for i, (label, code) in enumerate(self.role_map.items()):
@@ -812,10 +877,32 @@ class EditUserDialog(simpledialog.Dialog):
         if self.role_map:
             self.cmb_role.current(idx)
 
-        tk.Label(master, text="Активен:").grid(row=4, column=0, sticky="e", padx=(0, 6), pady=4)
+        # --- Подразделение ---
+        tk.Label(master, text="Подразделение:").grid(row=4, column=0, sticky="e", padx=(0, 6), pady=4)
+        try:
+            deps = get_departments_list()
+        except Exception as e:
+            messagebox.showerror("Подразделения", f"Ошибка чтения списка подразделений:\n{e}", parent=self)
+            deps = []
+
+        self.dep_map = {"(нет)": None}
+        for d in deps:
+            self.dep_map[d["name"]] = d["id"]
+
+        self.cmb_dep = ttk.Combobox(master, state="readonly", width=24, values=list(self.dep_map.keys()))
+        self.cmb_dep.grid(row=4, column=1, sticky="w", pady=4)
+
+        # выбрать текущее подразделение, если есть
+        current_dep_name = self.user.get("department_name")
+        if current_dep_name and current_dep_name in self.dep_map:
+            self.cmb_dep.set(current_dep_name)
+        else:
+            self.cmb_dep.set("(нет)")
+
+        tk.Label(master, text="Активен:").grid(row=5, column=0, sticky="e", padx=(0, 6), pady=4)
         self.var_active = tk.BooleanVar(value=bool(self.user.get("is_active")))
         self.cb_active = ttk.Checkbutton(master, variable=self.var_active)
-        self.cb_active.grid(row=4, column=1, sticky="w", pady=4)
+        self.cb_active.grid(row=5, column=1, sticky="w", pady=4)
 
         return self.ent_username
 
@@ -830,6 +917,7 @@ class EditUserDialog(simpledialog.Dialog):
         return True
 
     def apply(self):
+        sel_dep = self.cmb_dep.get()
         self.result = {
             "id": self.user["id"],
             "username": self.ent_username.get().strip(),
@@ -837,6 +925,7 @@ class EditUserDialog(simpledialog.Dialog):
             "password": self.ent_pwd.get().strip(),  # может быть пустым
             "role": self.role_map[self.cmb_role.get()],
             "is_active": self.var_active.get(),
+            "department_id": self.dep_map.get(sel_dep),
         }
 
 class UsersPage(tk.Frame):
@@ -855,7 +944,7 @@ class UsersPage(tk.Frame):
 
         self.tree = ttk.Treeview(
             self,
-            columns=("id", "username", "full_name", "role", "is_active"),
+            columns=("id", "username", "full_name", "role", "department", "is_active"),
             show="headings",
             height=12,
         )
@@ -863,12 +952,14 @@ class UsersPage(tk.Frame):
         self.tree.heading("username", text="Логин")
         self.tree.heading("full_name", text="ФИО")
         self.tree.heading("role", text="Роль")
+        self.tree.heading("department", text="Подразделение")
         self.tree.heading("is_active", text="Активен")
 
         self.tree.column("id", width=40, anchor="center")
-        self.tree.column("username", width=140)
-        self.tree.column("full_name", width=220)
-        self.tree.column("role", width=100)
+        self.tree.column("username", width=120)
+        self.tree.column("full_name", width=200)
+        self.tree.column("role", width=90)
+        self.tree.column("department", width=160)
         self.tree.column("is_active", width=70, anchor="center")
 
         self.tree.pack(fill="both", expand=True, padx=8, pady=(0, 8))
@@ -891,6 +982,7 @@ class UsersPage(tk.Frame):
                     u["username"],
                     u.get("full_name") or "",
                     u.get("role") or "",
+                    u.get("department_name") or "",
                     "Да" if u.get("is_active") else "Нет",
                 ),
             )
@@ -902,13 +994,14 @@ class UsersPage(tk.Frame):
             return None
         item_id = sel[0]
         values = self.tree.item(item_id, "values")
-        # порядок: id, username, full_name, role, is_active
+        # порядок: id, username, full_name, role, department_name, is_active
         user = {
             "id": int(values[0]),
             "username": values[1],
             "full_name": values[2],
             "role": values[3],
-            "is_active": (values[4] == "Да"),
+            "department_name": values[4],
+            "is_active": (values[5] == "Да"),
         }
         return user
 
@@ -930,6 +1023,7 @@ class UsersPage(tk.Frame):
                 role_code=data["role"],
                 is_active=data["is_active"],
                 new_password=data["password"] or None,
+                department_id=data.get("department_id"),
             )
         except Exception as e:
             messagebox.showerror("Редактировать пользователя", f"Ошибка сохранения:\n{e}", parent=self)
@@ -937,6 +1031,7 @@ class UsersPage(tk.Frame):
 
         self.reload_users()
         messagebox.showinfo("Редактировать пользователя", "Изменения сохранены.", parent=self)
+
 
     def _on_create_user(self):
         dlg = CreateUserDialog(self)
@@ -950,6 +1045,7 @@ class UsersPage(tk.Frame):
                 full_name=data["full_name"],
                 role_code=data["role"],
                 is_active=True,
+                department_id=data.get("department_id"),
             )
         except Exception as e:
             messagebox.showerror("Создать пользователя", f"Ошибка создания пользователя:\n{e}", parent=self)
