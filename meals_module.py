@@ -164,6 +164,66 @@ def get_or_create_department(cur, name: str):
     cur.execute("INSERT INTO departments (name) VALUES (%s) RETURNING id", (name,))
     return cur.fetchone()[0]
 
+def get_setting(key: str, default: str = "") -> str:
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM app_settings WHERE key = %s", (key,))
+            row = cur.fetchone()
+            if row:
+                return row[0]
+            return default
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+
+def set_setting(key: str, value: str):
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO app_settings (key, value)
+                    VALUES (%s, %s)
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                    """,
+                    (key, value),
+                )
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+def get_meals_limit_next_day_only() -> bool:
+    """
+    True  – заявки только на следующий день (жёсткое правило).
+    False – можно на любые будущие даты.
+    """
+    v = (get_setting("meals_limit_next_day_only", "1") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def get_meals_next_day_deadline() -> Optional[datetime.time]:
+    """
+    Время (часы:минуты) до которого сегодня можно подать заявку на завтра.
+    Формат в БД: 'HH:MM'. Если не задано – возвращает None (без ограничения по времени).
+    """
+    s = (get_setting("meals_next_day_deadline", "").strip())
+    if not s:
+        return None
+    try:
+        # поддержим 'HH:MM' и 'HH:MM:SS' на всякий случай
+        for fmt in ("%H:%M", "%H:%M:%S"):
+            try:
+                return datetime.strptime(s, fmt).time()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None
 
 # ------- НОВАЯ ЛОГИКА ПОИСКА/СОЗДАНИЯ ОБЪЕКТОВ --------
 
@@ -1646,12 +1706,48 @@ class MealOrderPage(tk.Frame):
         req = parse_date_any(self.ent_date.get())
         today = date.today()
         tomorrow = today + timedelta(days=1)
-        if req is None or req < tomorrow:
+
+        if req is None:
             messagebox.showwarning(
                 "Заявка",
-                f"Дата заявки должна быть не раньше {tomorrow.strftime('%Y-%m-%d')}.",
+                "Укажите корректную дату заявки.",
             )
             return False
+
+        # --- новая логика с учётом настроек из БД ---
+        limit_next_day_only = get_meals_limit_next_day_only()
+        deadline_time = get_meals_next_day_deadline()
+        now = datetime.now()
+
+        if limit_next_day_only:
+            # Разрешаем только заявки на ЗАВТРА
+            if req != tomorrow:
+                messagebox.showwarning(
+                    "Заявка",
+                    f"Сейчас можно подать заявку только на дату {tomorrow.strftime('%Y-%m-%d')}.",
+                )
+                return False
+
+            # Если задано время дедлайна – проверяем его
+            if deadline_time is not None:
+                deadline_dt = datetime.combine(today, deadline_time)
+                if now > deadline_dt:
+                    messagebox.showwarning(
+                        "Заявка",
+                        f"Приём заявок на завтра ({tomorrow.strftime('%Y-%m-%d')}) "
+                        f"закрыт после {deadline_time.strftime('%H:%M')} сегодняшнего дня.",
+                    )
+                    return False
+        else:
+            # Более мягкое правило: нельзя на прошедшие даты
+            if req < today:
+                messagebox.showwarning(
+                    "Заявка",
+                    f"Дата заявки не может быть раньше сегодняшнего дня ({today.strftime('%Y-%m-%d')}).",
+                )
+                return False
+
+        # --- дальше твоя старая логика без изменений ---
         if not (self.cmb_dep.get() or "").strip():
             messagebox.showwarning("Заявка", "Выберите Подразделение.")
             return False
@@ -1660,7 +1756,6 @@ class MealOrderPage(tk.Frame):
             messagebox.showwarning("Заявка", "Укажите Адрес объекта.")
             return False
 
-        # новая проверка: без ID объекта сохранять нельзя
         oid = (self.cmb_object_id.get() or "").strip()
         if not oid:
             messagebox.showwarning(
@@ -3367,13 +3462,18 @@ class MealsSettingsPage(tk.Frame):
     Вкладка "Настройки" для типов питания и цен.
     Доступна только администраторам (роль 'admin' контролирует внешний код).
     """
-
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
         self.name_vars: List[tk.StringVar] = []
         self.price_vars: List[tk.StringVar] = []
+
+        # --- новые переменные для настроек приёма заявок ---
+        self.var_limit_next_day_only = tk.BooleanVar(value=True)
+        self.var_deadline_time = tk.StringVar(value="14:00")
+
         self._build_ui()
         self.load_meal_types()
+        self.load_meals_order_rules()  # <<< новая загрузка настроек
 
     def _build_ui(self):
         top = tk.Frame(self, bg="#f7f7f7")
@@ -3415,6 +3515,105 @@ class MealsSettingsPage(tk.Frame):
         ttk.Button(
             btns, text="Сохранить типы питания", command=self.save_meal_types
         ).pack(side="left", padx=4)
+        rules_frame = tk.LabelFrame(
+            self,
+            text="Правила приёма заявок",
+            bg="#f7f7f7",
+            padx=10,
+            pady=8,
+        )
+        rules_frame.pack(fill="x", padx=10, pady=(0, 10))
+
+        ttk.Checkbutton(
+            rules_frame,
+            text="Разрешать заявки только на следующий день",
+            variable=self.var_limit_next_day_only,
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
+
+        tk.Label(
+            rules_frame,
+            text="Время окончания приёма заявок на завтра (HH:MM):",
+            bg="#f7f7f7",
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        ttk.Entry(
+            rules_frame,
+            textvariable=self.var_deadline_time,
+            width=10,
+        ).grid(row=1, column=1, sticky="w", padx=(4, 0), pady=(4, 0))
+
+        ttk.Label(
+            rules_frame,
+            text="(пусто — без ограничения по времени)",
+            background="#f7f7f7",
+        ).grid(row=1, column=2, sticky="w", padx=(6, 0), pady=(4, 0))
+
+        btns2 = tk.Frame(self, bg="#f7f7f7")
+        btns2.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Button(
+            btns2,
+            text="Сохранить правила приёма заявок",
+            command=self.save_meals_order_rules,
+        ).pack(side="left", padx=4)
+
+    def load_meals_order_rules(self):
+        """
+        Читает настройки приёма заявок из БД и заполняет виджеты.
+        """
+        try:
+            limit = get_meals_limit_next_day_only()
+            deadline = get_meals_next_day_deadline()
+
+            self.var_limit_next_day_only.set(bool(limit))
+            if deadline is not None:
+                self.var_deadline_time.set(deadline.strftime("%H:%M"))
+            else:
+                self.var_deadline_time.set("")
+        except Exception as e:
+            messagebox.showerror(
+                "Настройки питания",
+                f"Ошибка загрузки правил приёма заявок:\n{e}",
+                parent=self,
+            )
+
+    def save_meals_order_rules(self):
+        """
+        Сохраняет настройки приёма заявок в БД.
+        """
+        # проверяем корректность времени
+        t_str = (self.var_deadline_time.get() or "").strip()
+        if t_str:
+            try:
+                # допускаем только HH:MM
+                dt = datetime.strptime(t_str, "%H:%M")
+                t_str_norm = dt.strftime("%H:%M")
+            except Exception:
+                messagebox.showwarning(
+                    "Настройки питания",
+                    "Время окончания приёма заявок должно быть в формате HH:MM, "
+                    "например '14:00', или оставьте поле пустым.",
+                    parent=self,
+                )
+                return
+        else:
+            t_str_norm = ""
+
+        try:
+            set_setting("meals_limit_next_day_only",
+                        "1" if self.var_limit_next_day_only.get() else "0")
+            set_setting("meals_next_day_deadline", t_str_norm)
+
+            messagebox.showinfo(
+                "Настройки питания",
+                "Правила приёма заявок сохранены.",
+                parent=self,
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Настройки питания",
+                f"Ошибка сохранения правил приёма заявок:\n{e}",
+                parent=self,
+            )
 
     def load_meal_types(self):
         try:
