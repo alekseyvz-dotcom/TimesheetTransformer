@@ -224,32 +224,45 @@ def replace_timesheet_rows(header_id: int, rows: List[Dict[str, Any]]):
                 if len(hours_list) != 31:
                     hours_list = (hours_list + [None] * 31)[:31]
 
-                total_hours, total_days, total_ot_day, total_ot_night = 0.0, 0, 0.0, 0.0
-                for raw in hours_list:
-                    if not raw: continue
-                    hrs = parse_hours_value(raw)
-                    d_ot, n_ot = parse_overtime(raw)
-                    if isinstance(hrs, (int, float)) and hrs > 1e-12:
-                        total_hours += hrs; total_days += 1
-                    if isinstance(d_ot, (int, float)): total_ot_day += float(d_ot)
-                    if isinstance(n_ot, (int, float)): total_ot_night += float(n_ot)
+                total_hours = 0.0
+                total_night_hours = 0.0
+                total_days = 0
+                total_ot_day = 0.0
+                total_ot_night = 0.0
 
-                # Собираем кортеж значений
+                for raw in hours_list:
+                    if not raw:
+                        continue
+                    # Новая логика: обычные часы + ночные
+                    hrs, night = parse_hours_and_night(raw)
+                    d_ot, n_ot = parse_overtime(raw)
+
+                    if isinstance(hrs, (int, float)) and hrs > 1e-12:
+                        total_hours += float(hrs)
+                        total_days += 1
+                    if isinstance(night, (int, float)):
+                        total_night_hours += float(night)
+                    if isinstance(d_ot, (int, float)):
+                        total_ot_day += float(d_ot)
+                    if isinstance(n_ot, (int, float)):
+                        total_ot_night += float(n_ot)
+
                 values.append((
-                    header_id, 
-                    rec["fio"], 
-                    rec.get("tbn") or None, 
+                    header_id,
+                    rec["fio"],
+                    rec.get("tbn") or None,
                     hours_list,
-                    total_days or None, 
-                    total_hours or None, 
-                    total_ot_day or None, 
-                    total_ot_night or None
+                    total_days or None,
+                    total_hours or None,
+                    total_night_hours or None,
+                    total_ot_day or None,
+                    total_ot_night or None,
                 ))
 
-            # Один запрос вместо N запросов
             insert_query = """
                 INSERT INTO timesheet_rows 
-                (header_id, fio, tbn, hours_raw, total_days, total_hours, overtime_day, overtime_night)
+                (header_id, fio, tbn, hours_raw,
+                 total_days, total_hours, night_hours, overtime_day, overtime_night)
                 VALUES %s
             """
             execute_values(cur, insert_query, values)
@@ -293,15 +306,19 @@ def load_timesheet_rows_by_header_id(header_id: int) -> List[Dict[str, Any]]:
         conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT fio, tbn, hours_raw, total_days, total_hours, overtime_day, overtime_night "
+                "SELECT fio, tbn, hours_raw, total_days, total_hours, night_hours, overtime_day, overtime_night "
                 "FROM timesheet_rows WHERE header_id = %s ORDER BY fio, tbn", (header_id,),
             )
             result = []
-            for fio, tbn, hours_raw, total_days, total_hours, ot_day, ot_night in cur.fetchall():
+            for fio, tbn, hours_raw, total_days, total_hours, night_hours, ot_day, ot_night in cur.fetchall():
                 hrs = list(hours_raw) if hours_raw else [None] * 31
                 result.append({
-                    "fio": fio or "", "tbn": tbn or "", "hours_raw": [h for h in hrs],
-                    "total_days": total_days, "total_hours": float(total_hours) if total_hours is not None else None,
+                    "fio": fio or "",
+                    "tbn": tbn or "",
+                    "hours_raw": [h for h in hrs],
+                    "total_days": total_days,
+                    "total_hours": float(total_hours) if total_hours is not None else None,
+                    "night_hours": float(night_hours) if night_hours is not None else None,
                     "overtime_day": float(ot_day) if ot_day is not None else None,
                     "overtime_night": float(ot_night) if ot_night is not None else None,
                 })
@@ -435,6 +452,71 @@ def parse_overtime(v: Any) -> Tuple[Optional[float], Optional[float]]:
             return day_ot, night_ot
         return float(overtime_str.replace(",", ".")), 0.0
     except: return None, None
+
+def parse_hours_and_night(v: Any) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Парсит отработанные часы в ячейке (НЕ в скобках).
+    Возвращает (total_hours, night_hours).
+
+    Правила:
+      - '8' или '8,25' или '8:30' -> (8, 0) / (8.25, 0) / (8.5, 0)
+      - '8/2' (вне скобок) -> (10, 2)  (т.е. 8 всего + 2 ночных; ночные входят в общее)
+      - '8/2/1' -> (11, 3) (2+1 ночных)
+      - если строка содержит скобки, берём только часть ДО "(".
+    """
+    s = str(v or "").strip()
+    if not s:
+        return None, None
+
+    # Отбрасываем переработку в скобках: "8/2(1/1)" -> "8/2"
+    if "(" in s:
+        s = s.split("(", 1)[0].strip()
+    if not s:
+        return None, None
+
+    # Если есть /, то первая часть — "обычные", остальные — "ночные"
+    if "/" in s:
+        parts = [p.strip() for p in s.split("/") if p.strip()]
+        if not parts:
+            return None, None
+
+        # Перевод строки в число (поддержка "," и ":" как в parse_hours_value)
+        def _to_hours(x: str) -> Optional[float]:
+            if not x:
+                return None
+            if ":" in x:
+                p = x.split(":")
+                try:
+                    hh = float(p[0].replace(",", "."))
+                    mm = float((p[1] if len(p) > 1 else "0").replace(",", "."))
+                    return hh + mm / 60.0
+                except:
+                    return None
+            try:
+                return float(x.replace(",", "."))
+            except:
+                return None
+
+        base = _to_hours(parts[0])
+        if base is None:
+            return None, None
+
+        night_sum = 0.0
+        for p in parts[1:]:
+            v = _to_hours(p)
+            if isinstance(v, (int, float)):
+                night_sum += float(v)
+
+        total = base + night_sum
+        return (total if total > 0 else None,
+                night_sum if night_sum > 0 else 0.0)
+
+    # Без дроби: используем старую логику parse_hours_value
+    total = parse_hours_value(s)
+    if total is None:
+        return None, None
+    return total, 0.0
+
 
 def safe_filename(s: str, maxlen: int = 60) -> str:
     s = re.sub(r'[<>:"/\\|?*\n\r\t]+', "_", str(s or "")).strip()
@@ -1076,7 +1158,7 @@ class RowWidget:
             raw = e.get().strip()
             self._repaint_day_cell(i - 1, y, m)
             if i <= days_in_m and raw:
-                hours = parse_hours_value(raw)
+                hours, night = parse_hours_and_night(raw)
                 day_ot, night_ot = parse_overtime(raw)
                 if isinstance(hours, (int, float)) and hours > 1e-12:
                     total_hours += float(hours)
@@ -1525,7 +1607,7 @@ class TimesheetPage(tk.Frame):
     
     def _recalc_object_total(self):
         """Пересчитывает общие итоги по ВСЕЙ модели, а не только по видимой странице."""
-        tot_h, tot_d, tot_ot_day, tot_ot_night = 0.0, 0, 0.0, 0.0
+        tot_h, tot_d, tot_night, tot_ot_day, tot_ot_night = 0.0, 0, 0.0, 0.0, 0.0
 
         y, m = self.get_year_month()
         days_in_m = month_days(y, m)
@@ -1533,22 +1615,32 @@ class TimesheetPage(tk.Frame):
         for rec in self.model_rows:
             hours_list = rec.get("hours") or []
             for i, raw in enumerate(hours_list):
-                if i >= days_in_m: continue # Не считать дни за пределами месяца
-                if not raw: continue
-                hv = parse_hours_value(raw)
+                if i >= days_in_m:
+                    continue
+                if not raw:
+                    continue
+
+                hv, night = parse_hours_and_night(raw)
                 d_ot, n_ot = parse_overtime(raw)
+
                 if isinstance(hv, (int, float)) and hv > 1e-12:
-                    tot_h += float(hv); tot_d += 1
-                if isinstance(d_ot, (int, float)): tot_ot_day += float(d_ot)
-                if isinstance(n_ot, (int, float)): tot_ot_night += float(n_ot)
+                    tot_h += float(hv)
+                    tot_d += 1
+                if isinstance(night, (int, float)):
+                    tot_night += float(night)
+                if isinstance(d_ot, (int, float)):
+                    tot_ot_day += float(d_ot)
+                if isinstance(n_ot, (int, float)):
+                    tot_ot_night += float(n_ot)
 
         sh = f"{tot_h:.2f}".rstrip("0").rstrip(".")
+        sn = f"{tot_night:.2f}".rstrip("0").rstrip(".")
         sod = f"{tot_ot_day:.2f}".rstrip("0").rstrip(".")
         son = f"{tot_ot_night:.2f}".rstrip("0").rstrip(".")
         cnt = len(self.model_rows)
 
         self.lbl_object_total.config(
-            text=f"Сумма: сотрудников {cnt} | дней {tot_d} | часов {sh} | пер.день {sod} | пер.ночь {son}"
+            text=f"Сумма: сотрудников {cnt} | дней {tot_d} | часов {sh} | в т.ч. ночных {sn} | пер.день {sod} | пер.ночь {son}"
         )
     
     def add_row(self):
@@ -1802,18 +1894,36 @@ class TimesheetPage(tk.Frame):
         if "Табель" in wb.sheetnames:
             ws = wb["Табель"]
             hdr_first = str(ws.cell(1, 1).value or "")
-            if hdr_first == "ID объекта" and ws.max_column >= (7 + 31 + 4): return ws
+            if hdr_first == "ID объекта":
+                return ws
             base, i = "Табель_OLD", 1
             new_name = base
-            while new_name in wb.sheetnames: i += 1; new_name = f"{base}{i}"
+            while new_name in wb.sheetnames:
+                i += 1
+                new_name = f"{base}{i}"
             ws.title = new_name
 
         ws2 = wb.create_sheet("Табель")
-        hdr = ["ID объекта", "Адрес", "Месяц", "Год", "ФИО", "Табельный №", "Подразделение"] + [str(i) for i in range(1, 32)] + ["Итого дней", "Итого часов по табелю", "Переработка день", "Переработка ночь"]
+        hdr = (
+            ["ID объекта", "Адрес", "Месяц", "Год", "ФИО", "Табельный №", "Подразделение"]
+            + [str(i) for i in range(1, 32)]
+            + ["Итого дней", "Итого часов по табелю", "В т.ч. ночных", "Переработка день", "Переработка ночь"]
+        )
         ws2.append(hdr)
-        ws2.column_dimensions["A"].width = 14; ws2.column_dimensions["B"].width = 40; ws2.column_dimensions["C"].width = 10; ws2.column_dimensions["D"].width = 8; ws2.column_dimensions["E"].width = 28; ws2.column_dimensions["F"].width = 14; ws2.column_dimensions["G"].width = 20
-        for i in range(8, 8 + 31): ws2.column_dimensions[get_column_letter(i)].width = 6
-        ws2.column_dimensions[get_column_letter(39)].width = 10; ws2.column_dimensions[get_column_letter(40)].width = 18; ws2.column_dimensions[get_column_letter(41)].width = 14; ws2.column_dimensions[get_column_letter(42)].width = 14
+        ws2.column_dimensions["A"].width = 14
+        ws2.column_dimensions["B"].width = 40
+        ws2.column_dimensions["C"].width = 10
+        ws2.column_dimensions["D"].width = 8
+        ws2.column_dimensions["E"].width = 28
+        ws2.column_dimensions["F"].width = 14
+        ws2.column_dimensions["G"].width = 20
+        for i in range(8, 8 + 31):
+            ws2.column_dimensions[get_column_letter(i)].width = 6
+        ws2.column_dimensions[get_column_letter(39)].width = 10   # Итого дней
+        ws2.column_dimensions[get_column_letter(40)].width = 18   # Итого часов по табелю
+        ws2.column_dimensions[get_column_letter(41)].width = 16   # В т.ч. ночных
+        ws2.column_dimensions[get_column_letter(42)].width = 14   # Переработка день
+        ws2.column_dimensions[get_column_letter(43)].width = 14   # Переработка ночь
         ws2.freeze_panes = "A2"
         return ws2
 
@@ -1950,18 +2060,36 @@ class TimesheetPage(tk.Frame):
                         if emp_dep: department = emp_dep
                         break
 
-                total_hours, total_days, total_ot_day, total_ot_night = 0.0, 0, 0.0, 0.0
+                total_hours, total_days = 0.0, 0
+                total_night = 0.0
+                total_ot_day, total_ot_night = 0.0, 0.0
                 day_values = []
-                for raw in hours_list:
-                    day_values.append(raw) # Просто сохраняем сырое значение
-                    if not raw: continue
-                    hrs = parse_hours_value(raw); d_ot, n_ot = parse_overtime(raw)
-                    if isinstance(hrs, (int, float)) and hrs > 1e-12: total_hours += hrs; total_days += 1
-                    if isinstance(d_ot, (int, float)): total_ot_day += float(d_ot)
-                    if isinstance(n_ot, (int, float)): total_ot_night += float(n_ot)
 
-                row_values = [oid, addr, m, y, fio, tbn, department] + day_values + \
-                             [total_days or None, total_hours or None, total_ot_day or None, total_ot_night or None]
+                for raw in hours_list:
+                    day_values.append(raw)
+                    if not raw:
+                        continue
+                    hrs, night = parse_hours_and_night(raw)
+                    d_ot, n_ot = parse_overtime(raw)
+
+                    if isinstance(hrs, (int, float)) and hrs > 1e-12:
+                        total_hours += float(hrs)
+                        total_days += 1
+                    if isinstance(night, (int, float)):
+                        total_night += float(night)
+                    if isinstance(d_ot, (int, float)):
+                        total_ot_day += float(d_ot)
+                    if isinstance(n_ot, (int, float)):
+                        total_ot_night += float(n_ot)
+
+                row_values = [oid, addr, m, y, fio, tbn, department] + day_values + [
+                    total_days or None,
+                    total_hours or None,
+                    total_night or None,
+                    total_ot_day or None,
+                    total_ot_night or None,
+                ]
+
                 ws.append(row_values)
 
             wb.save(fpath)
@@ -2315,7 +2443,7 @@ class MyTimesheetsPage(tk.Frame):
             # Заголовки как в TimesheetRegistryPage
             header = ["Год", "Месяц", "Адрес", "ID объекта", "Подразделение", "ФИО сотрудника", "Табельный №"] + \
                      [str(i) for i in range(1, 32)] + \
-                     ["Итого дней", "Итого часов", "Переработка день", "Переработка ночь"]
+                     ["Итого дней", "Итого часов", "В т.ч. ночных", "Переработка день", "Переработка ночь"]
             ws.append(header)
             
             # Настраиваем ширину колонок
@@ -2331,7 +2459,7 @@ class MyTimesheetsPage(tk.Frame):
                         h["year"], h["month"], h.get("object_addr", ""), h.get("object_id", ""),
                         h.get("department", ""), r["fio"], r["tbn"]
                     ] + (r.get("hours_raw") or [None]*31) + [
-                        r.get("total_days"), r.get("total_hours"),
+                        r.get("total_days"), r.get("total_hours"), r.get("night_hours"), 
                         r.get("overtime_day"), r.get("overtime_night")
                     ]
                     ws.append(excel_row)
@@ -2540,9 +2668,10 @@ class TimesheetRegistryPage(tk.Frame):
                 "Пользователь",
                 "ФИО",
                 "Табельный №",
-            ] + [f"{i}" for i in range(1, 32)] + [
+                ] + [f"{i}" for i in range(1, 32)] + [
                 "Итого_дней",
                 "Итого_часов",
+                "В т.ч. ночных",
                 "Переработка_день",
                 "Переработка_ночь",
             ]
@@ -2585,6 +2714,7 @@ class TimesheetRegistryPage(tk.Frame):
                     hours_raw = row.get("hours_raw") or [None] * 31
                     total_days = row.get("total_days")
                     total_hours = row.get("total_hours")
+                    night_hours = row.get("night_hours")
                     ot_day = row.get("overtime_day")
                     ot_night = row.get("overtime_night")
 
@@ -2605,6 +2735,7 @@ class TimesheetRegistryPage(tk.Frame):
 
                     excel_row.append(total_days if total_days is not None else None)
                     excel_row.append(total_hours if total_hours is not None else None)
+                    excel_row.append(night_hours if night_hours is not None else None)
                     excel_row.append(ot_day if ot_day is not None else None)
                     excel_row.append(ot_night if ot_night is not None else None)
 
