@@ -165,8 +165,8 @@ class AnalyticsData:
         base_query = """
         SELECT
             tr.fio,
-            SUM(tr.total_hours) AS total_hours,
-            SUM(tr.overtime_day + tr.overtime_night) AS total_overtime
+            COALESCE(SUM(tr.total_hours), 0) AS total_hours,
+            COALESCE(SUM(tr.overtime_day + tr.overtime_night), 0) AS total_overtime
         FROM timesheet_headers th
         JOIN timesheet_rows tr ON th.id = tr.header_id
         {join_clause}
@@ -176,6 +176,7 @@ class AnalyticsData:
         ORDER BY total_hours DESC
         LIMIT {limit};
         """
+
         start_period = self.start_date.year * 100 + self.start_date.month
         end_period = self.end_date.year * 100 + self.end_date.month
         params: List[Any] = [start_period, end_period]
@@ -714,22 +715,40 @@ class AnalyticsPage(ttk.Frame):
             df_objects = df_objects.copy()
             df_objects["total_hours"] = df_objects["total_hours"].fillna(0)
             df_objects["object_name"] = df_objects["object_name"].fillna("—")
-            from matplotlib.figure import Figure
+
+            # Обрезаем слишком длинные адреса
+            def short_addr(a: str, max_len: int = 30) -> str:
+                a = a or "—"
+                return a if len(a) <= max_len else a[:max_len] + "…"
+
+            df_objects["short_name"] = df_objects["object_name"].apply(short_addr)
+
             fig1 = Figure(figsize=(5, 4), dpi=100)
             ax1 = fig1.add_subplot(111)
+
             df_plot = df_objects.head(10).sort_values("total_hours", ascending=True)
-            bars = ax1.barh(df_plot["object_name"], df_plot["total_hours"], color="#0078D7")
+            bars = ax1.barh(df_plot["short_name"], df_plot["total_hours"], color="#0078D7")
             ax1.set_xlabel("Человеко-часы")
             ax1.grid(axis="x", linestyle="--", alpha=0.7)
-            fig1.tight_layout()
+
+            # Подписи справа от столбцов
+            max_val = df_plot["total_hours"].max() or 0
             for bar in bars:
                 width = bar.get_width()
                 ax1.text(
-                    width + 5,
+                    width + max_val * 0.02,  # 2% от максимума как отступ
                     bar.get_y() + bar.get_height() / 2,
                     f"{width:.0f}",
                     va="center",
                 )
+
+            # Чуть увеличиваем правый отступ, чтобы подписи не обрезались
+            fig1.tight_layout(rect=(0.15, 0.05, 0.95, 0.95))
+
+            canvas1 = FigureCanvasTkAgg(fig1, master=left_frame)
+            canvas1.draw()
+            canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
             canvas1 = FigureCanvasTkAgg(fig1, master=left_frame)
             canvas1.draw()
             canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
