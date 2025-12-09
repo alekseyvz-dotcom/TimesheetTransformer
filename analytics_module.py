@@ -3,7 +3,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any
 from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 import logging
@@ -64,7 +64,7 @@ class AnalyticsData:
         ORDER BY short_name;
         """
         results = self._execute_query(query)
-        return [row['short_name'] for row in results]
+        return [row["short_name"] for row in results]
 
     # ============================================================
     #                      1. ТРУДОЗАТРАТЫ
@@ -98,7 +98,12 @@ class AnalyticsData:
 
         query = base_query.format(join_clause=join_clause, filter_clause=filter_clause)
         result = self._execute_query(query, tuple(params))
-        return result[0] if result else {}
+        row = result[0] if result else {}
+        # приводим к "обычным" питоновским типам
+        for k in ("total_hours", "total_days", "total_overtime"):
+            if k in row and row[k] is not None:
+                row[k] = float(row[k])
+        return row
 
     def get_labor_by_object(self) -> pd.DataFrame:
         """Трудозатраты в разрезе объектов."""
@@ -126,7 +131,10 @@ class AnalyticsData:
 
         query = base_query.format(filter_clause=filter_clause)
         data = self._execute_query(query, tuple(params))
-        return pd.DataFrame(data)
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df["total_hours"] = df["total_hours"].astype(float)
+        return df
 
     # 1.1. Динамика трудозатрат по месяцам
     def get_labor_trend_by_month(self) -> pd.DataFrame:
@@ -157,7 +165,10 @@ class AnalyticsData:
 
         query = base_query.format(join_clause=join_clause, filter_clause=filter_clause)
         data = self._execute_query(query, tuple(params))
-        return pd.DataFrame(data)
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df["total_hours"] = df["total_hours"].astype(float)
+        return df
 
     # 1.2. ТОП‑сотрудники по часам
     def get_top_employees_by_hours(self, limit: int = 10) -> pd.DataFrame:
@@ -192,7 +203,11 @@ class AnalyticsData:
                                   filter_clause=filter_clause,
                                   limit=limit)
         data = self._execute_query(query, tuple(params))
-        return pd.DataFrame(data)
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df["total_hours"] = df["total_hours"].astype(float)
+            df["total_overtime"] = df["total_overtime"].astype(float)
+        return df
 
     # 1.3. Нагрузка по подразделениям
     def get_labor_by_department(self) -> pd.DataFrame:
@@ -223,7 +238,10 @@ class AnalyticsData:
 
         query = base_query.format(join_clause=join_clause, filter_clause=filter_clause)
         data = self._execute_query(query, tuple(params))
-        return pd.DataFrame(data)
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df["total_hours"] = df["total_hours"].astype(float)
+        return df
 
     # ============================================================
     #                      2. ТРАНСПОРТ
@@ -252,10 +270,17 @@ class AnalyticsData:
         query = base_query.format(filter_clause=filter_clause)
         result = self._execute_query(query, tuple(params))
         kpi = result[0] if result else {}
-        if kpi.get('total_orders', 0) > 0:
-            kpi['avg_hours_per_order'] = kpi.get('total_machine_hours', 0) / kpi['total_orders']
+        total_hours = float(kpi.get("total_machine_hours", 0) or 0)
+        total_orders = int(kpi.get("total_orders", 0) or 0)
+        total_units = float(kpi.get("total_units", 0) or 0)
+        if total_orders > 0:
+            avg = total_hours / total_orders
         else:
-            kpi['avg_hours_per_order'] = 0
+            avg = 0.0
+        kpi["total_machine_hours"] = total_hours
+        kpi["total_orders"] = total_orders
+        kpi["total_units"] = total_units
+        kpi["avg_hours_per_order"] = avg
         return kpi
 
     def get_transport_by_tech(self) -> pd.DataFrame:
@@ -281,7 +306,10 @@ class AnalyticsData:
 
         query = base_query.format(filter_clause=filter_clause)
         data = self._execute_query(query, tuple(params))
-        return pd.DataFrame(data)
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df["total_hours"] = df["total_hours"].astype(float)
+        return df
 
     # ============================================================
     #                      3. ПИТАНИЕ
@@ -334,7 +362,8 @@ class AnalyticsData:
 
         query = base_query.format(filter_clause=filter_clause)
         data = self._execute_query(query, tuple(params))
-        return pd.DataFrame(data)
+        df = pd.DataFrame(data)
+        return df
 
     def get_meals_trend_by_month(self) -> pd.DataFrame:
         """Количество порций по месяцам в периоде."""
@@ -359,7 +388,8 @@ class AnalyticsData:
 
         query = base_query.format(filter_clause=filter_clause)
         data = self._execute_query(query, tuple(params))
-        return pd.DataFrame(data)
+        df = pd.DataFrame(data)
+        return df
 
     # 3.2 Питание по объектам
     def get_meals_by_object(self, limit: int = 10) -> pd.DataFrame:
@@ -389,8 +419,9 @@ class AnalyticsData:
 
         query = base_query.format(filter_clause=filter_clause, limit=limit)
         data = self._execute_query(query, tuple(params))
-        return pd.DataFrame(data)
-        
+        df = pd.DataFrame(data)
+        return df
+
     # 3.3 Питание по подразделениям
     def get_meals_by_department(self) -> pd.DataFrame:
         """Питание по подразделениям: порции и люди."""
@@ -409,7 +440,8 @@ class AnalyticsData:
 
         params: List[Any] = [self.start_date, self.end_date]
         data = self._execute_query(base_query, tuple(params))
-        return pd.DataFrame(data)
+        df = pd.DataFrame(data)
+        return df
 
     # ============================================================
     #        4. СКВОЗНАЯ АНАЛИТИКА ПО ОБЪЕКТАМ (TOP-N)
@@ -425,9 +457,12 @@ class AnalyticsData:
 
         type_filter_clause = ""
         params: List[Any] = [
-            start_period, end_period,           # labor
-            self.start_date, self.end_date,     # transport
-            self.start_date, self.end_date      # meals
+            start_period,
+            end_period,           # labor
+            self.start_date,
+            self.end_date,        # transport
+            self.start_date,
+            self.end_date,        # meals
         ]
 
         if self.object_type_filter:
@@ -481,7 +516,12 @@ class AnalyticsData:
         """.format(type_filter_clause=type_filter_clause, limit=limit)
 
         data = self._execute_query(query, tuple(params))
-        return pd.DataFrame(data)
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df["labor_hours"] = df["labor_hours"].astype(float)
+            df["machine_hours"] = df["machine_hours"].astype(float)
+            df["portions"] = df["portions"].astype(float)
+        return df
 
     # ============================================================
     #        5. АКТИВНОСТЬ ПОЛЬЗОВАТЕЛЕЙ
@@ -522,12 +562,19 @@ class AnalyticsData:
         ORDER BY (COALESCE(th_cnt,0)+COALESCE(trp_cnt,0)+COALESCE(mo_cnt,0)) DESC;
         """
         params = (
-            self.start_date, self.end_date,
-            self.start_date, self.end_date,
-            self.start_date, self.end_date,
+            self.start_date,
+            self.end_date,
+            self.start_date,
+            self.end_date,
+            self.start_date,
+            self.end_date,
         )
         data = self._execute_query(query, params)
-        return pd.DataFrame(data)
+        df = pd.DataFrame(data)
+        if not df.empty:
+            for col in ("timesheets_created", "transport_orders_created", "meal_orders_created"):
+                df[col] = df[col].astype(float)
+        return df
 
 
 # ============================================================
@@ -713,10 +760,9 @@ class AnalyticsPage(ttk.Frame):
         df_objects = self.data_provider.get_labor_by_object()
         if not df_objects.empty:
             df_objects = df_objects.copy()
-            df_objects["total_hours"] = df_objects["total_hours"].fillna(0)
+            df_objects["total_hours"] = df_objects["total_hours"].fillna(0).astype(float)
             df_objects["object_name"] = df_objects["object_name"].fillna("—")
 
-            # Обрезаем слишком длинные адреса
             def short_addr(a: str, max_len: int = 30) -> str:
                 a = a or "—"
                 return a if len(a) <= max_len else a[:max_len] + "…"
@@ -731,23 +777,17 @@ class AnalyticsPage(ttk.Frame):
             ax1.set_xlabel("Человеко-часы")
             ax1.grid(axis="x", linestyle="--", alpha=0.7)
 
-            # Подписи справа от столбцов
-            max_val = df_plot["total_hours"].max() or 0
+            max_val = float(df_plot["total_hours"].max() or 0.0)
             for bar in bars:
-                width = bar.get_width()
+                width = float(bar.get_width() or 0.0)
                 ax1.text(
-                    width + max_val * 0.02,  # 2% от максимума как отступ
+                    width + max_val * 0.02,
                     bar.get_y() + bar.get_height() / 2,
                     f"{width:.0f}",
                     va="center",
                 )
 
-            # Чуть увеличиваем правый отступ, чтобы подписи не обрезались
             fig1.tight_layout(rect=(0.15, 0.05, 0.95, 0.95))
-
-            canvas1 = FigureCanvasTkAgg(fig1, master=left_frame)
-            canvas1.draw()
-            canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
             canvas1 = FigureCanvasTkAgg(fig1, master=left_frame)
             canvas1.draw()
@@ -762,6 +802,8 @@ class AnalyticsPage(ttk.Frame):
 
         df_trend = self.data_provider.get_labor_trend_by_month()
         if not df_trend.empty:
+            df_trend = df_trend.copy()
+            df_trend["total_hours"] = df_trend["total_hours"].fillna(0).astype(float)
             df_trend["period"] = df_trend.apply(
                 lambda r: f"{int(r['year'])}-{int(r['month']):02d}", axis=1
             )
@@ -777,15 +819,13 @@ class AnalyticsPage(ttk.Frame):
             canvas2.draw()
             canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # 1.2 Топ сотрудников по часам
         top_emp_frame = ttk.LabelFrame(right_frame, text="ТОП-10 сотрудников по часам")
         top_emp_frame.pack(fill="both", expand=True, padx=5, pady=(5, 0))
 
         df_emp = self.data_provider.get_top_employees_by_hours(limit=10)
         if not df_emp.empty:
-            # подчищаем возможные None/NaN
             df_emp = df_emp.copy()
-            df_emp["total_hours"] = df_emp["total_hours"].fillna(0)
+            df_emp["total_hours"] = df_emp["total_hours"].fillna(0).astype(float)
             df_emp["fio"] = df_emp["fio"].fillna("—")
 
             fig3 = Figure(figsize=(5, 2.5), dpi=100)
@@ -796,9 +836,9 @@ class AnalyticsPage(ttk.Frame):
             ax3.grid(axis="x", linestyle="--", alpha=0.7)
             fig3.tight_layout()
             for bar in bars_emp:
-                width = bar.get_width() or 0
+                width = float(bar.get_width() or 0.0)
                 ax3.text(
-                    width + 2,
+                    width + 2.0,
                     bar.get_y() + bar.get_height() / 2,
                     f"{width:.0f}",
                     va="center",
@@ -812,6 +852,8 @@ class AnalyticsPage(ttk.Frame):
 
         df_dept = self.data_provider.get_labor_by_department()
         if not df_dept.empty:
+            df_dept = df_dept.copy()
+            df_dept["total_hours"] = df_dept["total_hours"].fillna(0).astype(float)
             tree = self._create_treeview(
                 dept_frame,
                 columns=[("department", "Подразделение"), ("hours", "Чел.-часы")],
@@ -855,7 +897,7 @@ class AnalyticsPage(ttk.Frame):
         df = self.data_provider.get_transport_by_tech()
         if not df.empty:
             df = df.copy()
-            df["total_hours"] = df["total_hours"].fillna(0)
+            df["total_hours"] = df["total_hours"].fillna(0).astype(float)
             df["tech"] = df["tech"].fillna("—")
             fig = Figure(figsize=(10, 5), dpi=100)
             ax = fig.add_subplot(111)
@@ -911,9 +953,10 @@ class AnalyticsPage(ttk.Frame):
 
             def autopct_format(values):
                 def my_format(pct):
-                    total = sum(values)
+                    total = float(sum(values))
                     val = int(round(pct * total / 100.0))
                     return f"{pct:.1f}%\n({val:d} шт.)"
+
                 return my_format
 
             ax1.pie(
@@ -1027,11 +1070,10 @@ class AnalyticsPage(ttk.Frame):
             )
             return
 
-        # подчищаем данные
         df = df.copy()
-        df["labor_hours"] = df["labor_hours"].fillna(0)
-        df["machine_hours"] = df["machine_hours"].fillna(0)
-        df["portions"] = df["portions"].fillna(0)
+        df["labor_hours"] = df["labor_hours"].fillna(0).astype(float)
+        df["machine_hours"] = df["machine_hours"].fillna(0).astype(float)
+        df["portions"] = df["portions"].fillna(0).astype(float)
         df["address"] = df["address"].fillna("—")
 
         table_frame = ttk.LabelFrame(frame, text="ТОП объектов по трудозатратам")
@@ -1060,7 +1102,7 @@ class AnalyticsPage(ttk.Frame):
                     row["address"],
                     f"{row['labor_hours']:.1f}",
                     f"{row['machine_hours']:.1f}",
-                    row["portions"],
+                    int(row["portions"]),
                 ),
             )
 
@@ -1127,10 +1169,9 @@ class AnalyticsPage(ttk.Frame):
             )
             return
 
-        # подчищаем данные
         df = df.copy()
         for col in ("timesheets_created", "transport_orders_created", "meal_orders_created"):
-            df[col] = df[col].fillna(0)
+            df[col] = df[col].fillna(0).astype(float)
         df["username"] = df["username"].fillna("—")
         df["full_name"] = df["full_name"].fillna("")
         df["total_ops"] = (
@@ -1169,9 +1210,9 @@ class AnalyticsPage(ttk.Frame):
                 values=(
                     row["username"],
                     row["full_name"] or "",
-                    row["timesheets_created"],
-                    row["transport_orders_created"],
-                    row["meal_orders_created"],
+                    int(row["timesheets_created"]),
+                    int(row["transport_orders_created"]),
+                    int(row["meal_orders_created"]),
                 ),
             )
 
@@ -1188,7 +1229,7 @@ class AnalyticsPage(ttk.Frame):
         ax.invert_yaxis()
         ax.grid(axis="x", alpha=0.3, linestyle="--")
         for bar in bars:
-            width = bar.get_width()
+            width = float(bar.get_width() or 0.0)
             ax.text(width + 0.5, bar.get_y() + bar.get_height() / 2, f"{int(width)}", va="center")
         fig.tight_layout()
 
