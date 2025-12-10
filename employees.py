@@ -206,7 +206,7 @@ class WorkersPage(tk.Frame):
         cmb_dep = ttk.Combobox(
             top,
             state="readonly",
-            width=26,
+            width=40,
             textvariable=self.var_dep,
             values=self.departments,
         )
