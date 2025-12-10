@@ -56,12 +56,13 @@ Settings = None
 timesheet_module = None
 analytics_module = None
 timesheet_transformer = None
+employees_module = None
 
 def perform_heavy_imports():
     """Функция для загрузки всех тяжелых модулей приложения."""
     global BudgetAnalyzer, _assets_logo, _LOGO_BASE64, SpecialOrders, \
            meals_module, objects, Settings, timesheet_module, \
-           analytics_module, timesheet_transformer
+           analytics_module, timesheet_transformer, employees_module
            
     import BudgetAnalyzer
     import assets_logo as _assets_logo
@@ -72,6 +73,7 @@ def perform_heavy_imports():
     import settings_manager as Settings
     import timesheet_module 
     import analytics_module
+    import employees as employees_module
 
     try:
         import timesheet_transformer
@@ -323,10 +325,36 @@ class MainApp(tk.Tk):
 
         # === Объектный табель (через новый модуль) ===
         m_ts = tk.Menu(self._menubar, tearoff=0)
-        m_ts.add_command(label="Создать", command=lambda: self._show_page("timesheet", lambda p: timesheet_module.create_timesheet_page(p, self)))
-        m_ts.add_command(label="Мои табели", command=lambda: self._show_page("my_timesheets", lambda p: timesheet_module.create_my_timesheets_page(p, self)))
+        m_ts.add_command(
+            label="Создать",
+            command=lambda: self._show_page(
+                "timesheet",
+                lambda p: timesheet_module.create_timesheet_page(p, self),
+            ),
+        )
+        m_ts.add_command(
+            label="Мои табели",
+            command=lambda: self._show_page(
+                "my_timesheets",
+                lambda p: timesheet_module.create_my_timesheets_page(p, self),
+            ),
+        )
         self._menu_timesheets_registry_index = m_ts.index("end")
-        m_ts.add_command(label="Реестр табелей", command=lambda: self._show_page("timesheet_registry", lambda p: timesheet_module.create_timesheet_registry_page(p, self)))
+        m_ts.add_command(
+            label="Реестр табелей",
+            command=lambda: self._show_page(
+                "timesheet_registry",
+                lambda p: timesheet_module.create_timesheet_registry_page(p, self),
+            ),
+        )
+        # новый пункт
+        m_ts.add_command(
+            label="Работники",
+            command=lambda: self._show_page(
+                "workers",
+                lambda p: employees_module.create_workers_page(p, self),
+            ),
+        )
         self._menubar.add_cascade(label="Объектный табель", menu=m_ts)
         self._menu_timesheets = m_ts
 
@@ -408,6 +436,7 @@ class MainApp(tk.Tk):
         headers = {
             "home": ("Управление строительством", "Выберите раздел в верхнем меню"),
             "timesheet": ("Объектный табель", ""), "my_timesheets": ("Мои табели", ""), "timesheet_registry": ("Реестр табелей", ""),
+            "workers": ("Работники", "Поиск по сотруднику и его объектам"),
             "transport": ("Заявка на спецтехнику", ""), "my_transport_orders": ("Мои заявки на транспорт", ""),
             "planning": ("Планирование транспорта", ""), "transport_registry": ("Реестр транспорта", ""),
             "meals_order": ("Заказ питания", ""), "my_meals_orders": ("Мои заявки на питание", ""),
@@ -469,6 +498,7 @@ class MainApp(tk.Tk):
         set_state(self._menu_timesheets, "Мои табели", True)
         # "Реестр табелей" доступен только менеджерам и администраторам.
         set_state(self._menu_timesheets, "Реестр табелей", is_manager)
+        set_state(self._menu_timesheets, "Работники", True)
 
         # --- Настройка меню "Автотранспорт" ---
         # "Создать заявку" и "Мои заявки" доступны всем.
@@ -532,7 +562,7 @@ if __name__ == "__main__":
             initialize_db_pool()
 
             splash.update_status("Передача настроек в модули...")
-            modules_to_init = [meals_module, SpecialOrders, objects, Settings, timesheet_module, analytics_module]
+            modules_to_init = [meals_module, SpecialOrders, objects, Settings, timesheet_module, analytics_module, employees_module]
             for module in modules_to_init:
                 if module and hasattr(module, "set_db_pool"):
                     module.set_db_pool(db_connection_pool)
