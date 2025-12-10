@@ -142,6 +142,10 @@ class WorkersPage(tk.Frame):
         for fio, tbn, pos, dep in self.employees:
             self.emp_tbn_by_fio[fio] = tbn
 
+        # Список подразделений для выпадающего списка
+        deps_set = { (dep or "").strip() for _, _, _, dep in self.employees if (dep or "").strip() }
+        self.departments = ["Все"] + sorted(deps_set)
+
         # Переменные формы
         self.var_fio = tk.StringVar()
         self.var_tbn = tk.StringVar()
@@ -167,7 +171,7 @@ class WorkersPage(tk.Frame):
 
         # ФИО (автодополнение)
         tk.Label(top, text="ФИО:").grid(row=row_f, column=0, sticky="e", padx=(0, 4))
-        cmb_fio = AutoCompleteCombobox(top, width=32, textvariable=self.var_fio)
+        cmb_fio = AutoCompleteCombobox(top, width=40, textvariable=self.var_fio)
         cmb_fio.set_completion_list(self.emp_names)
         cmb_fio.grid(row=row_f, column=1, sticky="w")
         cmb_fio.bind("<<ComboboxSelected>>", self._on_fio_selected)
@@ -199,8 +203,17 @@ class WorkersPage(tk.Frame):
         row_f += 1
 
         tk.Label(top, text="Подразделение:").grid(row=row_f, column=0, sticky="e", padx=(0, 4), pady=(4, 0))
-        ent_dep = ttk.Entry(top, width=24, textvariable=self.var_dep)
-        ent_dep.grid(row=row_f, column=1, sticky="w", pady=(4, 0))
+        cmb_dep = ttk.Combobox(
+            top,
+            state="readonly",
+            width=26,
+            textvariable=self.var_dep,
+            values=self.departments,
+        )
+        cmb_dep.grid(row=row_f, column=1, sticky="w", pady=(4, 0))
+        # по умолчанию "Все"
+        if not self.var_dep.get():
+            self.var_dep.set("Все")
 
         # Кнопки
         btns = tk.Frame(top)
@@ -271,7 +284,7 @@ class WorkersPage(tk.Frame):
         self.var_tbn.set("")
         self.var_year.set("")
         self.var_month.set("Все")
-        self.var_dep.set("")
+        self.var_dep.set("Все")
         self._rows.clear()
         self.tree.delete(*self.tree.get_children())
 
@@ -302,7 +315,11 @@ class WorkersPage(tk.Frame):
             except ValueError:
                 month = None
 
-        dep = self.var_dep.get().strip() or None
+        dep_val = self.var_dep.get().strip()
+        if dep_val and dep_val != "Все":
+            dep = dep_val
+        else:
+            dep = None
 
         try:
             rows = find_employee_work_summary(
