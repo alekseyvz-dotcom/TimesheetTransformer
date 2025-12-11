@@ -2608,10 +2608,12 @@ class AllMealsOrdersPage(tk.Frame):
 
     def _export_to_excel(self):
         """
-        Выгружает текущий реестр заявок в Excel с учётом фильтров
-        (дата с/по, подразделение, адрес).
+        Выгружает детализированный реестр (все сотрудники, все адреса, типы питания и стоимость)
+        с учётом фильтров (дата с/по, подразделение, адрес),
+        аналогично выгрузке в разделе 'Планирование питания'.
         """
         try:
+            # --- 1. Разбираем период ---
             date_from, date_to = self._parse_period()
 
             if date_from and date_to and date_from > date_to:
@@ -2625,23 +2627,41 @@ class AllMealsOrdersPage(tk.Frame):
             dep_filter = (self.cmb_dep_filter.get() or "").strip() if hasattr(self, "cmb_dep_filter") else ""
             addr_filter = (self.ent_address_filter.get() or "").strip() if hasattr(self, "ent_address_filter") else ""
 
-            # Загружаем заявки повторно, чтобы быть уверенными, что данные свежие
+            # --- 2. Получаем детальные данные через get_details_from_db ---
+            # В твоём API фильтр по дате один (filter_date). Здесь период,
+            # поэтому сделаем простую логику:
+            #  - если указано только одно поле (с или по) и они совпадают — фильтруем по этой дате;
+            #  - если заданы разные даты или только одна граница — тянем ВСЁ и потом фильтруем по Python.
+            # Если хочешь строго периодом с/по на стороне БД — можно написать отдельную функцию аналогично load_all_meal_orders.
+
+            # 2.1. Определяем, какую дату можно передать в filter_date:
+            filter_date_str: Optional[str] = None
+            if date_from and date_to and date_from == date_to:
+                filter_date_str = date_from.strftime("%Y-%m-%d")
+            elif date_from and not date_to:
+                # только "с": если нужно строго одну дату — можно тоже считать это как один день
+                filter_date_str = date_from.strftime("%Y-%m-%d")
+            elif date_to and not date_from:
+                filter_date_str = date_to.strftime("%Y-%m-%d")
+            else:
+                # период больше одного дня — фильтра по дате в SQL не делаем
+                filter_date_str = None
+
             try:
-                orders = load_all_meal_orders(
-                    date_from=date_from,
-                    date_to=date_to,
-                    department=dep_filter or None,
-                    address_substr=addr_filter or None,
+                raw_orders = get_details_from_db(
+                    filter_date=filter_date_str,
+                    filter_address=addr_filter or None,
+                    filter_department=dep_filter or None,
                 )
             except Exception as e:
                 messagebox.showerror(
                     "Экспорт в Excel",
-                    f"Ошибка загрузки данных из БД:\n{e}",
+                    f"Ошибка загрузки детализированных данных из БД:\n{e}",
                     parent=self,
                 )
                 return
 
-            if not orders:
+            if not raw_orders:
                 messagebox.showinfo(
                     "Экспорт в Excel",
                     "Нет данных для выгрузки (по заданным фильтрам).",
@@ -2649,12 +2669,72 @@ class AllMealsOrdersPage(tk.Frame):
                 )
                 return
 
-            # Формируем Excel
+            # 2.2. Если задан период более одного дня, дополнительно фильтруем по нему в Python
+            orders: List[Dict[str, Any]] = []
+            for o in raw_orders:
+                d_str = o.get("date") or ""
+                try:
+                    d = datetime.strptime(d_str, "%Y-%m-%d").date()
+                except Exception:
+                    # если формат неожиданно иной — просто пропускаем проверку
+                    d = None
+
+                if date_from and d and d < date_from:
+                    continue
+                if date_to and d and d > date_to:
+                    continue
+                orders.append(o)
+
+            if not orders:
+                messagebox.showinfo(
+                    "Экспорт в Excel",
+                    "Нет данных для выгрузки (по периодам дат).",
+                    parent=self,
+                )
+                return
+
+            # --- 3. Берём цены типов питания ---
+            price_map = get_meal_type_price_map()
+
+            # --- 4. Определяем дубликаты по (ФИО, Таб.№) так же, как в Планировании ---
+            freq: Dict[tuple, int] = {}
+            for o in orders:
+                fio = (o.get("fio") or "").strip()
+                tbn = (o.get("tbn") or "").strip()
+                key = (fio.lower(), tbn.lower())
+                if fio or tbn:
+                    freq[key] = freq.get(key, 0) + 1
+
+            duplicates_mark: List[str] = []
+            for o in orders:
+                fio = (o.get("fio") or "").strip()
+                tbn = (o.get("tbn") or "").strip()
+                key = (fio.lower(), tbn.lower())
+                mark = "дубль" if (fio or tbn) and freq.get(key, 0) > 1 else ""
+                duplicates_mark.append(mark)
+
+            # --- 5. Формируем Excel аналогично MealPlanningPage.export_to_excel ---
             wb = Workbook()
             ws = wb.active
-            ws.title = "Реестр заявок"
+            ws.title = "Реестр питания"
 
-            # Шапка с указанием фильтров
+            # 5.1. Свод по объектам, типам питания и стоимости
+            summary: Dict[str, Dict[str, Dict[str, float]]] = {}
+            # summary[addr][meal_type] = {"count": N, "amount": S}
+
+            for o in orders:
+                addr = o.get("address", "") or ""
+                mt = (o.get("meal_type", "") or "").strip()
+                if not addr or not mt:
+                    continue
+                price = price_map.get(mt, 0.0)
+
+                addr_dict = summary.setdefault(addr, {})
+                mt_dict = addr_dict.setdefault(mt, {"count": 0.0, "amount": 0.0})
+                mt_dict["count"] += 1.0
+                mt_dict["amount"] += price
+
+            # Шапка
             period_str = ""
             if date_from:
                 period_str += f"с {date_from.strftime('%Y-%m-%d')} "
@@ -2665,85 +2745,96 @@ class AllMealsOrdersPage(tk.Frame):
             dep_str = dep_filter or "Все"
             addr_str = addr_filter or "(любой адрес)"
 
-            ws.append([f"Реестр заявок на питание ({period_str})"])
-            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=8)
+            ws.append([f"Реестр питания ({period_str})"])
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=6)
 
             ws.append([f"Подразделение: {dep_str}"])
-            ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=8)
+            ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=6)
 
             ws.append([f"Адрес содержит: {addr_str}"])
-            ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=8)
+            ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=6)
 
             ws.append([])
 
-            # Заголовки таблицы
+            ws.append(["Свод по объектам, типам питания и стоимости"])
+            ws.merge_cells(start_row=5, start_column=1, end_row=5, end_column=4)
+            ws.append(["Адрес", "Тип питания", "Кол-во человек", "Сумма, руб."])
+
+            for addr, by_type in summary.items():
+                for mt, agg in by_type.items():
+                    ws.append([
+                        addr,
+                        mt,
+                        agg["count"],
+                        agg["amount"],
+                    ])
+
+            ws.append([])
+
+            # 5.2. Детальный список по людям
             headers = [
-                "ID заявки",
                 "Дата",
-                "Объект (код)",
                 "Адрес",
+                "ID объекта",
                 "Подразделение",
-                "Бригада",
-                "Сотрудников, чел.",
-                "Пользователь",
-                "Создана",
+                "Наименование бригады",
+                "ФИО",
+                "Табельный №",
+                "Должность",
+                "Тип питания",
+                "Цена, руб.",
+                "Сумма, руб.",
+                "Комментарий",
+                "Дубликаты",
             ]
             ws.append(headers)
 
-            for o in orders:
-                oid = o.get("id")
-                date_val = o.get("date")
-                if isinstance(date_val, datetime):
-                    date_str = date_val.date().strftime("%Y-%m-%d")
-                else:
-                    date_str = str(date_val or "")
-
-                obj_code = o.get("object_id") or ""
-                addr = o.get("object_address") or ""
-                dep = o.get("department") or ""
-                team = o.get("team_name") or ""
-                cnt = o.get("employees_count") or 0
-                user_name = o.get("user_name") or ""
-                created_at = o.get("created_at")
-                if isinstance(created_at, datetime):
-                    created_str = created_at.strftime("%d.%m.%Y %H:%M")
-                else:
-                    created_str = str(created_at or "")
+            for order, mark in zip(orders, duplicates_mark):
+                mt = (order.get("meal_type") or "").strip()
+                price = float(price_map.get(mt, 0.0))
+                amount = price  # пока 1 порция на человека; если появится количество — можно умножать
 
                 ws.append([
-                    oid,
-                    date_str,
-                    obj_code,
-                    addr,
-                    dep,
-                    team,
-                    cnt,
-                    user_name,
-                    created_str,
+                    order.get("date", ""),
+                    order.get("address", ""),
+                    order.get("object_id", ""),
+                    order.get("department", ""),
+                    order.get("team_name", ""),
+                    order.get("fio", ""),
+                    order.get("tbn", ""),
+                    order.get("position", ""),
+                    mt,
+                    price,
+                    amount,
+                    order.get("comment", ""),
+                    mark,
                 ])
 
             # Ширины колонок
             widths = [
-                8,   # ID
                 12,  # Дата
-                12,  # Объект (код)
                 40,  # Адрес
+                15,  # ID объекта
                 25,  # Подразделение
-                25,  # Бригада
-                16,  # Сотр., чел.
-                25,  # Пользователь
-                20,  # Создана
+                25,  # Наименование бригады
+                30,  # ФИО
+                15,  # Табельный №
+                25,  # Должность
+                18,  # Тип питания
+                12,  # Цена, руб.
+                14,  # Сумма, руб.
+                40,  # Комментарий
+                12,  # Дубликаты
             ]
             for col, width in enumerate(widths, start=1):
                 ws.column_dimensions[get_column_letter(col)].width = width
 
-            # Заморозим шапку таблицы (после служебных строк)
-            # Строка с заголовками таблицы сейчас на 5-й строке
-            ws.freeze_panes = "A6"
+            # Замораживаем панель чуть выше шапки детальной таблицы
+            ws.freeze_panes = "A7"
 
-            # Имя файла
+            # --- 6. Сохраняем файл ---
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            # Формируем человекочитаемую часть периода
+
             period_part = ""
             if date_from:
                 period_part += date_from.strftime("%Y%m%d")
@@ -2752,7 +2843,7 @@ class AllMealsOrdersPage(tk.Frame):
             if not period_part:
                 period_part = "все"
 
-            fname = f"Реестр_заявок_питание_{period_part}_{ts}.xlsx"
+            fname = f"Реестр_питания_детально_{period_part}_{ts}.xlsx"
             fpath = exe_dir() / "Заявки_питание" / fname
             fpath.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2760,7 +2851,7 @@ class AllMealsOrdersPage(tk.Frame):
 
             messagebox.showinfo(
                 "Экспорт в Excel",
-                f"Файл успешно сформирован:\n{fpath}\n\nЗаписей: {len(orders)}",
+                f"Файл успешно сформирован:\n{fpath}\n\nСтрок (сотрудников): {len(orders)}",
                 parent=self,
             )
 
