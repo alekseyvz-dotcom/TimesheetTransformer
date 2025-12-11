@@ -1082,16 +1082,27 @@ class SpecialOrdersPage(tk.Frame):
         self.cmb_fio.set_completion_list(filtered)
 
     def _update_tomorrow_hint(self):
-        """Подсказка: заявки принимаются только на завтрашнюю дату"""
+        """Подсказка по дате заявки: разрешены завтрашний и любые более поздние дни"""
         try:
             req = parse_date_any(self.ent_date.get())
-            tomorrow = date.today() + timedelta(days=1)
+            today = date.today()
+            tomorrow = today + timedelta(days=1)
+
             if req is None:
-                self.lbl_date_hint.config(text="Укажите дату в формате YYYY-MM-DD или DD.MM.YYYY", fg="#b00020")
-            elif req != tomorrow:
-                self.lbl_date_hint.config(text=f"Заявка возможна только на {tomorrow.strftime('%Y-%m-%d')}", fg="#b00020")
+                self.lbl_date_hint.config(
+                    text="Укажите дату в формате YYYY-MM-DD или DD.MM.YYYY",
+                    fg="#b00020"
+                )
+            elif req <= today:
+                self.lbl_date_hint.config(
+                    text=f"Дата должна быть не ранее {tomorrow.strftime('%Y-%m-%d')}",
+                    fg="#b00020"
+                )
             else:
-                self.lbl_date_hint.config(text="Ок: заявка на завтрашнюю дату", fg="#2e7d32")
+                self.lbl_date_hint.config(
+                    text="Ок: заявка на будущую дату",
+                    fg="#2e7d32"
+                )
         except Exception:
             self.lbl_date_hint.config(text="", fg="#555")
 
@@ -1137,12 +1148,17 @@ class SpecialOrdersPage(tk.Frame):
         if not phone or len(digits) < 5:
             messagebox.showwarning("Заявка", "Укажите номер телефона (минимум 5 цифр).")
             return False
-        # Дата — строго завтра
+        # Дата — не ранее завтрашнего дня
         req = parse_date_any(self.ent_date.get())
-        tomorrow = date.today() + timedelta(days=1)
-        if req is None or req != tomorrow:
-            messagebox.showwarning("Заявка", f"Заявка возможна только на дату: {tomorrow.strftime('%Y-%m-%d')}.")
+        today = date.today()
+        tomorrow = today + timedelta(days=1)
+        if req is None or req <= today:
+            messagebox.showwarning(
+                "Заявка",
+                f"Заявка возможна на даты, начинающиеся с {tomorrow.strftime('%Y-%m-%d')} и позже."
+            )
             return False
+
         # Адрес (обязателен)
         addr = (self.cmb_address.get() or "").strip()
         if not addr:
