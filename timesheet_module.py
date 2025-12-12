@@ -960,6 +960,51 @@ class HoursFillDialog(simpledialog.Dialog):
             "clear": self._clear,
         }
 
+class TimeForSelectedDialog(simpledialog.Dialog):
+    """
+    Диалог: ввести значение часов, которое будет проставлено
+    (как строка, например '8,25', '1/7', '8/2(1/1)').
+    """
+    def __init__(self, parent):
+        self.result = None
+        super().__init__(parent, title="Время для выделенных сотрудников")
+
+    def body(self, master):
+        tk.Label(master, text="Введите значение часов (как в ячейках табеля):")\
+            .grid(row=0, column=0, sticky="w", pady=(4, 2))
+
+        self.ent_value = ttk.Entry(master, width=20)
+        self.ent_value.grid(row=1, column=0, sticky="w")
+        self.ent_value.insert(0, "8,25")  # можно любое типовое значение
+
+        tk.Label(master, text="Примеры: 8 | 8,25 | 8:30 | 1/7 | 8/2(1/1)")\
+            .grid(row=2, column=0, sticky="w", pady=(6, 0))
+
+        return self.ent_value
+
+    def validate(self):
+        val = self.ent_value.get().strip()
+        if not val:
+            # разрешим пустое значение = очистить ячейки
+            self._value = ""
+            return True
+
+        # Проверим, что общее количество часов парсится (как в табеле)
+        hv = parse_hours_value(val)
+        if hv is None or hv < 0:
+            messagebox.showwarning(
+                "Время для выделенных",
+                "Введите корректное значение часов (например, 8, 8:30, 1/7, 8/2(1/1)).",
+            )
+            return False
+
+        self._value = val
+        return True
+
+    def apply(self):
+        # Пустая строка — значит очистка
+        self.result = (self._value or None)
+
 
 class AutoCompleteCombobox(ttk.Combobox):
     def __init__(self, master=None, **kw):
@@ -996,6 +1041,7 @@ class RowWidget:
     ZEBRA_ODD = "#f6f8fa"
     ERR_BG = "#ffccbc"
     DISABLED_BG = "#f0f0f0"
+    SELECT_BG = "#c5e1ff"  # фон выделенной строки
 
     def __init__(self, table: tk.Frame, row_index: int, fio: str, tbn: str,
                  get_year_month_callable, on_delete_callable):
@@ -1006,6 +1052,9 @@ class RowWidget:
         self._suspend_sync = False
 
         zebra_bg = self.ZEBRA_EVEN if (row_index % 2 == 0) else self.ZEBRA_ODD
+        self.base_bg = zebra_bg       # базовый фон строки (зебра)
+        self._selected = False        # флаг выделения
+
         self.widgets: List[tk.Widget] = []
 
         # ФИО
@@ -1013,14 +1062,14 @@ class RowWidget:
             self.table,
             text=fio,
             anchor="w",
-            bg=zebra_bg,
+            bg=self.base_bg,
             width=35,          # подбери по вкусу
         )
         self.lbl_fio.grid(row=self.row, column=0, padx=0, pady=1, sticky="nsew")
         self.widgets.append(self.lbl_fio)
 
         # Таб.№
-        self.lbl_tbn = tk.Label(self.table, text=tbn, anchor="center", bg=zebra_bg)
+        self.lbl_tbn = tk.Label(self.table, text=tbn, anchor="center", bg=self.base_bg)
         self.lbl_tbn.grid(row=self.row, column=1, padx=0, pady=1, sticky="nsew")
         self.widgets.append(self.lbl_tbn)
 
@@ -1036,19 +1085,19 @@ class RowWidget:
             self.widgets.append(e)
 
         # Итоги
-        self.lbl_days = tk.Label(self.table, text="0", anchor="e", bg=zebra_bg)
+        self.lbl_days = tk.Label(self.table, text="0", anchor="e", bg=self.base_bg)
         self.lbl_days.grid(row=self.row, column=33, padx=(4, 1), pady=1, sticky="nsew")
         self.widgets.append(self.lbl_days)
 
-        self.lbl_total = tk.Label(self.table, text="0", anchor="e", bg=zebra_bg)
+        self.lbl_total = tk.Label(self.table, text="0", anchor="e", bg=self.base_bg)
         self.lbl_total.grid(row=self.row, column=34, padx=(4, 1), pady=1, sticky="nsew")
         self.widgets.append(self.lbl_total)
 
-        self.lbl_overtime_day = tk.Label(self.table, text="0", anchor="e", bg=zebra_bg)
+        self.lbl_overtime_day = tk.Label(self.table, text="0", anchor="e", bg=self.base_bg)
         self.lbl_overtime_day.grid(row=self.row, column=35, padx=(4, 1), pady=1, sticky="nsew")
         self.widgets.append(self.lbl_overtime_day)
 
-        self.lbl_overtime_night = tk.Label(self.table, text="0", anchor="e", bg=zebra_bg)
+        self.lbl_overtime_night = tk.Label(self.table, text="0", anchor="e", bg=self.base_bg)
         self.lbl_overtime_night.grid(row=self.row, column=36, padx=(4, 1), pady=1, sticky="nsew")
         self.widgets.append(self.lbl_overtime_night)
 
@@ -1193,6 +1242,36 @@ class RowWidget:
 
     def delete_row(self):
         self.on_delete(self)
+
+    # --- Выделение строки ---
+
+    def set_selected(self, on: bool):
+        """Включить/выключить выделение строки (подсветка всех ячеек)."""
+        self._selected = bool(on)
+        bg = self.SELECT_BG if self._selected else self.base_bg
+
+        # Меняем фон у lbl_fio, lbl_tbn, итогов
+        for lbl in (self.lbl_fio, self.lbl_tbn,
+                    self.lbl_days, self.lbl_total,
+                    self.lbl_overtime_day, self.lbl_overtime_night):
+            try:
+                lbl.configure(bg=bg)
+            except Exception:
+                pass
+
+        # Для ячеек дней меняем только normal‑фон; disabledbackground
+        # остаётся для "лишних" дней месяца
+        for i, e in enumerate(self.day_entries, start=1):
+            try:
+                # если ячейка disabled — не трогаем
+                if str(e.cget("state")) == "disabled":
+                    continue
+                e.configure(bg=bg)
+            except Exception:
+                pass
+
+    def is_selected(self) -> bool:
+        return self._selected
         
 # ================= СТРАНИЦА ТАБЕЛЕЙ (ПОЛНАЯ ОПТИМИЗИРОВАННАЯ ВЕРСИЯ) =================
 
@@ -1242,6 +1321,7 @@ class TimesheetPage(tk.Frame):
         self.current_page = 1
         self.page_size = tk.IntVar(value=50) # Количество строк на странице
         self._suspend_sync = False # Флаг для предотвращения синхронизации при массовых операциях
+        self.selected_indices: set[int] = set()
         # ---------------------------------------------
 
         self._build_ui()
@@ -1339,12 +1419,13 @@ class TimesheetPage(tk.Frame):
         ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
         ttk.Button(btns, text="Добавить подразделение", command=self.add_department_all).grid(row=0, column=1, padx=4)
         ttk.Button(btns, text="Выбрать из подразделения…", command=self.add_department_partial).grid(row=0, column=2, padx=4)
-        ttk.Button(btns, text="5/2 всем", command=self.fill_52_all).grid(row=0, column=3, padx=4)
-        ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=4, padx=4)
-        ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=5, padx=4)
-        ttk.Button(btns, text="Загрузить из Excel", command=self.import_from_excel).grid(row=0, column=6, padx=4)
-        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=7, padx=4)
-        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=8, padx=4)
+        ttk.Button(btns, text="Время (выбранные)", command=self.fill_time_selected).grid(row=0, column=3, padx=4)
+        ttk.Button(btns, text="Снять выделение", command=self.clear_selection).grid(row=0, column=4, padx=4)
+        ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=5, padx=4)
+        ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=6, padx=4)
+        ttk.Button(btns, text="Загрузить из Excel", command=self.import_from_excel).grid(row=0, column=7, padx=4)
+        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=8, padx=4)
+        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=9, padx=4)
 
         # --- Основной контейнер (без изменений) ---
         main_frame = tk.Frame(self)
@@ -1432,8 +1513,6 @@ class TimesheetPage(tk.Frame):
             try:
                 self.lbl_object_total.config(text=self.lbl_object_total.cget("text") + " (режим просмотра)")
             except Exception: pass
-
-    # --- ВСЕ СЛЕДУЮЩИЕ МЕТОДЫ ИДУТ ВНУТРИ КЛАССА TimesheetPage ---
 
     def _build_header_row(self, parent):
         hb = self.HEADER_BG
@@ -1592,18 +1671,64 @@ class TimesheetPage(tk.Frame):
         # 4. Создаём виджеты только для этого среза
         for i in range(start, end):
             rec = self.model_rows[i]
-            row_widget = RowWidget(self.table, len(self.rows) + 1, rec["fio"], rec["tbn"], self.get_year_month, self.delete_row)
+            row_widget = RowWidget(
+                self.table,
+                len(self.rows) + 1,
+                rec["fio"],
+                rec["tbn"],
+                self.get_year_month,
+                self.delete_row,
+            )
             row_widget.set_day_font(self.DAY_ENTRY_FONT)
-            
+
             row_widget.update_days_enabled(y, m)
             row_widget.set_hours(rec.get("hours") or [None] * 31)
-            
+
+            # --- бинды для клика по ФИО (и, по желанию, по таб.№) ---
+            # ЛКМ по ФИО -> переключение выделения этой строки
+            def _make_on_click(local_i: int, rw: RowWidget):
+                def _handler(event):
+                    self._on_row_click(local_i, rw)
+                return _handler
+
+            local_index = len(self.rows)  # позиция в списке rows до добавления
+            row_widget.lbl_fio.bind("<Button-1>", _make_on_click(local_index, row_widget))
+            # Можно добавить и на lbl_tbn, если удобно:
+            row_widget.lbl_tbn.bind("<Button-1>", _make_on_click(local_index, row_widget))
+
+            # --- восстановить выделение, если этот глобальный индекс уже был выбран ---
+            global_index = i
+            if global_index in self.selected_indices:
+                row_widget.set_selected(True)
+            else:
+                row_widget.set_selected(False)
+
             self.rows.append(row_widget)
 
         # 5. Обновляем UI
         self.after(30, self._on_scroll_frame_configure)
         self._update_page_label()
         self._recalc_object_total()
+
+    def _on_row_click(self, local_index: int, row_widget: RowWidget):
+        """Обработчик клика по ФИО/Таб.№ — переключает выделение строки."""
+        if self.read_only:
+            return
+
+        # Посчитать глобальный индекс в model_rows
+        sz = max(1, self.page_size.get())
+        start = (self.current_page - 1) * sz
+        global_index = start + local_index
+        if not (0 <= global_index < len(self.model_rows)):
+            return
+
+        # Переключаем флаг в selected_indices
+        if global_index in self.selected_indices:
+            self.selected_indices.remove(global_index)
+            row_widget.set_selected(False)
+        else:
+            self.selected_indices.add(global_index)
+            row_widget.set_selected(True)
     
     def _recalc_object_total(self):
         """Пересчитывает общие итоги по ВСЕЙ модели, а не только по видимой странице."""
@@ -1826,6 +1951,93 @@ class TimesheetPage(tk.Frame):
         else:
             messagebox.showinfo("Проставить часы", f"Часы '{hours_val_str}' проставлены в день {day} всем сотрудникам.")
 
+    def _iter_selected_indices_on_current_page(self) -> List[Tuple[int, RowWidget]]:
+        """
+        Возвращает список (global_index, row_widget) для всех выделенных сотрудников,
+        которые находятся на текущей странице.
+        """
+        res = []
+        if not self.rows or not self.selected_indices:
+            return res
+
+        sz = max(1, self.page_size.get())
+        start = (self.current_page - 1) * sz
+
+        for local_idx, rw in enumerate(self.rows):
+            global_idx = start + local_idx
+            if global_idx in self.selected_indices:
+                res.append((global_idx, rw))
+        return res
+
+    def fill_time_selected(self):
+        """
+        Диалог 'Время' для выделенных сотрудников:
+        - спрашиваем строку часов;
+        - проставляем её во все дни месяца для выделенных строк;
+        - если строка пустая — очищаем все дни.
+        """
+        if self.read_only:
+            return
+
+        if not self.model_rows:
+            messagebox.showinfo("Время для выделенных", "Список сотрудников пуст.")
+            return
+
+        if not self.selected_indices:
+            messagebox.showinfo("Время для выделенных", "Не выбрано ни одного сотрудника.")
+            return
+
+        # Диалог выбора значения
+        dlg = TimeForSelectedDialog(self)
+        if dlg.result is None:
+            return  # Отмена
+
+        value_str = dlg.result  # может быть None (если пусто) или строка, например "8,25"
+        y, m = self.get_year_month()
+        max_day = month_days(y, m)
+
+        # Синхронизируем видимые данные с моделью
+        self._sync_visible_to_model()
+
+        # Проставляем в модели
+        for global_idx in sorted(self.selected_indices):
+            if not (0 <= global_idx < len(self.model_rows)):
+                continue
+            rec = self.model_rows[global_idx]
+            hours_list = rec.get("hours") or [None] * 31
+            if len(hours_list) < 31:
+                hours_list = (hours_list + [None] * 31)[:31]
+
+            for i in range(max_day):  # только реальные дни месяца
+                hours_list[i] = value_str
+
+            rec["hours"] = hours_list
+
+        # Перерисовываем текущую страницу
+        self._render_page(self.current_page)
+
+        if value_str is None:
+            messagebox.showinfo(
+                "Время для выделенных",
+                f"Все дни (1–{max_day}) очищены у {len(self.selected_indices)} выделенных сотрудников.",
+            )
+        else:
+            messagebox.showinfo(
+                "Время для выделенных",
+                f"Значение '{value_str}' проставлено во все дни (1–{max_day}) "
+                f"для {len(self.selected_indices)} выделенных сотрудников.",
+            )
+
+    def clear_selection(self):
+        """Снять выделение со всех сотрудников (и обновить подсветку на текущей странице)."""
+        if not self.selected_indices:
+            return
+
+        self.selected_indices.clear()
+        # Обновляем подсветку на текущей странице
+        for rw in self.rows:
+            rw.set_selected(False)
+
     def delete_row(self, roww: RowWidget):
         """Удаляет строку из модели и перерисовывает страницу."""
         if self.read_only: return
@@ -1851,6 +2063,17 @@ class TimesheetPage(tk.Frame):
         # 4. Удаляем из модели
         if 0 <= global_idx < len(self.model_rows):
             del self.model_rows[global_idx]
+
+            # Сдвигаем/очищаем выделение
+            new_selected = set()
+            for idx in self.selected_indices:
+                if idx == global_idx:
+                    continue  # удалённая строка
+                elif idx > global_idx:
+                    new_selected.add(idx - 1)
+                else:
+                    new_selected.add(idx)
+            self.selected_indices = new_selected
 
         # 5. Перерисовываем страницу. Если она опустела, перейдем на предыдущую
         if self.current_page > self._page_count():
@@ -1930,6 +2153,7 @@ class TimesheetPage(tk.Frame):
     def _load_existing_rows(self):
         """Загружает строки из БД в модель и рендерит первую страницу."""
         self.model_rows.clear()
+        self.selected_indices.clear()
         
         addr, oid = self.cmb_address.get().strip(), self.cmb_object_id.get().strip()
         y, m = self.get_year_month()
