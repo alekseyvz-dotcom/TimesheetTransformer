@@ -2387,7 +2387,9 @@ class TimesheetPage(tk.Frame):
             replace_mode = messagebox.askyesno("Импорт", "Заменить текущий список?") if self.model_rows else True
             
             self._sync_visible_to_model()
-            if replace_mode: self.model_rows.clear()
+            if replace_mode: 
+                self.model_rows.clear()
+                self.selected_indices.clear()
             
             existing = {(r["fio"].lower(), r["tbn"]) for r in self.model_rows}
             added = 0
@@ -2443,7 +2445,9 @@ class TimesheetPage(tk.Frame):
             found_uniq = list(uniq.values())
             
             self._sync_visible_to_model()
-            if mode == "replace": self.model_rows.clear()
+            if mode == "replace": 
+                self.model_rows.clear()
+                self.selected_indices.clear()
             
             existing = {(r["fio"].lower(), r["tbn"]) for r in self.model_rows}
             added = 0
