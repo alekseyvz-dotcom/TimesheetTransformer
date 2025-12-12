@@ -960,51 +960,6 @@ class HoursFillDialog(simpledialog.Dialog):
             "clear": self._clear,
         }
 
-class TimeForSelectedDialog(simpledialog.Dialog):
-    """
-    Диалог: ввести значение часов, которое будет проставлено
-    (как строка, например '8,25', '1/7', '8/2(1/1)').
-    """
-    def __init__(self, parent):
-        self.result = None
-        super().__init__(parent, title="Время для выделенных сотрудников")
-
-    def body(self, master):
-        tk.Label(master, text="Введите значение часов (как в ячейках табеля):")\
-            .grid(row=0, column=0, sticky="w", pady=(4, 2))
-
-        self.ent_value = ttk.Entry(master, width=20)
-        self.ent_value.grid(row=1, column=0, sticky="w")
-        self.ent_value.insert(0, "8,25")  # можно любое типовое значение
-
-        tk.Label(master, text="Примеры: 8 | 8,25 | 8:30 | 1/7 | 8/2(1/1)")\
-            .grid(row=2, column=0, sticky="w", pady=(6, 0))
-
-        return self.ent_value
-
-    def validate(self):
-        val = self.ent_value.get().strip()
-        if not val:
-            # разрешим пустое значение = очистить ячейки
-            self._value = ""
-            return True
-
-        # Проверим, что общее количество часов парсится (как в табеле)
-        hv = parse_hours_value(val)
-        if hv is None or hv < 0:
-            messagebox.showwarning(
-                "Время для выделенных",
-                "Введите корректное значение часов (например, 8, 8:30, 1/7, 8/2(1/1)).",
-            )
-            return False
-
-        self._value = val
-        return True
-
-    def apply(self):
-        # Пустая строка — значит очистка
-        self.result = (self._value or None)
-
 
 class AutoCompleteCombobox(ttk.Combobox):
     def __init__(self, master=None, **kw):
@@ -1032,6 +987,124 @@ class AutoCompleteCombobox(ttk.Combobox):
             self["values"] = self._all_values
             return
         self["values"] = [x for x in self._all_values if typed.lower() in x.lower()]
+
+class TimeForSelectedDialog(simpledialog.Dialog):
+    """
+    Диалог: ввести значение часов и диапазон дней,
+    которые будут проставлены у выделенных сотрудников.
+    """
+    def __init__(self, parent, max_day: int):
+        self.max_day = max_day
+        self.result = None
+        super().__init__(parent, title="Время для выделенных сотрудников")
+
+    def body(self, master):
+        tk.Label(master, text=f"В текущем месяце дней: {self.max_day}")\
+            .grid(row=0, column=0, columnspan=4, sticky="w", pady=(4, 4))
+
+        # Режим: один день или диапазон
+        self.var_mode = tk.StringVar(value="single")
+        rb_single = ttk.Radiobutton(master, text="Один день", value="single", variable=self.var_mode)
+        rb_range = ttk.Radiobutton(master, text="Диапазон дней", value="range", variable=self.var_mode)
+        rb_single.grid(row=1, column=0, sticky="w", pady=(2, 2), columnspan=2)
+        rb_range.grid(row=1, column=2, sticky="w", pady=(2, 2), columnspan=2)
+
+        # Один день
+        tk.Label(master, text="День:").grid(row=2, column=0, sticky="e")
+        self.spn_day = tk.Spinbox(master, from_=1, to=31, width=4)
+        self.spn_day.grid(row=2, column=1, sticky="w")
+        self.spn_day.delete(0, "end")
+        self.spn_day.insert(0, "1")
+
+        # Диапазон
+        tk.Label(master, text="С:").grid(row=3, column=0, sticky="e")
+        self.spn_from = tk.Spinbox(master, from_=1, to=31, width=4)
+        self.spn_from.grid(row=3, column=1, sticky="w")
+        self.spn_from.delete(0, "end")
+        self.spn_from.insert(0, "1")
+
+        tk.Label(master, text="по:").grid(row=3, column=2, sticky="e")
+        self.spn_to = tk.Spinbox(master, from_=1, to=31, width=4)
+        self.spn_to.grid(row=3, column=3, sticky="w")
+        self.spn_to.delete(0, "end")
+        self.spn_to.insert(0, str(self.max_day))
+
+        # Значение
+        tk.Label(master, text="Часы:").grid(row=4, column=0, sticky="e", pady=(6, 0))
+        self.ent_value = ttk.Entry(master, width=20)
+        self.ent_value.grid(row=4, column=1, columnspan=3, sticky="w", pady=(6, 0))
+        self.ent_value.insert(0, "8,25")  # типовое значение
+
+        tk.Label(master, text="Примеры: 8 | 8,25 | 8:30 | 1/7 | 8/2(1/1)\n"
+                              "Пусто — очистить выбранные дни")\
+            .grid(row=5, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+        return self.ent_value
+
+    def validate(self):
+        mode = self.var_mode.get()
+
+        # Проверяем дни
+        try:
+            d_single = int(self.spn_day.get())
+            d_from = int(self.spn_from.get())
+            d_to = int(self.spn_to.get())
+        except Exception:
+            messagebox.showwarning("Время для выделенных", "Дни должны быть целыми числами.")
+            return False
+
+        if not (1 <= d_single <= self.max_day):
+            messagebox.showwarning(
+                "Время для выделенных",
+                f"Один день должен быть от 1 до {self.max_day}.",
+            )
+            return False
+
+        if not (1 <= d_from <= self.max_day) or not (1 <= d_to <= self.max_day):
+            messagebox.showwarning(
+                "Время для выделенных",
+                f"Диапазон дней должен быть в пределах 1–{self.max_day}.",
+            )
+            return False
+
+        if mode == "range" and d_from > d_to:
+            messagebox.showwarning(
+                "Время для выделенных",
+                "Начальный день диапазона не может быть больше конечного.",
+            )
+            return False
+
+        self._mode = mode
+        if mode == "single":
+            self._from = self._to = d_single
+        else:
+            self._from, self._to = d_from, d_to
+
+        # Проверяем значение часов
+        val = self.ent_value.get().strip()
+        if not val:
+            # Пустое — разрешаем (значит очистить)
+            self._value = None
+            return True
+
+        hv = parse_hours_value(val)
+        if hv is None or hv < 0:
+            messagebox.showwarning(
+                "Время для выделенных",
+                "Введите корректное значение часов (например, 8, 8:30, 1/7, 8/2(1/1)).",
+            )
+            return False
+
+        self._value = val
+        return True
+
+    def apply(self):
+        # result: словарь с диапазоном и строковым значением (или None)
+        self.result = {
+            "from": self._from,
+            "to": self._to,
+            "value": self._value,  # None => очистка
+        }
 
 
 class RowWidget:
@@ -1246,7 +1319,7 @@ class RowWidget:
     # --- Выделение строки ---
 
     def set_selected(self, on: bool):
-        """Включить/выключить выделение строки (подсветка всех ячеек)."""
+        """Включить/выключить выделение строки (подсветка ФИО и итогов)."""
         self._selected = bool(on)
         bg = self.SELECT_BG if self._selected else self.base_bg
 
@@ -1256,17 +1329,6 @@ class RowWidget:
                     self.lbl_overtime_day, self.lbl_overtime_night):
             try:
                 lbl.configure(bg=bg)
-            except Exception:
-                pass
-
-        # Для ячеек дней меняем только normal‑фон; disabledbackground
-        # остаётся для "лишних" дней месяца
-        for i, e in enumerate(self.day_entries, start=1):
-            try:
-                # если ячейка disabled — не трогаем
-                if str(e.cget("state")) == "disabled":
-                    continue
-                e.configure(bg=bg)
             except Exception:
                 pass
 
@@ -1895,27 +1957,6 @@ class TimesheetPage(tk.Frame):
         self.ent_tbn.delete(0, "end"); self.ent_tbn.insert(0, tbn)
         self.pos_var.set(pos)
 
-    def fill_52_all(self):
-        """Заполняет часы для всех в модели."""
-        if self.read_only: return
-        if not self.model_rows:
-            messagebox.showinfo("5/2 всем", "Список сотрудников пуст.")
-            return
-        
-        y, m = self.get_year_month()
-        days = month_days(y, m)
-        
-        for rec in self.model_rows:
-            hrs = [None] * 31
-            for d in range(1, days + 1):
-                wd = datetime(y, m, d).weekday()
-                if wd < 4: hrs[d - 1] = "8,25"
-                elif wd == 4: hrs[d - 1] = "7"
-            rec["hours"] = hrs  
-        # Перерисовываем текущую страницу, чтобы увидеть изменения
-        self._render_page(self.current_page)
-        messagebox.showinfo("5/2 всем", "Режим 5/2 установлен всем сотрудникам.")
-
     def fill_hours_all(self):
         """Проставляет часы для всех в модели."""
         if self.read_only: return
@@ -1972,9 +2013,9 @@ class TimesheetPage(tk.Frame):
     def fill_time_selected(self):
         """
         Диалог 'Время' для выделенных сотрудников:
-        - спрашиваем строку часов;
-        - проставляем её во все дни месяца для выделенных строк;
-        - если строка пустая — очищаем все дни.
+        - спрашиваем строку часов и диапазон дней;
+        - проставляем её только в эти дни для выделенных строк;
+        - если значение пустое — очищаем эти дни.
         """
         if self.read_only:
             return
@@ -1987,14 +2028,17 @@ class TimesheetPage(tk.Frame):
             messagebox.showinfo("Время для выделенных", "Не выбрано ни одного сотрудника.")
             return
 
-        # Диалог выбора значения
-        dlg = TimeForSelectedDialog(self)
+        y, m = self.get_year_month()
+        max_day = month_days(y, m)
+
+        # Диалог
+        dlg = TimeForSelectedDialog(self, max_day)
         if dlg.result is None:
             return  # Отмена
 
-        value_str = dlg.result  # может быть None (если пусто) или строка, например "8,25"
-        y, m = self.get_year_month()
-        max_day = month_days(y, m)
+        day_from = dlg.result["from"]
+        day_to = dlg.result["to"]
+        value_str = dlg.result["value"]  # None => очистка
 
         # Синхронизируем видимые данные с моделью
         self._sync_visible_to_model()
@@ -2008,8 +2052,9 @@ class TimesheetPage(tk.Frame):
             if len(hours_list) < 31:
                 hours_list = (hours_list + [None] * 31)[:31]
 
-            for i in range(max_day):  # только реальные дни месяца
-                hours_list[i] = value_str
+            for d in range(day_from, day_to + 1):
+                idx = d - 1
+                hours_list[idx] = value_str
 
             rec["hours"] = hours_list
 
@@ -2017,16 +2062,21 @@ class TimesheetPage(tk.Frame):
         self._render_page(self.current_page)
 
         if value_str is None:
-            messagebox.showinfo(
-                "Время для выделенных",
-                f"Все дни (1–{max_day}) очищены у {len(self.selected_indices)} выделенных сотрудников.",
-            )
+            msg_val = "очищены"
         else:
-            messagebox.showinfo(
-                "Время для выделенных",
-                f"Значение '{value_str}' проставлено во все дни (1–{max_day}) "
-                f"для {len(self.selected_indices)} выделенных сотрудников.",
-            )
+            msg_val = f"установлены в '{value_str}'"
+
+        if day_from == day_to:
+            msg_days = f"для дня {day_from}"
+        else:
+            msg_days = f"для дней {day_from}–{day_to}"
+
+        messagebox.showinfo(
+            "Время для выделенных",
+            f"Значения {msg_val} {msg_days} "
+            f"у {len(self.selected_indices)} выделенных сотрудников.",
+        )
+
 
     def clear_selection(self):
         """Снять выделение со всех сотрудников (и обновить подсветку на текущей странице)."""
