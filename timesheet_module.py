@@ -15,6 +15,10 @@ from openpyxl.utils import get_column_letter
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 
+def exe_dir() -> Path:
+    if getattr(sys, "frozen", False): return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
 # ------------------------- Логика работы с пулом соединений -------------------------
 db_connection_pool = None
 USING_SHARED_POOL = False
@@ -440,10 +444,6 @@ def load_objects_short_for_timesheet() -> List[Tuple[str, str, str]]:
             release_db_connection(conn)
 
 # ------------------------- Утилиты (перенесены из main_app.py) -------------------------
-
-def exe_dir() -> Path:
-    if getattr(sys, "frozen", False): return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent
 
 def month_days(year: int, month: int) -> int: return calendar.monthrange(year, month)[1]
 
