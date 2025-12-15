@@ -408,7 +408,7 @@ def load_objects_from_db() -> List[Tuple[str, str]]:
     finally:
         if conn: release_db_connection(conn)
 
-def load_objects_full_from_db() -> List[Tuple[str, str, str]]:
+def load_objects_short_for_timesheet() -> List[Tuple[str, str, str]]:
     """
     Возвращает список объектов (excel_id, address, short_name).
     """
@@ -1501,7 +1501,7 @@ class TimesheetPage(tk.Frame):
         # сотрудники как было
         employees = load_employees_from_db()
         # объекты — полный список с short_name
-        objects_full = load_objects_full_from_db()  # (excel_id, address, short_name)
+        objects_full = load_objects_short_for_timesheet()  # (excel_id, address, short_name)
 
         self.employees = employees
         self.objects_full = objects_full  # сохраняем
@@ -1559,7 +1559,7 @@ class TimesheetPage(tk.Frame):
         self.cmb_address.set_completion_list(self.address_options)
         self.cmb_address.grid(row=1, column=5, sticky="w", pady=(8, 0))
         self.cmb_address.bind("<<ComboboxSelected>>", self._on_address_select)
-        self.cmb_address.bind("<FocusOut>", self._on_address_select)
+        # self.cmb_address.bind("<FocusOut>", self._on_address_select)
         self.cmb_address.bind("<Return>", lambda e: self._on_address_select())
         # self.cmb_address.bind("<KeyRelease>", lambda e: self._on_address_change(), add="+")
 
