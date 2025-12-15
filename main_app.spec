@@ -23,6 +23,7 @@ a = Analysis(
         ('objects.py', '.'),
         ('assets_logo.py', '.'),
         ('timesheet_transformer.py', '.'),
+        ('timesheet_compare.py', '.'),
         ('employees.py', '.'),
         ('BudgetAnalyzer.py', '.'),
         ('timesheet_module.py', '.'),
@@ -30,7 +31,7 @@ a = Analysis(
     ] + pandas_datas + psycopg2_datas, # Добавляем данные библиотек
     hiddenimports=[
         'settings_manager', 'analytics_module.py', 'meals_module', 'SpecialOrders', 'objects',
-        'assets_logo', 'timesheet_transformer', 'employees.py', 'BudgetAnalyzer', 'timesheet_modyle',
+        'assets_logo', 'timesheet_transformer', 'timesheet_compare.py', 'employees.py', 'BudgetAnalyzer', 'timesheet_modyle',
         'psycopg2', 'psycopg2.extras',
         'pandas', 'openpyxl', 'PIL'
     ] + collect_submodules('pandas'),
