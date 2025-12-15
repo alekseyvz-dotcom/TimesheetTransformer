@@ -41,6 +41,7 @@ class TimesheetComparePage(tk.Frame):
         self._obj_rows: List[Dict[str, Any]] = []  # строки объектного табеля
         self._hr_rows: List[Dict[str, Any]] = []   # строки кадрового табеля
         self._merged_rows: List[Dict[str, Any]] = []
+        self._agg_headers: List[Dict[str, Any]] = []
 
         self._build_ui()
         self._load_headers()
@@ -114,7 +115,7 @@ class TimesheetComparePage(tk.Frame):
         headers_frame = tk.LabelFrame(self, text="Объектные табели подразделений")
         headers_frame.pack(fill="x", padx=8, pady=(4, 4))
 
-        cols = ("year", "month", "object", "department", "user")
+        cols = ("year", "month", "department")
         self.tree_headers = ttk.Treeview(
             headers_frame,
             columns=cols,
@@ -125,15 +126,11 @@ class TimesheetComparePage(tk.Frame):
 
         self.tree_headers.heading("year", text="Год")
         self.tree_headers.heading("month", text="Месяц")
-        self.tree_headers.heading("object", text="Объект")
         self.tree_headers.heading("department", text="Подразделение")
-        self.tree_headers.heading("user", text="Пользователь")
 
-        self.tree_headers.column("year", width=60, anchor="center")
-        self.tree_headers.column("month", width=90, anchor="center")
-        self.tree_headers.column("object", width=260, anchor="w")
-        self.tree_headers.column("department", width=180, anchor="w")
-        self.tree_headers.column("user", width=150, anchor="w")
+        self.tree_headers.column("year", width=80, anchor="center")
+        self.tree_headers.column("month", width=120, anchor="center")
+        self.tree_headers.column("department", width=260, anchor="w")
 
         vsb_h = ttk.Scrollbar(headers_frame, orient="vertical", command=self.tree_headers.yview)
         self.tree_headers.configure(yscrollcommand=vsb_h.set)
@@ -237,39 +234,55 @@ class TimesheetComparePage(tk.Frame):
         # Заполняем комбобокс подразделений реальными значениями
         self._fill_departments_combo(headers)
 
+        # Агрегируем заголовки по (year, month, department)
+        agg_map: Dict[Tuple[int, int, str], Dict[str, Any]] = {}
         for h in headers:
-            y = h["year"]
-            m = h["month"]
-            addr = h["object_addr"] or ""
-            obj_id = h.get("object_id") or ""
-            dep_val = h.get("department") or ""
-            user = h.get("full_name") or h.get("username") or ""
+            y = int(h["year"])
+            m = int(h["month"])
+            dep_val = (h.get("department") or "").strip()
+            key = (y, m, dep_val)
+            if key not in agg_map:
+                agg_map[key] = {
+                    "year": y,
+                    "month": m,
+                    "department": dep_val,
+                    "headers": [],  # список исходных заголовков timesheet_headers
+                }
+            agg_map[key]["headers"].append(h)
 
+        self._agg_headers = list(agg_map.values())
+
+        # Заполняем таблицу агрегированными строками
+        for agg in sorted(self._agg_headers, key=lambda a: (a["year"], a["month"], a["department"]), reverse=True):
+            y = agg["year"]
+            m = agg["month"]
+            dep_val = agg["department"]
             m_ru = month_name_ru(m) if 1 <= m <= 12 else str(m)
-            obj_display = addr
-            if obj_id:
-                obj_display = f"[{obj_id}] {addr}"
 
-            iid = str(h["id"])
+            # iid делаем строкой "year:month:dep", чтобы потом по ней искать
+            iid = f"{y}:{m}:{dep_val}"
             self.tree_headers.insert(
                 "",
                 "end",
                 iid=iid,
-                values=(y, m_ru, obj_display, dep_val, user),
+                values=(y, m_ru, dep_val),
             )
 
-    def _get_selected_header(self) -> Optional[Dict[str, Any]]:
+    def _get_selected_agg(self) -> Optional[Dict[str, Any]]:
         sel = self.tree_headers.selection()
         if not sel:
             return None
-        iid = sel[0]
+        iid = sel[0]  # формат "year:month:department"
         try:
-            hid = int(iid)
+            y_str, m_str, dep_val = iid.split(":", 2)
+            y = int(y_str)
+            m = int(m_str)
         except Exception:
             return None
-        for h in self._headers:
-            if int(h["id"]) == hid:
-                return h
+
+        for agg in self._agg_headers:
+            if agg["year"] == y and agg["month"] == m and agg["department"] == dep_val:
+                return agg
         return None
 
     # ---------- Кадровый табель (файл после конвертера 1С) ----------
@@ -342,40 +355,54 @@ class TimesheetComparePage(tk.Frame):
     # ---------- Выбор объектного табеля и сбор данных ----------
 
     def _on_select_header(self):
-        h = self._get_selected_header()
-        if not h:
-            messagebox.showwarning("Сравнение табелей",
-                                   "Выберите табель из списка.",
-                                   parent=self)
+        agg = self._get_selected_agg()
+        if not agg:
+            messagebox.showwarning(
+                "Сравнение табелей",
+                "Выберите строку (год/месяц/подразделение).",
+                parent=self,
+            )
             return
 
-        header_id = int(h["id"])
-        try:
-            rows = load_timesheet_rows_by_header_id(header_id)
-        except Exception as e:
-            import logging
-            logging.exception("Ошибка загрузки строк табеля для сравнения")
-            messagebox.showerror("Сравнение табелей",
-                                 f"Ошибка загрузки строк табеля:\n{e}",
-                                 parent=self)
+        headers = agg.get("headers") or []
+        if not headers:
+            messagebox.showwarning(
+                "Сравнение табелей",
+                "Не найдены табели для выбранного подразделения.",
+                parent=self,
+            )
             return
 
         obj_rows: List[Dict[str, Any]] = []
-        for r in rows:
-            fio = (r["fio"] or "").strip()
-            tbn = (r["tbn"] or "").strip()
-            hours_raw = r.get("hours_raw") or [None] * 31
-            days: List[Optional[str]] = []
-            for v in hours_raw[:31]:
-                if v is None or v == "":
-                    days.append(None)
-                else:
-                    days.append(str(v).strip())
-            obj_rows.append({"fio": fio, "tbn": tbn, "days": days})
+
+        try:
+            for h in headers:
+                header_id = int(h["id"])
+                rows = load_timesheet_rows_by_header_id(header_id)
+                for r in rows:
+                    fio = (r["fio"] or "").strip()
+                    tbn = (r["tbn"] or "").strip()
+                    hours_raw = r.get("hours_raw") or [None] * 31
+                    days: List[Optional[str]] = []
+                    for v in hours_raw[:31]:
+                        if v is None or v == "":
+                            days.append(None)
+                        else:
+                            days.append(str(v).strip())
+                    obj_rows.append({"fio": fio, "tbn": tbn, "days": days})
+        except Exception as e:
+            import logging
+            logging.exception("Ошибка загрузки строк табелей для сравнения")
+            messagebox.showerror(
+                "Сравнение табелей",
+                f"Ошибка загрузки строк табелей:\n{e}",
+                parent=self,
+            )
+            return
 
         self._obj_rows = obj_rows
 
-        y, m = h["year"], h["month"]
+        y, m = agg["year"], agg["month"]
         days_in_m = month_days(y, m)
         self._configure_compare_columns(days_in_month=days_in_m)
 
