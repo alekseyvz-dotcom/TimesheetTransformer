@@ -1465,6 +1465,7 @@ class TimesheetPage(tk.Frame):
         self.owner_user_id: Optional[int] = owner_user_id
         self._init_object_id = init_object_id
         self._init_object_addr = init_object_addr
+        self._suppress_object_id_dialog = False
         self._init_department = init_department
         self._init_year = init_year
         self._init_month = init_month
@@ -1668,9 +1669,18 @@ class TimesheetPage(tk.Frame):
             self.cmb_month.current(self._init_month - 1)
         if self._init_object_addr and self._init_object_addr in self.address_options:
             self.cmb_address.set(self._init_object_addr)
+
+        # Если объектный табель открыт из "Моих табелей" или "Реестра",
+        # у нас уже есть конкретный object_id — не надо спрашивать пользователя.
         if self._init_object_id:
-            self._on_address_change()
-            if self._init_object_id in (self.cmb_object_id.cget("values") or []):
+            try:
+                self._suppress_object_id_dialog = True
+                self._on_address_change()  # заполнит список IDs по адресу
+            finally:
+                self._suppress_object_id_dialog = False
+            # На всякий случай ещё раз выставим ID, если он есть в списке
+            ids = self.cmb_object_id.cget("values") or []
+            if self._init_object_id in ids:
                 self.cmb_object_id.set(self._init_object_id)
         
         self._on_department_select()
@@ -1770,7 +1780,6 @@ class TimesheetPage(tk.Frame):
         ]
 
         if not objects_for_addr:
-            # как раньше — просто чистим
             self.cmb_object_id.config(state="normal", values=[])
             self.cmb_object_id.set("")
             return
@@ -1778,7 +1787,18 @@ class TimesheetPage(tk.Frame):
         # Собираем список excel_id
         ids = sorted({code for (code, a, short_name) in objects_for_addr if code})
 
-        # Если только один объект с ненулевым excel_id — просто подставим
+        # Если мы открываем существующий табель и объект уже известен —
+        # не показываем диалог, просто выставляем ID, если он в списке.
+        if self._suppress_object_id_dialog and self._init_object_id:
+            self.cmb_object_id.config(state="readonly", values=ids)
+            if self._init_object_id in ids:
+                self.cmb_object_id.set(self._init_object_id)
+            else:
+                # если по какой‑то причине ID нет в списке, просто очищаем
+                self.cmb_object_id.set("")
+            return
+
+        # Обычное поведение при создании/ручном выборе адреса
         if len(ids) == 1:
             self.cmb_object_id.config(state="readonly", values=ids)
             self.cmb_object_id.set(ids[0])
@@ -1790,7 +1810,6 @@ class TimesheetPage(tk.Frame):
 
         selected_id = dlg.result
         if selected_id:
-            # выбран excel_id
             self.cmb_object_id.config(state="readonly", values=ids)
             if selected_id not in ids:
                 ids.append(selected_id)
@@ -1798,8 +1817,6 @@ class TimesheetPage(tk.Frame):
                 self.cmb_object_id.config(values=ids)
             self.cmb_object_id.set(selected_id)
         else:
-            # отмена — можно либо очистить поле, либо оставить старое значение
-            # Сейчас просто обнулим:
             self.cmb_object_id.config(state="normal", values=[])
             self.cmb_object_id.set("")
 
