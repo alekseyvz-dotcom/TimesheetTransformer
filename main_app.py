@@ -60,10 +60,10 @@ employees_module = None
 timesheet_compare = None
 
 def perform_heavy_imports():
-    """Функция для загрузки всех тяжелых модулей приложения."""
     global BudgetAnalyzer, _assets_logo, _LOGO_BASE64, SpecialOrders, \
            meals_module, objects, Settings, timesheet_module, \
-           analytics_module, timesheet_transformer, employees_module, timesheet_compare
+           analytics_module, timesheet_transformer, employees_module, \
+           timesheet_compare
            
     import BudgetAnalyzer
     import assets_logo as _assets_logo
@@ -75,6 +75,7 @@ def perform_heavy_imports():
     import timesheet_module 
     import analytics_module
     import employees as employees_module
+    import timesheet_compare
 
     try:
         import timesheet_transformer
