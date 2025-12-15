@@ -604,6 +604,7 @@ class SelectObjectIdDialog(tk.Toplevel):
     """
     def __init__(self, parent, objects_for_addr: List[Tuple[str, str, str]], addr: str):
         super().__init__(parent)
+        print("DEBUG in dialog objects_for_addr:", objects_for_addr)
         self.title("Выбор ID объекта")
         self.resizable(True, True)
         self.grab_set()
@@ -1502,6 +1503,7 @@ class TimesheetPage(tk.Frame):
         employees = load_employees_from_db()
         # объекты — полный список с short_name
         objects_full = load_objects_short_for_timesheet()  # (excel_id, address, short_name)
+        print("DEBUG objects_full example:", self.objects_full[:10])
 
         self.employees = employees
         self.objects_full = objects_full  # сохраняем
@@ -1761,6 +1763,7 @@ class TimesheetPage(tk.Frame):
 
     def _on_address_change(self, *_):
         addr = self.cmb_address.get().strip()
+        print("DEBUG addr from combobox:", repr(addr))
 
         # Фильтруем объекты по адресу
         objects_for_addr = [
@@ -1768,6 +1771,7 @@ class TimesheetPage(tk.Frame):
             for (code, a, short_name) in getattr(self, "objects_full", [])
             if a == addr
         ]
+        print("DEBUG objects_for_addr:", objects_for_addr)
 
         if not objects_for_addr:
             # как раньше — просто чистим
