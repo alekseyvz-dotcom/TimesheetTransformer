@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from openpyxl import load_workbook
+import timesheet_transformer
 
 # Эти функции и типы берём из модуля табеля
 from timesheet_module import (
@@ -234,20 +235,38 @@ class TimesheetComparePage(tk.Frame):
     # ---------- Кадровый табель (файл после конвертера 1С) ----------
 
     def _load_hr_file(self):
+        """Выбор исходного файла 1С, конвертация через timesheet_transformer и загрузка результата."""
         path = filedialog.askopenfilename(
             parent=self,
-            title="Выберите кадровый табель (файл Результат из конвертера 1С)",
-            filetypes=[("Excel", "*.xlsx"), ("Все файлы", "*.*")],
+            title="Выберите исходный табель 1С (xlsx/xlsm)",
+            filetypes=[("Excel", "*.xlsx *.xlsm"), ("Все файлы", "*.*")],
         )
         if not path:
             return
 
         try:
-            wb = load_workbook(path, data_only=True)
+            # 1) Вычислим путь для временного результата рядом с исходником
+            from pathlib import Path
+            src = Path(path)
+            # имя как в timesheet_transformer: <stem>_result.xlsx
+            out_path = src.with_name(src.stem + "_result_for_compare.xlsx")
+
+            # 2) Запускаем конвертер в "встроенном" режиме.
+            # transform_file(file_path, out_path=None, parent=None)
+            # Твоя функция в конце показывает msg_info, это нормально.
+            timesheet_transformer.transform_file(str(src), str(out_path), parent=self)
+
+            # 3) Теперь out_path должен существовать; читаем его как и раньше
+            if not out_path.exists():
+                messagebox.showerror("Сравнение табелей",
+                                     f"Не найден результат конвертации:\n{out_path}",
+                                     parent=self)
+                return
+
+            wb = load_workbook(str(out_path), data_only=True)
             ws = wb["Результат"] if "Результат" in wb.sheetnames else wb.active
 
             rows: List[Dict[str, Any]] = []
-            # Ожидаем формат: №, ФИО, Должность, Табельный №, ID объекта, 1..31, итоги...
             for r in range(2, ws.max_row + 1):
                 fio = (ws.cell(r, 2).value or "").strip()
                 if not fio:
@@ -263,17 +282,22 @@ class TimesheetComparePage(tk.Frame):
                 rows.append({"fio": fio, "tbn": tbn, "days": days_vals})
 
             self._hr_rows = rows
-            messagebox.showinfo("Сравнение табелей",
-                                f"Кадровый табель загружен.\nСтрок: {len(rows)}",
-                                parent=self)
+            messagebox.showinfo(
+                "Сравнение табелей",
+                f"Исходный табель 1С сконвертирован и загружен.\n"
+                f"Строк: {len(rows)}\nФайл результата: {out_path.name}",
+                parent=self,
+            )
             self._rebuild_comparison()
 
         except Exception as e:
             import logging, traceback
-            logging.exception("Ошибка чтения кадрового табеля")
-            messagebox.showerror("Сравнение табелей",
-                                 f"Ошибка чтения файла кадрового табеля:\n{e}",
-                                 parent=self)
+            logging.exception("Ошибка конвертации/чтения кадрового табеля")
+            messagebox.showerror(
+                "Сравнение табелей",
+                f"Ошибка конвертации или чтения табеля 1С:\n{e}",
+                parent=self,
+            )
 
     # ---------- Выбор объектного табеля и сбор данных ----------
 
