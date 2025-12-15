@@ -51,14 +51,15 @@ class TimesheetComparePage(tk.Frame):
         top = tk.Frame(self)
         top.pack(fill="x", padx=8, pady=(8, 4))
 
-        tk.Label(top, text="Сравнение табелей (Объектный vs Кадровый 1С)",
-                 font=("Segoe UI", 12, "bold")).grid(
-            row=0, column=0, columnspan=6, sticky="w", pady=(0, 8)
-        )
+        tk.Label(
+            top,
+            text="Сравнение табеля объекта с кадровым табелем (1С)",
+            font=("Segoe UI", 12, "bold"),
+        ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 8))
 
         row_f = 1
 
-        # Фильтры для поиска табелей
+        # Год / месяц
         tk.Label(top, text="Год:").grid(row=row_f, column=0, sticky="e", padx=(0, 4))
         self.var_year = tk.StringVar()
         from datetime import datetime
@@ -81,32 +82,46 @@ class TimesheetComparePage(tk.Frame):
 
         row_f += 1
 
-        tk.Label(top, text="Подразделение:").grid(row=row_f, column=0, sticky="e", padx=(0, 4), pady=(4, 0))
+        # Подразделение — выпадающий список
+        tk.Label(top, text="Подразделение:").grid(
+            row=row_f, column=0, sticky="e", padx=(0, 4), pady=(4, 0)
+        )
         self.var_dep = tk.StringVar()
-        ent_dep = ttk.Entry(top, width=24, textvariable=self.var_dep)
-        ent_dep.grid(row=row_f, column=1, sticky="w", pady=(4, 0))
-
-        tk.Label(top, text="Адрес/объект:").grid(row=row_f, column=2, sticky="e", padx=(12, 4), pady=(4, 0))
-        self.var_addr = tk.StringVar()
-        ent_addr = ttk.Entry(top, width=34, textvariable=self.var_addr)
-        ent_addr.grid(row=row_f, column=3, sticky="w", pady=(4, 0))
+        self.cmb_dep = ttk.Combobox(
+            top,
+            state="readonly",
+            width=40,
+            textvariable=self.var_dep,
+            values=["Все"],  # заполним реальными значениями после загрузки заголовков
+        )
+        self.cmb_dep.grid(row=row_f, column=1, columnspan=3, sticky="w", pady=(4, 0))
+        self.var_dep.set("Все")
 
         btns = tk.Frame(top)
         btns.grid(row=row_f + 1, column=0, columnspan=6, sticky="w", pady=(8, 0))
-        ttk.Button(btns, text="Обновить список табелей", command=self._load_headers)\
-            .pack(side="left", padx=(0, 4))
-        ttk.Button(btns, text="Сбросить фильтры", command=self._reset_filters)\
-            .pack(side="left", padx=4)
-        ttk.Button(btns, text="Загрузить кадровый табель 1С…", command=self._load_hr_file)\
-            .pack(side="left", padx=12)
-
+        ttk.Button(btns, text="Обновить список табелей", command=self._load_headers).pack(
+            side="left", padx=(0, 4)
+        )
+        ttk.Button(btns, text="Сбросить фильтры", command=self._reset_filters).pack(
+            side="left", padx=4
+        )
+        ttk.Button(
+            btns,
+            text="Загрузить исходный табель 1С…",
+            command=self._load_hr_from_1c,
+        ).pack(side="left", padx=12)
         # ---- Таблица заголовков объектных табелей ----
-        headers_frame = tk.LabelFrame(self, text="Табели подразделений (объектные)")
+        headers_frame = tk.LabelFrame(self, text="Объектные табели подразделений")
         headers_frame.pack(fill="x", padx=8, pady=(4, 4))
 
         cols = ("year", "month", "object", "department", "user")
-        self.tree_headers = ttk.Treeview(headers_frame, columns=cols, show="headings",
-                                         height=6, selectmode="browse")
+        self.tree_headers = ttk.Treeview(
+            headers_frame,
+            columns=cols,
+            show="headings",
+            height=6,
+            selectmode="browse",
+        )
 
         self.tree_headers.heading("year", text="Год")
         self.tree_headers.heading("month", text="Месяц")
@@ -129,32 +144,45 @@ class TimesheetComparePage(tk.Frame):
         self.tree_headers.bind("<Double-1>", lambda e: self._on_select_header())
         self.tree_headers.bind("<Return>", lambda e: self._on_select_header())
 
-        ttk.Button(headers_frame, text="Выбрать табель и сравнить",
-                   command=self._on_select_header)\
-            .pack(fill="x", padx=4, pady=4)
+        ttk.Button(
+            headers_frame,
+            text="Выбрать табель и сравнить",
+            command=self._on_select_header,
+        ).pack(fill="x", padx=4, pady=4)
 
         # ---- Нижняя часть: таблица сравнений ----
         compare_frame = tk.LabelFrame(self, text="Сравнение по сотрудникам")
         compare_frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
-        self.tree_compare = ttk.Treeview(compare_frame, show="headings",
-                                         selectmode="browse")
+        self.tree_compare = ttk.Treeview(
+            compare_frame,
+            show="headings",
+            selectmode="browse",
+        )
         self.tree_compare.pack(side="left", fill="both", expand=True)
+
         vsb_c = ttk.Scrollbar(compare_frame, orient="vertical", command=self.tree_compare.yview)
         self.tree_compare.configure(yscrollcommand=vsb_c.set)
         vsb_c.pack(side="right", fill="y")
 
+        # первоначальная конфигурация колонок
         self._configure_compare_columns(days_in_month=31)
+        # Теги для чередования фона по парам строк
+        self.tree_compare.tag_configure("pair_even", background="#f5f5f5")
+        self.tree_compare.tag_configure("pair_odd", background="#e0e0e0")
 
     # ---------- Загрузка заголовков из БД ----------
 
     def _reset_filters(self):
         from datetime import datetime
+
         self.var_year.set(str(datetime.now().year))
         self.var_month.set("Все")
-        self.var_dep.set("")
-        self.var_addr.set("")
+        self.var_dep.set("Все")
+        if hasattr(self, "cmb_dep"):
+            self.cmb_dep.set("Все")
         self._load_headers()
+
 
     def _load_headers(self):
         self.tree_headers.delete(*self.tree_headers.get_children())
@@ -176,33 +204,45 @@ class TimesheetComparePage(tk.Frame):
                     month = i
                     break
 
-        dep = (self.var_dep.get() or "").strip() or None
-        addr_sub = (self.var_addr.get() or "").strip() or None
+        dep = (self.var_dep.get() or "").strip()
+        if dep == "" or dep == "Все":
+            dep_filter = None
+        else:
+            dep_filter = dep
+
+        # Адрес здесь больше не фильтруем
+        addr_sub = None
 
         try:
             headers = load_all_timesheet_headers(
                 year=year,
                 month=month,
-                department=dep,
+                department=dep_filter,
                 object_addr_substr=addr_sub,
                 object_id_substr=None,
             )
         except Exception as e:
             import logging
+
             logging.exception("Ошибка загрузки заголовков табелей для сравнения")
-            messagebox.showerror("Сравнение табелей",
-                                 f"Ошибка загрузки списка табелей:\n{e}",
-                                 parent=self)
+            messagebox.showerror(
+                "Сравнение табелей",
+                f"Ошибка загрузки списка табелей:\n{e}",
+                parent=self,
+            )
             return
 
         self._headers = headers
+
+        # Заполняем комбобокс подразделений реальными значениями
+        self._fill_departments_combo(headers)
 
         for h in headers:
             y = h["year"]
             m = h["month"]
             addr = h["object_addr"] or ""
             obj_id = h.get("object_id") or ""
-            dep = h.get("department") or ""
+            dep_val = h.get("department") or ""
             user = h.get("full_name") or h.get("username") or ""
 
             m_ru = month_name_ru(m) if 1 <= m <= 12 else str(m)
@@ -215,7 +255,7 @@ class TimesheetComparePage(tk.Frame):
                 "",
                 "end",
                 iid=iid,
-                values=(y, m_ru, obj_display, dep, user),
+                values=(y, m_ru, obj_display, dep_val, user),
             )
 
     def _get_selected_header(self) -> Optional[Dict[str, Any]]:
@@ -234,7 +274,7 @@ class TimesheetComparePage(tk.Frame):
 
     # ---------- Кадровый табель (файл после конвертера 1С) ----------
 
-    def _load_hr_file(self):
+    def _load_hr_from_1c(self):
         """Выбор исходного файла 1С, конвертация через timesheet_transformer и загрузка результата."""
         path = filedialog.askopenfilename(
             parent=self,
@@ -422,12 +462,21 @@ class TimesheetComparePage(tk.Frame):
         )
 
         days_in_m = len(self.tree_compare["columns"]) - 3
-        for row in self._merged_rows:
+
+        # Чередуем фон по парам строк (Объектный / Кадровый)
+        pair_index = 0  # 0,1,0,1,...
+        for i, row in enumerate(self._merged_rows):
             vals = [row["fio"], row["tbn"], row["kind"]]
-            for i in range(days_in_m):
-                v = row["days"][i] if i < len(row["days"]) and row["days"][i] is not None else ""
+            for d in range(days_in_m):
+                v = row["days"][d] if d < len(row["days"]) and row["days"][d] is not None else ""
                 vals.append(v)
-            self.tree_compare.insert("", "end", values=vals)
+
+            tag = "pair_even" if pair_index % 2 == 0 else "pair_odd"
+            self.tree_compare.insert("", "end", values=vals, tags=(tag,))
+
+            # после каждой второй строки (пары) переключаем цвет
+            if i % 2 == 1:
+                pair_index += 1
 
         self._highlight_differences(days_in_m)
 
@@ -458,7 +507,24 @@ class TimesheetComparePage(tk.Frame):
             if mismatch:
                 self.tree_compare.item(iid_obj, tags=(mismatch_tag,))
                 self.tree_compare.item(iid_hr, tags=(mismatch_tag,))
-
+    def _fill_departments_combo(self, headers: List[Dict[str, Any]]):
+        """Заполнить выпадающий список подразделений по загруженным заголовкам."""
+        deps_set = set()
+        for h in headers:
+            d = (h.get("department") or "").strip()
+            if d:
+                deps_set.add(d)
+        deps_list = sorted(deps_set)
+        values = ["Все"] + deps_list
+        try:
+            self.cmb_dep.configure(values=values)
+        except Exception:
+            return
+        # если выбранное подразделение больше не существует в фильтре — сбрасываем на "Все"
+        cur = (self.var_dep.get() or "").strip()
+        if cur not in values:
+            self.var_dep.set("Все")
+            self.cmb_dep.set("Все")
 
 # ---- API для main_app ----
 
