@@ -1561,7 +1561,7 @@ class TimesheetPage(tk.Frame):
         self.cmb_address.bind("<<ComboboxSelected>>", self._on_address_select)
         self.cmb_address.bind("<FocusOut>", self._on_address_select)
         self.cmb_address.bind("<Return>", lambda e: self._on_address_select())
-        self.cmb_address.bind("<KeyRelease>", lambda e: self._on_address_change(), add="+")
+        # self.cmb_address.bind("<KeyRelease>", lambda e: self._on_address_change(), add="+")
 
         tk.Label(top, text="ID объекта:").grid(row=1, column=6, sticky="w", padx=(16, 4), pady=(8, 0))
         self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=18)
