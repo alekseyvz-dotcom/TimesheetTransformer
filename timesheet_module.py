@@ -408,6 +408,27 @@ def load_objects_from_db() -> List[Tuple[str, str]]:
     finally:
         if conn: release_db_connection(conn)
 
+def load_objects_full_from_db() -> List[Tuple[str, str, str]]:
+    """
+    Возвращает список объектов (excel_id, address, short_name).
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    COALESCE(NULLIF(excel_id, ''), '') AS code,
+                    address,
+                    COALESCE(short_name, '') AS short_name
+                FROM objects
+                ORDER BY address, code
+            """)
+            return [(r[0] or "", r[1] or "", r[2] or "") for r in cur.fetchall()]
+    finally:
+        if conn:
+            release_db_connection(conn)
+
 # ------------------------- Утилиты (перенесены из main_app.py) -------------------------
 
 def exe_dir() -> Path:
@@ -574,6 +595,89 @@ class CopyFromDialog(simpledialog.Dialog):
             "with_hours": bool(self.var_copy_hours.get()),
             "mode": self.var_mode.get(),
         }
+
+class SelectObjectIdDialog(tk.Toplevel):
+    """
+    Диалог выбора ID объекта (excel_id) для заданного адреса.
+    Показывает excel_id, address, short_name.
+    result: выбранный excel_id (str) или None (Отмена/закрытие).
+    """
+    def __init__(self, parent, objects_for_addr: List[Tuple[str, str, str]], addr: str):
+        super().__init__(parent)
+        self.title("Выбор ID объекта")
+        self.resizable(True, True)
+        self.grab_set()
+        self.result: Optional[str] = None
+
+        main = tk.Frame(self, padx=10, pady=10)
+        main.pack(fill="both", expand=True)
+
+        tk.Label(
+            main,
+            text=f"По адресу:\n{addr}\nнайдено несколько объектов.\nВыберите нужный ID:",
+            justify="left",
+        ).pack(anchor="w")
+
+        # Таблица
+        cols = ("excel_id", "address", "short_name")
+        tree = ttk.Treeview(main, columns=cols, show="headings", height=6, selectmode="browse")
+        tree.heading("excel_id", text="ID (excel_id)")
+        tree.heading("address", text="Адрес")
+        tree.heading("short_name", text="Краткое имя")
+
+        tree.column("excel_id", width=120, anchor="center", stretch=False)
+        tree.column("address", width=260, anchor="w")
+        tree.column("short_name", width=200, anchor="w")
+
+        vsb = ttk.Scrollbar(main, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+
+        frame_tbl = tk.Frame(main)
+        frame_tbl.pack(fill="both", expand=True, pady=(8, 4))
+        tree.pack(in_=frame_tbl, side="left", fill="both", expand=True)
+        vsb.pack(in_=frame_tbl, side="right", fill="y")
+
+        # Заполнение
+        for code, a, short_name in objects_for_addr:
+            tree.insert("", "end", values=(code, a, short_name))
+
+        # Кнопки
+        btns = tk.Frame(main)
+        btns.pack(fill="x", pady=(6, 0))
+        ttk.Button(btns, text="OK", command=lambda: self._on_ok(tree)).pack(side="right", padx=(4, 0))
+        ttk.Button(btns, text="Отмена", command=self._on_cancel).pack(side="right")
+
+        # Двойной клик — тоже OK
+        tree.bind("<Double-1>", lambda e: self._on_ok(tree))
+        tree.bind("<Return>",  lambda e: self._on_ok(tree))
+
+        # Центрировать
+        try:
+            self.update_idletasks()
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            sw = self.winfo_width()
+            sh = self.winfo_height()
+            self.geometry(f"+{px + (pw - sw)//2}+{py + (ph - sh)//2}")
+        except Exception:
+            pass
+
+    def _on_ok(self, tree: ttk.Treeview):
+        sel = tree.selection()
+        if not sel:
+            messagebox.showwarning("Выбор ID объекта", "Сначала выберите строку.", parent=self)
+            return
+        vals = tree.item(sel[0], "values")
+        if not vals:
+            return
+        self.result = vals[0]  # excel_id
+        self.destroy()
+
+    def _on_cancel(self):
+        self.result = None
+        self.destroy()
 
 class SelectEmployeesDialog(tk.Toplevel):
     """
@@ -1394,12 +1498,13 @@ class TimesheetPage(tk.Frame):
         self.after(120, self._auto_fit_columns)
 
     def _load_spr_data_from_db(self):
-        # Эта функция остается без изменений
+        # сотрудники как было
         employees = load_employees_from_db()
-        objects = load_objects_from_db()
+        # объекты — полный список с short_name
+        objects_full = load_objects_full_from_db()  # (excel_id, address, short_name)
 
         self.employees = employees
-        self.objects = objects
+        self.objects_full = objects_full  # сохраняем
 
         self.emp_names = [fio for (fio, _, _, _) in self.employees]
         self.emp_info = {fio: (tbn, pos) for (fio, tbn, pos, _) in self.employees}
@@ -1407,14 +1512,17 @@ class TimesheetPage(tk.Frame):
         deps = sorted({(dep or "").strip() for (_, _, _, dep) in self.employees if (dep or "").strip()})
         self.departments = ["Все"] + deps
 
+        # addr -> список excel_id (как раньше, но по новому списку)
         self.addr_to_ids: Dict[str, List[str]] = {}
-        for oid, addr in self.objects:
+        for oid, addr, short_name in self.objects_full:
             if not addr:
                 continue
             self.addr_to_ids.setdefault(addr, [])
             if oid and oid not in self.addr_to_ids[addr]:
                 self.addr_to_ids[addr].append(oid)
-        addresses_set = set(self.addr_to_ids.keys()) | {addr for _, addr in self.objects if addr}
+
+        # список всех адресов
+        addresses_set = {addr for _, addr, _ in self.objects_full if addr}
         self.address_options = sorted(addresses_set)
 
     def _build_ui(self):
@@ -1653,11 +1761,45 @@ class TimesheetPage(tk.Frame):
 
     def _on_address_change(self, *_):
         addr = self.cmb_address.get().strip()
-        ids = sorted(self.addr_to_ids.get(addr, []))
-        if ids:
+
+        # Фильтруем объекты по адресу
+        objects_for_addr = [
+            (code, a, short_name)
+            for (code, a, short_name) in getattr(self, "objects_full", [])
+            if a == addr
+        ]
+
+        if not objects_for_addr:
+            # как раньше — просто чистим
+            self.cmb_object_id.config(state="normal", values=[])
+            self.cmb_object_id.set("")
+            return
+
+        # Собираем список excel_id
+        ids = sorted({code for (code, a, short_name) in objects_for_addr if code})
+
+        # Если только один объект с ненулевым excel_id — просто подставим
+        if len(ids) == 1:
             self.cmb_object_id.config(state="readonly", values=ids)
-            if self.cmb_object_id.get() not in ids: self.cmb_object_id.set(ids[0])
+            self.cmb_object_id.set(ids[0])
+            return
+
+        # Если несколько — показываем диалог выбора
+        dlg = SelectObjectIdDialog(self, objects_for_addr, addr)
+        self.wait_window(dlg)
+
+        selected_id = dlg.result
+        if selected_id:
+            # выбран excel_id
+            self.cmb_object_id.config(state="readonly", values=ids)
+            if selected_id not in ids:
+                ids.append(selected_id)
+                ids = sorted(ids)
+                self.cmb_object_id.config(values=ids)
+            self.cmb_object_id.set(selected_id)
         else:
+            # отмена — можно либо очистить поле, либо оставить старое значение
+            # Сейчас просто обнулим:
             self.cmb_object_id.config(state="normal", values=[])
             self.cmb_object_id.set("")
 
