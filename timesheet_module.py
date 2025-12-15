@@ -36,6 +36,16 @@ def release_db_connection(conn):
     if db_connection_pool:
         db_connection_pool.putconn(conn)
 
+import logging
+
+LOG_PATH = Path(exe_dir()) / "timesheet_debug.log"
+logging.basicConfig(
+    filename=str(LOG_PATH),
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    encoding="utf-8",
+)
+
 # ------------------------- Загрузка зависимостей (если нужны для standalone) -------------------------
 try:
     import settings_manager as Settings
@@ -604,11 +614,13 @@ class SelectObjectIdDialog(tk.Toplevel):
     """
     def __init__(self, parent, objects_for_addr: List[Tuple[str, str, str]], addr: str):
         super().__init__(parent)
-        print("DEBUG in dialog objects_for_addr:", objects_for_addr)
         self.title("Выбор ID объекта")
         self.resizable(True, True)
         self.grab_set()
         self.result: Optional[str] = None
+
+        logging.debug("SelectObjectIdDialog opened for addr=%r, objects=%r",
+                      addr, objects_for_addr)
 
         main = tk.Frame(self, padx=10, pady=10)
         main.pack(fill="both", expand=True)
@@ -621,36 +633,36 @@ class SelectObjectIdDialog(tk.Toplevel):
 
         # Таблица
         cols = ("excel_id", "address", "short_name")
-        tree = ttk.Treeview(main, columns=cols, show="headings", height=6, selectmode="browse")
-        tree.heading("excel_id", text="ID (excel_id)")
-        tree.heading("address", text="Адрес")
-        tree.heading("short_name", text="Краткое имя")
+        self.tree = ttk.Treeview(
+            main, columns=cols, show="headings", height=8, selectmode="browse"
+        )
+        self.tree.heading("excel_id", text="ID (excel_id)")
+        self.tree.heading("address", text="Адрес")
+        self.tree.heading("short_name", text="Краткое имя")
 
-        tree.column("excel_id", width=120, anchor="center", stretch=False)
-        tree.column("address", width=260, anchor="w")
-        tree.column("short_name", width=200, anchor="w")
+        self.tree.column("excel_id", width=120, anchor="center", stretch=False)
+        self.tree.column("address", width=260, anchor="w")
+        self.tree.column("short_name", width=200, anchor="w")
 
-        vsb = ttk.Scrollbar(main, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=vsb.set)
+        vsb = ttk.Scrollbar(main, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
 
-        frame_tbl = tk.Frame(main)
-        frame_tbl.pack(fill="both", expand=True, pady=(8, 4))
-        tree.pack(in_=frame_tbl, side="left", fill="both", expand=True)
-        vsb.pack(in_=frame_tbl, side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True, pady=(8, 4))
+        vsb.pack(side="right", fill="y")
 
         # Заполнение
         for code, a, short_name in objects_for_addr:
-            tree.insert("", "end", values=(code, a, short_name))
+            self.tree.insert("", "end", values=(code, a, short_name))
 
         # Кнопки
         btns = tk.Frame(main)
         btns.pack(fill="x", pady=(6, 0))
-        ttk.Button(btns, text="OK", command=lambda: self._on_ok(tree)).pack(side="right", padx=(4, 0))
+        ttk.Button(btns, text="OK", command=self._on_ok).pack(side="right", padx=(4, 0))
         ttk.Button(btns, text="Отмена", command=self._on_cancel).pack(side="right")
 
         # Двойной клик — тоже OK
-        tree.bind("<Double-1>", lambda e: self._on_ok(tree))
-        tree.bind("<Return>",  lambda e: self._on_ok(tree))
+        self.tree.bind("<Double-1>", self._on_ok)
+        self.tree.bind("<Return>",  self._on_ok)
 
         # Центрировать
         try:
@@ -665,18 +677,20 @@ class SelectObjectIdDialog(tk.Toplevel):
         except Exception:
             pass
 
-    def _on_ok(self, tree: ttk.Treeview):
-        sel = tree.selection()
+    def _on_ok(self, event=None):
+        sel = self.tree.selection()
         if not sel:
             messagebox.showwarning("Выбор ID объекта", "Сначала выберите строку.", parent=self)
             return
-        vals = tree.item(sel[0], "values")
+        vals = self.tree.item(sel[0], "values")
+        logging.debug("SelectObjectIdDialog OK clicked, selected row=%r", vals)
         if not vals:
             return
         self.result = vals[0]  # excel_id
         self.destroy()
 
-    def _on_cancel(self):
+    def _on_cancel(self, event=None):
+        logging.debug("SelectObjectIdDialog canceled")
         self.result = None
         self.destroy()
 
@@ -1503,10 +1517,10 @@ class TimesheetPage(tk.Frame):
         employees = load_employees_from_db()
         # объекты — полный список с short_name
         objects_full = load_objects_short_for_timesheet()  # (excel_id, address, short_name)
-        print("DEBUG objects_full example:", self.objects_full[:10])
 
         self.employees = employees
         self.objects_full = objects_full  # сохраняем
+        logging.debug("objects_full sample: %r", self.objects_full[:10])
 
         self.emp_names = [fio for (fio, _, _, _) in self.employees]
         self.emp_info = {fio: (tbn, pos) for (fio, tbn, pos, _) in self.employees}
@@ -1763,7 +1777,7 @@ class TimesheetPage(tk.Frame):
 
     def _on_address_change(self, *_):
         addr = self.cmb_address.get().strip()
-        print("DEBUG addr from combobox:", repr(addr))
+        logging.debug("addr from combobox: %r", addr)
 
         # Фильтруем объекты по адресу
         objects_for_addr = [
@@ -1771,7 +1785,7 @@ class TimesheetPage(tk.Frame):
             for (code, a, short_name) in getattr(self, "objects_full", [])
             if a == addr
         ]
-        print("DEBUG objects_for_addr:", objects_for_addr)
+        logging.debug("objects_for_addr for addr=%r: %r", addr, objects_for_addr)
 
         if not objects_for_addr:
             # как раньше — просто чистим
