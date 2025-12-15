@@ -40,16 +40,6 @@ def release_db_connection(conn):
     if db_connection_pool:
         db_connection_pool.putconn(conn)
 
-import logging
-
-LOG_PATH = Path(exe_dir()) / "timesheet_debug.log"
-logging.basicConfig(
-    filename=str(LOG_PATH),
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    encoding="utf-8",
-)
-
 # ------------------------- Загрузка зависимостей (если нужны для standalone) -------------------------
 try:
     import settings_manager as Settings
@@ -619,9 +609,6 @@ class SelectObjectIdDialog(tk.Toplevel):
         self.grab_set()
         self.result: Optional[str] = None
 
-        logging.debug("SelectObjectIdDialog opened for addr=%r, objects=%r",
-                      addr, objects_for_addr)
-
         main = tk.Frame(self, padx=10, pady=10)
         main.pack(fill="both", expand=True)
 
@@ -683,14 +670,12 @@ class SelectObjectIdDialog(tk.Toplevel):
             messagebox.showwarning("Выбор ID объекта", "Сначала выберите строку.", parent=self)
             return
         vals = self.tree.item(sel[0], "values")
-        logging.debug("SelectObjectIdDialog OK clicked, selected row=%r", vals)
         if not vals:
             return
         self.result = vals[0]  # excel_id
         self.destroy()
 
     def _on_cancel(self, event=None):
-        logging.debug("SelectObjectIdDialog canceled")
         self.result = None
         self.destroy()
 
@@ -1520,7 +1505,6 @@ class TimesheetPage(tk.Frame):
 
         self.employees = employees
         self.objects_full = objects_full  # сохраняем
-        logging.debug("objects_full sample: %r", self.objects_full[:10])
 
         self.emp_names = [fio for (fio, _, _, _) in self.employees]
         self.emp_info = {fio: (tbn, pos) for (fio, tbn, pos, _) in self.employees}
@@ -1777,7 +1761,6 @@ class TimesheetPage(tk.Frame):
 
     def _on_address_change(self, *_):
         addr = self.cmb_address.get().strip()
-        logging.debug("addr from combobox: %r", addr)
 
         # Фильтруем объекты по адресу
         objects_for_addr = [
@@ -1785,7 +1768,6 @@ class TimesheetPage(tk.Frame):
             for (code, a, short_name) in getattr(self, "objects_full", [])
             if a == addr
         ]
-        logging.debug("objects_for_addr for addr=%r: %r", addr, objects_for_addr)
 
         if not objects_for_addr:
             # как раньше — просто чистим
