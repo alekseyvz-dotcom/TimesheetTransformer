@@ -146,6 +146,11 @@ class TimesheetComparePage(tk.Frame):
             text="Выбрать табель и сравнить",
             command=self._on_select_header,
         ).pack(fill="x", padx=4, pady=4)
+        ttk.Button(
+            headers_frame,
+            text="Выгрузить свод в Excel…",
+            command=self._export_to_excel,
+        ).pack(fill="x", padx=4, pady=(0, 4))
 
         # ---- Нижняя часть: таблица сравнений ----
         compare_frame = tk.LabelFrame(self, text="Сравнение по сотрудникам")
@@ -554,6 +559,117 @@ class TimesheetComparePage(tk.Frame):
         if cur not in values:
             self.var_dep.set("Все")
             self.cmb_dep.set("Все")
+
+    def _export_to_excel(self):
+        """Выгрузить текущий свод сравнения в Excel с подсветкой отличий по дням."""
+        if not self._merged_rows:
+            messagebox.showinfo(
+                "Экспорт свода",
+                "Нет данных для экспорта. Сначала выберите объектный табель и загрузите кадровый.",
+                parent=self,
+            )
+            return
+
+        from tkinter import filedialog
+        from openpyxl import Workbook
+        from openpyxl.styles import PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
+
+        # Выбор файла
+        default_name = "Свод_сравнения_табелей.xlsx"
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Сохранить свод сравнения в Excel",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Excel файлы", "*.xlsx"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Свод сравнения"
+
+            days_in_m = len(self.tree_compare["columns"]) - 3
+
+            # Заголовок
+            header = ["ФИО", "Таб.№", "Источник"] + [str(i) for i in range(1, days_in_m + 1)]
+            ws.append(header)
+
+            # Выравнивание по центру для дневных ячеек
+            center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+            # Подсветка отличий
+            diff_fill = PatternFill(fill_type="solid", fgColor="FFF2CC")  # светло-жёлтый
+
+            items = self._merged_rows
+            row_excel = 2  # первая строка с данными
+
+            i = 0
+            while i < len(items):
+                row_obj = items[i]
+                vals_obj = [row_obj["fio"], row_obj["tbn"], row_obj["kind"]]
+                for d in range(days_in_m):
+                    v = row_obj["days"][d] if d < len(row_obj["days"]) and row_obj["days"][d] is not None else ""
+                    vals_obj.append(v)
+                ws.append(vals_obj)
+
+                row_hr = items[i + 1] if i + 1 < len(items) else None
+                if row_hr:
+                    vals_hr = [row_hr["fio"], row_hr["tbn"], row_hr["kind"]]
+                    for d in range(days_in_m):
+                        v = row_hr["days"][d] if d < len(row_hr["days"]) and row_hr["days"][d] is not None else ""
+                        vals_hr.append(v)
+                    ws.append(vals_hr)
+
+                    # Подсветка отличий по дням
+                    for d in range(1, days_in_m + 1):
+                        col_idx = 3 + d  # A=1, B=2, C=3, дни начинаются с 4-го столбца
+                        c_obj = ws.cell(row=row_excel, column=col_idx)
+                        c_hr = ws.cell(row=row_excel + 1, column=col_idx)
+
+                        vo = (c_obj.value or "")
+                        vh = (c_hr.value or "")
+                        if (vo == "" and vh == "") or (str(vo) == str(vh)):
+                            continue
+
+                        c_obj.fill = diff_fill
+                        c_hr.fill = diff_fill
+
+                    row_excel += 2
+                    i += 2
+                else:
+                    # нет пары — только объектный табель
+                    row_excel += 1
+                    i += 1
+
+            # Ширина колонок
+            ws.column_dimensions["A"].width = 32  # ФИО
+            ws.column_dimensions["B"].width = 10  # Таб.№
+            ws.column_dimensions["C"].width = 16  # Источник
+            for d in range(1, days_in_m + 1):
+                col_letter = get_column_letter(3 + d)
+                ws.column_dimensions[col_letter].width = 5.5
+
+            # Выравнивание по центру для всех дневных ячеек
+            max_row = ws.max_row
+            for r in range(2, max_row + 1):
+                for c in range(4, 4 + days_in_m):
+                    ws.cell(r, c).alignment = center
+
+            wb.save(path)
+            messagebox.showinfo(
+                "Экспорт свода",
+                f"Свод сравнения сохранён в файл:\n{path}",
+                parent=self,
+            )
+
+        except Exception as e:
+            import logging
+            logging.exception("Ошибка экспорта свода сравнения в Excel")
+            messagebox.showerror("Экспорт свода", f"Ошибка при сохранении файла:\n{e}", parent=self)
 
 # ---- API для main_app ----
 
