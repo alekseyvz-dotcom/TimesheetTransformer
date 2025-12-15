@@ -57,12 +57,13 @@ timesheet_module = None
 analytics_module = None
 timesheet_transformer = None
 employees_module = None
+timesheet_compare = None
 
 def perform_heavy_imports():
     """Функция для загрузки всех тяжелых модулей приложения."""
     global BudgetAnalyzer, _assets_logo, _LOGO_BASE64, SpecialOrders, \
            meals_module, objects, Settings, timesheet_module, \
-           analytics_module, timesheet_transformer, employees_module
+           analytics_module, timesheet_transformer, employees_module, timesheet_compare
            
     import BudgetAnalyzer
     import assets_logo as _assets_logo
@@ -347,12 +348,18 @@ class MainApp(tk.Tk):
                 lambda p: timesheet_module.create_timesheet_registry_page(p, self),
             ),
         )
-        # новый пункт
         m_ts.add_command(
             label="Работники",
             command=lambda: self._show_page(
                 "workers",
                 lambda p: employees_module.create_workers_page(p, self),
+            ),
+        )
+        m_ts.add_command(
+            label="Сравнение с 1С",
+            command=lambda: self._show_page(
+                "timesheet_compare",
+                lambda p: timesheet_compare.create_timesheet_compare_page(p, self),
             ),
         )
         self._menubar.add_cascade(label="Объектный табель", menu=m_ts)
@@ -437,6 +444,7 @@ class MainApp(tk.Tk):
             "home": ("Управление строительством", "Выберите раздел в верхнем меню"),
             "timesheet": ("Объектный табель", ""), "my_timesheets": ("Мои табели", ""), "timesheet_registry": ("Реестр табелей", ""),
             "workers": ("Работники", "Поиск по сотруднику и его объектам"),
+            "timesheet_compare": ("Сравнение табелей", "Объектный vs Кадровый (1С)"),
             "transport": ("Заявка на спецтехнику", ""), "my_transport_orders": ("Мои заявки на транспорт", ""),
             "planning": ("Планирование транспорта", ""), "transport_registry": ("Реестр транспорта", ""),
             "meals_order": ("Заказ питания", ""), "my_meals_orders": ("Мои заявки на питание", ""),
@@ -562,7 +570,7 @@ if __name__ == "__main__":
             initialize_db_pool()
 
             splash.update_status("Передача настроек в модули...")
-            modules_to_init = [meals_module, SpecialOrders, objects, Settings, timesheet_module, analytics_module, employees_module]
+            modules_to_init = [meals_module, SpecialOrders, objects, Settings, timesheet_module, analytics_module, employees_module, timesheet_compare]
             for module in modules_to_init:
                 if module and hasattr(module, "set_db_pool"):
                     module.set_db_pool(db_connection_pool)
