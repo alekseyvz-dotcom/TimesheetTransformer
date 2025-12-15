@@ -434,58 +434,60 @@ class TimesheetComparePage(tk.Frame):
         if not self._obj_rows or not self._hr_rows:
             return
 
-        # индекс кадрового табеля по (fio.lower, tbn)
-        hr_index: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        # индекс кадрового табеля по табельному номеру
+        hr_index: Dict[str, Dict[str, Any]] = {}
         for r in self._hr_rows:
-            key = (r["fio"].strip().lower(), r["tbn"].strip())
-            hr_index[key] = r
+            tbn_key = r["tbn"].strip()
+            if not tbn_key:
+                continue  # без таб.№ не можем сопоставить
+            hr_index[tbn_key] = r
 
         used_hr_keys = set()
 
-        # базовый проход: все из объектного
+        # базовый проход: все из объектного (ключ — табельный номер)
         for o in self._obj_rows:
-            key = (o["fio"].strip().lower(), o["tbn"].strip())
-            hr = hr_index.get(key)
-            if hr:
-                used_hr_keys.add(key)
+            tbn_key = o["tbn"].strip()
+            hr = hr_index.get(tbn_key) if tbn_key else None
+            if hr and tbn_key:
+                used_hr_keys.add(tbn_key)
 
             self._merged_rows.append({
                 "fio": o["fio"],
                 "tbn": o["tbn"],
                 "kind": "Объектный табель",
                 "days": o["days"],
-                "pair_key": key,
+                "pair_key": tbn_key,
             })
             self._merged_rows.append({
                 "fio": hr["fio"] if hr else o["fio"],
                 "tbn": hr["tbn"] if hr else o["tbn"],
                 "kind": "Кадровый табель",
                 "days": hr["days"] if hr else [None] * 31,
-                "pair_key": key,
+                "pair_key": tbn_key,
             })
 
-        # те, кто есть только в кадровом
-        for key, hr in hr_index.items():
-            if key in used_hr_keys:
+        # те, кто есть только в кадровом (по табельному номеру)
+        for tbn_key, hr in hr_index.items():
+            if tbn_key in used_hr_keys:
                 continue
             self._merged_rows.append({
                 "fio": hr["fio"],
                 "tbn": hr["tbn"],
                 "kind": "Объектный табель",
                 "days": [None] * 31,
-                "pair_key": key,
+                "pair_key": tbn_key,
             })
             self._merged_rows.append({
                 "fio": hr["fio"],
                 "tbn": hr["tbn"],
                 "kind": "Кадровый табель",
                 "days": hr["days"],
-                "pair_key": key,
+                "pair_key": tbn_key,
             })
 
         # сортировка: ФИО, таб.№, источник
         self._merged_rows.sort(
-            key=lambda r: (r["fio"].lower(), r["tbn"], 0 if r["kind"] == "Объектный табель" else 1)
+            key=lambda r: (r["tbn"], r["fio"].lower(), 0 if r["kind"] == "Объектный табель" else 1)
         )
 
         days_in_m = len(self.tree_compare["columns"]) - 3
