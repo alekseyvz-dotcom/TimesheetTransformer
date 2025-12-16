@@ -477,6 +477,7 @@ def save_order_to_db(data: dict) -> int:
                     position = (emp.get("position") or "").strip()
                     meal_type_name = (emp.get("meal_type") or "").strip()
                     comment = (emp.get("comment") or "").strip()
+                    quantity = float(emp.get("quantity") or 1)
 
                     meal_type_id = get_or_create_meal_type(cur, meal_type_name)
                     employee_id = find_employee(cur, fio, tbn)
@@ -525,8 +526,8 @@ def save_order_to_db(data: dict) -> int:
                         """
                         INSERT INTO meal_order_items
                         (order_id, employee_id, fio_text, tbn_text, position_text,
-                         meal_type_id, meal_type_text, comment)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                         meal_type_id, meal_type_text, comment, quantity)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             order_id,
@@ -537,6 +538,7 @@ def save_order_to_db(data: dict) -> int:
                             meal_type_id,
                             meal_type_name,
                             comment,
+                            quantity,
                         ),
                     )
 
@@ -794,7 +796,8 @@ def get_details_from_db(
                     COALESCE(moi.tbn_text, '')    AS tbn,
                     COALESCE(moi.position_text, '') AS position,
                     COALESCE(mti.name, moi.meal_type_text, '') AS meal_type,
-                    COALESCE(moi.comment, '')     AS comment
+                    COALESCE(moi.comment, '')     AS comment,
+                    COALESCE(moi.quantity, 1)     AS quantity
                 FROM meal_orders mo
                 JOIN meal_order_items moi ON moi.order_id = mo.id
                 LEFT JOIN objects o       ON o.id = mo.object_id
@@ -819,6 +822,7 @@ def get_details_from_db(
                 position,
                 meal_type,
                 comment,
+                quantity,
             ) = r
             result.append(
                 {
@@ -832,6 +836,7 @@ def get_details_from_db(
                     "position": position,
                     "meal_type": meal_type,
                     "comment": comment,
+                    "quantity": float(quantity or 1),
                 }
             )
         return result
@@ -1012,8 +1017,9 @@ EMP_COL_WIDTHS = {
     1: 90,
     2: 230,
     3: 140,
-    4: 260,
-    5: 80,
+    4: 200,
+    5: 60,
+    6: 80,
 }
 
 class SelectEmployeesDialog(tk.Toplevel):
@@ -1288,11 +1294,16 @@ class EmployeeRow:
 
         self.ent_comment = ttk.Entry(self.frame, width=32)
         self.ent_comment.grid(row=0, column=4, padx=2, sticky="w")
+        
+
+        self.ent_quantity = ttk.Entry(self.frame, width=7)
+        self.ent_quantity.insert(0, "1")
+        self.ent_quantity.grid(row=0, column=5, padx=2, sticky="w")
 
         self.btn_del = ttk.Button(self.frame, text="Удалить", width=9, command=self._delete)
-        self.btn_del.grid(row=0, column=5, padx=2)
+        self.btn_del.grid(row=0, column=6, padx=2)
 
-        for i in range(6):
+        for i in range(7):
             self.frame.grid_columnconfigure(i, minsize=EMP_COL_WIDTHS.get(i, 80))
 
     def grid(self, row: int):
@@ -1320,12 +1331,25 @@ class EmployeeRow:
             ok = False
         else:
             self._clear_err(self.cmb_fio)
+
         meal_type = (self.cmb_meal_type.get() or "").strip()
         if not meal_type:
             self._mark_err(self.cmb_meal_type)
             ok = False
         else:
             self._clear_err(self.cmb_meal_type)
+
+        # проверка количества
+        qty_str = (self.ent_quantity.get() or "").replace(",", ".").strip()
+        try:
+            qty = float(qty_str) if qty_str else 1.0
+            if qty <= 0:
+                raise ValueError
+            self._clear_err(self.ent_quantity)
+        except Exception:
+            self._mark_err(self.ent_quantity)
+            ok = False
+
         return ok
 
     def _mark_err(self, widget):
@@ -1341,14 +1365,20 @@ class EmployeeRow:
             pass
 
     def get_dict(self) -> Dict:
+        qty_str = (self.ent_quantity.get() or "").replace(",", ".").strip()
+        try:
+            qty = float(qty_str) if qty_str else 1.0
+        except Exception:
+            qty = 1.0
+
         return {
             "fio": (self.cmb_fio.get() or "").strip(),
             "tbn": (self.lbl_tbn.cget("text") or "").strip(),
             "position": (self.lbl_pos.cget("text") or "").strip(),
             "meal_type": (self.cmb_meal_type.get() or "").strip(),
             "comment": (self.ent_comment.get() or "").strip(),
+            "quantity": qty,
         }
-
 
 # ========================= СТРАНИЦА СОЗДАНИЯ ЗАЯВКИ =========================
 
@@ -1477,7 +1507,11 @@ class MealOrderPage(tk.Frame):
         tk.Label(hdr, text="Должность", anchor="w").grid(row=0, column=2, padx=2)
         tk.Label(hdr, text="Тип питания*", anchor="w").grid(row=0, column=3, padx=2)
         tk.Label(hdr, text="Комментарий", anchor="w").grid(row=0, column=4, padx=2)
-        tk.Label(hdr, text="Действие", anchor="center").grid(row=0, column=5, padx=2)
+        tk.Label(hdr, text="Кол-во", anchor="w").grid(row=0, column=5, padx=2)
+        tk.Label(hdr, text="Действие", anchor="center").grid(row=0, column=6, padx=2)
+
+        for i in range(7):
+            hdr.grid_columnconfigure(i, minsize=EMP_COL_WIDTHS.get(i, 80))
 
         wrap = tk.Frame(emp_wrap)
         wrap.pack(fill="both", expand=True)
@@ -1597,6 +1631,16 @@ class MealOrderPage(tk.Frame):
             row.cmb_meal_type.set(mt or self.meal_types[0])
             row.ent_comment.delete(0, "end")
             row.ent_comment.insert(0, emp.get("comment", ""))
+
+            # количество
+            qty = emp.get("quantity")
+            if qty is None:
+                qty = 1
+            try:
+                row.ent_quantity.delete(0, tk.END)
+                row.ent_quantity.insert(0, str(qty))
+            except Exception:
+                pass
 
         self._update_date_hint()
         self._update_emp_count()
@@ -1982,6 +2026,7 @@ class MealOrderPage(tk.Frame):
                             position = (emp.get("position") or "").strip()
                             meal_type_name = (emp.get("meal_type") or "").strip()
                             comment = (emp.get("comment") or "").strip()
+                            quantity = float(emp.get("quantity") or 1)
 
                             meal_type_id = get_or_create_meal_type(cur, meal_type_name)
                             employee_id = find_employee(cur, fio, tbn)
@@ -1990,8 +2035,8 @@ class MealOrderPage(tk.Frame):
                                 """
                                 INSERT INTO meal_order_items
                                 (order_id, employee_id, fio_text, tbn_text, position_text,
-                                 meal_type_id, meal_type_text, comment)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                 meal_type_id, meal_type_text, comment, quantity)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                                 """,
                                 (
                                     order_db_id,
@@ -2002,6 +2047,7 @@ class MealOrderPage(tk.Frame):
                                     meal_type_id,
                                     meal_type_name,
                                     comment,
+                                    quantity,
                                 ),
                             )
 
@@ -2665,14 +2711,6 @@ class AllMealsOrdersPage(tk.Frame):
             dep_filter = (self.cmb_dep_filter.get() or "").strip() if hasattr(self, "cmb_dep_filter") else ""
             addr_filter = (self.ent_address_filter.get() or "").strip() if hasattr(self, "ent_address_filter") else ""
 
-            # --- 2. Получаем детальные данные через get_details_from_db ---
-            # В твоём API фильтр по дате один (filter_date). Здесь период,
-            # поэтому сделаем простую логику:
-            #  - если указано только одно поле (с или по) и они совпадают — фильтруем по этой дате;
-            #  - если заданы разные даты или только одна граница — тянем ВСЁ и потом фильтруем по Python.
-            # Если хочешь строго периодом с/по на стороне БД — можно написать отдельную функцию аналогично load_all_meal_orders.
-
-            # 2.1. Определяем, какую дату можно передать в filter_date:
             filter_date_str: Optional[str] = None
             if date_from and date_to and date_from == date_to:
                 filter_date_str = date_from.strftime("%Y-%m-%d")
@@ -2765,12 +2803,14 @@ class AllMealsOrdersPage(tk.Frame):
                 mt = (o.get("meal_type", "") or "").strip()
                 if not addr or not mt:
                     continue
+                qty = float(o.get("quantity") or 1)
                 price = price_map.get(mt, 0.0)
 
                 addr_dict = summary.setdefault(addr, {})
                 mt_dict = addr_dict.setdefault(mt, {"count": 0.0, "amount": 0.0})
-                mt_dict["count"] += 1.0
-                mt_dict["amount"] += price
+                mt_dict["count"] += qty
+                mt_dict["amount"] += price * qty
+
 
             # Шапка
             period_str = ""
@@ -2829,8 +2869,9 @@ class AllMealsOrdersPage(tk.Frame):
 
             for order, mark in zip(orders, duplicates_mark):
                 mt = (order.get("meal_type") or "").strip()
+                qty = float(order.get("quantity") or 1)
                 price = float(price_map.get(mt, 0.0))
-                amount = price  # пока 1 порция на человека; если появится количество — можно умножать
+                amount = price * qty
 
                 ws.append([
                     order.get("date", ""),
@@ -3170,10 +3211,13 @@ class MealPlanningPage(tk.Frame):
                 mt = (o.get("meal_type") or "").strip() or "Не указан"
                 addr = (o.get("address") or "").strip()
                 team = (o.get("team_name") or "").strip()
-                total_by_type[mt] = total_by_type.get(mt, 0) + 1
+                qty = float(o.get("quantity") or 1)
+
+                total_by_type[mt] = total_by_type.get(mt, 0) + qty
 
                 key_row = (addr, team, mt)
-                per_object_team_type[key_row] = per_object_team_type.get(key_row, 0) + 1
+                per_object_team_type[key_row] = per_object_team_type.get(key_row, 0) + qty
+
 
             # формируем Excel
             wb = Workbook()
@@ -3476,12 +3520,13 @@ class MealPlanningPage(tk.Frame):
                 mt = (o.get("meal_type", "") or "").strip()
                 if not addr or not mt:
                     continue
+                qty = float(o.get("quantity") or 1)
                 price = price_map.get(mt, 0.0)
 
                 addr_dict = summary.setdefault(addr, {})
                 mt_dict = addr_dict.setdefault(mt, {"count": 0.0, "amount": 0.0})
-                mt_dict["count"] += 1.0
-                mt_dict["amount"] += price
+                mt_dict["count"] += qty
+                mt_dict["amount"] += price * qty
 
             ws.append(["Свод по объектам, типам питания и стоимости"])
             ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=4)
@@ -3518,8 +3563,9 @@ class MealPlanningPage(tk.Frame):
 
             for order, mark in zip(orders, duplicates_mark):
                 mt = (order.get("meal_type") or "").strip()
+                qty = float(order.get("quantity") or 1)
                 price = float(price_map.get(mt, 0.0))
-                amount = price  # если когда-нибудь появится поле "количество", можно перемножить
+                amount = price * qty
 
                 ws.append([
                     order.get("date", ""),
@@ -3926,7 +3972,8 @@ def get_order_with_items_from_db(order_id: int) -> Dict[str, Any]:
                     COALESCE(moi.tbn_text, '')      AS tbn,
                     COALESCE(moi.position_text, '') AS position,
                     COALESCE(mti.name, moi.meal_type_text, '') AS meal_type,
-                    COALESCE(moi.comment, '')       AS comment
+                    COALESCE(moi.comment, '')       AS comment,
+                    COALESCE(moi.quantity, 1)       AS quantity
                 FROM meal_order_items moi
                 LEFT JOIN meal_types mti ON mti.id = moi.meal_type_id
                 WHERE moi.order_id = %s
@@ -3935,7 +3982,7 @@ def get_order_with_items_from_db(order_id: int) -> Dict[str, Any]:
                 (order_id,),
             )
             emps = []
-            for fio, tbn, position, meal_type, comment in cur.fetchall():
+            for fio, tbn, position, meal_type, comment, quantity in cur.fetchall():
                 emps.append(
                     {
                         "fio": fio,
@@ -3943,6 +3990,7 @@ def get_order_with_items_from_db(order_id: int) -> Dict[str, Any]:
                         "position": position,
                         "meal_type": meal_type,
                         "comment": comment,
+                        "quantity": float(quantity or 1),
                     }
                 )
 
