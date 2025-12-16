@@ -458,16 +458,16 @@ def save_order_to_db(data: dict) -> int:
                 created_at = datetime.strptime(data["created_at"], "%Y-%m-%dT%H:%M:%S")
                 order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
                 team_name = (data.get("team_name") or "").strip()
-
+                fact_address = (data.get("fact_address") or "").strip()
                 user_id = data.get("user_id")
 
                 cur.execute(
                     """
-                    INSERT INTO meal_orders (created_at, date, department_id, team_name, object_id, user_id)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO meal_orders (created_at, date, department_id, team_name, object_id, user_id, fact_address)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
-                    (created_at, order_date, dept_id, team_name, object_id, user_id),
+                    (created_at, order_date, dept_id, team_name, object_id, user_id, fact_address),
                 )
                 order_id = cur.fetchone()[0]
 
@@ -566,7 +566,7 @@ def get_registry_from_db(
                 params.append(filter_date)
 
             if filter_address:
-                where_clauses.append("o.address ILIKE %s")
+                where_clauses.append("COALESCE(mo.fact_address, o.address) ILIKE %s")
                 params.append(f"%{filter_address}%")
 
             if filter_department and filter_department.lower() != "все":
@@ -581,7 +581,7 @@ def get_registry_from_db(
                 SELECT
                     mo.id                    AS order_id,
                     mo.date::text            AS date,
-                    COALESCE(o.address, '')  AS address,
+                    COALESCE(mo.fact_address, o.address, '')  AS address,
                     COALESCE(d.name, '')     AS department,
                     COALESCE(mo.team_name, '') AS team_name,
                     COALESCE(mti.name, moi.meal_type_text, '') AS meal_type
@@ -662,7 +662,7 @@ def load_all_meal_orders(
                 params.append(department.strip())
 
             if address_substr and address_substr.strip():
-                where_clauses.append("o.address ILIKE %s")
+                where_clauses.append("COALESCE(mo.fact_address, o.address) ILIKE %s")
                 params.append(f"%{address_substr.strip()}%")
 
             where_sql = ""
@@ -677,7 +677,7 @@ def load_all_meal_orders(
                     COALESCE(d.name, '')        AS department,
                     COALESCE(mo.team_name, '')  AS team_name,
                     COALESCE(o.excel_id, '')    AS object_id,
-                    COALESCE(o.address, '')     AS object_address,
+                    COALESCE(mo.fact_address, o.address, '')     AS object_address,
                     COUNT(moi.id)               AS employees_count,
                     COALESCE(au.full_name,
                              au.username,
@@ -727,7 +727,7 @@ def load_user_meal_orders(user_id: int) -> List[Dict[str, Any]]:
                     COALESCE(d.name, '')      AS department,
                     COALESCE(mo.team_name, '') AS team_name,
                     COALESCE(o.excel_id, '')  AS object_id,
-                    COALESCE(o.address, '')   AS object_address,
+                    COALESCE(mo.fact_address, o.address, '')   AS object_address,
                     COUNT(moi.id)             AS employees_count
                 FROM meal_orders mo
                 JOIN meal_order_items moi ON moi.order_id = mo.id
@@ -772,7 +772,7 @@ def get_details_from_db(
                 params.append(filter_date)
 
             if filter_address:
-                where_clauses.append("o.address ILIKE %s")
+                where_clauses.append("COALESCE(mo.fact_address, o.address) ILIKE %s")
                 params.append(f"%{filter_address}%")
 
             if filter_department and filter_department.lower() != "все":
@@ -786,7 +786,7 @@ def get_details_from_db(
             sql = f"""
                 SELECT
                     mo.date::text        AS date,
-                    COALESCE(o.address, '')       AS address,
+                    COALESCE(mo.fact_address, o.address, '')       AS address,
                     COALESCE(o.excel_id, '')        AS object_excel_id,
                     COALESCE(d.name, '')          AS department,
                     COALESCE(mo.team_name, '')    AS team_name,
@@ -1445,15 +1445,23 @@ class MealOrderPage(tk.Frame):
         self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=18)
         self.cmb_object_id.grid(row=1, column=4, sticky="w", padx=(4, 0), pady=(8, 0))
 
+        tk.Label(top, text="Фактический адрес:", bg="#f7f7f7").grid(
+            row=2, column=0, sticky="w", pady=(8, 0)
+        )
+        self.ent_fact_address = ttk.Entry(top, width=60)
+        self.ent_fact_address.grid(
+            row=2, column=1, columnspan=5, sticky="we", padx=(4, 12), pady=(8, 0)
+        )
+
         self.lbl_date_hint = tk.Label(top, text="", fg="#555", bg="#f7f7f7")
         self.lbl_date_hint.grid(row=1, column=5, sticky="w", padx=(12, 0), pady=(8, 0))
         disable_mousewheel(self.cmb_object_id)  # блокируем прокрутку ID объекта
 
         tk.Label(top, text="Наименование бригады*:", bg="#f7f7f7").grid(
-            row=2, column=0, sticky="w", pady=(8, 0)
+            row=3, column=0, sticky="w", pady=(8, 0)
         )
         self.ent_team = ttk.Entry(top, width=60)
-        self.ent_team.grid(row=2, column=1, columnspan=5, sticky="we", padx=(4, 12), pady=(8, 0))
+        self.ent_team.grid(row=3, column=1, columnspan=5, sticky="we", padx=(4, 12), pady=(8, 0))
 
         emp_wrap = tk.LabelFrame(self, text="Сотрудники")
         emp_wrap.pack(fill="both", expand=True, padx=10, pady=(6, 8))
@@ -1557,6 +1565,18 @@ class MealOrderPage(tk.Frame):
                 self.cmb_object_id["values"] = ids
             self.cmb_object_id.set(oid)
 
+        fact_addr = (data.get("fact_address") or "").strip()
+        try:
+            self.ent_fact_address.delete(0, tk.END)
+            if fact_addr:
+                self.ent_fact_address.insert(0, fact_addr)
+            else:
+                # если в данных нет – по умолчанию текущий адрес
+                if addr:
+                    self.ent_fact_address.insert(0, addr)
+        except Exception:
+            pass    
+
         self.ent_team.delete(0, "end")
         self.ent_team.insert(0, data.get("team_name", ""))
 
@@ -1585,6 +1605,7 @@ class MealOrderPage(tk.Frame):
         req_date = parse_date_any(self.ent_date.get()) or date.today()
         addr = (self.cmb_address.get() or "").strip()
         oid = (self.cmb_object_id.get() or "").strip()
+        fact_address = (self.ent_fact_address.get() or "").strip()
         employees = [r.get_dict() for r in self.emp_rows]
 
         user_id = None
@@ -1600,6 +1621,7 @@ class MealOrderPage(tk.Frame):
             "department": (self.cmb_dep.get() or "").strip(),
             "team_name": (self.ent_team.get() or "").strip(),
             "object": {"id": oid, "address": addr},
+            "fact_address": fact_address,
             "employees": employees,
         }
         if user_id is not None:
@@ -1660,6 +1682,15 @@ class MealOrderPage(tk.Frame):
         else:
             self.cmb_object_id.config(state="normal", values=[])
             self.cmb_object_id.set("")
+
+        # если фактический адрес пока пустой – заполняем выбранным адресом
+        fact = (self.ent_fact_address.get() or "").strip() if hasattr(self, "ent_fact_address") else ""
+        if not fact and addr:
+            try:
+                self.ent_fact_address.delete(0, tk.END)
+                self.ent_fact_address.insert(0, addr)
+            except Exception:
+                pass
 
     def add_employee(self):
         dep = (self.cmb_dep.get() or "Все").strip()
@@ -1879,6 +1910,7 @@ class MealOrderPage(tk.Frame):
                         order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
                         team_name = (data.get("team_name") or "").strip()
                         user_id = data.get("user_id")
+                        fact_address = (data.get("fact_address") or "").strip()
 
                         if self.edit_order_id:
                             existing_id = self.edit_order_id
@@ -1922,10 +1954,11 @@ class MealOrderPage(tk.Frame):
                                    SET date = %s,
                                        department_id = %s,
                                        team_name = %s,
-                                       object_id = %s
+                                       object_id = %s,
+                                       fact_address = %s
                                  WHERE id = %s
                                 """,
-                                (order_date, dept_id, team_name, object_id, existing_id),
+                                (order_date, dept_id, team_name, object_id, fact_address, existing_id),
                             )
                             order_db_id = existing_id
                         else:
@@ -1935,11 +1968,11 @@ class MealOrderPage(tk.Frame):
                             cur.execute(
                                 """
                                 INSERT INTO meal_orders
-                                    (created_at, date, department_id, team_name, object_id, user_id)
-                                VALUES (%s, %s, %s, %s, %s, %s)
+                                    (created_at, date, department_id, team_name, object_id, user_id, fact_address)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s)
                                 RETURNING id
                                 """,
-                                (created_at, order_date, dept_id, team_name, object_id, user_id),
+                                (created_at, order_date, dept_id, team_name, object_id, user_id, fact_address),
                             )
                             order_db_id = cur.fetchone()[0]
 
@@ -1993,7 +2026,8 @@ class MealOrderPage(tk.Frame):
                 ws.append(["Подразделение", data["department"]])
                 ws.append(["Наименование бригады", data.get("team_name", "")])
                 ws.append(["ID объекта", data["object"]["id"]])
-                ws.append(["Адрес", data["object"]["address"]])
+                ws.append(["Адрес (объект)", data["object"]["address"]])
+                ws.append(["Фактический адрес", data.get("fact_address", "")])
                 ws.append([])
                 hdr = ["#", "ФИО", "Тип питания", "Комментарий"]
                 ws.append(hdr)
@@ -2036,6 +2070,10 @@ class MealOrderPage(tk.Frame):
         self.cmb_object_id.config(values=[])
         self.cmb_object_id.set("")
         self.ent_team.delete(0, "end")
+        try:
+            self.ent_fact_address.delete(0, "end")
+        except Exception:
+            pass
         for r in self.emp_rows:
             r.destroy()
         self.emp_rows.clear()
@@ -3864,7 +3902,8 @@ def get_order_with_items_from_db(order_id: int) -> Dict[str, Any]:
                     COALESCE(d.name, '') AS department,
                     COALESCE(mo.team_name, '') AS team_name,
                     COALESCE(o.excel_id, '') AS object_excel_id,
-                    COALESCE(o.address, '') AS object_address
+                    COALESCE(o.address, '') AS object_address,
+                    COALESCE(mo.fact_address, '') AS fact_address
                 FROM meal_orders mo
                 LEFT JOIN departments d ON d.id = mo.department_id
                 LEFT JOIN objects o     ON o.id = mo.object_id
@@ -3877,7 +3916,7 @@ def get_order_with_items_from_db(order_id: int) -> Dict[str, Any]:
                 raise ValueError(f"Заявка id={order_id} не найдена")
 
             (oid, created_at, date_str,
-             department, team_name, obj_excel_id, obj_address) = row
+             department, team_name, obj_excel_id, obj_address, fact_address) = row
 
             # сотрудники
             cur.execute(
@@ -3914,6 +3953,7 @@ def get_order_with_items_from_db(order_id: int) -> Dict[str, Any]:
             "department": department,
             "team_name": team_name,
             "object": {"id": obj_excel_id, "address": obj_address},
+            "fact_address": fact_address,
             "employees": emps,
         }
     finally:
