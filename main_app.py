@@ -51,6 +51,7 @@ _assets_logo = None
 _LOGO_BASE64 = None
 SpecialOrders = None
 meals_module = None
+meals_employees_module = None
 objects = None
 Settings = None
 timesheet_module = None
@@ -63,7 +64,7 @@ def perform_heavy_imports():
     global BudgetAnalyzer, _assets_logo, _LOGO_BASE64, SpecialOrders, \
            meals_module, objects, Settings, timesheet_module, \
            analytics_module, timesheet_transformer, employees_module, \
-           timesheet_compare
+           timesheet_compare, meals_employees_module
            
     import BudgetAnalyzer
     import assets_logo as _assets_logo
@@ -76,6 +77,7 @@ def perform_heavy_imports():
     import analytics_module
     import employees as employees_module
     import timesheet_compare
+    import meals_employees as meals_employees_module
 
     try:
         import timesheet_transformer
@@ -383,6 +385,7 @@ class MainApp(tk.Tk):
         m_meals.add_command(label="Мои заявки", command=lambda: self._show_page("my_meals_orders", lambda p: meals_module.create_my_meals_orders_page(p, self)))
         m_meals.add_command(label="Планирование", command=lambda: self._show_page("meals_planning", lambda p: meals_module.create_meals_planning_page(p, self)))
         m_meals.add_command(label="Реестр", command=lambda: self._show_page("meals_registry", lambda p: meals_module.create_all_meals_orders_page(p, self)))
+        m_meals.add_command(label="Работники (питание)", command=lambda: self._show_page("meals_workers", lambda p: meals_employees_module.create_meals_workers_page(p, self)))
         self._menu_meals_settings_index = m_meals.index("end")
         m_meals.add_command(label="Настройки", command=lambda: self._show_page("meals_settings", lambda p: meals_module.create_meals_settings_page(p, self.current_user.get('role'))))
         self._menubar.add_cascade(label="Питание", menu=m_meals)
@@ -443,18 +446,29 @@ class MainApp(tk.Tk):
         
         headers = {
             "home": ("Управление строительством", "Выберите раздел в верхнем меню"),
-            "timesheet": ("Объектный табель", ""), "my_timesheets": ("Мои табели", ""), "timesheet_registry": ("Реестр табелей", ""),
+            "timesheet": ("Объектный табель", ""),
+            "my_timesheets": ("Мои табели", ""),
+            "timesheet_registry": ("Реестр табелей", ""),
             "workers": ("Работники", "Поиск по сотруднику и его объектам"),
             "timesheet_compare": ("Сравнение табелей", "Объектный vs Кадровый (1С)"),
-            "transport": ("Заявка на спецтехнику", ""), "my_transport_orders": ("Мои заявки на транспорт", ""),
-            "planning": ("Планирование транспорта", ""), "transport_registry": ("Реестр транспорта", ""),
-            "meals_order": ("Заказ питания", ""), "my_meals_orders": ("Мои заявки на питание", ""),
+            "transport": ("Заявка на спецтехнику", ""),
+            "my_transport_orders": ("Мои заявки на транспорт", ""),
+            "planning": ("Планирование транспорта", ""),
+            "transport_registry": ("Реестр транспорта", ""),
+            "meals_order": ("Заказ питания", ""),
+            "my_meals_orders": ("Мои заявки на питание", ""),
             "meals_planning": ("Планирование питания", ""),
             "meals_registry": ("Реестр заявок на питание", ""),
+            "meals_workers": ("Работники (питание)", "История питания по сотруднику"),
             "meals_settings": ("Настройки питания", ""),
-            "object_create": ("Объекты: Создание/Редактирование", ""), "objects_registry": ("Реестр объектов", ""),
-            "budget": ("Анализ смет", ""), "login": ("Управление строительством", "Вход в систему"),
-            "analytics_dashboard": ("Операционная аналитика", "Сводные показатели по ключевым метрикам")
+            "object_create": ("Объекты: Создание/Редактирование", ""),
+            "objects_registry": ("Реестр объектов", ""),
+            "budget": ("Анализ смет", ""),
+            "login": ("Управление строительством", "Вход в систему"),
+            "analytics_dashboard": (
+                "Операционная аналитика",
+                "Сводные показатели по ключевым метрикам",
+            ),
         }
         title, hint = headers.get(key, (key.replace("_", " ").title(), ""))
         self._set_header(title, hint)
@@ -524,6 +538,7 @@ class MainApp(tk.Tk):
         # "Планирование" доступно планировщикам, менеджерам и админам.
         set_state(self._menu_meals, "Планирование", is_planner)
         set_state(self._menu_meals, "Реестр", is_planner)
+        set_state(self._menu_meals, "Работники (питание)", is_planner)
         # "Настройки" доступны только администратору.
         set_state(self._menu_meals, "Настройки", is_admin)
 
@@ -571,7 +586,17 @@ if __name__ == "__main__":
             initialize_db_pool()
 
             splash.update_status("Передача настроек в модули...")
-            modules_to_init = [meals_module, SpecialOrders, objects, Settings, timesheet_module, analytics_module, employees_module, timesheet_compare]
+            modules_to_init = [
+                meals_module,
+                SpecialOrders,
+                objects,
+                Settings,
+                timesheet_module,
+                analytics_module,
+                employees_module,
+                timesheet_compare,
+                meals_employees_module, 
+            ]
             for module in modules_to_init:
                 if module and hasattr(module, "set_db_pool"):
                     module.set_db_pool(db_connection_pool)
