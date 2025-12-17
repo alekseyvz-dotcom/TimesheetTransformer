@@ -1461,9 +1461,9 @@ class MealOrderPage(tk.Frame):
         self.cmb_address.set_completion_list(self.addresses)
         self.cmb_address.grid(row=1, column=1, columnspan=2, sticky="we", padx=(4, 12), pady=(8, 0))
         disable_mousewheel(self.cmb_address)  # блокируем прокрутку адреса        
-        self.cmb_address.bind("<<ComboboxSelected>>", lambda e: self._sync_ids_by_address())
-        self.cmb_address.bind("<FocusOut>", lambda e: self._sync_ids_by_address())
-        self.cmb_address.bind("<Return>", lambda e: self._sync_ids_by_address())
+        self.cmb_address.bind("<<ComboboxSelected>>", self._on_address_selected)
+        self.cmb_address.bind("<FocusOut>", lambda e: self._sync_ids_by_address(self.cmb_address.get()))
+        self.cmb_address.bind("<Return>", lambda e: self._sync_ids_by_address(self.cmb_address.get()))
 
         tk.Label(top, text="ID объекта:", bg="#f7f7f7").grid(
             row=1,
@@ -1591,7 +1591,7 @@ class MealOrderPage(tk.Frame):
             self.addresses.sort()
             self.cmb_address.set_completion_list(self.addresses)
         self.cmb_address.set(addr)
-        self._sync_ids_by_address()
+        self._sync_ids_by_address(addr)
         if oid:
             ids = list(self.cmb_object_id["values"])
             if oid and oid not in ids:
@@ -1716,8 +1716,20 @@ class MealOrderPage(tk.Frame):
         except Exception:
             self.lbl_date_hint.config(text="", fg="#555")
 
-    def _sync_ids_by_address(self):
-        addr = (self.cmb_address.get() or "").strip()
+    def _sync_ids_by_address(self, address_value: Optional[str] = None):
+        """
+        Синхронизирует список ID объекта и фактический адрес по заданному адресу.
+        Если address_value не задан, берёт текущее значение из cmb_address.
+        """
+        addr = (address_value if address_value is not None else self.cmb_address.get() or "").strip()
+
+        # если передали новый полный адрес — обновим комбобокс
+        if address_value is not None:
+            try:
+                self.cmb_address.set(addr)
+            except Exception:
+                pass
+
         ids = sorted(self.addr_to_ids.get(addr, []))
         if ids:
             self.cmb_object_id.config(state="readonly", values=ids)
@@ -2230,6 +2242,29 @@ class MealOrderPage(tk.Frame):
             os.startfile(self.orders_dir)
         except Exception as e:
             messagebox.showerror("Папка", f"Не удалось открыть папку:\n{e}")
+
+    def _on_address_selected(self, event=None):
+        """
+        Обработчик выбора адреса из выпадающего списка комбобокса.
+        Здесь self.cmb_address.get() уже содержит полное значение из списка.
+        """
+        full_addr = (self.cmb_address.get() or "").strip()
+        if not full_addr:
+            return
+        # на всякий случай убеждаемся, что это один из известных нам адресов
+        # (если нет — оставляем как есть)
+        if full_addr not in self.addresses:
+            # попытаемся найти первый адрес, который начинается с введённого
+            typed = full_addr.lower()
+            for a in self.addresses:
+                if a.lower().startswith(typed):
+                    full_addr = a
+                    break
+
+        # ставим в комбобокс полный адрес
+        self.cmb_address.set(full_addr)
+        # синхронизируем ID и фактический адрес по полному
+        self._sync_ids_by_address(full_addr)
 
 class MyMealsOrdersPage(tk.Frame):
     """
