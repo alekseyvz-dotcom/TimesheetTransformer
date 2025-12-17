@@ -2139,8 +2139,8 @@ class TimesheetPage(tk.Frame):
 
     def _on_department_select(self):
         dep_sel = (self.cmb_department.get() or "Все").strip()
-        if set_selected_department_from_config:
-            set_selected_department_from_config(dep_sel)
+        if set_selected_department_in_config:
+            set_selected_department_in_config(dep_sel)
 
         if dep_sel == "Все":
             names = [e[0] for e in self.employees]
