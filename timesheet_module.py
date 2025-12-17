@@ -2135,6 +2135,178 @@ class TimesheetPage(tk.Frame):
         else:
             messagebox.showinfo("Объектный табель", "Все выбранные сотрудники уже есть в табеле.")
 
+    # ---------------- Выбор подразделения / импорт ----------------
+
+    def _on_department_select(self):
+        dep_sel = (self.cmb_department.get() or "Все").strip()
+        if set_selected_department_from_config:
+            set_selected_department_from_config(dep_sel)
+
+        if dep_sel == "Все":
+            names = [e[0] for e in self.employees]
+        else:
+            names = [e[0] for e in self.employees if len(e) > 3 and (e[3] or "").strip() == dep_sel]
+
+        # сохраняем текущий список допустимых ФИО
+        self.allowed_fio_names = set(names)
+
+        self.cmb_fio.set_completion_list(sorted(list(set(names))))
+
+        if self.fio_var.get() and self.fio_var.get() not in names:
+            self.fio_var.set("")
+            self.ent_tbn.delete(0, "end")
+            self.pos_var.set("")
+
+        self._load_existing_rows()
+
+    def import_from_excel(self):
+        if self.read_only:
+            return
+        from tkinter import filedialog
+
+        addr, oid = self.cmb_address.get().strip(), self.cmb_object_id.get().strip()
+        y, m = self.get_year_month()
+        current_dep = self.cmb_department.get().strip()
+        if not addr and not oid:
+            messagebox.showwarning("Импорт", "Укажите адрес/ID объекта и период.")
+            return
+
+        path = filedialog.askopenfilename(parent=self, title="Выберите Excel-файл табеля",
+                                          filetypes=[("Excel", "*.xlsx")])
+        if not path:
+            return
+
+        try:
+            wb = load_workbook(path, data_only=True)
+            ws = self._ensure_sheet(wb)
+            imported: List[Dict[str, Any]] = []
+
+            for r in range(2, ws.max_row + 1):
+                if int(ws.cell(r, 3).value or 0) != m or int(ws.cell(r, 4).value or 0) != y:
+                    continue
+                if oid:
+                    if (ws.cell(r, 1).value or "") != oid:
+                        continue
+                elif (ws.cell(r, 2).value or "") != addr:
+                    continue
+                if current_dep != "Все" and (ws.cell(r, 7).value or "") != current_dep:
+                    continue
+
+                fio = str(ws.cell(r, 5).value or "").strip()
+                if not fio:
+                    continue
+
+                hours_raw = [str(ws.cell(r, c).value or "").strip() or None
+                             for c in range(8, 8 + 31)]
+                imported.append({
+                    "fio": fio,
+                    "tbn": str(ws.cell(r, 6).value or "").strip(),
+                    "hours": hours_raw
+                })
+
+            if not imported:
+                messagebox.showinfo("Импорт", "Подходящих строк не найдено.")
+            else:
+                uniq: Dict[tuple, Dict[str, Any]] = {}
+                for rec in imported:
+                    uniq[(rec["fio"].lower(), rec["tbn"])] = rec
+                imported = list(uniq.values())
+
+                replace_mode = messagebox.askyesno(
+                    "Импорт", "Заменить текущий список?"
+                ) if self.model_rows else True
+
+                self._sync_visible_to_model()
+                if replace_mode:
+                    self.model_rows.clear()
+                    self.selected_indices.clear()
+
+                existing = {(r["fio"].lower(), r["tbn"]) for r in self.model_rows}
+                added = 0
+                for rec in imported:
+                    if (rec["fio"].lower(), rec["tbn"]) not in existing:
+                        self.model_rows.append(rec)
+                        added += 1
+
+                self._render_page(1)
+                self._schedule_auto_save()
+                messagebox.showinfo("Импорт", f"Импортировано {added} новых сотрудников.")
+
+        except Exception as e:
+            messagebox.showerror("Импорт", f"Ошибка чтения файла:\n{e}")
+
+    def copy_from_month(self):
+        if self.read_only:
+            return
+        addr, oid = self.cmb_address.get().strip(), self.cmb_object_id.get().strip()
+        current_dep = self.cmb_department.get().strip()
+        if not addr and not oid:
+            messagebox.showwarning("Копирование", "Укажите адрес/ID объекта.")
+            return
+
+        cy, cm = self.get_year_month()
+        dlg = CopyFromDialog(self, init_year=cy if cm > 1 else cy - 1,
+                             init_month=cm - 1 if cm > 1 else 12)
+        if not dlg.result:
+            return
+
+        src_y = dlg.result["year"]
+        src_m = dlg.result["month"]
+        with_hours = dlg.result["with_hours"]
+        mode = dlg.result["mode"]
+
+        src_path = self._file_path_for(src_y, src_m, addr=addr, oid=oid, department=current_dep)
+        if not src_path or not src_path.exists():
+            messagebox.showwarning("Копирование",
+                                   f"Файл-источник не найден:\n{src_path.name if src_path else 'N/A'}")
+            return
+
+        try:
+            wb = load_workbook(src_path, data_only=True)
+            ws = self._ensure_sheet(wb)
+            found = []
+            for r in range(2, ws.max_row + 1):
+                if int(ws.cell(r, 3).value or 0) != src_m or int(ws.cell(r, 4).value or 0) != src_y:
+                    continue
+                if oid and (ws.cell(r, 1).value or "") != oid:
+                    continue
+                elif not oid and (ws.cell(r, 2).value or "") != addr:
+                    continue
+                if current_dep != "Все" and (ws.cell(r, 7).value or "") != current_dep:
+                    continue
+
+                fio = str(ws.cell(r, 5).value or "").strip()
+                if not fio:
+                    continue
+                hrs = ([str(ws.cell(r, c).value or "").strip() or None
+                        for c in range(8, 8 + 31)] if with_hours else [None] * 31)
+                found.append((fio, str(ws.cell(r, 6).value or "").strip(), hrs))
+
+            if not found:
+                messagebox.showinfo("Копирование", "В источнике не найдено подходящих сотрудников.")
+                return
+
+            uniq = {((f.lower(), t)): (f, t, h) for f, t, h in found}
+            found_uniq = list(uniq.values())
+
+            self._sync_visible_to_model()
+            if mode == "replace":
+                self.model_rows.clear()
+                self.selected_indices.clear()
+
+            existing = {(r["fio"].lower(), r["tbn"]) for r in self.model_rows}
+            added = 0
+            for fio, tbn, hrs in found_uniq:
+                if (fio.lower(), tbn) not in existing:
+                    self.model_rows.append({"fio": fio, "tbn": tbn, "hours": hrs})
+                    added += 1
+
+            self._render_page(1)
+            self._schedule_auto_save()
+            messagebox.showinfo("Копирование", f"Скопировано {added} сотрудников.")
+        except Exception as e:
+            messagebox.showerror("Копирование", f"Ошибка при копировании:\n{e}")
+
     def add_department_all(self):
         if self.read_only:
             return
