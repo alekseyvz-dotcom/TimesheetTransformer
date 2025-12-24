@@ -520,12 +520,17 @@ class TimesheetComparePage(tk.Frame):
         mismatch_tag = "mismatch"
         self.tree_compare.tag_configure(mismatch_tag, background="#fff2cc")  # жёлтый фон
 
+        def _norm(v: Any) -> str:
+            # Нормализация значения для сравнения
+            if v is None:
+                return ""
+            return str(v).strip().lower()
+
         for i in range(0, len(items), 2):
             if i + 1 >= len(items):
                 break
             iid_obj = items[i]
             iid_hr = items[i + 1]
-
             v_obj = self.tree_compare.item(iid_obj, "values")
             v_hr = self.tree_compare.item(iid_hr, "values")
 
@@ -533,14 +538,21 @@ class TimesheetComparePage(tk.Frame):
             for idx in range(3, 3 + days_in_month):
                 vo = v_obj[idx] if idx < len(v_obj) else ""
                 vh = v_hr[idx] if idx < len(v_hr) else ""
-                if (vo == "" and vh == "") or (vo == vh):
+
+                # пусто-пусто — это ок
+                if _norm(vo) == "" and _norm(vh) == "":
                     continue
+                # регистронезависимое сравнение
+                if _norm(vo) == _norm(vh):
+                    continue
+
                 mismatch = True
                 break
 
             if mismatch:
                 self.tree_compare.item(iid_obj, tags=(mismatch_tag,))
                 self.tree_compare.item(iid_hr, tags=(mismatch_tag,))
+                
     def _fill_departments_combo(self, headers: List[Dict[str, Any]]):
         """Заполнить выпадающий список подразделений по загруженным заголовкам."""
         deps_set = set()
@@ -604,6 +616,11 @@ class TimesheetComparePage(tk.Frame):
             # Подсветка отличий
             diff_fill = PatternFill(fill_type="solid", fgColor="FFF2CC")  # светло-жёлтый
 
+            def _norm(v: Any) -> str:
+                if v is None:
+                    return ""
+                return str(v).strip().lower()
+
             items = self._merged_rows
             row_excel = 2  # первая строка с данными
 
@@ -624,15 +641,17 @@ class TimesheetComparePage(tk.Frame):
                         vals_hr.append(v)
                     ws.append(vals_hr)
 
-                    # Подсветка отличий по дням
+                    # Подсветка отличий по дням (регистронезависимая)
                     for d in range(1, days_in_m + 1):
                         col_idx = 3 + d  # A=1, B=2, C=3, дни начинаются с 4-го столбца
                         c_obj = ws.cell(row=row_excel, column=col_idx)
                         c_hr = ws.cell(row=row_excel + 1, column=col_idx)
+                        vo = c_obj.value
+                        vh = c_hr.value
 
-                        vo = (c_obj.value or "")
-                        vh = (c_hr.value or "")
-                        if (vo == "" and vh == "") or (str(vo) == str(vh)):
+                        if _norm(vo) == "" and _norm(vh) == "":
+                            continue
+                        if _norm(vo) == _norm(vh):
                             continue
 
                         c_obj.fill = diff_fill
