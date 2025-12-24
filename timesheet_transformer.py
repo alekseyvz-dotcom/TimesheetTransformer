@@ -366,16 +366,30 @@ def to_number_value(v: Any) -> Optional[float]:
     n = token_to_number(s)
     return float(n) if n is not None else None
 
-def day_hours_from_values(code_val: Any, hours_val: Any) -> Optional[float]:
+def day_value_from_values(code_val: Any, hours_val: Any) -> Optional[Any]:
+    """
+    Возвращает:
+    - число (float), если есть часы
+    - строку-код (например, 'О'), если часов нет, но есть буквенный код
+      (кроме 'В' — выходные, для них возвращаем None)
+    - None, если нет ни часов, ни кода
+    """
+    # 1. Пытаемся взять часы
     n = to_number_value(hours_val)
     if n is not None:
         return n
+
+    # 2. Часов нет — смотрим буквенный код сверху
     code = extract_code_token(code_val)
     if not code:
         return None
-    if is_non_working_code(code):
-        return 0.0
-    return None
+
+    # 3. Если выходной 'В' — ничего не подставляем
+    if code.strip().upper() == "В":
+        return None
+
+    # 4. Для всех остальных кодов (О, Б, НН, и т.п.) возвращаем сам код
+    return code
 
 # ---------------- Поиск конца данных ----------------
 def find_last_data_row(ws, start_row: int, ui: Optional[ProgressUI]) -> int:
@@ -499,13 +513,13 @@ def transform_sheet(ws, ui: Optional[ProgressUI]) -> Tuple[List[str], List[List[
         for dj in day_idx_h1:
             code_val = row[dj] if row else None
             hours_val = row_p1[dj] if row_p1 else None
-            daily = day_hours_from_values(code_val, hours_val)
+            daily = day_value_from_values(code_val, hours_val)
             out.append(daily if daily is not None else "")
 
         for dj in day_idx_h2:
             code_val = row_p2[dj] if row_p2 else None
             hours_val = row_p3[dj] if row_p3 else None
-            daily = day_hours_from_values(code_val, hours_val)
+            daily = day_value_from_values(code_val, hours_val)
             out.append(daily if daily is not None else "")
 
         out.append(days_num if days_num is not None else "")
@@ -826,3 +840,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
