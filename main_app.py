@@ -506,6 +506,7 @@ class MainApp(tk.Tk):
         is_logist = (role == "logist")
 
         def set_state(menu, label_text, condition):
+            """Меняет состояние пункта меню по его тексту."""
             if not menu:
                 return
             try:
@@ -517,20 +518,22 @@ class MainApp(tk.Tk):
 
         # === Если ЛОГИСТ ===
         if is_logist:
-            # --- Объектный табель: всё отключаем ---
+            # --- ВНУТРЕННИЕ пункты разделов ---
+
+            # Объектный табель
             set_state(self._menu_timesheets, "Создать", False)
             set_state(self._menu_timesheets, "Мои табели", False)
             set_state(self._menu_timesheets, "Реестр табелей", False)
             set_state(self._menu_timesheets, "Работники", False)
             set_state(self._menu_timesheets, "Сравнение с 1С", False)
 
-            # --- Автотранспорт: только "Создать заявку" и "Мои заявки" ---
+            # Автотранспорт – только два пункта
             set_state(self._menu_transport, "Создать заявку", True)
             set_state(self._menu_transport, "Мои заявки", True)
             set_state(self._menu_transport, "Планирование", False)
             set_state(self._menu_transport, "Реестр", False)
 
-            # --- Питание: всё отключаем ---
+            # Питание
             set_state(self._menu_meals, "Создать заявку", False)
             set_state(self._menu_meals, "Мои заявки", False)
             set_state(self._menu_meals, "Планирование", False)
@@ -538,37 +541,40 @@ class MainApp(tk.Tk):
             set_state(self._menu_meals, "Работники (питание)", False)
             set_state(self._menu_meals, "Настройки", False)
 
-            # --- Объекты: всё отключаем ---
+            # Объекты
             set_state(self._menu_objects, "Создать/Редактировать", False)
             set_state(self._menu_objects, "Реестр", False)
 
-            # --- Аналитика: отключаем ---
+            # --- Корневые пункты (разделы верхнего меню) ---
+            # Отключаем целиком разделы
+            set_state(self._menubar, "Объектный табель", False)
+            set_state(self._menubar, "Питание", False)
+            set_state(self._menubar, "Объекты", False)
             set_state(self._menubar, "Аналитика", False)
-
-            # --- Настройки: отключаем ---
+            set_state(self._menubar, "Инструменты", False)
             set_state(self._menubar, "Настройки", False)
-
-            # Можно также отключить весь пункт "Инструменты", если нужно:
-            # set_state(self._menubar, "Инструменты", False)
+            # "Главная" и "Автотранспорт" остаются активными
 
             return  # для логиста дальше не продолжаем
 
         # === Остальные роли (старое поведение) ===
 
-        # --- Объектный табель ---
+        # Внутренние пункты разделов
+
+        # Объектный табель
         set_state(self._menu_timesheets, "Создать", True)
         set_state(self._menu_timesheets, "Мои табели", True)
         set_state(self._menu_timesheets, "Реестр табелей", is_manager)
         set_state(self._menu_timesheets, "Работники", True)
         set_state(self._menu_timesheets, "Сравнение с 1С", True)
 
-        # --- Автотранспорт ---
+        # Автотранспорт
         set_state(self._menu_transport, "Создать заявку", True)
         set_state(self._menu_transport, "Мои заявки", True)
         set_state(self._menu_transport, "Планирование", is_planner)
         set_state(self._menu_transport, "Реестр", is_planner)
 
-        # --- Питание ---
+        # Питание
         set_state(self._menu_meals, "Создать заявку", True)
         set_state(self._menu_meals, "Мои заявки", True)
         set_state(self._menu_meals, "Планирование", is_planner)
@@ -576,15 +582,18 @@ class MainApp(tk.Tk):
         set_state(self._menu_meals, "Работники (питание)", is_planner)
         set_state(self._menu_meals, "Настройки", is_admin)
 
-        # --- Объекты ---
+        # Объекты
         set_state(self._menu_objects, "Создать/Редактировать", is_manager)
         set_state(self._menu_objects, "Реестр", True)
 
-        # --- Аналитика ---
+        # Корневые пункты (разделы верхнего меню)
+        set_state(self._menubar, "Объектный табель", True)
+        set_state(self._menubar, "Питание", True)
+        set_state(self._menubar, "Объекты", True)
         set_state(self._menubar, "Аналитика", is_manager)
-
-        # --- Настройки ---
+        set_state(self._menubar, "Инструменты", True)  # если когда‑то нужно ограничить – можно добавить по ролям
         set_state(self._menubar, "Настройки", is_admin)
+
 
         def destroy(self):
             """Корректное завершение работы приложения."""
