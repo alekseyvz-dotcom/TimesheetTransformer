@@ -1067,31 +1067,49 @@ class HoursFillDialog(simpledialog.Dialog):
 
 
 class AutoCompleteCombobox(ttk.Combobox):
+
     def __init__(self, master=None, **kw):
         super().__init__(master, **kw)
         self._all_values: List[str] = []
         self.bind("<KeyRelease>", self._on_keyrelease)
         self.bind("<Control-BackSpace>", self._clear_all)
+        self.bind("<FocusOut>", self._on_focus_out)
 
+    def set_values(self, values: List[str]):
+        """Задать полный список значений для автодополнения."""
+        self._all_values = list(values) if values is not None else []
+        self.config(values=self._all_values)
+
+    # Обратная совместимость со старым кодом
     def set_completion_list(self, values: List[str]):
-        self._all_values = list(values)
-        self["values"] = self._all_values
-
-    def _clear_all(self, _=None):
-        self.delete(0, tk.END)
-        self["values"] = self._all_values
+        """Совместимый с старым кодом метод; просто вызывает set_values."""
+        self.set_values(values)
 
     def _on_keyrelease(self, event):
-        if event.keysym in (
-            "Up", "Down", "Left", "Right", "Home",
-            "End", "Return", "Escape", "Tab"
-        ):
+        # Не перехватываем управляющие клавиши
+        if event.keysym in ("BackSpace", "Left", "Right", "Up", "Down", "Return", "Tab"):
             return
-        typed = self.get().strip()
-        if not typed:
-            self["values"] = self._all_values
+
+        text = self.get().strip()
+        if not text:
+            self.config(values=self._all_values)
             return
-        self["values"] = [x for x in self._all_values if typed.lower() in x.lower()]
+
+        filtered = [v for v in self._all_values if text.lower() in v.lower()]
+        self.config(values=filtered)
+
+    def _clear_all(self, event):
+        self.delete(0, tk.END)
+        self.config(values=self._all_values)
+
+    def _on_focus_out(self, event):
+        """
+        Строгий режим: при потере фокуса, если текущее значение не найдено
+        в полном списке значений, очищаем поле.
+        """
+        current = self.get().strip()
+        if current and current not in self._all_values:
+            self.set("")
 
 class TimeForSelectedDialog(simpledialog.Dialog):
     """
@@ -1838,38 +1856,58 @@ class TimesheetPage(tk.Frame):
         self._load_existing_rows()
 
     def _on_address_change(self, *_):
+        """
+        Вызывается при изменении адреса в cmb_address.
+        - Фильтрует объекты по точному адресу.
+        - Если нет объектов по адресу — очищает cmb_object_id.
+        - Если один объект — выбирает его ID и нормализует адрес.
+        - Если несколько — открывает диалог выбора ID и нормализует адрес
+          после выбора.
+        """
         addr = self.cmb_address.get().strip()
-
-        # Фильтруем объекты по адресу
+    
+        # Фильтруем объекты по адресу (точное совпадение)
         objects_for_addr = [
             (code, a, short_name)
             for (code, a, short_name) in getattr(self, "objects_full", [])
             if a == addr
         ]
-
+    
         if not objects_for_addr:
+            # Нет ни одного объекта с таким адресом в справочнике
             self.cmb_object_id.config(state="normal", values=[])
             self.cmb_object_id.set("")
             return
-
+    
         ids = sorted({code for (code, a, short_name) in objects_for_addr if code})
-
+    
+        # Если режим "подавления диалога" и есть заранее инициализированный ID
         if self._suppress_object_id_dialog and self._init_object_id:
             self.cmb_object_id.config(state="readonly", values=ids)
             if self._init_object_id in ids:
                 self.cmb_object_id.set(self._init_object_id)
+                # Нормализуем адрес: берём точное значение из objects_for_addr
+                for code, a, short_name in objects_for_addr:
+                    if code == self._init_object_id:
+                        self.cmb_address.set(a)
+                        break
             else:
                 self.cmb_object_id.set("")
             return
-
+    
+        # Если по адресу ровно один объект — просто выбираем его
         if len(ids) == 1:
             self.cmb_object_id.config(state="readonly", values=ids)
             self.cmb_object_id.set(ids[0])
+            # Нормализуем адрес из справочника
+            addr_db = objects_for_addr[0][1]
+            self.cmb_address.set(addr_db)
             return
-
+    
+        # Если несколько объектов по одному адресу — диалог выбора ID
         dlg = SelectObjectIdDialog(self, objects_for_addr, addr)
         self.wait_window(dlg)
-
+    
         selected_id = dlg.result
         if selected_id:
             self.cmb_object_id.config(state="readonly", values=ids)
@@ -1878,6 +1916,12 @@ class TimesheetPage(tk.Frame):
                 ids = sorted(ids)
                 self.cmb_object_id.config(values=ids)
             self.cmb_object_id.set(selected_id)
+    
+            # Нормализуем адрес: точный address для выбранного ID
+            for code, a, short_name in objects_for_addr:
+                if code == selected_id:
+                    self.cmb_address.set(a)
+                    break
         else:
             self.cmb_object_id.config(state="normal", values=[])
             self.cmb_object_id.set("")
@@ -2637,35 +2681,123 @@ class TimesheetPage(tk.Frame):
             if show_messages:
                 messagebox.showinfo("Объектный табель", "Сохранение недоступно в режиме просмотра.")
             return
-
+    
         self._sync_visible_to_model()
-
+    
         addr, oid = self.cmb_address.get().strip(), self.cmb_object_id.get().strip()
         y, m = self.get_year_month()
         current_dep = self.cmb_department.get().strip()
-
-        if not addr and not oid:
-            if show_messages:
-                messagebox.showwarning("Сохранение", "Укажите адрес и/или ID объекта.")
-            return
+    
+        # ------------------------ Базовые проверки ------------------------ #
+    
         if current_dep == "Все":
             if show_messages:
                 messagebox.showwarning("Сохранение", "Для сохранения выберите конкретное подразделение.")
             return
-
+    
         user_id = (self.app_ref.current_user or {}).get("id") if hasattr(self, "app_ref") else None
         if not user_id:
             if show_messages:
                 messagebox.showerror("Сохранение", "Не удалось определить пользователя.")
             return
-
+    
+        # --------------------- НОВОЕ: валидация адреса -------------------- #
+    
+        # 1) Адрес обязателен
+        if not addr:
+            if show_messages:
+                messagebox.showwarning(
+                    "Сохранение",
+                    "Не задан адрес объекта. Выберите адрес из списка."
+                )
+            return
+    
+        # 2) Адрес должен быть из справочника
+        address_options = getattr(self, "address_options", [])
+        if address_options and addr not in address_options:
+            if show_messages:
+                messagebox.showwarning(
+                    "Сохранение",
+                    "Адрес объекта введён вручную и не найден в справочнике.\n"
+                    "Выберите адрес из списка."
+                )
+            return
+    
+        # 3) По адресу могут быть несколько объектов — тогда обязателен ID
+        objects_for_addr = [
+            (code, a, short_name)
+            for (code, a, short_name) in getattr(self, "objects_full", [])
+            if a == addr
+        ]
+        ids_for_addr = sorted({code for (code, a, short_name) in objects_for_addr if code})
+    
+        if len(ids_for_addr) > 1 and not oid:
+            if show_messages:
+                messagebox.showwarning(
+                    "Сохранение",
+                    "По выбранному адресу найдено несколько объектов.\n"
+                    "Сначала выберите корректный ID объекта."
+                )
+            return
+    
+        # 4) Если ID указан — проверим, что он существует и соответствует адресу
+        if oid:
+            conn_check = get_db_connection()
+            try:
+                with conn_check.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT address
+                        FROM objects
+                        WHERE COALESCE(NULLIF(excel_id, ''), '') = %s
+                        """,
+                        (oid,),
+                    )
+                    row = cur.fetchone()
+                if not row:
+                    if show_messages:
+                        messagebox.showwarning(
+                            "Сохранение",
+                            f"ID объекта '{oid}' не найден в справочнике объектов.\n"
+                            "Выберите корректный ID."
+                        )
+                    return
+    
+                real_addr = (row[0] or "").strip()
+                if real_addr != addr:
+                    if show_messages:
+                        messagebox.showwarning(
+                            "Сохранение",
+                            "Выбранный ID объекта не соответствует адресу.\n"
+                            f"ID '{oid}' связан с адресом:\n{real_addr}\n"
+                            f"а вы указали адрес:\n{addr}\n\n"
+                            "Исправьте адрес или ID."
+                        )
+                    return
+            except Exception as e:
+                try:
+                    import logging
+                    logging.exception("Ошибка проверки соответствия ID и адреса объекта")
+                except ImportError:
+                    print("Ошибка проверки соответствия ID/адрес:", e)
+                if show_messages:
+                    messagebox.showerror(
+                        "Сохранение",
+                        f"Ошибка при проверке соответствия ID и адреса объекта:\n{e}"
+                    )
+                return
+            finally:
+                release_db_connection(conn_check)
+    
+        # ----------------- Проверка дублей сотрудников -------------------- #
+    
         employees_for_check = []
         for rec in self.model_rows:
             fio = (rec.get("fio") or "").strip()
             tbn = (rec.get("tbn") or "").strip()
             if fio or tbn:
                 employees_for_check.append((fio, tbn))
-
+    
         try:
             duplicates = find_duplicate_employees_for_timesheet(
                 object_id=oid or None,
@@ -2685,7 +2817,7 @@ class TimesheetPage(tk.Frame):
             if show_messages:
                 messagebox.showerror("Сохранение", f"Ошибка при проверке дублей сотрудников:\n{e}")
             return
-
+    
         if duplicates:
             if show_messages:
                 lines = []
@@ -2694,7 +2826,7 @@ class TimesheetPage(tk.Frame):
                     emp_tbn = d.get("tbn") or ""
                     uname = d.get("full_name") or d.get("username") or f"id={d.get('user_id')}"
                     lines.append(f"- {emp_fio} (таб.№ {emp_tbn}) — уже есть в табеле пользователя {uname}")
-
+    
                 msg = (
                     "Найдены сотрудники, которые уже есть в табелях других пользователей "
                     "по этому объекту/подразделению/месяцу:\n\n"
@@ -2703,8 +2835,9 @@ class TimesheetPage(tk.Frame):
                 )
                 messagebox.showwarning("Дубли сотрудников", msg)
             return
-
-        # Сохранение в БД
+    
+        # ------------------------- Сохранение в БД ------------------------ #
+    
         try:
             header_id = upsert_timesheet_header(oid or None, addr, current_dep, y, m, user_id)
             replace_timesheet_rows(header_id, self.model_rows)
@@ -2717,8 +2850,9 @@ class TimesheetPage(tk.Frame):
             if show_messages:
                 messagebox.showerror("Сохранение", f"Ошибка сохранения в БД:\n{e}")
             return
-
-        # Резервное сохранение в Excel
+    
+        # -------------------- Резервное сохранение в Excel ---------------- #
+    
         try:
             fpath = self._current_file_path()
             if not fpath:
@@ -2731,13 +2865,13 @@ class TimesheetPage(tk.Frame):
                 if is_auto:
                     self._update_auto_save_label()
                 return
-
+    
             wb = load_workbook(fpath) if fpath.exists() else Workbook()
             if "Sheet" in wb.sheetnames and len(wb.sheetnames) == 1:
                 wb.remove(wb.active)
-
+    
             ws = self._ensure_sheet(wb)
-
+    
             to_del = [
                 r
                 for r in range(2, ws.max_row + 1)
@@ -2749,7 +2883,7 @@ class TimesheetPage(tk.Frame):
             ]
             for r in reversed(to_del):
                 ws.delete_rows(r, 1)
-
+    
             for rec in self.model_rows:
                 fio, tbn = rec["fio"], rec["tbn"]
                 hours_list = rec.get("hours") or [None] * 31
@@ -2759,19 +2893,19 @@ class TimesheetPage(tk.Frame):
                         if emp_dep:
                             department = emp_dep
                         break
-
+    
                 total_hours, total_days = 0.0, 0
                 total_night = 0.0
                 total_ot_day, total_ot_night = 0.0, 0.0
                 day_values = []
-
+    
                 for raw in hours_list:
                     day_values.append(raw)
                     if not raw:
                         continue
                     hrs, night = parse_hours_and_night(raw)
                     d_ot, n_ot = parse_overtime(raw)
-
+    
                     if isinstance(hrs, (int, float)) and hrs > 1e-12:
                         total_hours += float(hrs)
                         total_days += 1
@@ -2781,7 +2915,7 @@ class TimesheetPage(tk.Frame):
                         total_ot_day += float(d_ot)
                     if isinstance(n_ot, (int, float)):
                         total_ot_night += float(n_ot)
-
+    
                 row_values = [oid, addr, m, y, fio, tbn, department] + day_values + [
                     total_days or None,
                     total_hours or None,
@@ -2789,11 +2923,11 @@ class TimesheetPage(tk.Frame):
                     total_ot_day or None,
                     total_ot_night or None,
                 ]
-
+    
                 ws.append(row_values)
-
+    
             wb.save(fpath)
-
+    
             if show_messages:
                 messagebox.showinfo("Сохранение", f"Табель сохранен в БД и в файл:\n{fpath}")
         except Exception as e:
@@ -2811,9 +2945,10 @@ class TimesheetPage(tk.Frame):
             if is_auto:
                 self._update_auto_save_label()
             return
-
+    
         if is_auto:
             self._update_auto_save_label()
+
 
     def _update_auto_save_label(self):
         """Обновляет надпись 'Последнее авто‑сохранение: время'."""
@@ -2827,10 +2962,6 @@ class TimesheetPage(tk.Frame):
         """Публичный метод, привязанный к кнопке 'Сохранить'."""
         # Явное сохранение (с сообщениями), считаем как не авто
         self._save_all_internal(show_messages=True, is_auto=False)
-
-    # ---------------- Выбор подразделения / импорт ----------------
-
-    # ---------------- Автоподгонка колонок -----------------------
 
     def _content_total_width(self, fio_px: Optional[int] = None) -> int:
         px = self.COLPX.copy()
