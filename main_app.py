@@ -493,67 +493,67 @@ class MainApp(tk.Tk):
         self.lbl_header_title.config(text=title)
         self.lbl_header_hint.config(text=hint or "")
 
-    def _apply_role_visibility(self):
-        """
-        Настраивает видимость пунктов меню в зависимости от роли пользователя.
-        Использует названия пунктов меню (label) вместо индексов для надежности.
-        """
-        role = self.current_user.get("role", "specialist") # по умолчанию 'specialist'
-        is_admin = (role == "admin")
-        is_manager = (role in ("admin", "manager"))
-        is_planner = (role in ("admin", "planner", "manager"))
+def _apply_role_visibility(self):
+    """
+    Настраивает видимость пунктов меню в зависимости от роли пользователя.
+    Использует названия пунктов меню (label) вместо индексов для надежности.
+    """
+    role = self.current_user.get("role", "specialist")  # по умолчанию 'specialist'
 
-        # Вспомогательная функция для упрощения кода
-        def set_state(menu, label_text, condition):
-            if not menu: return
-            try:
-                # Находим индекс по тексту
-                idx = menu.index(label_text)
-                # Устанавливаем состояние
-                menu.entryconfig(idx, state="normal" if condition else "disabled")
-            except tk.TclError:
-                # Игнорируем ошибку, если пункт меню с таким label не найден
-                pass
+    is_admin = (role == "admin")
+    is_manager = (role in ("admin", "manager"))
+    is_planner = (role in ("admin", "planner", "manager"))
+    # Логист – отдельная роль
+    is_logist = (role == "logist")
 
-        # --- Настройка меню "Объектный табель" ---
-        # "Создать" и "Мои табели" доступны всем авторизованным пользователям.
-        set_state(self._menu_timesheets, "Создать", True)
-        set_state(self._menu_timesheets, "Мои табели", True)
-        # "Реестр табелей" доступен только менеджерам и администраторам.
-        set_state(self._menu_timesheets, "Реестр табелей", is_manager)
-        set_state(self._menu_timesheets, "Работники", True)
+    def set_state(menu, label_text, condition):
+        if not menu:
+            return
+        try:
+            idx = menu.index(label_text)
+            menu.entryconfig(idx, state="normal" if condition else "disabled")
+        except tk.TclError:
+            pass
 
-        # --- Настройка меню "Автотранспорт" ---
-        # "Создать заявку" и "Мои заявки" доступны всем.
-        set_state(self._menu_transport, "Создать заявку", True)
-        set_state(self._menu_transport, "Мои заявки", True)
-        # "Планирование" и "Реестр" доступны планировщикам, менеджерам и админам.
-        set_state(self._menu_transport, "Планирование", is_planner)
-        set_state(self._menu_transport, "Реестр", is_planner)
+    # --- Объектный табель ---
+    set_state(self._menu_timesheets, "Создать", True)
+    set_state(self._menu_timesheets, "Мои табели", True)
+    set_state(self._menu_timesheets, "Реестр табелей", is_manager)
+    set_state(self._menu_timesheets, "Работники", True)
 
-        # --- Настройка меню "Питание" ---
-        # "Создать заявку" и "Мои заявки" доступны всем.
-        set_state(self._menu_meals, "Создать заявку", True)
-        set_state(self._menu_meals, "Мои заявки", True)
-        # "Планирование" доступно планировщикам, менеджерам и админам.
-        set_state(self._menu_meals, "Планирование", is_planner)
-        set_state(self._menu_meals, "Реестр", is_planner)
-        set_state(self._menu_meals, "Работники (питание)", is_planner)
-        # "Настройки" доступны только администратору.
-        set_state(self._menu_meals, "Настройки", is_admin)
+    # --- Автотранспорт ---
+    # Для логиста – только "Создать заявку" и "Мои заявки".
+    set_state(self._menu_transport, "Создать заявку", True)
+    set_state(self._menu_transport, "Мои заявки", True)
+    set_state(
+        self._menu_transport,
+        "Планирование",
+        is_planner and not is_logist  # логист НЕ видит планирование
+    )
+    set_state(
+        self._menu_transport,
+        "Реестр",
+        is_planner and not is_logist  # логист НЕ видит реестр транспорта
+    )
 
-        # --- Настройка меню "Объекты" ---
-        # "Создавать/Редактировать" объекты могут менеджеры и админы.
-        set_state(self._menu_objects, "Создать/Редактировать", is_manager)
-        # "Реестр" объектов доступен всем (для просмотра и выбора).
-        set_state(self._menu_objects, "Реестр", True)
+    # --- Питание ---
+    set_state(self._menu_meals, "Создать заявку", True)
+    set_state(self._menu_meals, "Мои заявки", True)
+    set_state(self._menu_meals, "Планирование", is_planner)
+    set_state(self._menu_meals, "Реестр", is_planner)
+    set_state(self._menu_meals, "Работники (питание)", is_planner)
+    set_state(self._menu_meals, "Настройки", is_admin)
 
-        # --- Настройка меню "Аналитика" ---
-        set_state(self._menubar, "Аналитика", is_manager)
+    # --- Объекты ---
+    # Для логиста – только "Реестр"
+    set_state(self._menu_objects, "Создать/Редактировать", is_manager and not is_logist)
+    set_state(self._menu_objects, "Реестр", True)
 
-        # --- Настройка корневого меню ---
-        # Главный пункт "Настройки" доступен только администратору.
-        set_state(self._menubar, "Настройки", is_admin)
+    # --- Аналитика ---
+    set_state(self._menubar, "Аналитика", is_manager)
+
+    # --- Корневое меню ---
+    set_state(self._menubar, "Настройки", is_admin)
 
     def destroy(self):
         """Корректное завершение работы приложения."""
