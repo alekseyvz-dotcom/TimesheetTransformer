@@ -503,7 +503,6 @@ class MainApp(tk.Tk):
         is_admin = (role == "admin")
         is_manager = (role in ("admin", "manager"))
         is_planner = (role in ("admin", "planner", "manager"))
-        # Логист – отдельная роль
         is_logist = (role == "logist")
 
         def set_state(menu, label_text, condition):
@@ -513,28 +512,61 @@ class MainApp(tk.Tk):
                 idx = menu.index(label_text)
                 menu.entryconfig(idx, state="normal" if condition else "disabled")
             except tk.TclError:
+                # Пункт не найден — пропускаем
                 pass
+
+        # === Если ЛОГИСТ ===
+        if is_logist:
+            # --- Объектный табель: всё отключаем ---
+            set_state(self._menu_timesheets, "Создать", False)
+            set_state(self._menu_timesheets, "Мои табели", False)
+            set_state(self._menu_timesheets, "Реестр табелей", False)
+            set_state(self._menu_timesheets, "Работники", False)
+            set_state(self._menu_timesheets, "Сравнение с 1С", False)
+
+            # --- Автотранспорт: только "Создать заявку" и "Мои заявки" ---
+            set_state(self._menu_transport, "Создать заявку", True)
+            set_state(self._menu_transport, "Мои заявки", True)
+            set_state(self._menu_transport, "Планирование", False)
+            set_state(self._menu_transport, "Реестр", False)
+
+            # --- Питание: всё отключаем ---
+            set_state(self._menu_meals, "Создать заявку", False)
+            set_state(self._menu_meals, "Мои заявки", False)
+            set_state(self._menu_meals, "Планирование", False)
+            set_state(self._menu_meals, "Реестр", False)
+            set_state(self._menu_meals, "Работники (питание)", False)
+            set_state(self._menu_meals, "Настройки", False)
+
+            # --- Объекты: всё отключаем ---
+            set_state(self._menu_objects, "Создать/Редактировать", False)
+            set_state(self._menu_objects, "Реестр", False)
+
+            # --- Аналитика: отключаем ---
+            set_state(self._menubar, "Аналитика", False)
+
+            # --- Настройки: отключаем ---
+            set_state(self._menubar, "Настройки", False)
+
+            # Можно также отключить весь пункт "Инструменты", если нужно:
+            # set_state(self._menubar, "Инструменты", False)
+
+            return  # для логиста дальше не продолжаем
+
+        # === Остальные роли (старое поведение) ===
 
         # --- Объектный табель ---
         set_state(self._menu_timesheets, "Создать", True)
         set_state(self._menu_timesheets, "Мои табели", True)
         set_state(self._menu_timesheets, "Реестр табелей", is_manager)
         set_state(self._menu_timesheets, "Работники", True)
+        set_state(self._menu_timesheets, "Сравнение с 1С", True)
 
         # --- Автотранспорт ---
-        # Для логиста – только "Создать заявку" и "Мои заявки".
         set_state(self._menu_transport, "Создать заявку", True)
         set_state(self._menu_transport, "Мои заявки", True)
-        set_state(
-            self._menu_transport,
-            "Планирование",
-            is_planner and not is_logist  # логист НЕ видит планирование
-        )
-        set_state(
-            self._menu_transport,
-            "Реестр",
-            is_planner and not is_logist  # логист НЕ видит реестр транспорта
-        )
+        set_state(self._menu_transport, "Планирование", is_planner)
+        set_state(self._menu_transport, "Реестр", is_planner)
 
         # --- Питание ---
         set_state(self._menu_meals, "Создать заявку", True)
@@ -545,14 +577,13 @@ class MainApp(tk.Tk):
         set_state(self._menu_meals, "Настройки", is_admin)
 
         # --- Объекты ---
-        # Для логиста – только "Реестр"
-        set_state(self._menu_objects, "Создать/Редактировать", is_manager and not is_logist)
+        set_state(self._menu_objects, "Создать/Редактировать", is_manager)
         set_state(self._menu_objects, "Реестр", True)
 
         # --- Аналитика ---
         set_state(self._menubar, "Аналитика", is_manager)
 
-        # --- Корневое меню ---
+        # --- Настройки ---
         set_state(self._menubar, "Настройки", is_admin)
 
         def destroy(self):
