@@ -44,17 +44,14 @@ def release_db_connection(conn):
 # ------------------------- Загрузка зависимостей (если нужны для standalone) -------------------------
 try:
     import settings_manager as Settings
+    from settings_manager import (
+        get_output_dir_from_config,
+        get_selected_department_from_config,
+        set_selected_department_in_config,
+    )
 except Exception:
     Settings = None
-
-try:
-    import settings_manager as Settings
-    # ДОБАВЬТЕ ЭТУ СТРОКУ:
-    from settings_manager import get_output_dir_from_config, get_selected_department_from_config, set_selected_department_in_config
-except Exception:
-    Settings = None
-    # И на всякий случай, если settings_manager не найден
-    get_output_dir_from_config = None 
+    get_output_dir_from_config = None
     get_selected_department_from_config = None
     set_selected_department_in_config = None
 
@@ -2695,7 +2692,10 @@ class TimesheetPage(tk.Frame):
                 messagebox.showwarning("Сохранение", "Для сохранения выберите конкретное подразделение.")
             return
     
-        user_id = (self.app_ref.current_user or {}).get("id") if hasattr(self, "app_ref") else None
+        user_id = self.owner_user_id
+        if user_id is None:
+            user_id = (self.app_ref.current_user or {}).get("id") if hasattr(self, "app_ref") else None
+        
         if not user_id:
             if show_messages:
                 messagebox.showerror("Сохранение", "Не удалось определить пользователя.")
