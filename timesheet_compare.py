@@ -383,18 +383,37 @@ class TimesheetComparePage(tk.Frame):
         try:
             for h in headers:
                 header_id = int(h["id"])
+            
+                obj_id = (h.get("object_id") or "").strip()
+                obj_addr = (h.get("object_addr") or "").strip()
+            
+                # как в реестрах: "[ID] Адрес" или просто "Адрес"
+                obj_display = obj_addr
+                if obj_id:
+                    obj_display = f"[{obj_id}] {obj_addr}"
+            
                 rows = load_timesheet_rows_by_header_id(header_id)
                 for r in rows:
                     fio = (r["fio"] or "").strip()
                     tbn = (r["tbn"] or "").strip()
                     hours_raw = r.get("hours_raw") or [None] * 31
+            
                     days: List[Optional[str]] = []
                     for v in hours_raw[:31]:
                         if v is None or v == "":
                             days.append(None)
                         else:
                             days.append(str(v).strip())
-                    obj_rows.append({"fio": fio, "tbn": tbn, "days": days})
+            
+                    obj_rows.append({
+                        "fio": fio,
+                        "tbn": tbn,
+                        "object_id": obj_id,
+                        "object_addr": obj_addr,
+                        "object_display": obj_display,
+                        "days": days,
+                    })
+
         except Exception as e:
             import logging
             logging.exception("Ошибка загрузки строк табелей для сравнения")
@@ -416,142 +435,171 @@ class TimesheetComparePage(tk.Frame):
     # ---------- Объединение и подсветка ----------
 
     def _configure_compare_columns(self, days_in_month: int):
-        cols = ["fio", "tbn", "kind"] + [f"d{i}" for i in range(1, days_in_month + 1)]
+        cols = ["fio", "tbn", "object", "kind"] + [f"d{i}" for i in range(1, days_in_month + 1)]
         self.tree_compare["columns"] = cols
-
+    
         self.tree_compare.heading("fio", text="ФИО")
         self.tree_compare.heading("tbn", text="Таб.№")
+        self.tree_compare.heading("object", text="Объект")
         self.tree_compare.heading("kind", text="Источник")
-
+    
         self.tree_compare.column("fio", width=240, anchor="w")
         self.tree_compare.column("tbn", width=80, anchor="center")
-        self.tree_compare.column("kind", width=120, anchor="center")
-
+        self.tree_compare.column("object", width=320, anchor="w")
+        self.tree_compare.column("kind", width=140, anchor="center")
+    
         for i in range(1, days_in_month + 1):
             col_id = f"d{i}"
             self.tree_compare.heading(col_id, text=str(i))
             self.tree_compare.column(col_id, width=36, anchor="center")
 
+
     def _rebuild_comparison(self):
         self.tree_compare.delete(*self.tree_compare.get_children())
         self._merged_rows.clear()
-
+    
         if not self._obj_rows or not self._hr_rows:
             return
-
+    
         # индекс кадрового табеля по табельному номеру
         hr_index: Dict[str, Dict[str, Any]] = {}
         for r in self._hr_rows:
-            tbn_key = r["tbn"].strip()
+            tbn_key = (r.get("tbn") or "").strip()
             if not tbn_key:
-                continue  # без таб.№ не можем сопоставить
-            hr_index[tbn_key] = r
-
-        used_hr_keys = set()
-
-        # базовый проход: все из объектного (ключ — табельный номер)
-        for o in self._obj_rows:
-            tbn_key = o["tbn"].strip()
-            hr = hr_index.get(tbn_key) if tbn_key else None
-            if hr and tbn_key:
-                used_hr_keys.add(tbn_key)
-
-            self._merged_rows.append({
-                "fio": o["fio"],
-                "tbn": o["tbn"],
-                "kind": "Объектный табель",
-                "days": o["days"],
-                "pair_key": tbn_key,
-            })
-            self._merged_rows.append({
-                "fio": hr["fio"] if hr else o["fio"],
-                "tbn": hr["tbn"] if hr else o["tbn"],
-                "kind": "Кадровый табель",
-                "days": hr["days"] if hr else [None] * 31,
-                "pair_key": tbn_key,
-            })
-
-        # те, кто есть только в кадровом (по табельному номеру)
-        for tbn_key, hr in hr_index.items():
-            if tbn_key in used_hr_keys:
                 continue
+            hr_index[tbn_key] = r
+    
+        # группируем объектные строки по таб.№ (с сохранением объектов)
+        obj_by_tbn: Dict[str, List[Dict[str, Any]]] = {}
+        for o in self._obj_rows:
+            tbn_key = (o.get("tbn") or "").strip()
+            if not tbn_key:
+                # без таб.№ не сможем нормально сопоставлять — но всё равно покажем как отдельные строки
+                tbn_key = ""
+            obj_by_tbn.setdefault(tbn_key, []).append(o)
+    
+        # общий список табельных номеров: те, кто есть в объектном или в кадровом
+        all_tbns = sorted(set(obj_by_tbn.keys()) | set(hr_index.keys()))
+    
+        # Строим merged_rows так:
+        # для каждого tbn:
+        #   - N строк "Объектный табель" (по каждому объекту)
+        #   - 1 строка "Кадровый табель" (1С)
+        for tbn_key in all_tbns:
+            obj_rows = obj_by_tbn.get(tbn_key, [])
+            hr = hr_index.get(tbn_key)
+    
+            # сортируем объектные строки по объекту (чтобы было стабильно)
+            obj_rows_sorted = sorted(
+                obj_rows,
+                key=lambda r: ((r.get("object_addr") or "").lower(), (r.get("object_id") or ""))
+            )
+    
+            if obj_rows_sorted:
+                fio_for_group = obj_rows_sorted[0].get("fio") or ""
+            else:
+                fio_for_group = (hr.get("fio") if hr else "") or ""
+    
+            # 1) строки по объектам
+            for o in obj_rows_sorted:
+                self._merged_rows.append({
+                    "fio": o.get("fio") or fio_for_group,
+                    "tbn": o.get("tbn") or tbn_key,
+                    "object": o.get("object_display") or (o.get("object_addr") or ""),
+                    "kind": "Объектный табель",
+                    "days": o.get("days") or [None] * 31,
+                    "pair_key": tbn_key,
+                })
+    
+            # 2) строка кадрового табеля (1С) — одна
             self._merged_rows.append({
-                "fio": hr["fio"],
-                "tbn": hr["tbn"],
-                "kind": "Объектный табель",
-                "days": [None] * 31,
-                "pair_key": tbn_key,
-            })
-            self._merged_rows.append({
-                "fio": hr["fio"],
-                "tbn": hr["tbn"],
+                "fio": (hr.get("fio") if hr else fio_for_group) or fio_for_group,
+                "tbn": (hr.get("tbn") if hr else tbn_key) or tbn_key,
+                "object": "",  # у 1С нет объекта
                 "kind": "Кадровый табель",
-                "days": hr["days"],
+                "days": (hr.get("days") if hr else [None] * 31),
                 "pair_key": tbn_key,
             })
-
-        # сортировка: ФИО, таб.№, источник
-        self._merged_rows.sort(
-            key=lambda r: (r["tbn"], r["fio"].lower(), 0 if r["kind"] == "Объектный табель" else 1)
-        )
-
-        days_in_m = len(self.tree_compare["columns"]) - 3
-
-        # Чередуем фон по парам строк (Объектный / Кадровый)
-        pair_index = 0  # 0,1,0,1,...
-        for i, row in enumerate(self._merged_rows):
-            vals = [row["fio"], row["tbn"], row["kind"]]
+    
+        days_in_m = len(self.tree_compare["columns"]) - 4  # fio,tbn,object,kind
+    
+        # Рендерим в treeview с "зеброй" по группам (по каждому сотруднику/tbn)
+        current_group = None
+        group_index = 0
+        for row in self._merged_rows:
+            group_key = row.get("pair_key") or ""
+            if group_key != current_group:
+                current_group = group_key
+                group_index += 1
+    
+            tag = "pair_even" if group_index % 2 == 0 else "pair_odd"
+    
+            vals = [row.get("fio", ""), row.get("tbn", ""), row.get("object", ""), row.get("kind", "")]
             for d in range(days_in_m):
                 v = row["days"][d] if d < len(row["days"]) and row["days"][d] is not None else ""
                 vals.append(v)
-
-            tag = "pair_even" if pair_index % 2 == 0 else "pair_odd"
+    
             self.tree_compare.insert("", "end", values=vals, tags=(tag,))
-
-            # после каждой второй строки (пары) переключаем цвет
-            if i % 2 == 1:
-                pair_index += 1
-
+    
         self._highlight_differences(days_in_m)
 
     def _highlight_differences(self, days_in_month: int):
-        # Подсвечиваем пары строк, где есть расхождения по дням
+        # Подсвечиваем строки объектного табеля, если они отличаются от строки 1С в той же группе (tbn)
         items = list(self.tree_compare.get_children())
         mismatch_tag = "mismatch"
         self.tree_compare.tag_configure(mismatch_tag, background="#fff2cc")  # жёлтый фон
-
+    
         def _norm(v: Any) -> str:
-            # Нормализация значения для сравнения
             if v is None:
                 return ""
             return str(v).strip().lower()
-
-        for i in range(0, len(items), 2):
-            if i + 1 >= len(items):
-                break
-            iid_obj = items[i]
-            iid_hr = items[i + 1]
-            v_obj = self.tree_compare.item(iid_obj, "values")
-            v_hr = self.tree_compare.item(iid_hr, "values")
-
-            mismatch = False
-            for idx in range(3, 3 + days_in_month):
-                vo = v_obj[idx] if idx < len(v_obj) else ""
-                vh = v_hr[idx] if idx < len(v_hr) else ""
-
-                # пусто-пусто — это ок
-                if _norm(vo) == "" and _norm(vh) == "":
-                    continue
-                # регистронезависимое сравнение
-                if _norm(vo) == _norm(vh):
-                    continue
-
-                mismatch = True
-                break
-
-            if mismatch:
-                self.tree_compare.item(iid_obj, tags=(mismatch_tag,))
-                self.tree_compare.item(iid_hr, tags=(mismatch_tag,))
+    
+        # Соберём по tbn: iid строки кадрового табеля и список iid объектных строк
+        # Структура значения treeview: [fio, tbn, object, kind, d1..]
+        group: Dict[str, Dict[str, Any]] = {}
+    
+        for iid in items:
+            vals = self.tree_compare.item(iid, "values")
+            if not vals or len(vals) < 4:
+                continue
+            tbn = str(vals[1] or "").strip()
+            kind = str(vals[3] or "").strip()
+    
+            g = group.setdefault(tbn, {"hr_iid": None, "obj_iids": []})
+            if kind == "Кадровый табель":
+                g["hr_iid"] = iid
+            elif kind == "Объектный табель":
+                g["obj_iids"].append(iid)
+    
+        # Теперь сравнение: каждая obj строка vs hr строка
+        for tbn, g in group.items():
+            hr_iid = g.get("hr_iid")
+            if not hr_iid:
+                continue  # нет строки 1С — нечего сравнивать
+    
+            v_hr = self.tree_compare.item(hr_iid, "values")
+    
+            for obj_iid in g.get("obj_iids", []):
+                v_obj = self.tree_compare.item(obj_iid, "values")
+    
+                mismatch = False
+                # дни начинаются с индекса 4 (fio,tbn,object,kind)
+                for idx in range(4, 4 + days_in_month):
+                    vo = v_obj[idx] if idx < len(v_obj) else ""
+                    vh = v_hr[idx] if idx < len(v_hr) else ""
+    
+                    if _norm(vo) == "" and _norm(vh) == "":
+                        continue
+                    if _norm(vo) == _norm(vh):
+                        continue
+    
+                    mismatch = True
+                    break
+    
+                if mismatch:
+                    self.tree_compare.item(obj_iid, tags=(mismatch_tag,))
+                    # можно подсветить и строку 1С, если хотите:
+                    self.tree_compare.item(hr_iid, tags=(mismatch_tag,))
                 
     def _fill_departments_combo(self, headers: List[Dict[str, Any]]):
         """Заполнить выпадающий список подразделений по загруженным заголовкам."""
@@ -581,13 +629,12 @@ class TimesheetComparePage(tk.Frame):
                 parent=self,
             )
             return
-
+    
         from tkinter import filedialog
         from openpyxl import Workbook
         from openpyxl.styles import PatternFill, Alignment
         from openpyxl.utils import get_column_letter
-
-        # Выбор файла
+    
         default_name = "Свод_сравнения_табелей.xlsx"
         path = filedialog.asksaveasfilename(
             parent=self,
@@ -598,93 +645,96 @@ class TimesheetComparePage(tk.Frame):
         )
         if not path:
             return
-
+    
         try:
             wb = Workbook()
             ws = wb.active
             ws.title = "Свод сравнения"
-
-            days_in_m = len(self.tree_compare["columns"]) - 3
-
-            # Заголовок
-            header = ["ФИО", "Таб.№", "Источник"] + [str(i) for i in range(1, days_in_m + 1)]
+    
+            days_in_m = len(self.tree_compare["columns"]) - 4  # fio,tbn,object,kind
+    
+            header = ["ФИО", "Таб.№", "Объект", "Источник"] + [str(i) for i in range(1, days_in_m + 1)]
             ws.append(header)
-
-            # Выравнивание по центру для дневных ячеек
+    
             center = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-            # Подсветка отличий
-            diff_fill = PatternFill(fill_type="solid", fgColor="FFF2CC")  # светло-жёлтый
-
+            diff_fill = PatternFill(fill_type="solid", fgColor="FFF2CC")
+    
             def _norm(v: Any) -> str:
                 if v is None:
                     return ""
                 return str(v).strip().lower()
-
-            items = self._merged_rows
-            row_excel = 2  # первая строка с данными
-
-            i = 0
-            while i < len(items):
-                row_obj = items[i]
-                vals_obj = [row_obj["fio"], row_obj["tbn"], row_obj["kind"]]
+    
+            # 1) Запишем все строки как есть
+            # 2) Параллельно запомним строки Excel по tbn: где строка 1С и где объектные
+            # self._merged_rows содержит уже правильный порядок (объекты..., затем 1С)
+            row_map: Dict[str, Dict[str, Any]] = {}
+            excel_row = 2  # первая строка данных
+    
+            for r in self._merged_rows:
+                tbn = (r.get("tbn") or "").strip()
+                kind = r.get("kind") or ""
+    
+                vals = [r.get("fio", ""), tbn, r.get("object", ""), kind]
+                days = r.get("days") or [None] * 31
                 for d in range(days_in_m):
-                    v = row_obj["days"][d] if d < len(row_obj["days"]) and row_obj["days"][d] is not None else ""
-                    vals_obj.append(v)
-                ws.append(vals_obj)
-
-                row_hr = items[i + 1] if i + 1 < len(items) else None
-                if row_hr:
-                    vals_hr = [row_hr["fio"], row_hr["tbn"], row_hr["kind"]]
-                    for d in range(days_in_m):
-                        v = row_hr["days"][d] if d < len(row_hr["days"]) and row_hr["days"][d] is not None else ""
-                        vals_hr.append(v)
-                    ws.append(vals_hr)
-
-                    # Подсветка отличий по дням (регистронезависимая)
+                    v = days[d] if d < len(days) and days[d] is not None else ""
+                    vals.append(v)
+    
+                ws.append(vals)
+    
+                g = row_map.setdefault(tbn, {"hr_row": None, "obj_rows": []})
+                if kind == "Кадровый табель":
+                    g["hr_row"] = excel_row
+                elif kind == "Объектный табель":
+                    g["obj_rows"].append(excel_row)
+    
+                excel_row += 1
+    
+            # 2) Подсветка отличий: каждая объектная строка vs строка 1С в той же группе
+            for tbn, g in row_map.items():
+                hr_row = g.get("hr_row")
+                if not hr_row:
+                    continue
+    
+                for obj_row in g.get("obj_rows", []):
                     for d in range(1, days_in_m + 1):
-                        col_idx = 3 + d  # A=1, B=2, C=3, дни начинаются с 4-го столбца
-                        c_obj = ws.cell(row=row_excel, column=col_idx)
-                        c_hr = ws.cell(row=row_excel + 1, column=col_idx)
+                        col_idx = 4 + d  # A=1(FIO),B=2(TBN),C=3(Obj),D=4(Kind), дни с E=5
+                        c_obj = ws.cell(row=obj_row, column=col_idx)
+                        c_hr = ws.cell(row=hr_row, column=col_idx)
+    
                         vo = c_obj.value
                         vh = c_hr.value
-
+    
                         if _norm(vo) == "" and _norm(vh) == "":
                             continue
                         if _norm(vo) == _norm(vh):
                             continue
-
+    
                         c_obj.fill = diff_fill
                         c_hr.fill = diff_fill
-
-                    row_excel += 2
-                    i += 2
-                else:
-                    # нет пары — только объектный табель
-                    row_excel += 1
-                    i += 1
-
-            # Ширина колонок
-            ws.column_dimensions["A"].width = 32  # ФИО
-            ws.column_dimensions["B"].width = 10  # Таб.№
-            ws.column_dimensions["C"].width = 16  # Источник
+    
+            # Ширины колонок
+            ws.column_dimensions["A"].width = 32
+            ws.column_dimensions["B"].width = 10
+            ws.column_dimensions["C"].width = 45
+            ws.column_dimensions["D"].width = 16
             for d in range(1, days_in_m + 1):
-                col_letter = get_column_letter(3 + d)
+                col_letter = get_column_letter(4 + d)
                 ws.column_dimensions[col_letter].width = 5.5
-
-            # Выравнивание по центру для всех дневных ячеек
+    
+            # Выравнивание по центру для дневных ячеек
             max_row = ws.max_row
             for r in range(2, max_row + 1):
-                for c in range(4, 4 + days_in_m):
+                for c in range(5, 5 + days_in_m):
                     ws.cell(r, c).alignment = center
-
+    
             wb.save(path)
             messagebox.showinfo(
                 "Экспорт свода",
                 f"Свод сравнения сохранён в файл:\n{path}",
                 parent=self,
             )
-
+    
         except Exception as e:
             import logging
             logging.exception("Ошибка экспорта свода сравнения в Excel")
