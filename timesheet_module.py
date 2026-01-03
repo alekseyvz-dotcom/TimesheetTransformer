@@ -2692,34 +2692,50 @@ class TimesheetPage(tk.Frame):
                 messagebox.showwarning("Сохранение", "Для сохранения выберите конкретное подразделение.")
             return
     
+        # owner_user_id важен для табелей, открытых из реестра (чужие табели)
         user_id = self.owner_user_id
         if user_id is None:
             user_id = (self.app_ref.current_user or {}).get("id") if hasattr(self, "app_ref") else None
-        
+    
         if not user_id:
             if show_messages:
                 messagebox.showerror("Сохранение", "Не удалось определить пользователя.")
             return
     
-        # --------------------- НОВОЕ: валидация адреса -------------------- #
+        # ------------------- Нормализация адрес/ID перед сохранением ------------------- #
+    
+        # Принудительно прогнать логику адрес -> список ID (и диалог при необходимости)
+        try:
+            self._on_address_change()
+        except Exception:
+            pass
+    
+        # перечитать значения после нормализации
+        addr, oid = self.cmb_address.get().strip(), self.cmb_object_id.get().strip()
+    
+        # --------------------- Валидация адреса -------------------- #
     
         # 1) Адрес обязателен
         if not addr:
             if show_messages:
                 messagebox.showwarning(
                     "Сохранение",
-                    "Не задан адрес объекта. Выберите адрес из списка."
+                    "Не задан адрес объекта. Выберите адрес из списка.",
                 )
             return
     
-        # 2) Адрес должен быть из справочника
+        # 2) Адрес должен быть из справочника + сбрасываем ID, чтобы не “прилипал”
         address_options = getattr(self, "address_options", [])
         if address_options and addr not in address_options:
+            try:
+                self.cmb_object_id.set("")  # важно: сбросить старый ID
+            except Exception:
+                pass
             if show_messages:
                 messagebox.showwarning(
                     "Сохранение",
                     "Адрес объекта введён вручную и не найден в справочнике.\n"
-                    "Выберите адрес из списка."
+                    "Выберите адрес из списка.",
                 )
             return
     
@@ -2736,7 +2752,7 @@ class TimesheetPage(tk.Frame):
                 messagebox.showwarning(
                     "Сохранение",
                     "По выбранному адресу найдено несколько объектов.\n"
-                    "Сначала выберите корректный ID объекта."
+                    "Сначала выберите корректный ID объекта.",
                 )
             return
     
@@ -2754,12 +2770,13 @@ class TimesheetPage(tk.Frame):
                         (oid,),
                     )
                     row = cur.fetchone()
+    
                 if not row:
                     if show_messages:
                         messagebox.showwarning(
                             "Сохранение",
                             f"ID объекта '{oid}' не найден в справочнике объектов.\n"
-                            "Выберите корректный ID."
+                            "Выберите корректный ID.",
                         )
                     return
     
@@ -2771,7 +2788,7 @@ class TimesheetPage(tk.Frame):
                             "Выбранный ID объекта не соответствует адресу.\n"
                             f"ID '{oid}' связан с адресом:\n{real_addr}\n"
                             f"а вы указали адрес:\n{addr}\n\n"
-                            "Исправьте адрес или ID."
+                            "Исправьте адрес или ID.",
                         )
                     return
             except Exception as e:
@@ -2783,7 +2800,7 @@ class TimesheetPage(tk.Frame):
                 if show_messages:
                     messagebox.showerror(
                         "Сохранение",
-                        f"Ошибка при проверке соответствия ID и адреса объекта:\n{e}"
+                        f"Ошибка при проверке соответствия ID и адреса объекта:\n{e}",
                     )
                 return
             finally:
@@ -2861,7 +2878,6 @@ class TimesheetPage(tk.Frame):
                         "Сохранение",
                         "Сохранено в БД. Локальный файл не создан (нет адреса/ID).",
                     )
-                # даже без файла считаем авто‑сохранение успешным
                 if is_auto:
                     self._update_auto_save_label()
                 return
@@ -2887,6 +2903,7 @@ class TimesheetPage(tk.Frame):
             for rec in self.model_rows:
                 fio, tbn = rec["fio"], rec["tbn"]
                 hours_list = rec.get("hours") or [None] * 31
+    
                 department = current_dep if current_dep != "Все" else ""
                 for emp_fio, emp_tbn, emp_pos, emp_dep in self.employees:
                     if emp_fio == fio:
@@ -2923,7 +2940,6 @@ class TimesheetPage(tk.Frame):
                     total_ot_day or None,
                     total_ot_night or None,
                 ]
-    
                 ws.append(row_values)
     
             wb.save(fpath)
@@ -2941,14 +2957,12 @@ class TimesheetPage(tk.Frame):
                     "Сохранение",
                     f"В БД табель сохранён, но ошибка при записи в Excel:\n{e}",
                 )
-            # даже если Excel не сохранился, авто‑сохранение в БД всё равно было
             if is_auto:
                 self._update_auto_save_label()
             return
     
         if is_auto:
             self._update_auto_save_label()
-
 
     def _update_auto_save_label(self):
         """Обновляет надпись 'Последнее авто‑сохранение: время'."""
