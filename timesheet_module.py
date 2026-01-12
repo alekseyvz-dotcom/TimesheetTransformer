@@ -207,8 +207,74 @@ def upsert_timesheet_header(
         if conn:
             release_db_connection(conn)
 
-def load_timesheet_rows_from_db(object_id: str, object_addr: str, department: str, year: int, month: int, user_id: int) -> Tuple[Optional[int], List[Dict[str, Any]]]:
-    """Загружает header_id и строки табеля для конкретного пользователя и контекста."""
+def replace_timesheet_rows(header_id: int, rows: List[Dict[str, Any]]):
+    """Полностью заменяет строки табеля одним запросом (Batch Insert)."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn, conn.cursor() as cur:
+            # Сначала удаляем старые (тут всё ок)
+            cur.execute("DELETE FROM timesheet_rows WHERE header_id = %s", (header_id,))
+            
+            if not rows:
+                return
+
+            # Подготовка данных для массовой вставки
+            values = []
+            for rec in rows:
+                hours_list = rec.get("hours") or [None] * 31
+                if len(hours_list) != 31:
+                    hours_list = (hours_list + [None] * 31)[:31]
+
+                total_hours = 0.0
+                total_night_hours = 0.0
+                total_days = 0
+                total_ot_day = 0.0
+                total_ot_night = 0.0
+
+                for raw in hours_list:
+                    if not raw:
+                        continue
+                    # Новая логика: обычные часы + ночные
+                    hrs, night = parse_hours_and_night(raw)
+                    d_ot, n_ot = parse_overtime(raw)
+
+                    if isinstance(hrs, (int, float)) and hrs > 1e-12:
+                        total_hours += float(hrs)
+                        total_days += 1
+                    if isinstance(night, (int, float)):
+                        total_night_hours += float(night)
+                    if isinstance(d_ot, (int, float)):
+                        total_ot_day += float(d_ot)
+                    if isinstance(n_ot, (int, float)):
+                        total_ot_night += float(n_ot)
+
+                values.append((
+                    header_id,
+                    rec["fio"],
+                    rec.get("tbn") or None,
+                    hours_list,
+                    total_days or None,
+                    total_hours or None,
+                    total_night_hours or None,
+                    total_ot_day or None,
+                    total_ot_night or None,
+                ))
+
+            insert_query = """
+                INSERT INTO timesheet_rows 
+                (header_id, fio, tbn, hours_raw,
+                 total_days, total_hours, night_hours, overtime_day, overtime_night)
+                VALUES %s
+            """
+            execute_values(cur, insert_query, values)
+            
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+def load_timesheet_rows_from_db(object_id: str, object_addr: str, department: str, year: int, month: int, user_id: int) -> List[Dict[str, Any]]:
+    """Загружает строки табеля для конкретного пользователя и контекста."""
     conn = None
     try:
         conn = get_db_connection()
@@ -217,24 +283,20 @@ def load_timesheet_rows_from_db(object_id: str, object_addr: str, department: st
                 """
                 SELECT h.id FROM timesheet_headers h
                 WHERE COALESCE(h.object_id, '') = COALESCE(%s, '') AND h.object_addr = %s
-                  AND COALESCE(h.department, '') = COALESCE(%s, '') AND h.year = %s AND h.month = %s AND h.user_id = %s
+                AND COALESCE(h.department, '') = COALESCE(%s, '') AND h.year = %s AND h.month = %s AND h.user_id = %s
                 """,
                 (object_id or None, object_addr, department or None, year, month, user_id),
             )
             row = cur.fetchone()
-            if not row:
-                return None, []
+            if not row: return []
             header_id = row[0]
 
-            cur.execute(
-                "SELECT fio, tbn, hours_raw FROM timesheet_rows WHERE header_id = %s ORDER BY fio, tbn",
-                (header_id,),
-            )
+            cur.execute("SELECT fio, tbn, hours_raw FROM timesheet_rows WHERE header_id = %s ORDER BY fio, tbn", (header_id,))
             result = []
             for fio, tbn, hours_raw in cur.fetchall():
                 hrs = list(hours_raw) if hours_raw is not None else [None] * 31
                 result.append({"fio": fio or "", "tbn": tbn or "", "hours": [h for h in hrs]})
-            return header_id, result
+            return result
     finally:
         if conn:
             release_db_connection(conn)
@@ -365,132 +427,6 @@ def load_objects_short_for_timesheet() -> List[Tuple[str, str, str]]:
                 ORDER BY address, code
             """)
             return [(r[0] or "", r[1] or "", r[2] or "") for r in cur.fetchall()]
-    finally:
-        if conn:
-            release_db_connection(conn)
-
-def upsert_timesheet_rows_incremental(
-    header_id: int,
-    rows: List[Dict[str, Any]],
-    *,
-    try_lock: bool = False,
-) -> None:
-    """
-    Инкрементальное сохранение: UPSERT только переданных строк.
-    Уникальность: (header_id, fio, COALESCE(tbn,'')) должна быть обеспечена индексом в БД.
-    """
-    if not rows:
-        return
-
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn, conn.cursor() as cur:
-            # блокировка на header_id, чтобы авто/ручное не пересекались
-            if try_lock:
-                cur.execute("SELECT pg_try_advisory_xact_lock(%s)", (header_id,))
-                if not cur.fetchone()[0]:
-                    raise RuntimeError("Табель сейчас сохраняется (в другом окне).")
-            else:
-                cur.execute("SELECT pg_advisory_xact_lock(%s)", (header_id,))
-
-            values = []
-            for rec in rows:
-                fio = (rec.get("fio") or "").strip()
-                tbn = (rec.get("tbn") or "").strip()
-                tbn = tbn if tbn else None  # храним как NULL как и раньше
-
-                hours_list = rec.get("hours") or [None] * 31
-                if len(hours_list) != 31:
-                    hours_list = (hours_list + [None] * 31)[:31]
-
-                total_hours = 0.0
-                total_night_hours = 0.0
-                total_days = 0
-                total_ot_day = 0.0
-                total_ot_night = 0.0
-
-                for raw in hours_list:
-                    if not raw:
-                        continue
-                    hrs, night = parse_hours_and_night(raw)
-                    d_ot, n_ot = parse_overtime(raw)
-
-                    if isinstance(hrs, (int, float)) and hrs > 1e-12:
-                        total_hours += float(hrs)
-                        total_days += 1
-                    if isinstance(night, (int, float)):
-                        total_night_hours += float(night)
-                    if isinstance(d_ot, (int, float)):
-                        total_ot_day += float(d_ot)
-                    if isinstance(n_ot, (int, float)):
-                        total_ot_night += float(n_ot)
-
-                values.append((
-                    header_id,
-                    fio,
-                    tbn,
-                    hours_list,
-                    total_days or None,
-                    total_hours or None,
-                    total_night_hours or None,
-                    total_ot_day or None,
-                    total_ot_night or None,
-                ))
-
-            q = """
-                INSERT INTO public.timesheet_rows
-                    (header_id, fio, tbn, hours_raw,
-                     total_days, total_hours, night_hours, overtime_day, overtime_night)
-                VALUES %s
-                ON CONFLICT (header_id, fio, (COALESCE(tbn, '')))
-                DO UPDATE SET
-                    hours_raw       = EXCLUDED.hours_raw,
-                    total_days      = EXCLUDED.total_days,
-                    total_hours     = EXCLUDED.total_hours,
-                    night_hours     = EXCLUDED.night_hours,
-                    overtime_day    = EXCLUDED.overtime_day,
-                    overtime_night  = EXCLUDED.overtime_night
-            """
-            execute_values(cur, q, values)
-
-            # чтобы в реестре было видно "Обновлён"
-            cur.execute("UPDATE public.timesheet_headers SET updated_at = now() WHERE id = %s", (header_id,))
-    finally:
-        if conn:
-            release_db_connection(conn)
-
-
-def delete_timesheet_row_incremental(
-    header_id: int,
-    fio: str,
-    tbn: str,
-    *,
-    try_lock: bool = False,
-) -> None:
-    """Удалить одну строку табеля по ключу (header_id, fio, COALESCE(tbn,''))"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn, conn.cursor() as cur:
-            if try_lock:
-                cur.execute("SELECT pg_try_advisory_xact_lock(%s)", (header_id,))
-                if not cur.fetchone()[0]:
-                    raise RuntimeError("Табель сейчас сохраняется (в другом окне).")
-            else:
-                cur.execute("SELECT pg_advisory_xact_lock(%s)", (header_id,))
-
-            fio_n = (fio or "").strip()
-            tbn_n = (tbn or "").strip()
-
-            cur.execute(
-                """
-                DELETE FROM public.timesheet_rows
-                WHERE header_id = %s AND fio = %s AND (COALESCE(tbn, '')) = %s
-                """,
-                (header_id, fio_n, tbn_n),
-            )
-            cur.execute("UPDATE public.timesheet_headers SET updated_at = now() WHERE id = %s", (header_id,))
     finally:
         if conn:
             release_db_connection(conn)
@@ -1337,32 +1273,14 @@ class RowWidget:
             e = tk.Entry(self.table, width=4, justify="center", relief="solid", bd=1)
             e.grid(row=self.row, column=1 + d, padx=0, pady=1, sticky="nsew")
 
-            def _notify_change(self_ref=self):
-                if callable(self_ref.on_change):
-                    try:
-                        # mode="typing" — чтобы страница могла НЕ пересчитывать всё на каждый символ
-                        self_ref.on_change(self_ref, "typing")
-                    except Exception:
-                        pass
-            
             def _on_focus_out(ev, _d=d, self_ref=self):
-                # На выходе из ячейки — пересчёт итогов и "сильное" уведомление
                 self_ref.update_total()
                 if callable(self_ref.on_change):
                     try:
-                        self_ref.on_change(self_ref, "commit")
+                        self_ref.on_change()
                     except Exception:
                         pass
-            
-            def _on_key_release(ev, self_ref=self):
-                # Игнорируем управляющие клавиши
-                if getattr(ev, "keysym", "") in ("Shift_L", "Shift_R", "Control_L", "Control_R",
-                                                "Alt_L", "Alt_R", "Left", "Right", "Up", "Down",
-                                                "Tab", "Return", "Escape"):
-                    return
-                _notify_change(self_ref)
-            
-            e.bind("<KeyRelease>", _on_key_release)
+
             e.bind("<FocusOut>", _on_focus_out)
             e.bind("<Button-2>", lambda ev: "break")
             e.bind("<ButtonRelease-2>", lambda ev: "break")
@@ -1602,9 +1520,6 @@ class TimesheetPage(tk.Frame):
         self.page_size = tk.IntVar(value=50)  # Количество строк на странице
         self._suspend_sync = False  # Флаг для предотвращения синхронизации при массовых операциях
         self.selected_indices: set[int] = set()
-        self._header_id: Optional[int] = None
-        self._dirty_row_keys: set[tuple[str, str]] = set()  # (fio_lower, tbn_norm)
-        self._auto_save_delay_ms = 1200  # было 8000
 
         self._build_ui()
         # Загружаем данные из БД в модель, а затем рендерим первую страницу
@@ -2171,29 +2086,13 @@ class TimesheetPage(tk.Frame):
 
     # --------------- Реакция на изменение строки -----------------
 
-    def _on_row_data_changed(self, row_widget: RowWidget, mode: str = "commit"):
+    def _on_row_data_changed(self):
         """
-        mode:
-          - "typing": частые события набора; не делаем тяжелые операции
-          - "commit": выход из ячейки/фиксирование; можно пересчитать итоги
+        Вызывается RowWidget при изменении значений в ячейках текущей страницы.
         """
-        # Синхронизируем только видимую страницу в модель
         self._sync_visible_to_model()
-    
-        fio_l = (row_widget.fio() or "").strip().lower()
-        tbn_n = (row_widget.tbn() or "").strip()
-        self._dirty_row_keys.add((fio_l, tbn_n))
-    
-        # Планируем автосейв (debounce)
+        self._recalc_object_total()
         self._schedule_auto_save()
-    
-        # Дорогие пересчёты — только на commit
-        if mode == "commit":
-            self._recalc_object_total()
-
-    def _mark_all_rows_dirty(self):
-        for rec in self.model_rows:
-            self._dirty_row_keys.add(((rec.get("fio") or "").strip().lower(), (rec.get("tbn") or "").strip()))
 
     # ------------------- Операции со строками --------------------
 
@@ -2229,7 +2128,6 @@ class TimesheetPage(tk.Frame):
                 return
 
         self.model_rows.append({"fio": fio, "tbn": tbn, "hours": [None] * 31})
-        self._dirty_row_keys.add((fio.strip().lower(), tbn.strip()))
         last_page = self._page_count()
         self._render_page(last_page)
         self._schedule_auto_save()
@@ -2268,7 +2166,6 @@ class TimesheetPage(tk.Frame):
                 "hours": [None] * 31,
             })
             existing.add(key)
-            self._dirty_row_keys.add((fio.strip().lower(), (tbn or "").strip()))
             added_count += 1
 
         if added_count > 0:
@@ -2372,8 +2269,6 @@ class TimesheetPage(tk.Frame):
                         self.model_rows.append(rec)
                         added += 1
 
-                self._dirty_row_keys.clear()
-                self._mark_all_rows_dirty()
                 self._render_page(1)
                 self._schedule_auto_save()
                 messagebox.showinfo("Импорт", f"Импортировано {added} новых сотрудников.")
@@ -2448,8 +2343,6 @@ class TimesheetPage(tk.Frame):
                     added += 1
 
             self._render_page(1)
-            self._dirty_row_keys.clear()
-            self._mark_all_rows_dirty()
             self._schedule_auto_save()
             messagebox.showinfo("Копирование", f"Скопировано {added} сотрудников.")
         except Exception as e:
@@ -2489,7 +2382,6 @@ class TimesheetPage(tk.Frame):
                     self.model_rows.append({"fio": fio, "tbn": tbn, "hours": [None] * 31})
                     existing.add(key)
                     added_count += 1
-                    self._dirty_row_keys.add((fio.strip().lower(), (tbn or "").strip()))
                 dlg.step()
 
             dlg.close()
@@ -2538,8 +2430,7 @@ class TimesheetPage(tk.Frame):
             if len(rec.get("hours", [])) < 31:
                 rec["hours"] = (rec.get("hours", []) + [None] * 31)[:31]
             rec["hours"][day_idx] = hours_val_str
-            
-        self._mark_all_rows_dirty()
+
         self._render_page(self.current_page)
         self._schedule_auto_save()
 
@@ -2590,18 +2481,15 @@ class TimesheetPage(tk.Frame):
         for global_idx in sorted(self.selected_indices):
             if not (0 <= global_idx < len(self.model_rows)):
                 continue
-        
             rec = self.model_rows[global_idx]
-            self._dirty_row_keys.add(((rec.get("fio") or "").strip().lower(), (rec.get("tbn") or "").strip()))
-        
             hours_list = rec.get("hours") or [None] * 31
             if len(hours_list) < 31:
                 hours_list = (hours_list + [None] * 31)[:31]
-        
+
             for d in range(day_from, day_to + 1):
                 idx = d - 1
                 hours_list[idx] = value_str
-        
+
             rec["hours"] = hours_list
 
         self._render_page(self.current_page)
@@ -2653,19 +2541,6 @@ class TimesheetPage(tk.Frame):
             pass
 
         if 0 <= global_idx < len(self.model_rows):
-            fio_del = self.model_rows[global_idx].get("fio", "")
-            tbn_del = self.model_rows[global_idx].get("tbn", "")
-            
-            # убираем из dirty
-            self._dirty_row_keys.discard((fio_del.strip().lower(), (tbn_del or "").strip()))
-            
-            # удаляем в БД, если header уже существует
-            if self._header_id is not None:
-                try:
-                    delete_timesheet_row_incremental(self._header_id, fio_del, tbn_del, try_lock=True)
-                except Exception:
-                    # можно залогировать; UI всё равно удалит строку
-                    pass
             del self.model_rows[global_idx]
 
             new_selected = set()
@@ -2695,7 +2570,6 @@ class TimesheetPage(tk.Frame):
         for rec in self.model_rows:
             rec['hours'] = [None] * 31
 
-        self._mark_all_rows_dirty()
         self._render_page(self.current_page)
         self._schedule_auto_save()
         messagebox.showinfo("Очистка", "Все часы были стерты.")
@@ -2763,8 +2637,6 @@ class TimesheetPage(tk.Frame):
 
     def _load_existing_rows(self):
         """Загружает строки из БД в модель и рендерит первую страницу."""
-        self._header_id = None
-        self._dirty_row_keys.clear()
         self.model_rows.clear()
         self.selected_indices.clear()
 
@@ -2785,9 +2657,8 @@ class TimesheetPage(tk.Frame):
             return
 
         try:
-            self._header_id, db_rows = load_timesheet_rows_from_db(oid or None, addr, current_dep, y, m, user_id)
+            db_rows = load_timesheet_rows_from_db(oid or None, addr, current_dep, y, m, user_id)
             self.model_rows.extend(db_rows)
-            self._dirty_row_keys.clear()
         except Exception as e:
             try:
                 import logging
@@ -2983,36 +2854,10 @@ class TimesheetPage(tk.Frame):
             return
     
         # ------------------------- Сохранение в БД ------------------------ #
+    
         try:
-            # --- инкрементальное сохранение ---
-            if is_auto and not self._dirty_row_keys:
-                self._update_auto_save_label()
-                return
-            
-            try:
-                if self._header_id is None:
-                    self._header_id = upsert_timesheet_header(oid or None, addr, current_dep, y, m, user_id)
-            
-                dirty_rows = []
-                if self._dirty_row_keys:
-                    for rec in self.model_rows:
-                        key = ((rec.get("fio") or "").strip().lower(), (rec.get("tbn") or "").strip())
-                        if key in self._dirty_row_keys:
-                            dirty_rows.append(rec)
-            
-                if dirty_rows:
-                    upsert_timesheet_rows_incremental(self._header_id, dirty_rows, try_lock=bool(is_auto))
-            
-                    # очищаем только успешно сохранённые
-                    for rec in dirty_rows:
-                        key = ((rec.get("fio") or "").strip().lower(), (rec.get("tbn") or "").strip())
-                        self._dirty_row_keys.discard(key)
-            
-            except RuntimeError as e:
-                if show_messages:
-                    messagebox.showwarning("Сохранение", str(e))
-                return
-
+            header_id = upsert_timesheet_header(oid or None, addr, current_dep, y, m, user_id)
+            replace_timesheet_rows(header_id, self.model_rows)
         except Exception as e:
             try:
                 import logging
@@ -3021,10 +2866,6 @@ class TimesheetPage(tk.Frame):
                 print(f"Ошибка сохранения в БД: {e}")
             if show_messages:
                 messagebox.showerror("Сохранение", f"Ошибка сохранения в БД:\n{e}")
-            return
-
-        if is_auto:
-            self._update_auto_save_label()
             return
     
         # -------------------- Резервное сохранение в Excel ---------------- #
