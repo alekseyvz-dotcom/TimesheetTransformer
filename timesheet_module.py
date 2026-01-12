@@ -1,14 +1,12 @@
 import calendar
 import re
 import sys
-import math
 import logging
 from datetime import datetime, date
 from pathlib import Path
 from typing import List, Tuple, Optional, Any, Dict
 
 import psycopg2
-from psycopg2 import pool
 from psycopg2.extras import RealDictCursor, execute_values
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
@@ -537,6 +535,50 @@ def parse_hours_and_night(v: Any) -> Tuple[Optional[float], Optional[float]]:
         return None, None
     return total, 0.0
 
+def calc_row_totals(hours_list: List[Optional[str]], year: int, month: int) -> Dict[str, Any]:
+    """
+    Возвращает totals для одной строки табеля.
+    days: количество дней с ненулевыми часами
+    hours: сумма часов (включая ночные, как в parse_hours_and_night)
+    ot_day / ot_night: переработка из скобок
+    """
+    days_in_m = month_days(year, month)
+
+    total_hours = 0.0
+    total_days = 0
+    total_ot_day = 0.0
+    total_ot_night = 0.0
+
+    if not hours_list:
+        hours_list = [None] * 31
+    if len(hours_list) < 31:
+        hours_list = (hours_list + [None] * 31)[:31]
+    else:
+        hours_list = hours_list[:31]
+
+    for i in range(days_in_m):
+        raw = hours_list[i]
+        if not raw:
+            continue
+
+        hrs, _night = parse_hours_and_night(raw)
+        d_ot, n_ot = parse_overtime(raw)
+
+        if isinstance(hrs, (int, float)) and hrs > 1e-12:
+            total_hours += float(hrs)
+            total_days += 1
+        if isinstance(d_ot, (int, float)):
+            total_ot_day += float(d_ot)
+        if isinstance(n_ot, (int, float)):
+            total_ot_night += float(n_ot)
+
+    # Форматирование лучше оставлять числом, а вывод решит грид
+    return {
+        "days": total_days,
+        "hours": float(f"{total_hours:.2f}"),
+        "ot_day": float(f"{total_ot_day:.2f}"),
+        "ot_night": float(f"{total_ot_night:.2f}"),
+    }
 
 def safe_filename(s: str, maxlen: int = 60) -> str:
     s = re.sub(r'[<>:"/\\|?*\n\r\t]+', "_", str(s or "")).strip()
@@ -1226,245 +1268,6 @@ class TimeForSelectedDialog(simpledialog.Dialog):
             "to": self._to,
             "value": self._value,  # None => очистка
         }
-
-
-class RowWidget:
-    WEEK_BG_SAT = "#fff8e1"
-    WEEK_BG_SUN = "#ffebee"
-    ZEBRA_EVEN = "#ffffff"
-    ZEBRA_ODD = "#f6f8fa"
-    ERR_BG = "#ffccbc"
-    DISABLED_BG = "#f0f0f0"
-    SELECT_BG = "#c5e1ff"  # фон выделенной строки
-
-    def __init__(self, table: tk.Frame, row_index: int, fio: str, tbn: str,
-                 get_year_month_callable, on_delete_callable, on_change_callable=None):
-        self.table = table
-        self.row = row_index
-        self.get_year_month = get_year_month_callable
-        self.on_delete = on_delete_callable
-        self.on_change = on_change_callable
-        self._suspend_sync = False
-
-        zebra_bg = self.ZEBRA_EVEN if (row_index % 2 == 0) else self.ZEBRA_ODD
-        self.base_bg = zebra_bg       # базовый фон строки (зебра)
-        self._selected = False        # флаг выделения
-
-        self.widgets: List[tk.Widget] = []
-
-        # ФИО
-        self.lbl_fio = tk.Label(
-            self.table,
-            text=fio,
-            anchor="w",
-            bg=self.base_bg,
-            width=35,
-        )
-        self.lbl_fio.grid(row=self.row, column=0, padx=0, pady=1, sticky="nsew")
-        self.widgets.append(self.lbl_fio)
-
-        # Таб.№
-        self.lbl_tbn = tk.Label(self.table, text=tbn, anchor="center", bg=self.base_bg)
-        self.lbl_tbn.grid(row=self.row, column=1, padx=0, pady=1, sticky="nsew")
-        self.widgets.append(self.lbl_tbn)
-
-        # Дни месяца
-        self.day_entries: List[tk.Entry] = []
-        for d in range(1, 32):
-            e = tk.Entry(self.table, width=4, justify="center", relief="solid", bd=1)
-            e.grid(row=self.row, column=1 + d, padx=0, pady=1, sticky="nsew")
-
-            def _on_focus_out(ev, _d=d, self_ref=self):
-                self_ref.update_total()
-                if callable(self_ref.on_change):
-                    try:
-                        self_ref.on_change()
-                    except Exception:
-                        pass
-
-            e.bind("<FocusOut>", _on_focus_out)
-            e.bind("<Button-2>", lambda ev: "break")
-            e.bind("<ButtonRelease-2>", lambda ev: "break")
-            self.day_entries.append(e)
-            self.widgets.append(e)
-
-        # Итоги
-        self.lbl_days = tk.Label(self.table, text="0", anchor="e", bg=self.base_bg)
-        self.lbl_days.grid(row=self.row, column=33, padx=(4, 1), pady=1, sticky="nsew")
-        self.widgets.append(self.lbl_days)
-
-        self.lbl_total = tk.Label(self.table, text="0", anchor="e", bg=self.base_bg)
-        self.lbl_total.grid(row=self.row, column=34, padx=(4, 1), pady=1, sticky="nsew")
-        self.widgets.append(self.lbl_total)
-
-        self.lbl_overtime_day = tk.Label(self.table, text="0", anchor="e", bg=self.base_bg)
-        self.lbl_overtime_day.grid(row=self.row, column=35, padx=(4, 1), pady=1, sticky="nsew")
-        self.widgets.append(self.lbl_overtime_day)
-
-        self.lbl_overtime_night = tk.Label(self.table, text="0", anchor="e", bg=self.base_bg)
-        self.lbl_overtime_night.grid(row=self.row, column=36, padx=(4, 1), pady=1, sticky="nsew")
-        self.widgets.append(self.lbl_overtime_night)
-
-        # 5/2
-        self.btn_52 = ttk.Button(self.table, text="5/2", width=4, command=self.fill_52)
-        self.btn_52.grid(row=self.row, column=37, padx=1, pady=0, sticky="nsew")
-        self.widgets.append(self.btn_52)
-
-        # Удалить
-        self.btn_del = ttk.Button(self.table, text="Удалить", width=7, command=self.delete_row)
-        self.btn_del.grid(row=self.row, column=38, padx=1, pady=0, sticky="nsew")
-        self.widgets.append(self.btn_del)
-
-    def set_day_font(self, font_tuple):
-        for e in self.day_entries:
-            e.configure(font=font_tuple)
-
-    def regrid_to(self, new_row: int):
-        self.row = new_row
-        self.lbl_fio.grid_configure(row=new_row, column=0)
-        self.lbl_tbn.grid_configure(row=new_row, column=1)
-        for i, e in enumerate(self.day_entries, start=2):
-            e.grid_configure(row=new_row, column=i)
-        self.lbl_days.grid_configure(row=new_row, column=33)
-        self.lbl_total.grid_configure(row=new_row, column=34)
-        self.lbl_overtime_day.grid_configure(row=new_row, column=35)
-        self.lbl_overtime_night.grid_configure(row=new_row, column=36)
-        self.btn_52.grid_configure(row=new_row, column=37)
-        self.btn_del.grid_configure(row=new_row, column=38)
-
-    def fio(self) -> str:
-        return self.lbl_fio.cget("text")
-
-    def tbn(self) -> str:
-        return self.lbl_tbn.cget("text")
-
-    def set_hours(self, arr: List[Optional[str]]):
-        days = len(arr)
-        for i in range(31):
-            self.day_entries[i].delete(0, "end")
-            if i < days and arr[i]:
-                self.day_entries[i].insert(0, str(arr[i]))
-        self.update_total()
-
-    def get_hours_with_overtime(self) -> List[Tuple[Optional[float], Optional[float], Optional[float]]]:
-        result = []
-        for e in self.day_entries:
-            raw = e.get().strip()
-            hours = parse_hours_value(raw) if raw else None
-            day_ot, night_ot = parse_overtime(raw) if raw else (None, None)
-            result.append((hours, day_ot, night_ot))
-        return result
-
-    def _bg_for_day(self, year: int, month: int, day: int) -> str:
-        from datetime import datetime as _dt
-        wd = _dt(year, month, day).weekday()
-        if wd == 5:
-            return self.WEEK_BG_SAT
-        if wd == 6:
-            return self.WEEK_BG_SUN
-        return "white"
-
-    def _repaint_day_cell(self, i0: int, year: int, month: int):
-        from datetime import datetime as _dt
-        day = i0 + 1
-        e = self.day_entries[i0]
-        days = month_days(year, month)
-
-        if day > days:
-            e.configure(state="disabled", disabledbackground=self.DISABLED_BG)
-            e.delete(0, "end")
-            return
-
-        e.configure(state="normal")
-        raw = e.get().strip()
-
-        invalid = False
-        if raw:
-            val = parse_hours_value(raw)
-            if val is None or val < 0 or val > 24:
-                invalid = True
-            if "(" in raw:
-                day_ot, night_ot = parse_overtime(raw)
-                if day_ot is None and night_ot is None:
-                    invalid = True
-
-        if invalid:
-            e.configure(bg=self.ERR_BG)
-        else:
-            e.configure(bg=self._bg_for_day(year, month, day))
-
-    def update_days_enabled(self, year: int, month: int):
-        for i in range(31):
-            self._repaint_day_cell(i, year, month)
-        self.update_total()
-
-    def update_total(self):
-        total_hours = 0.0
-        total_days = 0
-        total_overtime_day = 0.0
-        total_overtime_night = 0.0
-
-        y, m = self.get_year_month()
-        days_in_m = month_days(y, m)
-
-        for i, e in enumerate(self.day_entries, start=1):
-            raw = e.get().strip()
-            self._repaint_day_cell(i - 1, y, m)
-            if i <= days_in_m and raw:
-                hours, night = parse_hours_and_night(raw)
-                day_ot, night_ot = parse_overtime(raw)
-                if isinstance(hours, (int, float)) and hours > 1e-12:
-                    total_hours += float(hours)
-                    total_days += 1
-                if isinstance(day_ot, (int, float)):
-                    total_overtime_day += float(day_ot)
-                if isinstance(night_ot, (int, float)):
-                    total_overtime_night += float(night_ot)
-
-        self.lbl_days.config(text=str(total_days))
-        sh = f"{total_hours:.2f}".rstrip("0").rstrip(".")
-        self.lbl_total.config(text=sh)
-        sod = f"{total_overtime_day:.2f}".rstrip("0").rstrip(".")
-        self.lbl_overtime_day.config(text=sod)
-        son = f"{total_overtime_night:.2f}".rstrip("0").rstrip(".")
-        self.lbl_overtime_night.config(text=son)
-
-    def fill_52(self):
-        y, m = self.get_year_month()
-        days = month_days(y, m)
-        for d in range(1, days + 1):
-            wd = datetime(y, m, d).weekday()
-            e = self.day_entries[d - 1]
-            e.delete(0, "end")
-            if wd < 4:
-                e.insert(0, "8,25")
-            elif wd == 4:
-                e.insert(0, "7")
-        for d in range(days + 1, 32):
-            self.day_entries[d - 1].delete(0, "end")
-        self.update_total()
-
-    def delete_row(self):
-        self.on_delete(self)
-
-    # --- Выделение строки ---
-
-    def set_selected(self, on: bool):
-        """Включить/выключить выделение строки (подсветка ФИО и итогов)."""
-        self._selected = bool(on)
-        bg = self.SELECT_BG if self._selected else self.base_bg
-
-        # Меняем фон у lbl_fio, lbl_tbn, итогов
-        for lbl in (self.lbl_fio, self.lbl_tbn,
-                    self.lbl_days, self.lbl_total,
-                    self.lbl_overtime_day, self.lbl_overtime_night):
-            try:
-                lbl.configure(bg=bg)
-            except Exception:
-                pass
-
-    def is_selected(self) -> bool:
-        return self._selected
         
 # ================= СТРАНИЦА ТАБЕЛЕЙ (ПОЛНАЯ ОПТИМИЗИРОВАННАЯ ВЕРСИЯ) =================
 
@@ -1834,6 +1637,11 @@ class TimesheetPage(tk.Frame):
         self.pos_var.set(pos)
 
     # ---------------- totals / change ----------------
+    def _recalc_all_row_totals(self):
+        y, m = self.get_year_month()
+        for rec in self.model_rows:
+            hours_list = rec.get("hours") or [None] * 31
+            rec["_totals"] = calc_row_totals(hours_list, y, m)
 
     def _recalc_object_total(self):
         tot_h, tot_d, tot_night, tot_ot_day, tot_ot_night = 0.0, 0, 0.0, 0.0, 0.0
@@ -1874,7 +1682,8 @@ class TimesheetPage(tk.Frame):
         )
 
     def _on_row_data_changed(self):
-        # В виртуальной таблице данные уже записаны в model_rows
+        self._recalc_all_row_totals()
+        self._grid_refresh(rows_changed=False)
         self._recalc_object_total()
         self._schedule_auto_save()
 
@@ -1886,6 +1695,7 @@ class TimesheetPage(tk.Frame):
         if not (0 <= row_index < len(self.model_rows)):
             return
         del self.model_rows[row_index]
+        self._recalc_all_row_totals()
         self._grid_refresh(rows_changed=True)
         self._recalc_object_total()
         self._schedule_auto_save()
@@ -1911,6 +1721,7 @@ class TimesheetPage(tk.Frame):
                 hours[d - 1] = None
         rec["hours"] = hours
 
+        self._recalc_all_row_totals()
         self._grid_refresh(rows_changed=False)
         self._recalc_object_total()
         self._schedule_auto_save()
@@ -1946,6 +1757,7 @@ class TimesheetPage(tk.Frame):
                 return
 
         self.model_rows.append({"fio": fio, "tbn": tbn, "hours": [None] * 31})
+        self._recalc_all_row_totals()
         self._grid_refresh(rows_changed=True)
         self._recalc_object_total()
         self._schedule_auto_save()
@@ -1988,6 +1800,7 @@ class TimesheetPage(tk.Frame):
 
             dlg.close()
 
+            self._recalc_all_row_totals()
             self._grid_refresh(rows_changed=True)
             self._recalc_object_total()
             self._schedule_auto_save()
@@ -2028,6 +1841,7 @@ class TimesheetPage(tk.Frame):
             existing.add(key)
             added_count += 1
 
+        self._recalc_all_row_totals()
         self._grid_refresh(rows_changed=True)
         self._recalc_object_total()
         self._schedule_auto_save()
@@ -2075,7 +1889,8 @@ class TimesheetPage(tk.Frame):
             for d in range(day_from, day_to + 1):
                 hours_list[d - 1] = value_str
             rec["hours"] = hours_list
-
+        
+        self._recalc_all_row_totals()
         self._grid_refresh(rows_changed=False)
         self._recalc_object_total()
         self._schedule_auto_save()
@@ -2121,7 +1936,8 @@ class TimesheetPage(tk.Frame):
                 hours = (hours + [None] * 31)[:31]
             hours[day_idx] = hours_val_str
             rec["hours"] = hours
-
+            
+        self._recalc_all_row_totals()
         self._grid_refresh(rows_changed=False)
         self._recalc_object_total()
         self._schedule_auto_save()
@@ -2143,6 +1959,7 @@ class TimesheetPage(tk.Frame):
         for rec in self.model_rows:
             rec["hours"] = [None] * 31
 
+        self._recalc_all_row_totals()
         self._grid_refresh(rows_changed=False)
         self._recalc_object_total()
         self._schedule_auto_save()
@@ -2217,7 +2034,8 @@ class TimesheetPage(tk.Frame):
                 if (rec["fio"].lower(), rec["tbn"]) not in existing:
                     self.model_rows.append(rec)
                     added += 1
-
+            
+            self._recalc_all_row_totals()
             self._grid_refresh(rows_changed=True)
             self._recalc_object_total()
             self._schedule_auto_save()
@@ -2301,6 +2119,7 @@ class TimesheetPage(tk.Frame):
                     self.model_rows.append({"fio": fio, "tbn": tbn, "hours": hrs})
                     added += 1
 
+            self._recalc_all_row_totals()
             self._grid_refresh(rows_changed=True)
             self._recalc_object_total()
             self._schedule_auto_save()
@@ -2402,6 +2221,7 @@ class TimesheetPage(tk.Frame):
         try:
             db_rows = load_timesheet_rows_from_db(oid or None, addr, current_dep, y, m, user_id)
             self.model_rows.extend(db_rows)
+            self._recalc_all_row_totals()
             self._grid_refresh(rows_changed=True)
             self._recalc_object_total()
         except Exception as e:
