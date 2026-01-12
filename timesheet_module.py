@@ -207,19 +207,32 @@ def upsert_timesheet_header(
         if conn:
             release_db_connection(conn)
 
-def replace_timesheet_rows(header_id: int, rows: List[Dict[str, Any]]):
-    """Полностью заменяет строки табеля одним запросом (Batch Insert)."""
+def replace_timesheet_rows(header_id: int, rows: List[Dict[str, Any]], *, try_lock: bool = False):
+    """
+    Полностью заменяет строки табеля одним запросом (Batch Insert).
+
+    Защита от гонок: берём pg_advisory_xact_lock(header_id) на время транзакции.
+    try_lock=True: не ждать блокировку; если занято — бросаем RuntimeError.
+    """
     conn = None
     try:
         conn = get_db_connection()
         with conn, conn.cursor() as cur:
-            # Сначала удаляем старые (тут всё ок)
+            # --- ВАЖНО: транзакционный advisory lock ---
+            if try_lock:
+                cur.execute("SELECT pg_try_advisory_xact_lock(%s)", (header_id,))
+                locked = cur.fetchone()[0]
+                if not locked:
+                    raise RuntimeError("Табель сейчас сохраняется (в другом окне).")
+            else:
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (header_id,))
+
+            # Критическая секция: DELETE + INSERT (не должна пересекаться)
             cur.execute("DELETE FROM timesheet_rows WHERE header_id = %s", (header_id,))
-            
+
             if not rows:
                 return
 
-            # Подготовка данных для массовой вставки
             values = []
             for rec in rows:
                 hours_list = rec.get("hours") or [None] * 31
@@ -235,7 +248,7 @@ def replace_timesheet_rows(header_id: int, rows: List[Dict[str, Any]]):
                 for raw in hours_list:
                     if not raw:
                         continue
-                    # Новая логика: обычные часы + ночные
+
                     hrs, night = parse_hours_and_night(raw)
                     d_ot, n_ot = parse_overtime(raw)
 
@@ -268,7 +281,7 @@ def replace_timesheet_rows(header_id: int, rows: List[Dict[str, Any]]):
                 VALUES %s
             """
             execute_values(cur, insert_query, values)
-            
+
     finally:
         if conn:
             release_db_connection(conn)
@@ -2857,7 +2870,18 @@ class TimesheetPage(tk.Frame):
     
         try:
             header_id = upsert_timesheet_header(oid or None, addr, current_dep, y, m, user_id)
-            replace_timesheet_rows(header_id, self.model_rows)
+
+            # Авто-сохранение: не ждём, если табель уже сохраняется (например, ручное сохранение)
+            # Ручное сохранение: ждём блокировку
+            replace_timesheet_rows(header_id, self.model_rows, try_lock=bool(is_auto))
+
+        except RuntimeError as e:
+            # Это наш "lock занят" (см. replace_timesheet_rows)
+            if show_messages:
+                messagebox.showwarning("Сохранение", str(e))
+            # Для авто-сохранения — тихо выходим
+            return
+
         except Exception as e:
             try:
                 import logging
