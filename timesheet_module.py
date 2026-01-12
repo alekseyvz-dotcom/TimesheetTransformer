@@ -12,6 +12,7 @@ from psycopg2 import pool
 from psycopg2.extras import RealDictCursor, execute_values
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils import get_column_letter
+from virtual_timesheet_grid import VirtualTimesheetGrid
 
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
@@ -1657,32 +1658,27 @@ class TimesheetPage(tk.Frame):
         ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=8, padx=4)
         ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=9, padx=4)
 
-        # --- Основной контейнер с таблицей ---
+        # --- Основной контейнер с таблицей (VirtualTimesheetGrid на Canvas) ---
         main_frame = tk.Frame(self)
         main_frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
-        self.header_canvas = tk.Canvas(main_frame, borderwidth=0, highlightthickness=0, height=28)
-        self.header_canvas.grid(row=0, column=0, sticky="ew")
-        self.main_canvas = tk.Canvas(main_frame, borderwidth=0, highlightthickness=0)
-        self.main_canvas.grid(row=1, column=0, sticky="nsew")
-        self.vscroll = ttk.Scrollbar(main_frame, orient="vertical", command=self.main_canvas.yview)
-        self.vscroll.grid(row=1, column=1, sticky="ns")
-        self.hscroll = ttk.Scrollbar(main_frame, orient="horizontal")
-        self.hscroll.grid(row=2, column=0, sticky="ew")
-        main_frame.grid_rowconfigure(1, weight=1)
+        main_frame.grid_rowconfigure(0, weight=1)
         main_frame.grid_columnconfigure(0, weight=1)
-        self.header_table = tk.Frame(self.header_canvas, bg="#ffffff")
-        self.header_window = self.header_canvas.create_window((0, 0), window=self.header_table, anchor="nw")
-        self.table = tk.Frame(self.main_canvas, bg="#ffffff")
-        self.canvas_window = self.main_canvas.create_window((0, 0), window=self.table, anchor="nw")
-        self.main_canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=self._on_xscroll_main)
-        self.hscroll.configure(command=self._xscroll_both)
-        self.table.bind("<Configure>", self._on_scroll_frame_configure)
-        self._configure_table_columns()
-        self._build_header_row(self.header_table)
-        self.main_canvas.bind("<MouseWheel>", self._on_wheel)
-        self.main_canvas.bind("<Shift-MouseWheel>", self._on_shift_wheel)
-        self.bind_all("<MouseWheel>", self._on_wheel_anywhere)
-        self.rows: List[RowWidget] = []
+        
+        # Фича-флаг (можно убрать позже)
+        self.use_virtual_grid = True
+        
+        if self.use_virtual_grid:
+            self.grid = VirtualTimesheetGrid(
+                main_frame,
+                get_year_month=self.get_year_month,
+                on_change=self._on_row_data_changed,   # будет вызываться при изменениях (позже, когда добавим редактирование)
+                row_height=22,
+                colpx=self.COLPX,
+            )
+            self.grid.grid(row=0, column=0, sticky="nsew")
+        else:
+            # (оставь старую таблицу здесь, если хочешь иметь быстрый откат)
+            pass
 
         # --- Нижняя панель (итоги + пагинация + авто‑сохранение) ---
         bottom = tk.Frame(self)
@@ -2636,38 +2632,55 @@ class TimesheetPage(tk.Frame):
         return ws2
 
     def _load_existing_rows(self):
-        """Загружает строки из БД в модель и рендерит первую страницу."""
+        """Загружает строки из БД в модель и обновляет отображение."""
         self.model_rows.clear()
         self.selected_indices.clear()
 
+        if hasattr(self, "grid"):
+            self.grid.set_selected_indices(set())
+    
         addr, oid = self.cmb_address.get().strip(), self.cmb_object_id.get().strip()
         y, m = self.get_year_month()
-        current_dep = self.cmb_department.get().strip()
-
+        current_dep = (self.cmb_department.get() or "").strip()
+    
+        # Если подразделение "Все" — по твоей логике показываем пусто
         if current_dep == "Все":
-            self._render_page(1)
+            if hasattr(self, "grid"):
+                self.grid.set_rows(self.model_rows)  # пусто
+            self._recalc_object_total()
             return
-
+    
         user_id = self.owner_user_id
         if user_id is None and hasattr(self, "app_ref") and getattr(self.app_ref, "current_user", None):
             user_id = (self.app_ref.current_user or {}).get("id")
-
+    
         if not user_id:
-            self._render_page(1)
+            if hasattr(self, "grid"):
+                self.grid.set_rows(self.model_rows)  # пусто
+            self._recalc_object_total()
             return
-
+    
         try:
             db_rows = load_timesheet_rows_from_db(oid or None, addr, current_dep, y, m, user_id)
             self.model_rows.extend(db_rows)
+    
+            if hasattr(self, "grid"):
+                self.grid.set_rows(self.model_rows)
+    
+            self._recalc_object_total()  # пока полный пересчёт
         except Exception as e:
             try:
                 import logging
                 logging.exception("Ошибка загрузки табеля из БД")
-            except ImportError:
-                print(f"Ошибка загрузки табеля из БД: {e}")
+            except Exception:
+                pass
             messagebox.showerror("Загрузка", f"Не удалось загрузить табель из БД:\n{e}")
+    
+            # на ошибке лучше тоже показать пусто/старые данные не оставлять
+            if hasattr(self, "grid"):
+                self.grid.set_rows(self.model_rows)
+            self._recalc_object_total()
 
-        self._render_page(1)
 
     def _save_all_internal(self, show_messages: bool, is_auto: bool = False):
         """
