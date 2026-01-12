@@ -1469,6 +1469,14 @@ class RowWidget:
 # ================= СТРАНИЦА ТАБЕЛЕЙ (ПОЛНАЯ ОПТИМИЗИРОВАННАЯ ВЕРСИЯ) =================
 
 class TimesheetPage(tk.Frame):
+    """
+    TimesheetPage (версия для VirtualTimesheetGrid).
+    ВАЖНО:
+      - Удалена пагинация/RowWidget/старые Canvas-таблицы.
+      - Все операции работают через self.model_rows и self.grid (виртуальная таблица).
+      - Выделение строк хранится в гриде.
+    """
+
     COLPX = {"fio": 200, "tbn": 100, "day": 36, "days": 46, "hours": 56, "btn52": 40, "del": 66}
     MIN_FIO_PX = 140
     MAX_FIO_PX = 260
@@ -1490,82 +1498,80 @@ class TimesheetPage(tk.Frame):
         self.app_ref = app_ref
         self.read_only = bool(read_only)
         self.owner_user_id: Optional[int] = owner_user_id
+
         self._init_object_id = init_object_id
         self._init_object_addr = init_object_addr
-        self._suppress_object_id_dialog = False
         self._init_department = init_department
         self._init_year = init_year
         self._init_month = init_month
+        self._suppress_object_id_dialog = False
 
         # Авто‑сохранение
         self._auto_save_job = None
-        self._auto_save_delay_ms = 8000  # задержка авто‑сохранения (мс)
+        self._auto_save_delay_ms = 8000
 
-        # Убедимся, что get_output_dir_from_config существует и возвращает Path
+        # output dir
         if get_output_dir_from_config:
             self.out_dir = get_output_dir_from_config()
         else:
-            # Запасной вариант, если функция не найдена
             self.out_dir = Path("./output")
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
-        self.DAY_ENTRY_FONT = ("Segoe UI", 8)
-        self._fit_job = None
-
+        # Данные
         self._load_spr_data_from_db()
         self.allowed_fio_names: set[str] = set()
 
-        # Модель и пагинация
-        self.model_rows: List[Dict[str, Any]] = []  # Модель данных (все сотрудники)
-        self.current_page = 1
-        self.page_size = tk.IntVar(value=50)  # Количество строк на странице
-        self._suspend_sync = False  # Флаг для предотвращения синхронизации при массовых операциях
-        self.selected_indices: set[int] = set()
+        # Модель табеля
+        self.model_rows: List[Dict[str, Any]] = []
 
+        # UI
+        self._fit_job = None
         self._build_ui()
-        # Загружаем данные из БД в модель, а затем рендерим первую страницу
+
+        # initial load
         self._load_existing_rows()
 
+        # авто-подгон ширины ФИО (только виртуальная таблица)
         self.bind("<Configure>", self._on_window_configure)
         self.after(120, self._auto_fit_columns)
 
-    # ---------------------- АВТО‑СОХРАНЕНИЕ ----------------------
+    # ---------------------- helpers: grid / selection ----------------------
+
+    def _grid_selected(self) -> set[int]:
+        if hasattr(self, "grid"):
+            return self.grid.get_selected_indices()
+        return set()
+
+    def _grid_refresh(self, rows_changed: bool = False):
+        if not hasattr(self, "grid"):
+            return
+        if rows_changed:
+            self.grid.set_rows(self.model_rows)
+        else:
+            self.grid.refresh()
+
+    # ---------------------- AUTO SAVE ----------------------
 
     def _schedule_auto_save(self):
-        """
-        Планирует авто‑сохранение через небольшой интервал после последнего изменения.
-        """
         if self.read_only:
             return
-
-        # отменяем предыдущий таймер
         if self._auto_save_job is not None:
             try:
                 self.after_cancel(self._auto_save_job)
             except Exception:
                 pass
             self._auto_save_job = None
-
         self._auto_save_job = self.after(self._auto_save_delay_ms, self._auto_save_callback)
 
     def _auto_save_callback(self):
-        """
-        Вызывается по истечении таймера авто‑сохранения.
-        """
         self._auto_save_job = None
-        # Сохраняем без всплывающих "успешно" сообщений
         self._save_all_internal(show_messages=False, is_auto=True)
 
-    # ------------------ ЗАГРУЗКА СПРАВОЧНИКОВ -------------------
+    # ------------------ load reference data -------------------
 
     def _load_spr_data_from_db(self):
-        # сотрудники
-        employees = load_employees_from_db()
-        # объекты — полный список с short_name
-        objects_full = load_objects_short_for_timesheet()  # (excel_id, address, short_name)
-
-        self.employees = employees
-        self.objects_full = objects_full  # сохраняем
+        self.employees = load_employees_from_db()  # (fio,tbn,pos,dep)
+        self.objects_full = load_objects_short_for_timesheet()  # (excel_id,address,short_name)
 
         self.emp_names = [fio for (fio, _, _, _) in self.employees]
         self.emp_info = {fio: (tbn, pos) for (fio, tbn, pos, _) in self.employees}
@@ -1573,7 +1579,6 @@ class TimesheetPage(tk.Frame):
         deps = sorted({(dep or "").strip() for (_, _, _, dep) in self.employees if (dep or "").strip()})
         self.departments = ["Все"] + deps
 
-        # addr -> список excel_id (как раньше, но по новому списку)
         self.addr_to_ids: Dict[str, List[str]] = {}
         for oid, addr, short_name in self.objects_full:
             if not addr:
@@ -1582,14 +1587,12 @@ class TimesheetPage(tk.Frame):
             if oid and oid not in self.addr_to_ids[addr]:
                 self.addr_to_ids[addr].append(oid)
 
-        # список всех адресов
-        addresses_set = {addr for _, addr, _ in self.objects_full if addr}
-        self.address_options = sorted(addresses_set)
+        self.address_options = sorted({addr for _, addr, _ in self.objects_full if addr})
 
-    # ------------------------ UI СТРАНИЦЫ ------------------------
+    # ------------------------ UI ------------------------
 
     def _build_ui(self):
-        # --- Верхняя панель ---
+        # --- Top panel ---
         top = tk.Frame(self)
         top.pack(fill="x", padx=8, pady=8)
 
@@ -1605,7 +1608,9 @@ class TimesheetPage(tk.Frame):
         self.cmb_department.bind("<<ComboboxSelected>>", lambda e: self._on_department_select())
 
         tk.Label(top, text="Месяц:").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(8, 0))
-        self.cmb_month = ttk.Combobox(top, state="readonly", width=12, values=[month_name_ru(i) for i in range(1, 13)])
+        self.cmb_month = ttk.Combobox(
+            top, state="readonly", width=12, values=[month_name_ru(i) for i in range(1, 13)]
+        )
         self.cmb_month.grid(row=1, column=1, sticky="w", pady=(8, 0))
         self.cmb_month.current(datetime.now().month - 1)
         self.cmb_month.bind("<<ComboboxSelected>>", lambda e: self._on_period_change())
@@ -1658,62 +1663,35 @@ class TimesheetPage(tk.Frame):
         ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=8, padx=4)
         ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=9, padx=4)
 
-        # --- Основной контейнер с таблицей (VirtualTimesheetGrid на Canvas) ---
+        # --- Main table: VirtualTimesheetGrid ---
         main_frame = tk.Frame(self)
         main_frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
         main_frame.grid_rowconfigure(0, weight=1)
         main_frame.grid_columnconfigure(0, weight=1)
-        
-        # Фича-флаг (можно убрать позже)
-        self.use_virtual_grid = True
-        
-        if self.use_virtual_grid:
-            self.grid = VirtualTimesheetGrid(
-                main_frame,
-                get_year_month=self.get_year_month,
-                on_change=self._on_row_data_changed,   # будет вызываться при изменениях (позже, когда добавим редактирование)
-                row_height=22,
-                colpx=self.COLPX,
-            )
-            self.grid.grid(row=0, column=0, sticky="nsew")
-        else:
-            # (оставь старую таблицу здесь, если хочешь иметь быстрый откат)
-            pass
 
-        # --- Нижняя панель (итоги + пагинация + авто‑сохранение) ---
+        self.grid = VirtualTimesheetGrid(
+            main_frame,
+            get_year_month=self.get_year_month,
+            on_change=self._on_row_data_changed,
+            on_fill_52=self._grid_fill_52_row,
+            on_delete_row=self._grid_delete_row,
+            row_height=22,
+            colpx=self.COLPX,
+            read_only=self.read_only,
+        )
+        self.grid.grid(row=0, column=0, sticky="nsew")
+
+        # --- Bottom panel (totals + autosave label) ---
         bottom = tk.Frame(self)
         bottom.pack(fill="x", padx=8, pady=(0, 8))
 
         self.lbl_object_total = tk.Label(
-            bottom, text="Сумма: сотрудников 0 | дней 0 | часов 0",
-            font=("Segoe UI", 10, "bold")
+            bottom,
+            text="Сумма: сотрудников 0 | дней 0 | часов 0",
+            font=("Segoe UI", 10, "bold"),
         )
         self.lbl_object_total.pack(side="left")
 
-        pag_frame = tk.Frame(bottom)
-        pag_frame.pack(side="right")
-
-        ttk.Label(pag_frame, text="На странице:").pack(side="left", padx=(0, 4))
-        self.cmb_page_size = ttk.Combobox(pag_frame, state="readonly", width=6,
-                                          values=[25, 50, 100])
-        self.cmb_page_size.pack(side="left")
-        self.cmb_page_size.set(str(self.page_size.get()))
-        self.cmb_page_size.bind("<<ComboboxSelected>>", lambda e: self._on_page_size_change())
-
-        def go_prev_page():
-            self._sync_visible_to_model()
-            self._render_page(self.current_page - 1)
-
-        def go_next_page():
-            self._sync_visible_to_model()
-            self._render_page(self.current_page + 1)
-
-        ttk.Button(pag_frame, text="⟨", width=3, command=go_prev_page).pack(side="left", padx=4)
-        self.lbl_page = ttk.Label(pag_frame, text="Стр. 1 / 1")
-        self.lbl_page.pack(side="left")
-        ttk.Button(pag_frame, text="⟩", width=3, command=go_next_page).pack(side="left", padx=4)
-
-        # Статус авто‑сохранения
         self.lbl_auto_save = tk.Label(
             self,
             text="Последнее авто‑сохранение: нет",
@@ -1723,7 +1701,7 @@ class TimesheetPage(tk.Frame):
         )
         self.lbl_auto_save.pack(fill="x", padx=8, pady=(0, 6))
 
-        # --- Инициализация значений ---
+        # --- Initialize inputs ---
         if self._init_department and self._init_department in deps:
             self.cmb_department.set(self._init_department)
         if self._init_year:
@@ -1737,7 +1715,7 @@ class TimesheetPage(tk.Frame):
         if self._init_object_id:
             try:
                 self._suppress_object_id_dialog = True
-                self._on_address_change()  # заполнит список IDs по адресу
+                self._on_address_change()
             finally:
                 self._suppress_object_id_dialog = False
             ids = self.cmb_object_id.cget("values") or []
@@ -1759,127 +1737,61 @@ class TimesheetPage(tk.Frame):
             except Exception:
                 pass
 
-    def _build_header_row(self, parent):
-        hb = self.HEADER_BG
-        tk.Label(parent, text="ФИО", bg=hb, anchor="w", font=("Segoe UI", 9, "bold")).grid(row=0, column=0, padx=0, pady=(0, 2), sticky="nsew")
-        tk.Label(parent, text="Таб.№", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(row=0, column=1, padx=0, pady=(0, 2), sticky="nsew")
-        for d in range(1, 32):
-            tk.Label(parent, text=str(d), bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(row=0, column=1 + d, padx=0, pady=(0, 2), sticky="nsew")
-        tk.Label(parent, text="Дней", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(row=0, column=33, padx=(4, 1), pady=(0, 2), sticky="nsew")
-        tk.Label(parent, text="Часы", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(row=0, column=34, padx=(4, 1), pady=(0, 2), sticky="nsew")
-        tk.Label(parent, text="Пер.день", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(row=0, column=35, padx=(4, 1), pady=(0, 2), sticky="nsew")
-        tk.Label(parent, text="Пер.ночь", bg=hb, anchor="e", font=("Segoe UI", 9, "bold")).grid(row=0, column=36, padx=(4, 1), pady=(0, 2), sticky="nsew")
-        tk.Label(parent, text="5/2", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(row=0, column=37, padx=1, pady=(0, 2), sticky="nsew")
-        tk.Label(parent, text="Удалить", bg=hb, anchor="center", font=("Segoe UI", 9, "bold")).grid(row=0, column=38, padx=1, pady=(0, 2), sticky="nsew")
+    # ---------------- period / address / department ----------------
 
-    # ------------------ Скролл/разметка колонок ------------------
-
-    def _on_scroll_frame_configure(self, _=None):
-        self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
-        try:
-            content_bbox = self.main_canvas.bbox("all")
-            if content_bbox:
-                self.header_canvas.configure(scrollregion=(0, 0, content_bbox[2], 0))
-            self.header_canvas.configure(width=self.main_canvas.winfo_width())
-        except Exception:
-            pass
-
-    def _configure_table_columns(self):
-        px = self.COLPX
-        for frame in (self.table, self.header_table):
-            if not frame:
-                continue
-            frame.grid_columnconfigure(0, minsize=px['fio'], weight=0)
-            frame.grid_columnconfigure(1, minsize=px['tbn'], weight=0)
-            for col in range(2, 33):
-                frame.grid_columnconfigure(col, minsize=px['day'], weight=0)
-            frame.grid_columnconfigure(33, minsize=px['days'], weight=0)
-            frame.grid_columnconfigure(34, minsize=px['hours'], weight=0)
-            frame.grid_columnconfigure(35, minsize=px['hours'], weight=0)
-            frame.grid_columnconfigure(36, minsize=px['hours'], weight=0)
-            frame.grid_columnconfigure(37, minsize=px['btn52'], weight=0)
-            frame.grid_columnconfigure(38, minsize=px['del'], weight=0)
-
-    def _on_wheel(self, event):
-        if self.main_canvas.winfo_exists():
-            self.main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        return "break"
-
-    def _on_wheel_anywhere(self, event):
-        try:
-            widget = event.widget
-            while widget:
-                if widget == self.main_canvas or widget == self.table:
-                    return self._on_wheel(event)
-                widget = widget.master
-        except Exception:
-            pass
-        return None
-
-    def _on_shift_wheel(self, event):
-        if self.main_canvas.winfo_exists():
-            dx = int(-1 * (event.delta / 120))
-            self.main_canvas.xview_scroll(dx, "units")
-            try:
-                self.header_canvas.xview_scroll(dx, "units")
-            except Exception:
-                pass
-        return "break"
-
-    def _xscroll_both(self, *args):
-        try:
-            self.main_canvas.xview(*args)
-            self.header_canvas.xview(*args)
-        except Exception:
-            pass
-
-    def _on_xscroll_main(self, first, last):
-        try:
-            self.hscroll.set(first, last)
-            self.header_canvas.xview_moveto(first)
-        except Exception:
-            pass
-
-    # ---------------- Смена периода / адреса ---------------------
+    def get_year_month(self) -> Tuple[int, int]:
+        return int(self.spn_year.get()), self.cmb_month.current() + 1
 
     def _on_period_change(self):
-        y, m = self.get_year_month()
-        for r in self.rows:
-            r.update_days_enabled(y, m)
+        # важно: закрыть возможный редактор в гриде
+        if hasattr(self, "grid"):
+            self.grid.close_editor(commit=True)
+        self._load_existing_rows()
+
+    def _on_department_select(self):
+        dep_sel = (self.cmb_department.get() or "Все").strip()
+        if set_selected_department_in_config:
+            set_selected_department_in_config(dep_sel)
+
+        if dep_sel == "Все":
+            names = [e[0] for e in self.employees]
+        else:
+            names = [e[0] for e in self.employees if len(e) > 3 and (e[3] or "").strip() == dep_sel]
+
+        self.allowed_fio_names = set(names)
+        self.cmb_fio.set_completion_list(sorted(set(names)))
+
+        if self.fio_var.get() and self.fio_var.get() not in self.allowed_fio_names:
+            self.fio_var.set("")
+            self.ent_tbn.delete(0, "end")
+            self.pos_var.set("")
+
+        self._load_existing_rows()
+
+    def _on_address_select(self, *_):
+        self._on_address_change()
         self._load_existing_rows()
 
     def _on_address_change(self, *_):
-        """
-        Вызывается при изменении адреса в cmb_address.
-        - Фильтрует объекты по точному адресу.
-        - Если нет объектов по адресу — очищает cmb_object_id.
-        - Если один объект — выбирает его ID и нормализует адрес.
-        - Если несколько — открывает диалог выбора ID и нормализует адрес
-          после выбора.
-        """
         addr = self.cmb_address.get().strip()
-    
-        # Фильтруем объекты по адресу (точное совпадение)
+
         objects_for_addr = [
             (code, a, short_name)
             for (code, a, short_name) in getattr(self, "objects_full", [])
             if a == addr
         ]
-    
+
         if not objects_for_addr:
-            # Нет ни одного объекта с таким адресом в справочнике
             self.cmb_object_id.config(state="normal", values=[])
             self.cmb_object_id.set("")
             return
-    
+
         ids = sorted({code for (code, a, short_name) in objects_for_addr if code})
-    
-        # Если режим "подавления диалога" и есть заранее инициализированный ID
+
         if self._suppress_object_id_dialog and self._init_object_id:
             self.cmb_object_id.config(state="readonly", values=ids)
             if self._init_object_id in ids:
                 self.cmb_object_id.set(self._init_object_id)
-                # Нормализуем адрес: берём точное значение из objects_for_addr
                 for code, a, short_name in objects_for_addr:
                     if code == self._init_object_id:
                         self.cmb_address.set(a)
@@ -1887,20 +1799,16 @@ class TimesheetPage(tk.Frame):
             else:
                 self.cmb_object_id.set("")
             return
-    
-        # Если по адресу ровно один объект — просто выбираем его
+
         if len(ids) == 1:
             self.cmb_object_id.config(state="readonly", values=ids)
             self.cmb_object_id.set(ids[0])
-            # Нормализуем адрес из справочника
-            addr_db = objects_for_addr[0][1]
-            self.cmb_address.set(addr_db)
+            self.cmb_address.set(objects_for_addr[0][1])
             return
-    
-        # Если несколько объектов по одному адресу — диалог выбора ID
+
         dlg = SelectObjectIdDialog(self, objects_for_addr, addr)
         self.wait_window(dlg)
-    
+
         selected_id = dlg.result
         if selected_id:
             self.cmb_object_id.config(state="readonly", values=ids)
@@ -1909,8 +1817,7 @@ class TimesheetPage(tk.Frame):
                 ids = sorted(ids)
                 self.cmb_object_id.config(values=ids)
             self.cmb_object_id.set(selected_id)
-    
-            # Нормализуем адрес: точный address для выбранного ID
+
             for code, a, short_name in objects_for_addr:
                 if code == selected_id:
                     self.cmb_address.set(a)
@@ -1919,130 +1826,16 @@ class TimesheetPage(tk.Frame):
             self.cmb_object_id.config(state="normal", values=[])
             self.cmb_object_id.set("")
 
-    def _on_address_select(self, *_):
-        self._on_address_change()
-        self._load_existing_rows()
+    def _on_fio_select(self, *_):
+        fio = self.fio_var.get().strip()
+        tbn, pos = self.emp_info.get(fio, ("", ""))
+        self.ent_tbn.delete(0, "end")
+        self.ent_tbn.insert(0, tbn)
+        self.pos_var.set(pos)
 
-    def get_year_month(self) -> Tuple[int, int]:
-        return int(self.spn_year.get()), self.cmb_month.current() + 1
-
-    # ------------------- ПАГИНАЦИЯ / МОДЕЛЬ ----------------------
-
-    def _on_page_size_change(self):
-        try:
-            sz = int(self.cmb_page_size.get())
-            if sz not in (25, 50, 100):
-                sz = 50
-            self.page_size.set(sz)
-        except Exception:
-            self.page_size.set(50)
-        self._sync_visible_to_model()
-        self._render_page(1)
-
-    def _page_count(self) -> int:
-        sz = max(1, self.page_size.get())
-        n = len(self.model_rows)
-        return max(1, math.ceil(n / sz))
-
-    def _update_page_label(self):
-        self.lbl_page.config(text=f"Стр. {self.current_page} / {self._page_count()}")
-
-    def _sync_visible_to_model(self):
-        """Считывает значения из видимых RowWidget в модель self.model_rows."""
-        if not self.rows or self._suspend_sync:
-            return
-
-        sz = max(1, self.page_size.get())
-        start_index = (self.current_page - 1) * sz
-
-        for i, row_widget in enumerate(self.rows):
-            model_index = start_index + i
-            if 0 <= model_index < len(self.model_rows):
-                hour_values = [e.get().strip() or None for e in row_widget.day_entries]
-                self.model_rows[model_index]["hours"] = hour_values
-
-    def _render_page(self, page: Optional[int] = None):
-        """Создаёт виджеты только для текущей страницы."""
-        # 1. Очищаем текущие UI-строки
-        for r in self.rows:
-            for widget in r.widgets:
-                try:
-                    widget.destroy()
-                except tk.TclError:
-                    pass
-        self.rows.clear()
-
-        # 2. Страница
-        total_pages = self._page_count()
-        if page is None:
-            page = self.current_page
-        self.current_page = max(1, min(total_pages, page))
-
-        # 3. Срез модели
-        sz = max(1, self.page_size.get())
-        start = (self.current_page - 1) * sz
-        end = min(start + sz, len(self.model_rows))
-
-        y, m = self.get_year_month()
-
-        # 4. Строки
-        for i in range(start, end):
-            rec = self.model_rows[i]
-            row_widget = RowWidget(
-                self.table,
-                len(self.rows) + 1,
-                rec["fio"],
-                rec["tbn"],
-                self.get_year_month,
-                self.delete_row,
-                on_change_callable=self._on_row_data_changed,  # ВАЖНО
-            )
-            row_widget.set_day_font(self.DAY_ENTRY_FONT)
-
-            row_widget.update_days_enabled(y, m)
-            row_widget.set_hours(rec.get("hours") or [None] * 31)
-
-            # Клик по ФИО/Таб.№
-            def _make_on_click(local_i: int, rw: RowWidget):
-                def _handler(event):
-                    self._on_row_click(local_i, rw)
-                return _handler
-
-            local_index = len(self.rows)
-            row_widget.lbl_fio.bind("<Button-1>", _make_on_click(local_index, row_widget))
-            row_widget.lbl_tbn.bind("<Button-1>", _make_on_click(local_index, row_widget))
-
-            global_index = i
-            if global_index in self.selected_indices:
-                row_widget.set_selected(True)
-            else:
-                row_widget.set_selected(False)
-
-            self.rows.append(row_widget)
-
-        self.after(30, self._on_scroll_frame_configure)
-        self._update_page_label()
-        self._recalc_object_total()
-
-    def _on_row_click(self, local_index: int, row_widget: RowWidget):
-        if self.read_only:
-            return
-
-        sz = max(1, self.page_size.get())
-        start = (self.current_page - 1) * sz
-        global_index = start + local_index
-        if not (0 <= global_index < len(self.model_rows)):
-            return
-
-        if global_index in self.selected_indices:
-            self.selected_indices.remove(global_index)
-            row_widget.set_selected(False)
-        else:
-            self.selected_indices.add(global_index)
-            row_widget.set_selected(True)
+    # ---------------- totals / change ----------------
 
     def _recalc_object_total(self):
-        """Пересчитывает общие итоги по всей модели."""
         tot_h, tot_d, tot_night, tot_ot_day, tot_ot_night = 0.0, 0, 0.0, 0.0, 0.0
 
         y, m = self.get_year_month()
@@ -2080,21 +1873,54 @@ class TimesheetPage(tk.Frame):
                  f"в т.ч. ночных {sn} | пер.день {sod} | пер.ночь {son}"
         )
 
-    # --------------- Реакция на изменение строки -----------------
-
     def _on_row_data_changed(self):
-        """
-        Вызывается RowWidget при изменении значений в ячейках текущей страницы.
-        """
-        self._sync_visible_to_model()
+        # В виртуальной таблице данные уже записаны в model_rows
         self._recalc_object_total()
         self._schedule_auto_save()
 
-    # ------------------- Операции со строками --------------------
+    # ---------------- row ops (called by grid) ----------------
+
+    def _grid_delete_row(self, row_index: int):
+        if self.read_only:
+            return
+        if not (0 <= row_index < len(self.model_rows)):
+            return
+        del self.model_rows[row_index]
+        self._grid_refresh(rows_changed=True)
+        self._recalc_object_total()
+        self._schedule_auto_save()
+
+    def _grid_fill_52_row(self, row_index: int):
+        if self.read_only:
+            return
+        if not (0 <= row_index < len(self.model_rows)):
+            return
+
+        y, m = self.get_year_month()
+        days = month_days(y, m)
+
+        rec = self.model_rows[row_index]
+        hours = [None] * 31
+        for d in range(1, days + 1):
+            wd = datetime(y, m, d).weekday()
+            if wd < 4:
+                hours[d - 1] = "8,25"
+            elif wd == 4:
+                hours[d - 1] = "7"
+            else:
+                hours[d - 1] = None
+        rec["hours"] = hours
+
+        self._grid_refresh(rows_changed=False)
+        self._recalc_object_total()
+        self._schedule_auto_save()
+
+    # ---------------- operations buttons ----------------
 
     def add_row(self):
         if self.read_only:
             return
+
         fio = self.fio_var.get().strip()
         tbn = self.ent_tbn.get().strip()
 
@@ -2102,8 +1928,6 @@ class TimesheetPage(tk.Frame):
             messagebox.showwarning("Объектный табель", "Выберите ФИО.")
             return
 
-        # ПРИНЦИПИАЛЬНОЕ ИЗМЕНЕНИЕ:
-        # проверяем, что введённое ФИО есть в справочнике сотрудников
         if fio not in getattr(self, "allowed_fio_names", set()):
             messagebox.showwarning(
                 "Объектный табель",
@@ -2112,21 +1936,68 @@ class TimesheetPage(tk.Frame):
             )
             return
 
-        # при желании можно ещё и табельный номер сверять с self.emp_info[fio][0]
-
         key = (fio.strip().lower(), tbn.strip())
-        existing = {(r["fio"].strip().lower(), r["tbn"].strip()) for r in self.model_rows}
+        existing = {(r["fio"].strip().lower(), (r.get("tbn") or "").strip()) for r in self.model_rows}
         if key in existing:
             if not messagebox.askyesno(
                 "Дублирование",
-                f"Сотрудник уже есть в реестре:\n{fio} (Таб.№ {tbn}).\nДобавить ещё одну строку?"
+                f"Сотрудник уже есть в табеле:\n{fio} (Таб.№ {tbn}).\nДобавить ещё одну строку?"
             ):
                 return
 
         self.model_rows.append({"fio": fio, "tbn": tbn, "hours": [None] * 31})
-        last_page = self._page_count()
-        self._render_page(last_page)
+        self._grid_refresh(rows_changed=True)
+        self._recalc_object_total()
         self._schedule_auto_save()
+
+    def add_department_all(self):
+        if self.read_only:
+            return
+
+        dep_sel = (self.cmb_department.get() or "Все").strip()
+
+        if dep_sel == "Все":
+            candidates = self.employees[:]
+            if not candidates:
+                messagebox.showinfo("Объектный табель", "Справочник сотрудников пуст.")
+                return
+            if not messagebox.askyesno("Добавить всех", f"Добавить в табель всех сотрудников ({len(candidates)})?"):
+                return
+        else:
+            candidates = [e for e in self.employees if len(e) > 3 and (e[3] or "").strip() == dep_sel]
+            if not candidates:
+                messagebox.showinfo("Объектный табель", f"В подразделении «{dep_sel}» нет сотрудников.")
+                return
+
+        existing = {(r["fio"].strip().lower(), (r.get("tbn") or "").strip()) for r in self.model_rows}
+        added_count = 0
+
+        dlg = BatchAddDialog(self, total=len(candidates), title="Добавление сотрудников")
+
+        def process_batch():
+            nonlocal added_count
+            for fio, tbn, _, _ in candidates:
+                if dlg.cancelled:
+                    break
+                key = (fio.strip().lower(), (tbn or "").strip())
+                if key not in existing:
+                    self.model_rows.append({"fio": fio, "tbn": tbn, "hours": [None] * 31})
+                    existing.add(key)
+                    added_count += 1
+                dlg.step()
+
+            dlg.close()
+
+            self._grid_refresh(rows_changed=True)
+            self._recalc_object_total()
+            self._schedule_auto_save()
+
+            if added_count > 0:
+                messagebox.showinfo("Объектный табель", f"Добавлено новых сотрудников: {added_count}")
+            else:
+                messagebox.showinfo("Объектный табель", "Все сотрудники из этого подразделения уже в списке.")
+
+        self.after(50, process_batch)
 
     def add_department_partial(self):
         if self.read_only:
@@ -2142,59 +2013,142 @@ class TimesheetPage(tk.Frame):
 
         if dlg.result is None:
             return
-
         selected_emps = dlg.result
         if not selected_emps:
             return
 
-        self._sync_visible_to_model()
-
-        existing = {(r["fio"].strip().lower(), r["tbn"].strip()) for r in self.model_rows}
+        existing = {(r["fio"].strip().lower(), (r.get("tbn") or "").strip()) for r in self.model_rows}
         added_count = 0
 
         for fio, tbn, pos, dep in selected_emps:
             key = (fio.strip().lower(), (tbn or "").strip())
             if key in existing:
                 continue
-            self.model_rows.append({
-                "fio": fio,
-                "tbn": tbn,
-                "hours": [None] * 31,
-            })
+            self.model_rows.append({"fio": fio, "tbn": tbn, "hours": [None] * 31})
             existing.add(key)
             added_count += 1
 
+        self._grid_refresh(rows_changed=True)
+        self._recalc_object_total()
+        self._schedule_auto_save()
+
         if added_count > 0:
-            last_page = self._page_count()
-            self._render_page(last_page)
-            self._schedule_auto_save()
             messagebox.showinfo("Объектный табель", f"Добавлено сотрудников: {added_count}")
         else:
             messagebox.showinfo("Объектный табель", "Все выбранные сотрудники уже есть в табеле.")
 
-    # ---------------- Выбор подразделения / импорт ----------------
+    def clear_selection(self):
+        if hasattr(self, "grid"):
+            self.grid.set_selected_indices(set())
 
-    def _on_department_select(self):
-        dep_sel = (self.cmb_department.get() or "Все").strip()
-        if set_selected_department_in_config:
-            set_selected_department_in_config(dep_sel)
+    def fill_time_selected(self):
+        if self.read_only:
+            return
+        if not self.model_rows:
+            messagebox.showinfo("Время для выделенных", "Список сотрудников пуст.")
+            return
 
-        if dep_sel == "Все":
-            names = [e[0] for e in self.employees]
+        selected = self._grid_selected()
+        if not selected:
+            messagebox.showinfo("Время для выделенных", "Не выбрано ни одного сотрудника.")
+            return
+
+        y, m = self.get_year_month()
+        max_day = month_days(y, m)
+
+        dlg = TimeForSelectedDialog(self, max_day)
+        if dlg.result is None:
+            return
+
+        day_from = dlg.result["from"]
+        day_to = dlg.result["to"]
+        value_str = dlg.result["value"]  # None => clear
+
+        for idx in sorted(selected):
+            if not (0 <= idx < len(self.model_rows)):
+                continue
+            rec = self.model_rows[idx]
+            hours_list = rec.get("hours") or [None] * 31
+            if len(hours_list) < 31:
+                hours_list = (hours_list + [None] * 31)[:31]
+
+            for d in range(day_from, day_to + 1):
+                hours_list[d - 1] = value_str
+            rec["hours"] = hours_list
+
+        self._grid_refresh(rows_changed=False)
+        self._recalc_object_total()
+        self._schedule_auto_save()
+
+        msg_val = "очищены" if value_str is None else f"установлены в '{value_str}'"
+        msg_days = f"для дня {day_from}" if day_from == day_to else f"для дней {day_from}–{day_to}"
+        messagebox.showinfo(
+            "Время для выделенных",
+            f"Значения {msg_val} {msg_days} у {len(selected)} выделенных сотрудников.",
+        )
+
+    def fill_hours_all(self):
+        if self.read_only:
+            return
+        if not self.model_rows:
+            messagebox.showinfo("Проставить часы", "Список сотрудников пуст.")
+            return
+
+        y, m = self.get_year_month()
+        max_day = month_days(y, m)
+
+        dlg = HoursFillDialog(self, max_day)
+        if not dlg.result:
+            return
+
+        day = dlg.result["day"]
+        if not (1 <= day <= max_day):
+            messagebox.showwarning("Проставить часы", f"В этом месяце нет дня №{day}.")
+            return
+
+        day_idx = day - 1
+        is_clear = dlg.result.get("clear", False)
+
+        hours_val_str = None
+        if not is_clear:
+            hours_val_float = float(dlg.result["hours"])
+            if hours_val_float > 1e-12:
+                hours_val_str = f"{hours_val_float:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+
+        for rec in self.model_rows:
+            hours = rec.get("hours") or [None] * 31
+            if len(hours) < 31:
+                hours = (hours + [None] * 31)[:31]
+            hours[day_idx] = hours_val_str
+            rec["hours"] = hours
+
+        self._grid_refresh(rows_changed=False)
+        self._recalc_object_total()
+        self._schedule_auto_save()
+
+        if is_clear:
+            messagebox.showinfo("Проставить часы", f"День {day} очищен у всех сотрудников.")
         else:
-            names = [e[0] for e in self.employees if len(e) > 3 and (e[3] or "").strip() == dep_sel]
+            messagebox.showinfo("Проставить часы", f"Часы '{hours_val_str}' проставлены в день {day} всем сотрудникам.")
 
-        # сохраняем текущий список допустимых ФИО
-        self.allowed_fio_names = set(names)
+    def clear_all_rows(self):
+        if self.read_only or not self.model_rows:
+            return
+        if not messagebox.askyesno(
+            "Очистка табеля",
+            "Вы уверены, что хотите очистить все часы у всех сотрудников?\n\nСами сотрудники останутся в списке."
+        ):
+            return
 
-        self.cmb_fio.set_completion_list(sorted(list(set(names))))
+        for rec in self.model_rows:
+            rec["hours"] = [None] * 31
 
-        if self.fio_var.get() and self.fio_var.get() not in names:
-            self.fio_var.set("")
-            self.ent_tbn.delete(0, "end")
-            self.pos_var.set("")
+        self._grid_refresh(rows_changed=False)
+        self._recalc_object_total()
+        self._schedule_auto_save()
+        messagebox.showinfo("Очистка", "Все часы были стерты.")
 
-        self._load_existing_rows()
+    # ---------------- import / copy ----------------
 
     def import_from_excel(self):
         if self.read_only:
@@ -2208,8 +2162,11 @@ class TimesheetPage(tk.Frame):
             messagebox.showwarning("Импорт", "Укажите адрес/ID объекта и период.")
             return
 
-        path = filedialog.askopenfilename(parent=self, title="Выберите Excel-файл табеля",
-                                          filetypes=[("Excel", "*.xlsx")])
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Выберите Excel-файл табеля",
+            filetypes=[("Excel", "*.xlsx")],
+        )
         if not path:
             return
 
@@ -2233,41 +2190,38 @@ class TimesheetPage(tk.Frame):
                 if not fio:
                     continue
 
-                hours_raw = [str(ws.cell(r, c).value or "").strip() or None
-                             for c in range(8, 8 + 31)]
-                imported.append({
-                    "fio": fio,
-                    "tbn": str(ws.cell(r, 6).value or "").strip(),
-                    "hours": hours_raw
-                })
+                hours_raw = [
+                    str(ws.cell(r, c).value or "").strip() or None
+                    for c in range(8, 8 + 31)
+                ]
+                imported.append({"fio": fio, "tbn": str(ws.cell(r, 6).value or "").strip(), "hours": hours_raw})
 
             if not imported:
                 messagebox.showinfo("Импорт", "Подходящих строк не найдено.")
-            else:
-                uniq: Dict[tuple, Dict[str, Any]] = {}
-                for rec in imported:
-                    uniq[(rec["fio"].lower(), rec["tbn"])] = rec
-                imported = list(uniq.values())
+                return
 
-                replace_mode = messagebox.askyesno(
-                    "Импорт", "Заменить текущий список?"
-                ) if self.model_rows else True
+            uniq: Dict[tuple, Dict[str, Any]] = {}
+            for rec in imported:
+                uniq[(rec["fio"].lower(), rec["tbn"])] = rec
+            imported = list(uniq.values())
 
-                self._sync_visible_to_model()
-                if replace_mode:
-                    self.model_rows.clear()
-                    self.selected_indices.clear()
+            replace_mode = messagebox.askyesno("Импорт", "Заменить текущий список?") if self.model_rows else True
 
-                existing = {(r["fio"].lower(), r["tbn"]) for r in self.model_rows}
-                added = 0
-                for rec in imported:
-                    if (rec["fio"].lower(), rec["tbn"]) not in existing:
-                        self.model_rows.append(rec)
-                        added += 1
+            if replace_mode:
+                self.model_rows.clear()
+                self.clear_selection()
 
-                self._render_page(1)
-                self._schedule_auto_save()
-                messagebox.showinfo("Импорт", f"Импортировано {added} новых сотрудников.")
+            existing = {(r["fio"].lower(), r.get("tbn", "")) for r in self.model_rows}
+            added = 0
+            for rec in imported:
+                if (rec["fio"].lower(), rec["tbn"]) not in existing:
+                    self.model_rows.append(rec)
+                    added += 1
+
+            self._grid_refresh(rows_changed=True)
+            self._recalc_object_total()
+            self._schedule_auto_save()
+            messagebox.showinfo("Импорт", f"Импортировано {added} новых сотрудников.")
 
         except Exception as e:
             messagebox.showerror("Импорт", f"Ошибка чтения файла:\n{e}")
@@ -2275,6 +2229,7 @@ class TimesheetPage(tk.Frame):
     def copy_from_month(self):
         if self.read_only:
             return
+
         addr, oid = self.cmb_address.get().strip(), self.cmb_object_id.get().strip()
         current_dep = self.cmb_department.get().strip()
         if not addr and not oid:
@@ -2282,8 +2237,7 @@ class TimesheetPage(tk.Frame):
             return
 
         cy, cm = self.get_year_month()
-        dlg = CopyFromDialog(self, init_year=cy if cm > 1 else cy - 1,
-                             init_month=cm - 1 if cm > 1 else 12)
+        dlg = CopyFromDialog(self, init_year=cy if cm > 1 else cy - 1, init_month=cm - 1 if cm > 1 else 12)
         if not dlg.result:
             return
 
@@ -2294,13 +2248,16 @@ class TimesheetPage(tk.Frame):
 
         src_path = self._file_path_for(src_y, src_m, addr=addr, oid=oid, department=current_dep)
         if not src_path or not src_path.exists():
-            messagebox.showwarning("Копирование",
-                                   f"Файл-источник не найден:\n{src_path.name if src_path else 'N/A'}")
+            messagebox.showwarning(
+                "Копирование",
+                f"Файл-источник не найден:\n{src_path.name if src_path else 'N/A'}",
+            )
             return
 
         try:
             wb = load_workbook(src_path, data_only=True)
             ws = self._ensure_sheet(wb)
+
             found = []
             for r in range(2, ws.max_row + 1):
                 if int(ws.cell(r, 3).value or 0) != src_m or int(ws.cell(r, 4).value or 0) != src_y:
@@ -2315,8 +2272,15 @@ class TimesheetPage(tk.Frame):
                 fio = str(ws.cell(r, 5).value or "").strip()
                 if not fio:
                     continue
-                hrs = ([str(ws.cell(r, c).value or "").strip() or None
-                        for c in range(8, 8 + 31)] if with_hours else [None] * 31)
+
+                hrs = (
+                    [
+                        str(ws.cell(r, c).value or "").strip() or None
+                        for c in range(8, 8 + 31)
+                    ]
+                    if with_hours
+                    else [None] * 31
+                )
                 found.append((fio, str(ws.cell(r, 6).value or "").strip(), hrs))
 
             if not found:
@@ -2326,251 +2290,26 @@ class TimesheetPage(tk.Frame):
             uniq = {((f.lower(), t)): (f, t, h) for f, t, h in found}
             found_uniq = list(uniq.values())
 
-            self._sync_visible_to_model()
             if mode == "replace":
                 self.model_rows.clear()
-                self.selected_indices.clear()
+                self.clear_selection()
 
-            existing = {(r["fio"].lower(), r["tbn"]) for r in self.model_rows}
+            existing = {(r["fio"].lower(), r.get("tbn", "")) for r in self.model_rows}
             added = 0
             for fio, tbn, hrs in found_uniq:
                 if (fio.lower(), tbn) not in existing:
                     self.model_rows.append({"fio": fio, "tbn": tbn, "hours": hrs})
                     added += 1
 
-            self._render_page(1)
+            self._grid_refresh(rows_changed=True)
+            self._recalc_object_total()
             self._schedule_auto_save()
             messagebox.showinfo("Копирование", f"Скопировано {added} сотрудников.")
+
         except Exception as e:
             messagebox.showerror("Копирование", f"Ошибка при копировании:\n{e}")
 
-    def add_department_all(self):
-        if self.read_only:
-            return
-        dep_sel = (self.cmb_department.get() or "Все").strip()
-
-        if dep_sel == "Все":
-            candidates = self.employees[:]
-            if not candidates:
-                messagebox.showinfo("Объектный табель", "Справочник сотрудников пуст.")
-                return
-            if not messagebox.askyesno("Добавить всех", f"Добавить в реестр всех сотрудников ({len(candidates)})?"):
-                return
-        else:
-            candidates = [e for e in self.employees if len(e) > 3 and (e[3] or "").strip() == dep_sel]
-            if not candidates:
-                messagebox.showinfo("Объектный табель", f"В подразделении «{dep_sel}» нет сотрудников.")
-                return
-
-        self._sync_visible_to_model()
-        existing = {(r["fio"].strip().lower(), r["tbn"].strip()) for r in self.model_rows}
-        added_count = 0
-
-        dlg = BatchAddDialog(self, total=len(candidates), title="Добавление сотрудников")
-
-        def process_batch():
-            nonlocal added_count
-            for fio, tbn, _, _ in candidates:
-                if dlg.cancelled:
-                    break
-                key = (fio.strip().lower(), (tbn or "").strip())
-                if key not in existing:
-                    self.model_rows.append({"fio": fio, "tbn": tbn, "hours": [None] * 31})
-                    existing.add(key)
-                    added_count += 1
-                dlg.step()
-
-            dlg.close()
-            if added_count > 0:
-                self._render_page(1)
-                self._schedule_auto_save()
-                messagebox.showinfo("Объектный табель", f"Добавлено новых сотрудников: {added_count}")
-            else:
-                messagebox.showinfo("Объектный табель", "Все сотрудники из этого подразделения уже в списке.")
-
-        self.after(50, process_batch)
-
-    def _on_fio_select(self, *_):
-        fio = self.fio_var.get().strip()
-        tbn, pos = self.emp_info.get(fio, ("", ""))
-        self.ent_tbn.delete(0, "end")
-        self.ent_tbn.insert(0, tbn)
-        self.pos_var.set(pos)
-
-    def fill_hours_all(self):
-        if self.read_only:
-            return
-        if not self.model_rows:
-            messagebox.showinfo("Проставить часы", "Список сотрудников пуст.")
-            return
-        y, m = self.get_year_month()
-        max_day = month_days(y, m)
-        dlg = HoursFillDialog(self, max_day)
-        if not dlg.result:
-            return
-
-        day = dlg.result["day"]
-        if not (1 <= day <= max_day):
-            messagebox.showwarning("Проставить часы", f"В этом месяце нет дня №{day}.")
-            return
-
-        day_idx = day - 1
-        is_clear = dlg.result.get("clear", False)
-        hours_val_str = None
-        if not is_clear:
-            hours_val_float = float(dlg.result["hours"])
-            if hours_val_float > 1e-12:
-                hours_val_str = f"{hours_val_float:.2f}".rstrip("0").rstrip(".").replace(".", ",")
-
-        for rec in self.model_rows:
-            if len(rec.get("hours", [])) < 31:
-                rec["hours"] = (rec.get("hours", []) + [None] * 31)[:31]
-            rec["hours"][day_idx] = hours_val_str
-
-        self._render_page(self.current_page)
-        self._schedule_auto_save()
-
-        if is_clear:
-            messagebox.showinfo("Проставить часы", f"День {day} очищен у всех сотрудников.")
-        else:
-            messagebox.showinfo("Проставить часы", f"Часы '{hours_val_str}' проставлены в день {day} всем сотрудникам.")
-
-    def _iter_selected_indices_on_current_page(self) -> List[Tuple[int, RowWidget]]:
-        res = []
-        if not self.rows or not self.selected_indices:
-            return res
-
-        sz = max(1, self.page_size.get())
-        start = (self.current_page - 1) * sz
-
-        for local_idx, rw in enumerate(self.rows):
-            global_idx = start + local_idx
-            if global_idx in self.selected_indices:
-                res.append((global_idx, rw))
-        return res
-
-    def fill_time_selected(self):
-        if self.read_only:
-            return
-
-        if not self.model_rows:
-            messagebox.showinfo("Время для выделенных", "Список сотрудников пуст.")
-            return
-
-        if not self.selected_indices:
-            messagebox.showinfo("Время для выделенных", "Не выбрано ни одного сотрудника.")
-            return
-
-        y, m = self.get_year_month()
-        max_day = month_days(y, m)
-
-        dlg = TimeForSelectedDialog(self, max_day)
-        if dlg.result is None:
-            return
-
-        day_from = dlg.result["from"]
-        day_to = dlg.result["to"]
-        value_str = dlg.result["value"]
-
-        self._sync_visible_to_model()
-
-        for global_idx in sorted(self.selected_indices):
-            if not (0 <= global_idx < len(self.model_rows)):
-                continue
-            rec = self.model_rows[global_idx]
-            hours_list = rec.get("hours") or [None] * 31
-            if len(hours_list) < 31:
-                hours_list = (hours_list + [None] * 31)[:31]
-
-            for d in range(day_from, day_to + 1):
-                idx = d - 1
-                hours_list[idx] = value_str
-
-            rec["hours"] = hours_list
-
-        self._render_page(self.current_page)
-        self._schedule_auto_save()
-
-        if value_str is None:
-            msg_val = "очищены"
-        else:
-            msg_val = f"установлены в '{value_str}'"
-
-        if day_from == day_to:
-            msg_days = f"для дня {day_from}"
-        else:
-            msg_days = f"для дней {day_from}–{day_to}"
-
-        messagebox.showinfo(
-            "Время для выделенных",
-            f"Значения {msg_val} {msg_days} "
-            f"у {len(self.selected_indices)} выделенных сотрудников.",
-        )
-
-    def clear_selection(self):
-        if not self.selected_indices:
-            return
-
-        self.selected_indices.clear()
-        for rw in self.rows:
-            rw.set_selected(False)
-
-    def delete_row(self, roww: RowWidget):
-        if self.read_only:
-            return
-
-        self._sync_visible_to_model()
-
-        try:
-            sz = self.page_size.get()
-            start = (self.current_page - 1) * sz
-            local_idx = self.rows.index(roww)
-            global_idx = start + local_idx
-        except (ValueError, AttributeError):
-            return
-
-        try:
-            for widget in roww.widgets:
-                widget.destroy()
-            self.rows.pop(local_idx)
-        except Exception:
-            pass
-
-        if 0 <= global_idx < len(self.model_rows):
-            del self.model_rows[global_idx]
-
-            new_selected = set()
-            for idx in self.selected_indices:
-                if idx == global_idx:
-                    continue
-                elif idx > global_idx:
-                    new_selected.add(idx - 1)
-                else:
-                    new_selected.add(idx)
-            self.selected_indices = new_selected
-
-        if self.current_page > self._page_count():
-            self.current_page = self._page_count()
-        self._render_page(self.current_page)
-        self._schedule_auto_save()
-
-    def clear_all_rows(self):
-        if self.read_only or not self.model_rows:
-            return
-        if not messagebox.askyesno(
-            "Очистка табеля",
-            "Вы уверены, что хотите очистить все часы у всех сотрудников?\n\nСами сотрудники останутся в списке."
-        ):
-            return
-
-        for rec in self.model_rows:
-            rec['hours'] = [None] * 31
-
-        self._render_page(self.current_page)
-        self._schedule_auto_save()
-        messagebox.showinfo("Очистка", "Все часы были стерты.")
-
-    # --------------------- Сохранение / Excel --------------------
+    # ---------------- saving / excel sheet ----------------
 
     def _current_file_path(self) -> Optional[Path]:
         addr = self.cmb_address.get().strip()
@@ -2583,8 +2322,14 @@ class TimesheetPage(tk.Frame):
         dep_part = safe_filename(dep) if dep and dep != "Все" else "ВсеПодразделения"
         return self.out_dir / f"Объектный_табель_{id_part}_{dep_part}_{y}_{m:02d}.xlsx"
 
-    def _file_path_for(self, year: int, month: int, addr: Optional[str] = None, oid: Optional[str] = None,
-                       department: Optional[str] = None) -> Optional[Path]:
+    def _file_path_for(
+        self,
+        year: int,
+        month: int,
+        addr: Optional[str] = None,
+        oid: Optional[str] = None,
+        department: Optional[str] = None,
+    ) -> Optional[Path]:
         addr = (addr if addr is not None else self.cmb_address.get().strip())
         oid = (oid if oid is not None else self.cmb_object_id.get().strip())
         dep = (department if department is not None else self.cmb_department.get().strip())
@@ -2632,42 +2377,33 @@ class TimesheetPage(tk.Frame):
         return ws2
 
     def _load_existing_rows(self):
-        """Загружает строки из БД в модель и обновляет отображение."""
         self.model_rows.clear()
-        self.selected_indices.clear()
-
         if hasattr(self, "grid"):
             self.grid.set_selected_indices(set())
-    
+
         addr, oid = self.cmb_address.get().strip(), self.cmb_object_id.get().strip()
         y, m = self.get_year_month()
         current_dep = (self.cmb_department.get() or "").strip()
-    
-        # Если подразделение "Все" — по твоей логике показываем пусто
+
         if current_dep == "Все":
-            if hasattr(self, "grid"):
-                self.grid.set_rows(self.model_rows)  # пусто
+            self._grid_refresh(rows_changed=True)
             self._recalc_object_total()
             return
-    
+
         user_id = self.owner_user_id
         if user_id is None and hasattr(self, "app_ref") and getattr(self.app_ref, "current_user", None):
             user_id = (self.app_ref.current_user or {}).get("id")
-    
+
         if not user_id:
-            if hasattr(self, "grid"):
-                self.grid.set_rows(self.model_rows)  # пусто
+            self._grid_refresh(rows_changed=True)
             self._recalc_object_total()
             return
-    
+
         try:
             db_rows = load_timesheet_rows_from_db(oid or None, addr, current_dep, y, m, user_id)
             self.model_rows.extend(db_rows)
-    
-            if hasattr(self, "grid"):
-                self.grid.set_rows(self.model_rows)
-    
-            self._recalc_object_total()  # пока полный пересчёт
+            self._grid_refresh(rows_changed=True)
+            self._recalc_object_total()
         except Exception as e:
             try:
                 import logging
@@ -2675,124 +2411,97 @@ class TimesheetPage(tk.Frame):
             except Exception:
                 pass
             messagebox.showerror("Загрузка", f"Не удалось загрузить табель из БД:\n{e}")
-    
-            # на ошибке лучше тоже показать пусто/старые данные не оставлять
-            if hasattr(self, "grid"):
-                self.grid.set_rows(self.model_rows)
+            self._grid_refresh(rows_changed=True)
             self._recalc_object_total()
 
+    # ---------------- save ----------------
 
     def _save_all_internal(self, show_messages: bool, is_auto: bool = False):
-        """
-        Общая логика сохранения; show_messages=True — показывать messagebox'ы,
-        is_auto=True — вызов из авто‑сохранения (обновляем надпись внизу).
-        """
         if self.read_only:
             if show_messages:
                 messagebox.showinfo("Объектный табель", "Сохранение недоступно в режиме просмотра.")
             return
-    
-        self._sync_visible_to_model()
-    
+
+        # закрыть редактор (чтобы коммитнуть активную ячейку)
+        if hasattr(self, "grid"):
+            self.grid.close_editor(commit=True)
+
         addr, oid = self.cmb_address.get().strip(), self.cmb_object_id.get().strip()
         y, m = self.get_year_month()
         current_dep = self.cmb_department.get().strip()
-    
-        # ------------------------ Базовые проверки ------------------------ #
-    
+
         if current_dep == "Все":
             if show_messages:
                 messagebox.showwarning("Сохранение", "Для сохранения выберите конкретное подразделение.")
             return
-    
-        # owner_user_id важен для табелей, открытых из реестра (чужие табели)
+
         user_id = self.owner_user_id
         if user_id is None:
             user_id = (self.app_ref.current_user or {}).get("id") if hasattr(self, "app_ref") else None
-    
         if not user_id:
             if show_messages:
                 messagebox.showerror("Сохранение", "Не удалось определить пользователя.")
             return
-    
-        # ------------------- Нормализация адрес/ID перед сохранением ------------------- #
-    
-        # Принудительно прогнать логику адрес -> список ID (и диалог при необходимости)
+
+        # normalize address/id
         try:
             self._on_address_change()
         except Exception:
             pass
-    
-        # перечитать значения после нормализации
         addr, oid = self.cmb_address.get().strip(), self.cmb_object_id.get().strip()
-    
-        # --------------------- Валидация адреса -------------------- #
-    
-        # 1) Адрес обязателен
+
+        # address validation
         if not addr:
             if show_messages:
-                messagebox.showwarning(
-                    "Сохранение",
-                    "Не задан адрес объекта. Выберите адрес из списка.",
-                )
+                messagebox.showwarning("Сохранение", "Не задан адрес объекта. Выберите адрес из списка.")
             return
-    
-        # 2) Адрес должен быть из справочника + сбрасываем ID, чтобы не “прилипал”
+
         address_options = getattr(self, "address_options", [])
         if address_options and addr not in address_options:
             try:
-                self.cmb_object_id.set("")  # важно: сбросить старый ID
+                self.cmb_object_id.set("")
             except Exception:
                 pass
             if show_messages:
                 messagebox.showwarning(
                     "Сохранение",
-                    "Адрес объекта введён вручную и не найден в справочнике.\n"
-                    "Выберите адрес из списка.",
+                    "Адрес объекта введён вручную и не найден в справочнике.\nВыберите адрес из списка.",
                 )
             return
-    
-        # 3) По адресу могут быть несколько объектов — тогда обязателен ID
+
         objects_for_addr = [
             (code, a, short_name)
             for (code, a, short_name) in getattr(self, "objects_full", [])
             if a == addr
         ]
         ids_for_addr = sorted({code for (code, a, short_name) in objects_for_addr if code})
-    
+
         if len(ids_for_addr) > 1 and not oid:
             if show_messages:
                 messagebox.showwarning(
                     "Сохранение",
-                    "По выбранному адресу найдено несколько объектов.\n"
-                    "Сначала выберите корректный ID объекта.",
+                    "По выбранному адресу найдено несколько объектов.\nСначала выберите корректный ID объекта.",
                 )
             return
-    
-        # 4) Если ID указан — проверим, что он существует и соответствует адресу
+
         if oid:
             conn_check = get_db_connection()
             try:
                 with conn_check.cursor() as cur:
                     cur.execute(
-                        """
-                        SELECT address
-                        FROM objects
-                        WHERE COALESCE(NULLIF(excel_id, ''), '') = %s
-                        """,
+                        "SELECT address FROM objects WHERE COALESCE(NULLIF(excel_id, ''), '') = %s",
                         (oid,),
                     )
                     row = cur.fetchone()
-    
+
                 if not row:
                     if show_messages:
                         messagebox.showwarning(
                             "Сохранение",
-                            f"ID объекта '{oid}' не найден в справочнике объектов.\n"
-                            "Выберите корректный ID.",
+                            f"ID объекта '{oid}' не найден в справочнике объектов.\nВыберите корректный ID.",
                         )
                     return
-    
+
                 real_addr = (row[0] or "").strip()
                 if real_addr != addr:
                     if show_messages:
@@ -2808,26 +2517,22 @@ class TimesheetPage(tk.Frame):
                 try:
                     import logging
                     logging.exception("Ошибка проверки соответствия ID и адреса объекта")
-                except ImportError:
-                    print("Ошибка проверки соответствия ID/адрес:", e)
+                except Exception:
+                    pass
                 if show_messages:
-                    messagebox.showerror(
-                        "Сохранение",
-                        f"Ошибка при проверке соответствия ID и адреса объекта:\n{e}",
-                    )
+                    messagebox.showerror("Сохранение", f"Ошибка при проверке соответствия ID и адреса объекта:\n{e}")
                 return
             finally:
                 release_db_connection(conn_check)
-    
-        # ----------------- Проверка дублей сотрудников -------------------- #
-    
+
+        # duplicate employees check
         employees_for_check = []
         for rec in self.model_rows:
             fio = (rec.get("fio") or "").strip()
             tbn = (rec.get("tbn") or "").strip()
             if fio or tbn:
                 employees_for_check.append((fio, tbn))
-    
+
         try:
             duplicates = find_duplicate_employees_for_timesheet(
                 object_id=oid or None,
@@ -2842,12 +2547,12 @@ class TimesheetPage(tk.Frame):
             try:
                 import logging
                 logging.exception("Ошибка проверки дублей сотрудников между табелями")
-            except ImportError:
-                print("Ошибка проверки дублей:", e)
+            except Exception:
+                pass
             if show_messages:
                 messagebox.showerror("Сохранение", f"Ошибка при проверке дублей сотрудников:\n{e}")
             return
-    
+
         if duplicates:
             if show_messages:
                 lines = []
@@ -2856,7 +2561,7 @@ class TimesheetPage(tk.Frame):
                     emp_tbn = d.get("tbn") or ""
                     uname = d.get("full_name") or d.get("username") or f"id={d.get('user_id')}"
                     lines.append(f"- {emp_fio} (таб.№ {emp_tbn}) — уже есть в табеле пользователя {uname}")
-    
+
                 msg = (
                     "Найдены сотрудники, которые уже есть в табелях других пользователей "
                     "по этому объекту/подразделению/месяцу:\n\n"
@@ -2865,9 +2570,8 @@ class TimesheetPage(tk.Frame):
                 )
                 messagebox.showwarning("Дубли сотрудников", msg)
             return
-    
-        # ------------------------- Сохранение в БД ------------------------ #
-    
+
+        # save DB
         try:
             header_id = upsert_timesheet_header(oid or None, addr, current_dep, y, m, user_id)
             replace_timesheet_rows(header_id, self.model_rows)
@@ -2875,32 +2579,28 @@ class TimesheetPage(tk.Frame):
             try:
                 import logging
                 logging.exception("Ошибка сохранения табеля в БД")
-            except ImportError:
-                print(f"Ошибка сохранения в БД: {e}")
+            except Exception:
+                pass
             if show_messages:
                 messagebox.showerror("Сохранение", f"Ошибка сохранения в БД:\n{e}")
             return
-    
-        # -------------------- Резервное сохранение в Excel ---------------- #
-    
+
+        # backup to Excel (as before)
         try:
             fpath = self._current_file_path()
             if not fpath:
                 if show_messages:
-                    messagebox.showinfo(
-                        "Сохранение",
-                        "Сохранено в БД. Локальный файл не создан (нет адреса/ID).",
-                    )
+                    messagebox.showinfo("Сохранение", "Сохранено в БД. Локальный файл не создан (нет адреса/ID).")
                 if is_auto:
                     self._update_auto_save_label()
                 return
-    
+
             wb = load_workbook(fpath) if fpath.exists() else Workbook()
             if "Sheet" in wb.sheetnames and len(wb.sheetnames) == 1:
                 wb.remove(wb.active)
-    
+
             ws = self._ensure_sheet(wb)
-    
+
             to_del = [
                 r
                 for r in range(2, ws.max_row + 1)
@@ -2912,30 +2612,32 @@ class TimesheetPage(tk.Frame):
             ]
             for r in reversed(to_del):
                 ws.delete_rows(r, 1)
-    
+
             for rec in self.model_rows:
-                fio, tbn = rec["fio"], rec["tbn"]
+                fio, tbn = rec.get("fio") or "", rec.get("tbn") or ""
                 hours_list = rec.get("hours") or [None] * 31
-    
+                if len(hours_list) < 31:
+                    hours_list = (hours_list + [None] * 31)[:31]
+
                 department = current_dep if current_dep != "Все" else ""
                 for emp_fio, emp_tbn, emp_pos, emp_dep in self.employees:
                     if emp_fio == fio:
                         if emp_dep:
                             department = emp_dep
                         break
-    
+
                 total_hours, total_days = 0.0, 0
                 total_night = 0.0
                 total_ot_day, total_ot_night = 0.0, 0.0
                 day_values = []
-    
+
                 for raw in hours_list:
                     day_values.append(raw)
                     if not raw:
                         continue
                     hrs, night = parse_hours_and_night(raw)
                     d_ot, n_ot = parse_overtime(raw)
-    
+
                     if isinstance(hrs, (int, float)) and hrs > 1e-12:
                         total_hours += float(hrs)
                         total_days += 1
@@ -2945,7 +2647,7 @@ class TimesheetPage(tk.Frame):
                         total_ot_day += float(d_ot)
                     if isinstance(n_ot, (int, float)):
                         total_ot_night += float(n_ot)
-    
+
                 row_values = [oid, addr, m, y, fio, tbn, department] + day_values + [
                     total_days or None,
                     total_hours or None,
@@ -2954,31 +2656,27 @@ class TimesheetPage(tk.Frame):
                     total_ot_night or None,
                 ]
                 ws.append(row_values)
-    
+
             wb.save(fpath)
-    
+
             if show_messages:
                 messagebox.showinfo("Сохранение", f"Табель сохранен в БД и в файл:\n{fpath}")
         except Exception as e:
             try:
                 import logging
                 logging.exception("Ошибка резервного сохранения в Excel")
-            except ImportError:
-                print(f"Ошибка резервного сохранения в Excel: {e}")
+            except Exception:
+                pass
             if show_messages:
-                messagebox.showwarning(
-                    "Сохранение",
-                    f"В БД табель сохранён, но ошибка при записи в Excel:\n{e}",
-                )
+                messagebox.showwarning("Сохранение", f"В БД табель сохранён, но ошибка при записи в Excel:\n{e}")
             if is_auto:
                 self._update_auto_save_label()
             return
-    
+
         if is_auto:
             self._update_auto_save_label()
 
     def _update_auto_save_label(self):
-        """Обновляет надпись 'Последнее авто‑сохранение: время'."""
         try:
             now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
             self.lbl_auto_save.config(text=f"Последнее авто‑сохранение: {now}")
@@ -2986,22 +2684,31 @@ class TimesheetPage(tk.Frame):
             pass
 
     def save_all(self):
-        """Публичный метод, привязанный к кнопке 'Сохранить'."""
-        # Явное сохранение (с сообщениями), считаем как не авто
         self._save_all_internal(show_messages=True, is_auto=False)
+
+    # ---------------- auto-fit columns (virtual grid) ----------------
 
     def _content_total_width(self, fio_px: Optional[int] = None) -> int:
         px = self.COLPX.copy()
         if fio_px is not None:
             px["fio"] = fio_px
-        return (px["fio"] + px["tbn"] + 31 * px["day"] +
-                px["days"] + px["hours"] * 3 + px["btn52"] + px["del"])
+        return (
+            px["fio"]
+            + px["tbn"]
+            + 31 * px["day"]
+            + px["days"]
+            + px["hours"] * 3
+            + px["btn52"]
+            + px["del"]
+        )
 
     def _auto_fit_columns(self):
+        # In virtual grid, use body canvas width
         try:
-            viewport = self.main_canvas.winfo_width()
+            viewport = self.grid.body.winfo_width() if hasattr(self, "grid") else 0
         except Exception:
             viewport = 0
+
         if viewport <= 1:
             self.after(120, self._auto_fit_columns)
             return
@@ -3013,11 +2720,13 @@ class TimesheetPage(tk.Frame):
 
         if int(new_fio) != int(self.COLPX["fio"]):
             self.COLPX["fio"] = int(new_fio)
-            self._configure_table_columns()
-            self._render_page(self.current_page)
-        else:
+            # push widths into grid and rebuild columns/header
             try:
-                self.header_canvas.configure(width=self.main_canvas.winfo_width())
+                if hasattr(self, "grid"):
+                    self.grid.COLPX = self.COLPX
+                    self.grid._build_columns()
+                    self.grid._draw_header()
+                    self._grid_refresh(rows_changed=True)
             except Exception:
                 pass
 
@@ -3027,6 +2736,7 @@ class TimesheetPage(tk.Frame):
         except Exception:
             pass
         self._fit_job = self.after(150, self._auto_fit_columns)
+
 
 class MyTimesheetsPage(tk.Frame):
     """
