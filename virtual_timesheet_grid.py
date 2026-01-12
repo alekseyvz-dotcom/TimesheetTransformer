@@ -101,7 +101,6 @@ class VirtualTimesheetGrid(tk.Frame):
         # events
         self.body.bind("<Configure>", lambda e: self._refresh())
         self.body.bind("<Button-1>", self._on_click)
-        self.body.bind("<Double-1>", self._on_double_click)
 
         # wheel (Windows); if you need mac/linux later, can add platform-specific handling
         self.body.bind("<MouseWheel>", self._on_wheel)
@@ -285,28 +284,40 @@ class VirtualTimesheetGrid(tk.Frame):
     def _on_click(self, event):
         row, col = self._hit_test(event.x, event.y)
         if row is None:
+            self._end_edit(commit=True)
             return
-
-        # close editor if user clicks elsewhere
-        self._end_edit(commit=True)
-
+    
         if not col:
+            self._end_edit(commit=True)
             return
-
+    
         kind, extra = col
-
+    
+        # Если кликнули по другой ячейке — сначала коммитим текущий редактор
+        # (но ниже для day мы ещё откроем новый редактор)
+        if self._editor:
+            self._end_edit(commit=True)
+    
         # "buttons" in cells
         if kind == "btn52":
             if callable(self.on_fill_52) and not self.read_only:
                 self.on_fill_52(row)
             return
-
+    
         if kind == "del":
             if callable(self.on_delete_row) and not self.read_only:
                 self.on_delete_row(row)
             return
-
-        # row selection by clicking FIO/TBN (like before)
+    
+        # Редактирование по 1 клику
+        if kind == "day" and not self.read_only:
+            day_index = int(extra)
+            y, m = self.get_year_month()
+            if (day_index + 1) <= month_days(y, m):
+                self._begin_edit_day(row, day_index)
+            return
+    
+        # row selection by clicking FIO/TBN
         if self.allow_row_select and kind in ("fio", "tbn"):
             if row in self.selected_indices:
                 self.selected_indices.remove(row)
@@ -369,9 +380,20 @@ class VirtualTimesheetGrid(tk.Frame):
         self._editor_var = tk.StringVar(value=str(cur_val))
         self._editor = tk.Entry(self.body, textvariable=self._editor_var, justify="center")
 
-        # commit/cancel
-        self._editor.bind("<Return>", lambda e: self._end_edit(commit=True))
-        self._editor.bind("<Escape>", lambda e: self._end_edit(commit=False))
+        def _cancel(ev):
+            self._end_edit(commit=False)
+            return "break"
+        
+        self._editor.bind("<Return>", lambda e: (self._commit_and_move(dr=1, dc=0)))
+        self._editor.bind("<Tab>", lambda e: (self._commit_and_move(dr=0, dc=1)))
+        self._editor.bind("<Shift-Tab>", lambda e: (self._commit_and_move(dr=0, dc=-1)))
+        
+        self._editor.bind("<Left>",  lambda e: (self._commit_and_move(dr=0, dc=-1)))
+        self._editor.bind("<Right>", lambda e: (self._commit_and_move(dr=0, dc=1)))
+        self._editor.bind("<Up>",    lambda e: (self._commit_and_move(dr=-1, dc=0)))
+        self._editor.bind("<Down>",  lambda e: (self._commit_and_move(dr=1, dc=0)))
+        
+        self._editor.bind("<Escape>", _cancel)
         self._editor.bind("<FocusOut>", lambda e: self._end_edit(commit=True))
 
         self._editor_window_id = self.body.create_window(
@@ -472,6 +494,43 @@ class VirtualTimesheetGrid(tk.Frame):
             self._draw_row(r)
 
         self._sync_header_x()
+
+    def _commit_and_move(self, dr: int, dc: int):
+        """
+        Commit текущей ячейки и открыть редактор в соседней (dr/dc).
+        dc двигает по дням, dr по строкам.
+        """
+        row = self._edit_row
+        day = self._edit_day
+        if row is None or day is None:
+            return "break"
+    
+        # Сохраним значение
+        self._end_edit(commit=True)
+    
+        new_row = row + dr
+        new_day = day + dc
+    
+        if new_row < 0:
+            new_row = 0
+        if new_row >= len(self.model_rows):
+            new_row = len(self.model_rows) - 1 if self.model_rows else 0
+    
+        if new_day < 0:
+            new_day = 0
+        if new_day > 30:
+            new_day = 30
+    
+        # не открывать disabled день (после конца месяца) — откатимся назад пока не попадём в валидный
+        y, m = self.get_year_month()
+        dim = month_days(y, m)
+        while new_day + 1 > dim and new_day > 0:
+            new_day -= 1
+    
+        if self.model_rows:
+            self._begin_edit_day(new_row, new_day)
+    
+        return "break"
 
     def _bg_for_day(self, year: int, month: int, day: int) -> str:
         wd = datetime(year, month, day).weekday()
