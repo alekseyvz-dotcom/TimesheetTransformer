@@ -1561,6 +1561,34 @@ class TimesheetPage(tk.Frame):
             except Exception:
                 pass
 
+    def _sync_object_id_values_silent(self):
+        """
+        Обновляет values для cmb_object_id по текущему адресу,
+        НЕ показывает диалог и НЕ очищает выбранный oid, если он валидный.
+        """
+        addr = self.cmb_address.get().strip()
+        objects_for_addr = [
+            (code, a, short_name)
+            for (code, a, short_name) in getattr(self, "objects_full", [])
+            if a == addr
+        ]
+        if not objects_for_addr:
+            self.cmb_object_id.config(state="normal", values=[])
+            return
+    
+        ids = sorted({code for (code, a, short_name) in objects_for_addr if code})
+        cur = (self.cmb_object_id.get() or "").strip()
+    
+        self.cmb_object_id.config(state="readonly", values=ids)
+    
+        # если текущий выбранный id валиден — оставляем
+        if cur and cur in ids:
+            return
+    
+        # если ровно один id — подставим
+        if len(ids) == 1:
+            self.cmb_object_id.set(ids[0])
+
     # ---------------- period / address / department ----------------
 
     def get_year_month(self) -> Tuple[int, int]:
@@ -1598,56 +1626,47 @@ class TimesheetPage(tk.Frame):
 
     def _on_address_change(self, *_):
         addr = self.cmb_address.get().strip()
-
+    
         objects_for_addr = [
             (code, a, short_name)
             for (code, a, short_name) in getattr(self, "objects_full", [])
             if a == addr
         ]
-
+    
         if not objects_for_addr:
             self.cmb_object_id.config(state="normal", values=[])
             self.cmb_object_id.set("")
             return
-
+    
         ids = sorted({code for (code, a, short_name) in objects_for_addr if code})
-
-        if self._suppress_object_id_dialog and self._init_object_id:
-            self.cmb_object_id.config(state="readonly", values=ids)
-            if self._init_object_id in ids:
-                self.cmb_object_id.set(self._init_object_id)
-                for code, a, short_name in objects_for_addr:
-                    if code == self._init_object_id:
-                        self.cmb_address.set(a)
-                        break
-            else:
-                self.cmb_object_id.set("")
+        current_oid = (self.cmb_object_id.get() or "").strip()
+    
+        # Всегда обновляем список values
+        self.cmb_object_id.config(state="readonly", values=ids)
+    
+        # Если текущий oid валиден — НИЧЕГО не спрашиваем
+        if current_oid and current_oid in ids:
             return
-
+    
+        # Если один вариант — ставим автоматически
         if len(ids) == 1:
-            self.cmb_object_id.config(state="readonly", values=ids)
             self.cmb_object_id.set(ids[0])
-            self.cmb_address.set(objects_for_addr[0][1])
             return
-
+    
+        # Если мы в режиме подавления диалога при инициализации — не показываем окно
+        if getattr(self, "_suppress_object_id_dialog", False):
+            # оставим пустым, пользователь выберет сам
+            self.cmb_object_id.set("")
+            return
+    
+        # Только здесь показываем диалог
         dlg = SelectObjectIdDialog(self, objects_for_addr, addr)
         self.wait_window(dlg)
-
+    
         selected_id = dlg.result
-        if selected_id:
-            self.cmb_object_id.config(state="readonly", values=ids)
-            if selected_id not in ids:
-                ids.append(selected_id)
-                ids = sorted(ids)
-                self.cmb_object_id.config(values=ids)
+        if selected_id and selected_id in ids:
             self.cmb_object_id.set(selected_id)
-
-            for code, a, short_name in objects_for_addr:
-                if code == selected_id:
-                    self.cmb_address.set(a)
-                    break
         else:
-            self.cmb_object_id.config(state="normal", values=[])
             self.cmb_object_id.set("")
 
     def _on_fio_select(self, *_):
@@ -2322,7 +2341,7 @@ class TimesheetPage(tk.Frame):
 
         # normalize address/id
         try:
-            self._on_address_change()
+            self._sync_object_id_values_silent()
         except Exception:
             pass
         addr, oid = self.cmb_address.get().strip(), self.cmb_object_id.get().strip()
