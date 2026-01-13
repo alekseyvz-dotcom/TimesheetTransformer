@@ -52,6 +52,7 @@ _LOGO_BASE64 = None
 SpecialOrders = None
 meals_module = None
 meals_employees_module = None
+lodging_module = None
 objects = None
 Settings = None
 timesheet_module = None
@@ -78,6 +79,7 @@ def perform_heavy_imports():
     import employees as employees_module
     import timesheet_compare
     import meals_employees as meals_employees_module
+    import lodging_module
 
     try:
         import timesheet_transformer
@@ -391,6 +393,24 @@ class MainApp(tk.Tk):
         self._menubar.add_cascade(label="Питание", menu=m_meals)
         self._menu_meals = m_meals
 
+        m_lodging = tk.Menu(self._menubar, tearoff=0)
+        m_lodging.add_command(
+            label="Реестр проживаний",
+            command=lambda: self._show_page(
+                "lodging_registry",
+                lambda p: lodging_module.create_lodging_registry_page(p, self),
+            ),
+        )
+        m_lodging.add_command(
+            label="Общежития и комнаты",
+            command=lambda: self._show_page(
+                "lodging_dorms",
+                lambda p: lodging_module.create_dorms_page(p, self),
+            ),
+        )
+        self._menubar.add_cascade(label="Проживание", menu=m_lodging)
+        self._menu_lodging = m_lodging
+
         # === Объекты ===
         m_objects = tk.Menu(self._menubar, tearoff=0)
         m_objects.add_command(label="Создать/Редактировать", command=lambda: self._show_page("object_create", lambda p: objects.ObjectCreatePage(p, self)))
@@ -461,6 +481,8 @@ class MainApp(tk.Tk):
             "meals_registry": ("Реестр заявок на питание", ""),
             "meals_workers": ("Работники (питание)", "История питания по сотруднику"),
             "meals_settings": ("Настройки питания", ""),
+            "lodging_registry": ("Проживание", "Реестр заселений/выселений"),
+            "lodging_dorms": ("Проживание", "Общежития и комнаты"),
             "object_create": ("Объекты: Создание/Редактирование", ""),
             "objects_registry": ("Реестр объектов", ""),
             "budget": ("Анализ смет", ""),
@@ -504,6 +526,7 @@ class MainApp(tk.Tk):
         is_manager = (role in ("admin", "manager"))
         is_planner = (role in ("admin", "planner", "manager"))
         is_logist = (role == "logist")
+        can_lodging = (role in ("admin", "manager"))
 
         def set_state(menu, label_text, condition):
             """Меняет состояние пункта меню по его тексту."""
@@ -519,6 +542,8 @@ class MainApp(tk.Tk):
         # === Если ЛОГИСТ ===
         if is_logist:
             # --- ВНУТРЕННИЕ пункты разделов ---
+
+            set_state(self._menubar, "Проживание", False)
 
             # Объектный табель
             set_state(self._menu_timesheets, "Создать", False)
@@ -559,8 +584,6 @@ class MainApp(tk.Tk):
 
         # === Остальные роли (старое поведение) ===
 
-        # Внутренние пункты разделов
-
         # Объектный табель
         set_state(self._menu_timesheets, "Создать", True)
         set_state(self._menu_timesheets, "Мои табели", True)
@@ -581,6 +604,9 @@ class MainApp(tk.Tk):
         set_state(self._menu_meals, "Реестр", is_planner)
         set_state(self._menu_meals, "Работники (питание)", is_planner)
         set_state(self._menu_meals, "Настройки", is_admin)
+
+        # Проживание
+        set_state(self._menubar, "Проживание", can_lodging)
 
         # Объекты
         set_state(self._menu_objects, "Создать/Редактировать", is_manager)
@@ -635,7 +661,8 @@ if __name__ == "__main__":
                 analytics_module,
                 employees_module,
                 timesheet_compare,
-                meals_employees_module, 
+                meals_employees_module,
+                lodging_module,
             ]
             for module in modules_to_init:
                 if module and hasattr(module, "set_db_pool"):
