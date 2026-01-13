@@ -12,20 +12,18 @@ def month_days(year: int, month: int) -> int:
     return calendar.monthrange(year, month)[1]
 
 
-def _fmt_num(v: Optional[float]) -> str:
-    if v is None:
-        return ""
-    s = f"{v:.2f}".rstrip("0").rstrip(".")
-    return s
-
-
 class VirtualTimesheetGrid(tk.Frame):
     """
     Виртуализированный грид табеля на Canvas:
     - рисует только видимые строки
     - не создаёт тысячи Entry/Label
     - редактирование одной ячейки через один Entry поверх Canvas
-    - клики по "5/2" и "Удалить" обрабатываются (через колбэки)
+    - клик по ячейке дня -> редактирование
+    - Enter/Tab/стрелки: commit + переход
+    - Esc: отмена
+    - "Удалить" обрабатывается через on_delete_row
+    - on_change вызывается как on_change(row_index, day_index)
+      (для инкрементальных totals)
     """
 
     def __init__(
@@ -33,8 +31,7 @@ class VirtualTimesheetGrid(tk.Frame):
         master,
         *,
         get_year_month: Callable[[], Tuple[int, int]],
-        on_change: Optional[Callable[[], None]] = None,
-        on_fill_52: Optional[Callable[[int], None]] = None,
+        on_change: Optional[Callable[[int, int], None]] = None,
         on_delete_row: Optional[Callable[[int], None]] = None,
         row_height: int = 22,
         colpx: Optional[Dict[str, int]] = None,
@@ -45,7 +42,6 @@ class VirtualTimesheetGrid(tk.Frame):
 
         self.get_year_month = get_year_month
         self.on_change = on_change
-        self.on_fill_52 = on_fill_52
         self.on_delete_row = on_delete_row
 
         self.read_only = bool(read_only)
@@ -53,13 +49,13 @@ class VirtualTimesheetGrid(tk.Frame):
 
         self.row_height = int(row_height)
 
+        # NOTE: btn52 removed
         self.COLPX = colpx or {
             "fio": 200,
             "tbn": 100,
             "day": 36,
             "days": 46,
             "hours": 56,
-            "btn52": 40,
             "del": 66,
         }
 
@@ -102,7 +98,7 @@ class VirtualTimesheetGrid(tk.Frame):
         self.body.bind("<Configure>", lambda e: self._refresh())
         self.body.bind("<Button-1>", self._on_click)
 
-        # wheel (Windows); if you need mac/linux later, can add platform-specific handling
+        # wheel (Windows)
         self.body.bind("<MouseWheel>", self._on_wheel)
         self.body.bind("<Shift-MouseWheel>", self._on_shift_wheel)
 
@@ -181,9 +177,6 @@ class VirtualTimesheetGrid(tk.Frame):
         cols.append(("ot_night", x, x + self.COLPX["hours"], None))
         x += self.COLPX["hours"]
 
-        cols.append(("btn52", x, x + self.COLPX["btn52"], None))
-        x += self.COLPX["btn52"]
-
         cols.append(("del", x, x + self.COLPX["del"], None))
         x += self.COLPX["del"]
 
@@ -217,8 +210,6 @@ class VirtualTimesheetGrid(tk.Frame):
                 text = "Пер.день"
             elif kind == "ot_night":
                 text = "Пер.ночь"
-            elif kind == "btn52":
-                text = "5/2"
             elif kind == "del":
                 text = "Удалить"
             else:
@@ -286,37 +277,31 @@ class VirtualTimesheetGrid(tk.Frame):
         if row is None:
             self._end_edit(commit=True)
             return
-    
+
         if not col:
             self._end_edit(commit=True)
             return
-    
+
         kind, extra = col
-    
-        # Если кликнули по другой ячейке — сначала коммитим текущий редактор
-        # (но ниже для day мы ещё откроем новый редактор)
+
+        # commit current editor before acting on click
         if self._editor:
             self._end_edit(commit=True)
-    
-        # "buttons" in cells
-        if kind == "btn52":
-            if callable(self.on_fill_52) and not self.read_only:
-                self.on_fill_52(row)
-            return
-    
+
+        # delete cell
         if kind == "del":
             if callable(self.on_delete_row) and not self.read_only:
                 self.on_delete_row(row)
             return
-    
-        # Редактирование по 1 клику
+
+        # edit on 1 click
         if kind == "day" and not self.read_only:
             day_index = int(extra)
             y, m = self.get_year_month()
             if (day_index + 1) <= month_days(y, m):
                 self._begin_edit_day(row, day_index)
             return
-    
+
         # row selection by clicking FIO/TBN
         if self.allow_row_select and kind in ("fio", "tbn"):
             if row in self.selected_indices:
@@ -324,25 +309,6 @@ class VirtualTimesheetGrid(tk.Frame):
             else:
                 self.selected_indices.add(row)
             self._refresh()
-
-    def _on_double_click(self, event):
-        if self.read_only:
-            return
-
-        row, col = self._hit_test(event.x, event.y)
-        if row is None or not col:
-            return
-
-        kind, extra = col
-        if kind != "day":
-            return
-
-        day_index = int(extra)
-        y, m = self.get_year_month()
-        if (day_index + 1) > month_days(y, m):
-            return  # disabled day
-
-        self._begin_edit_day(row, day_index)
 
     def _cell_bbox(self, row_index: int, kind: str, extra: Optional[int]) -> Optional[Tuple[int, int, int, int]]:
         x0 = x1 = None
@@ -380,19 +346,20 @@ class VirtualTimesheetGrid(tk.Frame):
         self._editor_var = tk.StringVar(value=str(cur_val))
         self._editor = tk.Entry(self.body, textvariable=self._editor_var, justify="center")
 
-        def _cancel(ev):
+        def _cancel(_ev):
             self._end_edit(commit=False)
             return "break"
-        
-        self._editor.bind("<Return>", lambda e: (self._commit_and_move(dr=1, dc=0)))
-        self._editor.bind("<Tab>", lambda e: (self._commit_and_move(dr=0, dc=1)))
-        self._editor.bind("<Shift-Tab>", lambda e: (self._commit_and_move(dr=0, dc=-1)))
-        
-        self._editor.bind("<Left>",  lambda e: (self._commit_and_move(dr=0, dc=-1)))
-        self._editor.bind("<Right>", lambda e: (self._commit_and_move(dr=0, dc=1)))
-        self._editor.bind("<Up>",    lambda e: (self._commit_and_move(dr=-1, dc=0)))
-        self._editor.bind("<Down>",  lambda e: (self._commit_and_move(dr=1, dc=0)))
-        
+
+        # commit+move
+        self._editor.bind("<Return>", lambda e: self._commit_and_move(dr=1, dc=0))
+        self._editor.bind("<Tab>", lambda e: self._commit_and_move(dr=0, dc=1))
+        self._editor.bind("<Shift-Tab>", lambda e: self._commit_and_move(dr=0, dc=-1))
+
+        self._editor.bind("<Left>", lambda e: self._commit_and_move(dr=0, dc=-1))
+        self._editor.bind("<Right>", lambda e: self._commit_and_move(dr=0, dc=1))
+        self._editor.bind("<Up>", lambda e: self._commit_and_move(dr=-1, dc=0))
+        self._editor.bind("<Down>", lambda e: self._commit_and_move(dr=1, dc=0))
+
         self._editor.bind("<Escape>", _cancel)
         self._editor.bind("<FocusOut>", lambda e: self._end_edit(commit=True))
 
@@ -463,9 +430,9 @@ class VirtualTimesheetGrid(tk.Frame):
         # re-draw row
         self._draw_row(row_index)
 
-        # notify
+        # notify (for incremental totals)
         if callable(self.on_change):
-            self.on_change()
+            self.on_change(row_index, day_index)
 
     def _refresh(self):
         # visible area
@@ -504,32 +471,32 @@ class VirtualTimesheetGrid(tk.Frame):
         day = self._edit_day
         if row is None or day is None:
             return "break"
-    
-        # Сохраним значение
+
+        # commit current
         self._end_edit(commit=True)
-    
+
         new_row = row + dr
         new_day = day + dc
-    
+
         if new_row < 0:
             new_row = 0
         if new_row >= len(self.model_rows):
             new_row = len(self.model_rows) - 1 if self.model_rows else 0
-    
+
         if new_day < 0:
             new_day = 0
         if new_day > 30:
             new_day = 30
-    
-        # не открывать disabled день (после конца месяца) — откатимся назад пока не попадём в валидный
+
+        # avoid disabled day after end-of-month
         y, m = self.get_year_month()
         dim = month_days(y, m)
         while new_day + 1 > dim and new_day > 0:
             new_day -= 1
-    
+
         if self.model_rows:
             self._begin_edit_day(new_row, new_day)
-    
+
         return "break"
 
     def _bg_for_day(self, year: int, month: int, day: int) -> str:
@@ -620,10 +587,6 @@ class VirtualTimesheetGrid(tk.Frame):
                 text = "" if totals_ot_night is None else str(totals_ot_night)
                 anchor = "e"
                 tx = x1 - 4
-            elif kind == "btn52":
-                text = "5/2"
-                anchor = "center"
-                tx = (x0 + x1) / 2
             elif kind == "del":
                 text = "Удалить"
                 anchor = "center"
