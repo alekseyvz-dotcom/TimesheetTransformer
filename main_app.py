@@ -79,8 +79,7 @@ def perform_heavy_imports():
     import employees as employees_module
     import timesheet_compare
     import meals_employees as meals_employees_module
-    import lodging_module
-
+    import lodging_module as lodging_module
     try:
         import timesheet_transformer
     except ImportError:
