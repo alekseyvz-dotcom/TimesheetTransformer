@@ -148,6 +148,39 @@ def load_active_occupancy_by_room(dorm_id: int) -> Dict[int, int]:
             return {int(r[0]): int(r[1]) for r in cur.fetchall()}
     finally:
         release_db_connection(conn)
+def load_employees_for_checkin(include_fired: bool = False) -> List[Dict[str, Any]]:
+    """
+    Возвращает сотрудников + признак active_stay.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            where = ["1=1"]
+            if not include_fired:
+                where.append("COALESCE(e.is_fired,FALSE)=FALSE")
+
+            cur.execute(
+                f"""
+                SELECT
+                    e.id,
+                    e.fio,
+                    COALESCE(e.tbn,'') AS tbn,
+                    EXISTS (
+                        SELECT 1
+                        FROM dorm_stays s
+                        WHERE s.employee_id = e.id
+                          AND s.status='active'
+                          AND s.check_out IS NULL
+                    ) AS has_active_stay
+                FROM employees e
+                WHERE {" AND ".join(where)}
+                ORDER BY e.fio
+                """
+            )
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        release_db_connection(conn)
 
 def load_stays(filters: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
@@ -277,9 +310,9 @@ class SimpleTextDialog(simpledialog.Dialog):
         self.value = (self.ent.get() or "").strip()
 
 class CheckInDialog(simpledialog.Dialog):
-    def __init__(self, parent, employees: List[Tuple[int, str, str]], dorms: List[Dict[str, Any]], title="Заселение"):
-        self._all_employees = employees[:]  # (id, fio, tbn)
-        self._filtered_employees: List[Tuple[int, str, str]] = employees[:]
+    def __init__(self, parent, employees: List[Dict[str, Any]], dorms: List[Dict[str, Any]], title="Заселение"):
+        self._all_employees = employees[:]   # dict: id,fio,tbn,has_active_stay
+        self._filtered_employees: List[Dict[str, Any]] = employees[:]
         self.dorms = dorms
         self.result = None
         self._rooms: List[Dict[str, Any]] = []
@@ -292,48 +325,71 @@ class CheckInDialog(simpledialog.Dialog):
         ent_q.grid(row=0, column=1, sticky="w", pady=4)
         ent_q.bind("<KeyRelease>", lambda e: self._reload_employees())
 
-        ttk.Label(master, text="Сотрудник:").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.cmb_emp = ttk.Combobox(master, state="readonly", width=48)
-        self.cmb_emp.grid(row=1, column=1, sticky="w", pady=4)
+        self.var_show_all = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            master,
+            text="Показывать всех (включая уже проживающих)",
+            variable=self.var_show_all,
+            command=self._reload_employees,
+        ).grid(row=1, column=1, sticky="w", pady=2)
 
-        ttk.Label(master, text="Общежитие:").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.cmb_dorm = ttk.Combobox(master, state="readonly", width=48)
-        self.cmb_dorm.grid(row=2, column=1, sticky="w", pady=4)
+        ttk.Label(master, text="Сотрудник:").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.cmb_emp = ttk.Combobox(master, state="readonly", width=56)
+        self.cmb_emp.grid(row=2, column=1, sticky="w", pady=4)
+
+        ttk.Label(master, text="Общежитие:").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.cmb_dorm = ttk.Combobox(master, state="readonly", width=56)
+        self.cmb_dorm.grid(row=3, column=1, sticky="w", pady=4)
         self.cmb_dorm["values"] = [f"{d['name']} | {d['address']} | id={d['id']}" for d in self.dorms]
         self.cmb_dorm.bind("<<ComboboxSelected>>", lambda e: self._reload_rooms())
 
-        ttk.Label(master, text="Комната:").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.cmb_room = ttk.Combobox(master, state="readonly", width=48)
-        self.cmb_room.grid(row=3, column=1, sticky="w", pady=4)
+        self.var_hide_full = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            master,
+            text="Скрыть комнаты без мест",
+            variable=self.var_hide_full,
+            command=self._reload_rooms,
+        ).grid(row=4, column=1, sticky="w", pady=2)
 
-        ttk.Label(master, text="Дата заезда (дд.мм.гггг):").grid(row=4, column=0, sticky="e", padx=(0, 6), pady=4)
+        ttk.Label(master, text="Комната:").grid(row=5, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.cmb_room = ttk.Combobox(master, state="readonly", width=56)
+        self.cmb_room.grid(row=5, column=1, sticky="w", pady=4)
+
+        ttk.Label(master, text="Дата заезда (дд.мм.гггг):").grid(row=6, column=0, sticky="e", padx=(0, 6), pady=4)
         self.ent_in = ttk.Entry(master, width=20)
-        self.ent_in.grid(row=4, column=1, sticky="w", pady=4)
+        self.ent_in.grid(row=6, column=1, sticky="w", pady=4)
         self.ent_in.insert(0, datetime.now().strftime("%d.%m.%Y"))
 
-        ttk.Label(master, text="Комментарий:").grid(row=5, column=0, sticky="ne", padx=(0, 6), pady=4)
-        self.txt_notes = tk.Text(master, width=48, height=3)
-        self.txt_notes.grid(row=5, column=1, sticky="we", pady=4)
+        ttk.Label(master, text="Комментарий:").grid(row=7, column=0, sticky="ne", padx=(0, 6), pady=4)
+        self.txt_notes = tk.Text(master, width=56, height=3)
+        self.txt_notes.grid(row=7, column=1, sticky="we", pady=4)
 
-        # первичная загрузка сотрудников
         self._reload_employees()
-        return ent_q  # фокус на поиске
+        return ent_q
 
     def _reload_employees(self):
         q = _norm(self.var_emp_q.get())
-        if not q:
-            self._filtered_employees = self._all_employees[:]
-        else:
+        show_all = bool(self.var_show_all.get())
+
+        items = self._all_employees
+        if not show_all:
+            items = [e for e in items if not e.get("has_active_stay")]
+
+        if q:
             def ok(e):
-                eid, fio, tbn = e
-                hay = f"{fio} {tbn} {eid}".lower()
+                hay = f"{e.get('fio','')} {e.get('tbn','')} {e.get('id','')}".lower()
                 return q in hay
-            self._filtered_employees = [e for e in self._all_employees if ok(e)]
+            items = [e for e in items if ok(e)]
 
-        self.cmb_emp["values"] = [f"{fio} | {tbn or ''} | id={eid}" for eid, fio, tbn in self._filtered_employees]
+        self._filtered_employees = items
 
-        # авто-выбор первого, чтобы не оставалось пусто
-        if self._filtered_employees:
+        vals = []
+        for e in self._filtered_employees:
+            mark = " (УЖЕ ПРОЖИВАЕТ)" if e.get("has_active_stay") else ""
+            vals.append(f"{e.get('fio','')} | {e.get('tbn','')} | id={e.get('id')}{mark}")
+
+        self.cmb_emp["values"] = vals
+        if vals:
             self.cmb_emp.current(0)
         else:
             self.cmb_emp.set("")
@@ -343,20 +399,37 @@ class CheckInDialog(simpledialog.Dialog):
         if idx < 0:
             self.cmb_room["values"] = []
             return
+
         dorm_id = int(self.dorms[idx]["id"])
         rooms = load_rooms(dorm_id, active_only=True)
         occ = load_active_occupancy_by_room(dorm_id)
-        self._rooms = rooms
 
-        vals = []
+        # считаем free и сортируем по убыванию свободных мест
+        enriched = []
         for r in rooms:
             rid = int(r["id"])
-            cap = int(r["capacity"] or 0)
+            cap = int(r.get("capacity") or 0)
             used = int(occ.get(rid, 0))
-            vals.append(f"{r['room_no']} | {used}/{cap} занято | id={rid}")
+            free = max(0, cap - used)
+            enriched.append((free, used, cap, r))
+
+        hide_full = bool(self.var_hide_full.get())
+        if hide_full:
+            enriched = [x for x in enriched if x[0] > 0]
+
+        enriched.sort(key=lambda x: (-x[0], str(x[3].get("room_no") or "")))
+
+        self._rooms = [x[3] for x in enriched]
+
+        vals = []
+        for free, used, cap, r in enriched:
+            vals.append(f"{r['room_no']} | {used}/{cap} занято | свободно: {free} | id={r['id']}")
+
         self.cmb_room["values"] = vals
         if vals:
             self.cmb_room.current(0)
+        else:
+            self.cmb_room.set("")
 
     def validate(self):
         if self.cmb_emp.current() < 0:
@@ -374,23 +447,26 @@ class CheckInDialog(simpledialog.Dialog):
             messagebox.showwarning("Заселение", "Введите корректную дату заезда (дд.мм.гггг).", parent=self)
             return False
 
+        # защита: если оператор включил “показывать всех” и выбрал уже проживающего
+        emp = self._filtered_employees[self.cmb_emp.current()]
+        if emp.get("has_active_stay"):
+            messagebox.showwarning("Заселение", "У сотрудника уже есть активное проживание.", parent=self)
+            return False
+
         self._check_in = d
         return True
 
     def apply(self):
-        emp_idx = self.cmb_emp.current()
-        dorm_idx = self.cmb_dorm.current()
-        room_idx = self.cmb_room.current()
+        emp = self._filtered_employees[self.cmb_emp.current()]
+        dorm = self.dorms[self.cmb_dorm.current()]
+        room = self._rooms[self.cmb_room.current()]
 
-        employee_id = int(self._filtered_employees[emp_idx][0])
-        dorm_id = int(self.dorms[dorm_idx]["id"])
-        room_id = int(self._rooms[room_idx]["id"])
         notes = (self.txt_notes.get("1.0", "end").strip() or "")
 
         self.result = {
-            "employee_id": employee_id,
-            "dorm_id": dorm_id,
-            "room_id": room_id,
+            "employee_id": int(emp["id"]),
+            "dorm_id": int(dorm["id"]),
+            "room_id": int(room["id"]),
             "check_in": self._check_in,
             "notes": notes,
         }
@@ -503,26 +579,17 @@ class LodgingRegistryPage(tk.Frame):
             )
 
     def _check_in(self):
-        # список сотрудников (id, fio, tbn)
-        conn = None
-        employees: List[Tuple[int, str, str]] = []
-        try:
-            conn = get_db_connection()
-            with conn.cursor() as cur:
-                cur.execute("SELECT id, fio, COALESCE(tbn,'') FROM employees WHERE COALESCE(is_fired,FALSE)=FALSE ORDER BY fio")
-                employees = [(int(a), str(b), str(c)) for a, b, c in cur.fetchall()]
-        finally:
-            release_db_connection(conn)
-
+        employees = load_employees_for_checkin(include_fired=False)
+    
         dorms = load_dorms(active_only=True)
         if not dorms:
             messagebox.showwarning("Проживание", "Нет активных общежитий. Сначала создайте общежитие.", parent=self)
             return
-
+    
         dlg = CheckInDialog(self, employees, dorms)
         if not dlg.result:
             return
-
+    
         user_id = (self.app_ref.current_user or {}).get("id") if hasattr(self.app_ref, "current_user") else None
         try:
             create_stay(
@@ -536,7 +603,7 @@ class LodgingRegistryPage(tk.Frame):
         except Exception as e:
             messagebox.showerror("Заселение", str(e), parent=self)
             return
-
+    
         self._reload()
 
     def _check_out(self):
