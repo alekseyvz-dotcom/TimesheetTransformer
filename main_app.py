@@ -162,6 +162,23 @@ def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
     finally:
         if conn and db_connection_pool: db_connection_pool.putconn(conn)
 
+def load_user_permissions(user_id: int) -> set[str]:
+    conn = None
+    try:
+        if not db_connection_pool:
+            raise RuntimeError("Пул соединений недоступен.")
+        conn = db_connection_pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT perm_code FROM public.app_user_permissions WHERE user_id = %s",
+                (user_id,),
+            )
+            return {r[0] for r in cur.fetchall()}
+    finally:
+        if conn and db_connection_pool:
+            db_connection_pool.putconn(conn)
+
+
 # --- ГРАФИЧЕСКИЙ ИНТЕРФЕЙС ---
 
 def embedded_logo_image(parent, max_w=360, max_h=160):
@@ -445,17 +462,31 @@ class MainApp(tk.Tk):
         self._menubar.add_command(label="Настройки", command=lambda: Settings.open_settings_window(self))
 
     def _set_user(self, user: Optional[Dict[str, Any]]):
-        """Обновляет состояние приложения при входе/выходе пользователя."""
         self.current_user = user or {}
         self.is_authenticated = bool(user)
         caption = f" — {user.get('full_name') or user.get('username')}" if user else ""
         self.title(APP_NAME + caption)
-        self._apply_role_visibility()
+    
+        if self.current_user.get("permissions") is not None:
+            self._apply_permissions_visibility()
+        else:
+            self._apply_role_visibility()
+
 
     def on_login_success(self, user: Dict[str, Any]):
         logging.debug(f"MainApp.on_login_success: {user!r}")
+        try:
+            user["permissions"] = load_user_permissions(user["id"])
+        except Exception as e:
+            logging.exception("Не удалось загрузить права пользователя")
+            messagebox.showerror("Права", f"Не удалось загрузить права пользователя:\n{e}")
+            return
         self._set_user(user)
         self.show_home()
+
+    def has_perm(self, perm_code: str) -> bool:
+        perms = self.current_user.get("permissions")
+        return bool(perms and perm_code in perms)
 
     def show_home(self):
         self._show_page("home", lambda p: HomePage(p))
@@ -469,6 +500,40 @@ class MainApp(tk.Tk):
         if not self.is_authenticated and key != "login":
             self.show_login()
             return
+
+        PAGE_PERMS = {
+            "home": "page.home",
+            "timesheet": "page.timesheet",
+            "my_timesheets": "page.my_timesheets",
+            "timesheet_registry": "page.timesheet_registry",
+            "workers": "page.workers",
+            "timesheet_compare": "page.timesheet_compare",
+            "transport": "page.transport",
+            "my_transport_orders": "page.my_transport_orders",
+            "planning": "page.planning",
+            "transport_registry": "page.transport_registry",
+            "meals_order": "page.meals_order",
+            "my_meals_orders": "page.my_meals_orders",
+            "meals_planning": "page.meals_planning",
+            "meals_registry": "page.meals_registry",
+            "meals_workers": "page.meals_workers",
+            "meals_settings": "page.meals_settings",
+            "lodging_registry": "page.lodging_registry",
+            "lodging_dorms": "page.lodging_dorms",
+            "lodging_rates": "page.lodging_rates",
+            "object_create": "page.object_create",
+            "objects_registry": "page.objects_registry",
+            "budget": "page.budget",
+            "analytics_dashboard": "page.analytics_dashboard",
+            "login": None,
+        }
+        
+        required = PAGE_PERMS.get(key)
+        if key not in ("login",) and required and not self.has_perm(required):
+            messagebox.showwarning("Доступ запрещён", "У вас нет прав на этот пункт.")
+            self.show_home()
+            return
+
         
         headers = {
             "home": ("Управление строительством", "Выберите раздел в верхнем меню"),
@@ -521,6 +586,50 @@ class MainApp(tk.Tk):
         """Обновляет заголовок над содержимым."""
         self.lbl_header_title.config(text=title)
         self.lbl_header_hint.config(text=hint or "")
+
+    def _apply_permissions_visibility(self):
+        def set_state(menu, label_text, condition):
+            if not menu:
+                return
+            try:
+                idx = menu.index(label_text)
+                menu.entryconfig(idx, state="normal" if condition else "disabled")
+            except tk.TclError:
+                pass
+    
+        # Объектный табель
+        set_state(self._menu_timesheets, "Создать", self.has_perm("page.timesheet"))
+        set_state(self._menu_timesheets, "Мои табели", self.has_perm("page.my_timesheets"))
+        set_state(self._menu_timesheets, "Реестр табелей", self.has_perm("page.timesheet_registry"))
+        set_state(self._menu_timesheets, "Работники", self.has_perm("page.workers"))
+        set_state(self._menu_timesheets, "Сравнение с 1С", self.has_perm("page.timesheet_compare"))
+    
+        # Автотранспорт
+        set_state(self._menu_transport, "Создать заявку", self.has_perm("page.transport"))
+        set_state(self._menu_transport, "Мои заявки", self.has_perm("page.my_transport_orders"))
+        set_state(self._menu_transport, "Планирование", self.has_perm("page.planning"))
+        set_state(self._menu_transport, "Реестр", self.has_perm("page.transport_registry"))
+    
+        # Питание
+        set_state(self._menu_meals, "Создать заявку", self.has_perm("page.meals_order"))
+        set_state(self._menu_meals, "Мои заявки", self.has_perm("page.my_meals_orders"))
+        set_state(self._menu_meals, "Планирование", self.has_perm("page.meals_planning"))
+        set_state(self._menu_meals, "Реестр", self.has_perm("page.meals_registry"))
+        set_state(self._menu_meals, "Работники (питание)", self.has_perm("page.meals_workers"))
+        set_state(self._menu_meals, "Настройки", self.has_perm("page.meals_settings"))
+    
+        # Проживание
+        set_state(self._menu_lodging, "Реестр проживаний", self.has_perm("page.lodging_registry"))
+        set_state(self._menu_lodging, "Общежития и комнаты", self.has_perm("page.lodging_dorms"))
+        set_state(self._menu_lodging, "Тарифы (цена за сутки)", self.has_perm("page.lodging_rates"))
+    
+        # Объекты
+        set_state(self._menu_objects, "Создать/Редактировать", self.has_perm("page.object_create"))
+        set_state(self._menu_objects, "Реестр", self.has_perm("page.objects_registry"))
+    
+        # Аналитика
+        set_state(self._menu_analytics, "Операционная аналитика", self.has_perm("page.analytics_dashboard"))
+
 
     def _apply_role_visibility(self):
         """
@@ -628,11 +737,11 @@ class MainApp(tk.Tk):
         set_state(self._menubar, "Настройки", is_admin)
 
 
-        def destroy(self):
-            """Корректное завершение работы приложения."""
-            logging.info("Приложение закрывается. Закрываем пул соединений.")
-            close_db_pool()
-            super().destroy()
+     def destroy(self):
+         """Корректное завершение работы приложения."""
+          logging.info("Приложение закрывается. Закрываем пул соединений.")
+          close_db_pool()
+          super().destroy()
 
 # --- ТОЧКА ВХОДА ПРИЛОЖЕНИЯ ---
 
