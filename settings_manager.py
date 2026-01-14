@@ -600,7 +600,83 @@ def _verify_password(password: str, stored_hash: str) -> bool:
         return password == stored_hash
     except Exception:
         return False
-        
+
+def get_permissions_catalog() -> List[Dict]:
+    """Справочник всех прав (для окна выдачи прав)."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT code, title, group_name
+                FROM public.app_permissions
+                ORDER BY group_name, title;
+                """
+            )
+            return list(cur.fetchall())
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+
+def get_user_permissions(user_id: int) -> set[str]:
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT perm_code FROM public.app_user_permissions WHERE user_id = %s",
+                (user_id,),
+            )
+            return {r[0] for r in cur.fetchall()}
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+
+def set_user_permissions(user_id: int, perm_codes: List[str]):
+    """Полная перезапись прав пользователя."""
+    perm_codes = sorted({(p or "").strip() for p in perm_codes if p and str(p).strip()})
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM public.app_user_permissions WHERE user_id = %s", (user_id,))
+                if perm_codes:
+                    cur.executemany(
+                        """
+                        INSERT INTO public.app_user_permissions(user_id, perm_code)
+                        VALUES (%s, %s)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        [(user_id, p) for p in perm_codes],
+                    )
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+
+def grant_default_permissions(user_id: int):
+    """Минимальные права новому пользователю."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO public.app_user_permissions(user_id, perm_code)
+                VALUES (%s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (user_id, "page.home"),
+            )
+            # если у вас есть settings-permission для админов, не включаем его по умолчанию
+    finally:
+        if conn:
+            release_db_connection(conn)
+
 def get_roles_list() -> List[Dict]:
     conn = None
     try:
@@ -657,20 +733,23 @@ def create_app_user(
         raise ValueError("Роль не указана")
 
     pwd_hash = _hash_password(password)
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO app_users (username, password_hash, is_active, full_name, "role", department_id)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                """,
-                (username, pwd_hash, is_active, full_name, role_code, department_id),
-            )
-    finally:
-        if conn:
-            release_db_connection(conn)
+     conn = None
+        try:
+            conn = get_db_connection()
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO app_users (username, password_hash, is_active, full_name, "role", department_id)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (username, pwd_hash, is_active, full_name, role_code, department_id),
+                )
+                new_id = cur.fetchone()[0]
+            return new_id
+        finally:
+            if conn:
+                release_db_connection(conn)
 
 def update_app_user(
     user_id: int,
@@ -939,6 +1018,7 @@ class UsersPage(tk.Frame):
         top.pack(fill="x", padx=8, pady=8)
 
         ttk.Button(top, text="Создать пользователя", command=self._on_create_user).pack(side="left")
+        ttk.Button(top, text="Права...", command=self._on_permissions).pack(side="left", padx=4)
         ttk.Button(top, text="Изменить", command=self._on_edit_user).pack(side="left", padx=4)
         ttk.Button(top, text="Удалить", command=self._on_delete_user).pack(side="left")
 
@@ -963,6 +1043,13 @@ class UsersPage(tk.Frame):
         self.tree.column("is_active", width=70, anchor="center")
 
         self.tree.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    def _on_permissions(self):
+        user = self._get_selected_user()
+        if not user:
+            return
+        EditUserPermissionsDialog(self, user_id=user["id"], username=user["username"])
+
 
     def reload_users(self):
         for row in self.tree.get_children():
@@ -1039,7 +1126,7 @@ class UsersPage(tk.Frame):
             return
         data = dlg.result
         try:
-            create_app_user(
+            new_id = create_app_user(
                 username=data["username"],
                 password=data["password"],
                 full_name=data["full_name"],
@@ -1047,11 +1134,14 @@ class UsersPage(tk.Frame):
                 is_active=True,
                 department_id=data.get("department_id"),
             )
+            grant_default_permissions(new_id)  # минимум (например page.home)
         except Exception as e:
             messagebox.showerror("Создать пользователя", f"Ошибка создания пользователя:\n{e}", parent=self)
             return
+    
         self.reload_users()
-        messagebox.showinfo("Создать пользователя", "Пользователь создан.", parent=self)
+        # Сразу открыть права — лучший UX
+        EditUserPermissionsDialog(self, user_id=new_id, username=data["username"])
 
     def _on_delete_user(self):
         user = self._get_selected_user()
@@ -1073,6 +1163,165 @@ class UsersPage(tk.Frame):
 
         self.reload_users()
         messagebox.showinfo("Удалить пользователя", "Пользователь удалён.", parent=self)
+
+class EditUserPermissionsDialog(tk.Toplevel):
+    def __init__(self, parent, user_id: int, username: str):
+        super().__init__(parent)
+        self.title(f"Права доступа — {username}")
+        self.geometry("760x520")
+        self.minsize(720, 480)
+
+        self.user_id = user_id
+        self.username = username
+
+        try:
+            self.catalog = get_permissions_catalog()
+            self.current = get_user_permissions(user_id)
+        except Exception as e:
+            messagebox.showerror("Права", f"Ошибка загрузки прав:\n{e}", parent=self)
+            self.destroy()
+            return
+
+        # code -> (meta, var, widget)
+        self._vars: Dict[str, tk.BooleanVar] = {}
+        self._cb_widgets: Dict[str, ttk.Checkbutton] = {}
+        self._meta: Dict[str, Dict] = {}
+
+        # UI top: поиск + кнопки
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=10, pady=10)
+
+        ttk.Label(top, text="Поиск:").pack(side="left")
+        self.search_var = tk.StringVar(value="")
+        ent = ttk.Entry(top, textvariable=self.search_var, width=40)
+        ent.pack(side="left", padx=(6, 10))
+        ent.focus_set()
+
+        ttk.Button(top, text="Выбрать всё (видимое)", command=self._select_all_visible).pack(side="left", padx=4)
+        ttk.Button(top, text="Снять всё (видимое)", command=self._clear_all_visible).pack(side="left", padx=4)
+
+        # Notebook по группам
+        self.nb = ttk.Notebook(self)
+        self.nb.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        # Группируем права по group_name
+        groups: Dict[str, List[Dict]] = {}
+        for p in self.catalog:
+            g = (p.get("group_name") or "").strip() or "Другое"
+            groups.setdefault(g, []).append(p)
+
+        # Строим вкладки
+        self._tabs: Dict[str, ttk.Frame] = {}
+        for group_name in sorted(groups.keys()):
+            tab = ttk.Frame(self.nb)
+            tab.pack(fill="both", expand=True)
+            self.nb.add(tab, text=group_name)
+            self._tabs[group_name] = tab
+
+            # Вкладка: прокручиваемая область
+            canvas = tk.Canvas(tab, highlightthickness=0)
+            vsb = ttk.Scrollbar(tab, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=vsb.set)
+
+            vsb.pack(side="right", fill="y")
+            canvas.pack(side="left", fill="both", expand=True)
+
+            inner = ttk.Frame(canvas)
+            inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+            def _on_configure(event, c=canvas, inner_frame=inner):
+                c.configure(scrollregion=c.bbox("all"))
+
+            def _on_canvas_configure(event, c=canvas, win_id=inner_id):
+                c.itemconfigure(win_id, width=event.width)
+
+            inner.bind("<Configure>", _on_configure)
+            canvas.bind("<Configure>", _on_canvas_configure)
+
+            # Кнопки для вкладки
+            bar = ttk.Frame(inner)
+            bar.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 8))
+            bar.columnconfigure(0, weight=1)
+
+            ttk.Label(bar, text="").grid(row=0, column=0, sticky="w")
+            ttk.Button(bar, text="Выбрать всё", command=lambda g=group_name: self._select_group(g)).grid(row=0, column=1, padx=4)
+            ttk.Button(bar, text="Снять всё", command=lambda g=group_name: self._clear_group(g)).grid(row=0, column=2, padx=4)
+
+            # Чекбоксы
+            row = 1
+            for p in groups[group_name]:
+                code = p["code"]
+                title = p["title"]
+                var = tk.BooleanVar(value=(code in self.current))
+                self._vars[code] = var
+                self._meta[code] = p
+
+                cb = ttk.Checkbutton(inner, text=title, variable=var)
+                cb.grid(row=row, column=0, sticky="w", padx=10, pady=2)
+                self._cb_widgets[code] = cb
+                row += 1
+
+        # Нижние кнопки
+        bottom = ttk.Frame(self)
+        bottom.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Button(bottom, text="Сохранить", command=self._save).pack(side="right", padx=4)
+        ttk.Button(bottom, text="Отмена", command=self.destroy).pack(side="right")
+
+        # Поиск
+        self.search_var.trace_add("write", lambda *_: self._apply_filter())
+        self._apply_filter()
+
+        self.transient(parent)
+        self.grab_set()
+
+    def _visible_codes(self) -> List[str]:
+        needle = self.search_var.get().strip().lower()
+        if not needle:
+            return list(self._vars.keys())
+        out = []
+        for code, p in self._meta.items():
+            hay = f"{p.get('title','')} {p.get('code','')} {p.get('group_name','')}".lower()
+            if needle in hay:
+                out.append(code)
+        return out
+
+    def _apply_filter(self):
+        needle = self.search_var.get().strip().lower()
+        for code, cb in self._cb_widgets.items():
+            p = self._meta[code]
+            hay = f"{p.get('title','')} {p.get('code','')} {p.get('group_name','')}".lower()
+            show = (not needle) or (needle in hay)
+            cb.grid_remove() if not show else cb.grid()
+
+    def _select_all_visible(self):
+        for code in self._visible_codes():
+            self._vars[code].set(True)
+
+    def _clear_all_visible(self):
+        for code in self._visible_codes():
+            self._vars[code].set(False)
+
+    def _select_group(self, group_name: str):
+        for code, p in self._meta.items():
+            g = (p.get("group_name") or "").strip() or "Другое"
+            if g == group_name:
+                self._vars[code].set(True)
+
+    def _clear_group(self, group_name: str):
+        for code, p in self._meta.items():
+            g = (p.get("group_name") or "").strip() or "Другое"
+            if g == group_name:
+                self._vars[code].set(False)
+
+    def _save(self):
+        selected = [code for code, var in self._vars.items() if var.get()]
+        try:
+            set_user_permissions(self.user_id, selected)
+        except Exception as e:
+            messagebox.showerror("Права", f"Ошибка сохранения:\n{e}", parent=self)
+            return
+        messagebox.showinfo("Права", "Права сохранены.", parent=self)
+        self.destroy()
 
 # ---------------- UI ОКНО НАСТРОЕК ----------------
 
