@@ -407,6 +407,13 @@ class MainApp(tk.Tk):
                 lambda p: lodging_module.create_dorms_page(p, self),
             ),
         )
+        m_lodging.add_command(
+            label="Тарифы (цена за сутки)",
+            command=lambda: self._show_page(
+                "lodging_rates",
+                lambda p: lodging_module.create_rates_page(p, self)
+            ),
+        )
         self._menubar.add_cascade(label="Проживание", menu=m_lodging)
         self._menu_lodging = m_lodging
 
@@ -482,6 +489,7 @@ class MainApp(tk.Tk):
             "meals_settings": ("Настройки питания", ""),
             "lodging_registry": ("Проживание", "Реестр заселений/выселений"),
             "lodging_dorms": ("Проживание", "Общежития и комнаты"),
+            "lodging_rates": ("Проживание", "Тарифы (цена за сутки)"),
             "object_create": ("Объекты: Создание/Редактирование", ""),
             "objects_registry": ("Реестр объектов", ""),
             "budget": ("Анализ смет", ""),
