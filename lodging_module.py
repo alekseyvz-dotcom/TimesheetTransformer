@@ -127,6 +127,9 @@ def _parse_date(s: str) -> Optional[date]:
             pass
     return None
 
+def _norm(s: str) -> str:
+    return (s or "").strip().lower()
+
 def load_active_occupancy_by_room(dorm_id: int) -> Dict[int, int]:
     """
     Возвращает {room_id: occupied_count} только по активным проживающим.
@@ -273,41 +276,67 @@ class SimpleTextDialog(simpledialog.Dialog):
     def apply(self):
         self.value = (self.ent.get() or "").strip()
 
-
 class CheckInDialog(simpledialog.Dialog):
     def __init__(self, parent, employees: List[Tuple[int, str, str]], dorms: List[Dict[str, Any]], title="Заселение"):
-        self.employees = employees
+        self._all_employees = employees[:]  # (id, fio, tbn)
+        self._filtered_employees: List[Tuple[int, str, str]] = employees[:]
         self.dorms = dorms
         self.result = None
         self._rooms: List[Dict[str, Any]] = []
         super().__init__(parent, title=title)
 
     def body(self, master):
-        ttk.Label(master, text="Сотрудник:").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.cmb_emp = ttk.Combobox(master, state="readonly", width=48)
-        self.cmb_emp.grid(row=0, column=1, sticky="w", pady=4)
-        self.cmb_emp["values"] = [f"{fio} | {tbn or ''} | id={eid}" for eid, fio, tbn in self.employees]
+        ttk.Label(master, text="Поиск сотрудника (ФИО/Таб№):").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.var_emp_q = tk.StringVar()
+        ent_q = ttk.Entry(master, width=30, textvariable=self.var_emp_q)
+        ent_q.grid(row=0, column=1, sticky="w", pady=4)
+        ent_q.bind("<KeyRelease>", lambda e: self._reload_employees())
 
-        ttk.Label(master, text="Общежитие:").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
+        ttk.Label(master, text="Сотрудник:").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.cmb_emp = ttk.Combobox(master, state="readonly", width=48)
+        self.cmb_emp.grid(row=1, column=1, sticky="w", pady=4)
+
+        ttk.Label(master, text="Общежитие:").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=4)
         self.cmb_dorm = ttk.Combobox(master, state="readonly", width=48)
-        self.cmb_dorm.grid(row=1, column=1, sticky="w", pady=4)
+        self.cmb_dorm.grid(row=2, column=1, sticky="w", pady=4)
         self.cmb_dorm["values"] = [f"{d['name']} | {d['address']} | id={d['id']}" for d in self.dorms]
         self.cmb_dorm.bind("<<ComboboxSelected>>", lambda e: self._reload_rooms())
 
-        ttk.Label(master, text="Комната:").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=4)
+        ttk.Label(master, text="Комната:").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=4)
         self.cmb_room = ttk.Combobox(master, state="readonly", width=48)
-        self.cmb_room.grid(row=2, column=1, sticky="w", pady=4)
+        self.cmb_room.grid(row=3, column=1, sticky="w", pady=4)
 
-        ttk.Label(master, text="Дата заезда (дд.мм.гггг):").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=4)
+        ttk.Label(master, text="Дата заезда (дд.мм.гггг):").grid(row=4, column=0, sticky="e", padx=(0, 6), pady=4)
         self.ent_in = ttk.Entry(master, width=20)
-        self.ent_in.grid(row=3, column=1, sticky="w", pady=4)
+        self.ent_in.grid(row=4, column=1, sticky="w", pady=4)
         self.ent_in.insert(0, datetime.now().strftime("%d.%m.%Y"))
 
-        ttk.Label(master, text="Комментарий:").grid(row=4, column=0, sticky="ne", padx=(0, 6), pady=4)
+        ttk.Label(master, text="Комментарий:").grid(row=5, column=0, sticky="ne", padx=(0, 6), pady=4)
         self.txt_notes = tk.Text(master, width=48, height=3)
-        self.txt_notes.grid(row=4, column=1, sticky="we", pady=4)
+        self.txt_notes.grid(row=5, column=1, sticky="we", pady=4)
 
-        return self.cmb_emp
+        # первичная загрузка сотрудников
+        self._reload_employees()
+        return ent_q  # фокус на поиске
+
+    def _reload_employees(self):
+        q = _norm(self.var_emp_q.get())
+        if not q:
+            self._filtered_employees = self._all_employees[:]
+        else:
+            def ok(e):
+                eid, fio, tbn = e
+                hay = f"{fio} {tbn} {eid}".lower()
+                return q in hay
+            self._filtered_employees = [e for e in self._all_employees if ok(e)]
+
+        self.cmb_emp["values"] = [f"{fio} | {tbn or ''} | id={eid}" for eid, fio, tbn in self._filtered_employees]
+
+        # авто-выбор первого, чтобы не оставалось пусто
+        if self._filtered_employees:
+            self.cmb_emp.current(0)
+        else:
+            self.cmb_emp.set("")
 
     def _reload_rooms(self):
         idx = self.cmb_dorm.current()
@@ -319,7 +348,6 @@ class CheckInDialog(simpledialog.Dialog):
         occ = load_active_occupancy_by_room(dorm_id)
         self._rooms = rooms
 
-        # показываем: room_no (occupied/capacity)
         vals = []
         for r in rooms:
             rid = int(r["id"])
@@ -354,7 +382,7 @@ class CheckInDialog(simpledialog.Dialog):
         dorm_idx = self.cmb_dorm.current()
         room_idx = self.cmb_room.current()
 
-        employee_id = int(self.employees[emp_idx][0])
+        employee_id = int(self._filtered_employees[emp_idx][0])
         dorm_id = int(self.dorms[dorm_idx]["id"])
         room_id = int(self._rooms[room_idx]["id"])
         notes = (self.txt_notes.get("1.0", "end").strip() or "")
@@ -366,7 +394,6 @@ class CheckInDialog(simpledialog.Dialog):
             "check_in": self._check_in,
             "notes": notes,
         }
-
 
 # ===================== PAGES =====================
 
@@ -590,14 +617,18 @@ class DormsPage(tk.Frame):
         right.grid(row=0, column=1, sticky="nsew")
         ttk.Label(right, text="Комнаты").pack(anchor="w")
 
-        cols2 = ("room_no", "capacity", "active")
+        cols2 = ("room_no", "capacity", "occupied", "free", "active")
         self.tree_rooms = ttk.Treeview(right, columns=cols2, show="headings", selectmode="browse", height=18)
         self.tree_rooms.heading("room_no", text="Комната")
         self.tree_rooms.heading("capacity", text="Мест")
+        self.tree_rooms.heading("occupied", text="Занято")
+        self.tree_rooms.heading("free", text="Свободно")
         self.tree_rooms.heading("active", text="Активно")
-
+        
         self.tree_rooms.column("room_no", width=120)
         self.tree_rooms.column("capacity", width=60, anchor="center")
+        self.tree_rooms.column("occupied", width=70, anchor="center")
+        self.tree_rooms.column("free", width=80, anchor="center")
         self.tree_rooms.column("active", width=60, anchor="center")
 
         self.tree_rooms.pack(fill="both", expand=True, pady=(6, 6))
@@ -630,10 +661,24 @@ class DormsPage(tk.Frame):
         if not self._selected_dorm_id:
             return
         self._rooms = load_rooms(self._selected_dorm_id, active_only=False)
+    
+        # занятость только по активным проживающим
+        occ = load_active_occupancy_by_room(self._selected_dorm_id)
+    
         self.tree_rooms.delete(*self.tree_rooms.get_children())
         for r in self._rooms:
+            rid = int(r["id"])
+            cap = int(r.get("capacity") or 0)
+            used = int(occ.get(rid, 0))
+            free = max(0, cap - used)
+    
             active = "Да" if r.get("is_active") else "Нет"
-            self.tree_rooms.insert("", "end", iid=str(r["id"]), values=(r["room_no"], r["capacity"], active))
+            self.tree_rooms.insert(
+                "",
+                "end",
+                iid=str(rid),
+                values=(r["room_no"], cap, used, free, active),
+            )
 
     def _add_dorm(self):
         self._open_dorm_editor(None)
