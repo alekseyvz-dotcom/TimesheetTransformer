@@ -65,7 +65,7 @@ def perform_heavy_imports():
     global BudgetAnalyzer, _assets_logo, _LOGO_BASE64, SpecialOrders, \
            meals_module, objects, Settings, timesheet_module, \
            analytics_module, timesheet_transformer, employees_module, \
-           timesheet_compare, meals_employees_module
+           timesheet_compare, meals_employees_module, lodging_module
            
     import BudgetAnalyzer
     import assets_logo as _assets_logo
