@@ -630,6 +630,29 @@ class MainApp(tk.Tk):
         # Аналитика
         set_state(self._menu_analytics, "Операционная аналитика", self.has_perm("page.analytics_dashboard"))
 
+        # --- Корневые пункты верхнего меню ---
+        def set_menubar_state(label_text: str, allowed: bool):
+            try:
+                idx = self._menubar.index(label_text)
+                self._menubar.entryconfig(idx, state="normal" if allowed else "disabled")
+            except tk.TclError:
+                pass
+
+        # Проживание: включаем, если есть хотя бы один разрешённый пункт
+        lodging_allowed = any([
+            self.has_perm("page.lodging_registry"),
+            self.has_perm("page.lodging_dorms"),
+            self.has_perm("page.lodging_rates"),
+        ])
+        set_menubar_state("Проживание", lodging_allowed)
+
+        # Аналитика
+        set_menubar_state("Аналитика", self.has_perm("page.analytics_dashboard"))
+
+        # Настройки (нужно отдельное право)
+        set_menubar_state("Настройки", self.has_perm("page.settings"))
+
+
 
     def _apply_role_visibility(self):
         """
