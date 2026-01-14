@@ -529,7 +529,7 @@ class MainApp(tk.Tk):
         }
         
         required = PAGE_PERMS.get(key)
-        if key not in ("login",) and required and not self.has_perm(required):
+        if key not in ("login", "home") and required and not self.has_perm(required):
             messagebox.showwarning("Доступ запрещён", "У вас нет прав на этот пункт.")
             self.show_home()
             return
@@ -736,12 +736,11 @@ class MainApp(tk.Tk):
         set_state(self._menubar, "Инструменты", True)  # если когда‑то нужно ограничить – можно добавить по ролям
         set_state(self._menubar, "Настройки", is_admin)
 
-
-     def destroy(self):
-         """Корректное завершение работы приложения."""
-          logging.info("Приложение закрывается. Закрываем пул соединений.")
-          close_db_pool()
-          super().destroy()
+    def destroy(self):
+        """Корректное завершение работы приложения."""
+        logging.info("Приложение закрывается. Закрываем пул соединений.")
+        close_db_pool()
+        super().destroy()
 
 # --- ТОЧКА ВХОДА ПРИЛОЖЕНИЯ ---
 
