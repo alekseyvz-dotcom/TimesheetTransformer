@@ -630,7 +630,7 @@ class MainApp(tk.Tk):
         # Аналитика
         set_state(self._menu_analytics, "Операционная аналитика", self.has_perm("page.analytics_dashboard"))
 
-        # --- Корневые пункты верхнего меню ---
+        # --- Корневые пункты верхнего меню (разделы) ---
         def set_menubar_state(label_text: str, allowed: bool):
             try:
                 idx = self._menubar.index(label_text)
@@ -638,7 +638,40 @@ class MainApp(tk.Tk):
             except tk.TclError:
                 pass
 
-        # Проживание: включаем, если есть хотя бы один разрешённый пункт
+        # Главная обычно всегда доступна
+        set_menubar_state("Главная", True)
+
+        # Объектный табель
+        timesheets_allowed = any([
+            self.has_perm("page.timesheet"),
+            self.has_perm("page.my_timesheets"),
+            self.has_perm("page.timesheet_registry"),
+            self.has_perm("page.workers"),
+            self.has_perm("page.timesheet_compare"),
+        ])
+        set_menubar_state("Объектный табель", timesheets_allowed)
+
+        # Автотранспорт
+        transport_allowed = any([
+            self.has_perm("page.transport"),
+            self.has_perm("page.my_transport_orders"),
+            self.has_perm("page.planning"),
+            self.has_perm("page.transport_registry"),
+        ])
+        set_menubar_state("Автотранспорт", transport_allowed)
+
+        # Питание
+        meals_allowed = any([
+            self.has_perm("page.meals_order"),
+            self.has_perm("page.my_meals_orders"),
+            self.has_perm("page.meals_planning"),
+            self.has_perm("page.meals_registry"),
+            self.has_perm("page.meals_workers"),
+            self.has_perm("page.meals_settings"),
+        ])
+        set_menubar_state("Питание", meals_allowed)
+
+        # Проживание
         lodging_allowed = any([
             self.has_perm("page.lodging_registry"),
             self.has_perm("page.lodging_dorms"),
@@ -646,13 +679,26 @@ class MainApp(tk.Tk):
         ])
         set_menubar_state("Проживание", lodging_allowed)
 
+        # Объекты
+        objects_allowed = any([
+            self.has_perm("page.object_create"),
+            self.has_perm("page.objects_registry"),
+        ])
+        set_menubar_state("Объекты", objects_allowed)
+
         # Аналитика
         set_menubar_state("Аналитика", self.has_perm("page.analytics_dashboard"))
 
-        # Настройки (нужно отдельное право)
+        # Инструменты (если хотите контролировать)
+        tools_allowed = any([
+            self.has_perm("page.budget"),
+            # если позже добавите права на конвертер — включите сюда
+            # self.has_perm("page.timesheet_converter"),
+        ])
+        set_menubar_state("Инструменты", tools_allowed)
+
+        # Настройки
         set_menubar_state("Настройки", self.has_perm("page.settings"))
-
-
 
     def _apply_role_visibility(self):
         """
