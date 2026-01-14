@@ -289,6 +289,134 @@ def close_stay(stay_id: int, check_out: date, closed_by: Optional[int], reason: 
     finally:
         release_db_connection(conn)
 
+def load_rates(dorm_id: Optional[int] = None, room_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            where = ["1=1"]
+            params: List[Any] = []
+            if dorm_id is not None:
+                where.append("dr.dorm_id = %s")
+                params.append(dorm_id)
+            if room_id is not None:
+                where.append("dr.room_id = %s")
+                params.append(room_id)
+
+            cur.execute(
+                f"""
+                SELECT
+                    dr.id,
+                    dr.dorm_id, dr.room_id,
+                    dr.valid_from,
+                    dr.price_per_day,
+                    dr.currency,
+                    dr.comment,
+                    d.name AS dorm_name,
+                    r.room_no
+                FROM dorm_rates dr
+                LEFT JOIN dorms d ON d.id = dr.dorm_id
+                LEFT JOIN dorm_rooms r ON r.id = dr.room_id
+                WHERE {" AND ".join(where)}
+                ORDER BY COALESCE(d.name,''), COALESCE(r.room_no,''), dr.valid_from DESC
+                """,
+                params,
+            )
+            return [dict(x) for x in cur.fetchall()]
+    finally:
+        release_db_connection(conn)
+
+
+def upsert_rate(rate_id: Optional[int], dorm_id: Optional[int], room_id: Optional[int],
+                valid_from: date, price_per_day: float, currency: str, created_by: Optional[int], comment: str = "") -> int:
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn, conn.cursor() as cur:
+            if rate_id:
+                cur.execute(
+                    """
+                    UPDATE dorm_rates
+                    SET dorm_id=%s, room_id=%s, valid_from=%s, price_per_day=%s, currency=%s, comment=%s
+                    WHERE id=%s
+                    RETURNING id
+                    """,
+                    (dorm_id, room_id, valid_from, price_per_day, currency, comment or None, rate_id),
+                )
+                return int(cur.fetchone()[0])
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO dorm_rates (dorm_id, room_id, valid_from, price_per_day, currency, created_by, comment)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    RETURNING id
+                    """,
+                    (dorm_id, room_id, valid_from, price_per_day, currency, created_by, comment or None),
+                )
+                return int(cur.fetchone()[0])
+    finally:
+        release_db_connection(conn)
+
+
+def delete_rate(rate_id: int):
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM dorm_rates WHERE id=%s", (rate_id,))
+            if cur.rowcount != 1:
+                raise RuntimeError("Тариф не найден.")
+    finally:
+        release_db_connection(conn)
+
+
+def pick_rate_for_date(dorm_id: int, room_id: int, on_date: date) -> Dict[str, Any]:
+    """
+    Выбор тарифа на дату:
+      - если у общежития PER_ROOM: берём тариф комнаты (room_id), иначе тариф общежития (dorm_id)
+      - выбираем последнюю запись с valid_from <= on_date
+    Возвращает dict тарифа или бросает исключение.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT rate_mode FROM dorms WHERE id=%s", (dorm_id,))
+            row = cur.fetchone()
+            if not row:
+                raise RuntimeError("Общежитие не найдено.")
+            rate_mode = row["rate_mode"]
+
+            if rate_mode == "PER_ROOM":
+                cur.execute(
+                    """
+                    SELECT * FROM dorm_rates
+                    WHERE room_id=%s AND valid_from <= %s
+                    ORDER BY valid_from DESC
+                    LIMIT 1
+                    """,
+                    (room_id, on_date),
+                )
+                r = cur.fetchone()
+                if not r:
+                    raise RuntimeError("Не найден тариф комнаты на выбранную дату.")
+                return dict(r)
+            else:
+                cur.execute(
+                    """
+                    SELECT * FROM dorm_rates
+                    WHERE dorm_id=%s AND valid_from <= %s
+                    ORDER BY valid_from DESC
+                    LIMIT 1
+                    """,
+                    (dorm_id, on_date),
+                )
+                r = cur.fetchone()
+                if not r:
+                    raise RuntimeError("Не найден тариф общежития на выбранную дату.")
+                return dict(r)
+    finally:
+        release_db_connection(conn)
 
 # ===================== DIALOGS =====================
 
@@ -925,6 +1053,309 @@ class DormsPage(tk.Frame):
         ttk.Button(btns, text="Сохранить", command=on_save).pack(side="right", padx=(6, 0))
         ttk.Button(btns, text="Отмена", command=win.destroy).pack(side="right")
 
+class RatesPage(tk.Frame):
+    def __init__(self, master, app_ref):
+        super().__init__(master)
+        self.app_ref = app_ref
+        self._dorms: List[Dict[str, Any]] = []
+        self._rooms: List[Dict[str, Any]] = []
+        self._build_ui()
+        self._reload_dorms()
+
+    def _build_ui(self):
+        top = tk.Frame(self)
+        top.pack(fill="x", padx=8, pady=8)
+
+        ttk.Label(top, text="Общежитие:").pack(side="left")
+        self.cmb_dorm = ttk.Combobox(top, state="readonly", width=50)
+        self.cmb_dorm.pack(side="left", padx=(6, 12))
+        self.cmb_dorm.bind("<<ComboboxSelected>>", lambda e: self._reload_rooms_and_rates())
+
+        ttk.Label(top, text="Комната (для PER_ROOM):").pack(side="left")
+        self.cmb_room = ttk.Combobox(top, state="readonly", width=30)
+        self.cmb_room.pack(side="left", padx=(6, 12))
+        self.cmb_room.bind("<<ComboboxSelected>>", lambda e: self._reload_rates())
+
+        btns = tk.Frame(self)
+        btns.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Button(btns, text="Добавить…", command=self._add).pack(side="left", padx=(0, 6))
+        ttk.Button(btns, text="Редактировать…", command=self._edit).pack(side="left", padx=(0, 6))
+        ttk.Button(btns, text="Удалить", command=self._delete).pack(side="left")
+        ttk.Button(btns, text="Проверить тариф на дату…", command=self._check_pick).pack(side="right")
+
+        frame = tk.Frame(self)
+        frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        cols = ("scope", "valid_from", "price", "currency", "comment")
+        self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="browse")
+        self.tree.heading("scope", text="Область")
+        self.tree.heading("valid_from", text="Действует с")
+        self.tree.heading("price", text="Цена/сутки")
+        self.tree.heading("currency", text="Валюта")
+        self.tree.heading("comment", text="Комментарий")
+
+        self.tree.column("scope", width=260)
+        self.tree.column("valid_from", width=110, anchor="center")
+        self.tree.column("price", width=110, anchor="e")
+        self.tree.column("currency", width=70, anchor="center")
+        self.tree.column("comment", width=420)
+
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+    def _reload_dorms(self):
+        self._dorms = load_dorms(active_only=False)
+        self.cmb_dorm["values"] = [f"{d['name']} | {d['address']} | id={d['id']}" for d in self._dorms]
+        if self._dorms:
+            self.cmb_dorm.current(0)
+            self._reload_rooms_and_rates()
+        else:
+            self.cmb_room["values"] = []
+            self.tree.delete(*self.tree.get_children())
+
+    def _selected_dorm(self) -> Optional[Dict[str, Any]]:
+        idx = self.cmb_dorm.current()
+        return self._dorms[idx] if idx >= 0 else None
+
+    def _reload_rooms_and_rates(self):
+        dorm = self._selected_dorm()
+        if not dorm:
+            return
+        self._rooms = load_rooms(int(dorm["id"]), active_only=False)
+        self.cmb_room["values"] = ["(не выбрано)"] + [f"{r['room_no']} | id={r['id']}" for r in self._rooms]
+        self.cmb_room.current(0)
+        self._reload_rates()
+
+    def _reload_rates(self):
+        dorm = self._selected_dorm()
+        if not dorm:
+            return
+        dorm_id = int(dorm["id"])
+
+        room_id = None
+        if self.cmb_room.current() > 0:
+            room_id = int(self._rooms[self.cmb_room.current() - 1]["id"])
+
+        rows = load_rates(dorm_id=None, room_id=None)
+
+        # фильтруем для отображения:
+        # - показываем тарифы выбранного общежития (dorm_id)
+        # - и тарифы выбранной комнаты (room_id), если выбрана
+        filtered = []
+        for r in rows:
+            if r.get("dorm_id") == dorm_id:
+                filtered.append(r)
+            elif room_id is not None and r.get("room_id") == room_id:
+                filtered.append(r)
+
+        self.tree.delete(*self.tree.get_children())
+        for r in filtered:
+            scope = ""
+            if r.get("room_id"):
+                scope = f"Комната {r.get('room_no')}"
+            else:
+                scope = f"Общежитие {r.get('dorm_name')}"
+            vf = r["valid_from"].strftime("%d.%m.%Y") if r.get("valid_from") else ""
+            price = str(r.get("price_per_day") or "")
+            cur = r.get("currency") or ""
+            cmt = r.get("comment") or ""
+            self.tree.insert("", "end", iid=str(r["id"]), values=(scope, vf, price, cur, cmt))
+
+    def _selected_rate_id(self) -> Optional[int]:
+        sel = self.tree.selection()
+        return int(sel[0]) if sel else None
+
+    def _rate_editor(self, rate: Optional[Dict[str, Any]]):
+        dorm = self._selected_dorm()
+        if not dorm:
+            return
+
+        win = tk.Toplevel(self)
+        win.title("Тариф")
+        win.resizable(False, False)
+        win.grab_set()
+
+        frm = tk.Frame(win, padx=10, pady=10)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Тип тарифа:").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=4)
+        cmb_type = ttk.Combobox(frm, state="readonly", values=["PER_DORM", "PER_ROOM"], width=12)
+        cmb_type.grid(row=0, column=1, sticky="w", pady=4)
+
+        ttk.Label(frm, text="Комната (если PER_ROOM):").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
+        cmb_room = ttk.Combobox(frm, state="readonly", width=24)
+        cmb_room.grid(row=1, column=1, sticky="w", pady=4)
+        cmb_room["values"] = ["(не выбрано)"] + [f"{r['room_no']} | id={r['id']}" for r in self._rooms]
+
+        ttk.Label(frm, text="Действует с (дд.мм.гггг):").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=4)
+        ent_vf = ttk.Entry(frm, width=20)
+        ent_vf.grid(row=2, column=1, sticky="w", pady=4)
+
+        ttk.Label(frm, text="Цена/сутки:").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=4)
+        ent_price = ttk.Entry(frm, width=20)
+        ent_price.grid(row=3, column=1, sticky="w", pady=4)
+
+        ttk.Label(frm, text="Валюта:").grid(row=4, column=0, sticky="e", padx=(0, 6), pady=4)
+        ent_cur = ttk.Entry(frm, width=10)
+        ent_cur.grid(row=4, column=1, sticky="w", pady=4)
+        ent_cur.insert(0, "RUB")
+
+        ttk.Label(frm, text="Комментарий:").grid(row=5, column=0, sticky="ne", padx=(0, 6), pady=4)
+        txt = tk.Text(frm, width=40, height=4)
+        txt.grid(row=5, column=1, sticky="w", pady=4)
+
+        if rate:
+            # определяем тип
+            if rate.get("room_id"):
+                cmb_type.set("PER_ROOM")
+            else:
+                cmb_type.set("PER_DORM")
+
+            # выбираем комнату
+            if rate.get("room_id"):
+                rid = int(rate["room_id"])
+                idx = 0
+                for i, r in enumerate(self._rooms):
+                    if int(r["id"]) == rid:
+                        idx = i + 1
+                        break
+                cmb_room.current(idx)
+            else:
+                cmb_room.current(0)
+
+            ent_vf.insert(0, rate["valid_from"].strftime("%d.%m.%Y"))
+            ent_price.insert(0, str(rate.get("price_per_day") or ""))
+            ent_cur.delete(0, "end")
+            ent_cur.insert(0, rate.get("currency") or "RUB")
+            txt.insert("1.0", rate.get("comment") or "")
+        else:
+            cmb_type.set("PER_DORM")
+            cmb_room.current(0)
+            ent_vf.insert(0, datetime.now().strftime("%d.%m.%Y"))
+
+        def on_save():
+            rtype = (cmb_type.get() or "").strip()
+            if rtype not in ("PER_DORM", "PER_ROOM"):
+                messagebox.showwarning("Тариф", "Выберите тип тарифа.", parent=win)
+                return
+
+            vf = _parse_date(ent_vf.get())
+            if not vf:
+                messagebox.showwarning("Тариф", "Некорректная дата.", parent=win)
+                return
+
+            try:
+                price = float((ent_price.get() or "").replace(",", "."))
+                if price < 0:
+                    raise ValueError
+            except Exception:
+                messagebox.showwarning("Тариф", "Некорректная цена.", parent=win)
+                return
+
+            cur = (ent_cur.get() or "").strip() or "RUB"
+            comment = (txt.get("1.0", "end").strip() or "")
+
+            dorm_id = int(dorm["id"])
+            room_id = None
+
+            if rtype == "PER_ROOM":
+                if cmb_room.current() <= 0:
+                    messagebox.showwarning("Тариф", "Для PER_ROOM нужно выбрать комнату.", parent=win)
+                    return
+                room_id = int(self._rooms[cmb_room.current() - 1]["id"])
+                dorm_id_for_save = None
+            else:
+                dorm_id_for_save = dorm_id
+                room_id = None
+
+            user_id = (self.app_ref.current_user or {}).get("id") if hasattr(self.app_ref, "current_user") else None
+            try:
+                upsert_rate(
+                    rate_id=int(rate["id"]) if rate else None,
+                    dorm_id=dorm_id_for_save,
+                    room_id=room_id,
+                    valid_from=vf,
+                    price_per_day=price,
+                    currency=cur,
+                    created_by=user_id,
+                    comment=comment,
+                )
+            except Exception as e:
+                messagebox.showerror("Тариф", f"Ошибка сохранения:\n{e}", parent=win)
+                return
+
+            win.destroy()
+            self._reload_rates()
+
+        btns = tk.Frame(frm)
+        btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        ttk.Button(btns, text="Сохранить", command=on_save).pack(side="right", padx=(6, 0))
+        ttk.Button(btns, text="Отмена", command=win.destroy).pack(side="right")
+
+    def _add(self):
+        self._rate_editor(None)
+
+    def _edit(self):
+        rid = self._selected_rate_id()
+        if not rid:
+            messagebox.showinfo("Тарифы", "Выберите тариф в таблице.", parent=self)
+            return
+        rate = next((r for r in load_rates(None, None) if int(r["id"]) == rid), None)
+        if not rate:
+            messagebox.showerror("Тарифы", "Не удалось загрузить тариф.", parent=self)
+            return
+        self._rate_editor(rate)
+
+    def _delete(self):
+        rid = self._selected_rate_id()
+        if not rid:
+            messagebox.showinfo("Тарифы", "Выберите тариф в таблице.", parent=self)
+            return
+        if not messagebox.askyesno("Удаление", "Удалить тариф?", parent=self):
+            return
+        try:
+            delete_rate(rid)
+        except Exception as e:
+            messagebox.showerror("Тарифы", str(e), parent=self)
+            return
+        self._reload_rates()
+
+    def _check_pick(self):
+        dorm = self._selected_dorm()
+        if not dorm:
+            return
+        dorm_id = int(dorm["id"])
+
+        # нужна комната, чтобы корректно проверять PER_ROOM
+        if self.cmb_room.current() <= 0:
+            messagebox.showinfo("Проверка тарифа", "Выберите комнату (для проверки тарифа на дату).", parent=self)
+            return
+        room_id = int(self._rooms[self.cmb_room.current() - 1]["id"])
+
+        dlg = SimpleTextDialog(self, "Проверка тарифа", "Дата (дд.мм.гггг):", initial=datetime.now().strftime("%d.%m.%Y"))
+        if dlg.value is None:
+            return
+        d = _parse_date(dlg.value)
+        if not d:
+            messagebox.showwarning("Проверка тарифа", "Некорректная дата.", parent=self)
+            return
+
+        try:
+            r = pick_rate_for_date(dorm_id, room_id, d)
+        except Exception as e:
+            messagebox.showerror("Проверка тарифа", str(e), parent=self)
+            return
+
+        messagebox.showinfo(
+            "Проверка тарифа",
+            f"Тариф найден:\n"
+            f"valid_from: {r.get('valid_from')}\n"
+            f"price_per_day: {r.get('price_per_day')} {r.get('currency')}\n"
+            f"id: {r.get('id')}",
+            parent=self,
+        )
 
 # ===================== API FOR MAIN APP =====================
 
@@ -933,3 +1364,6 @@ def create_lodging_registry_page(parent, app_ref):
 
 def create_dorms_page(parent, app_ref):
     return DormsPage(parent, app_ref)
+
+def create_rates_page(parent, app_ref):
+    return RatesPage(parent, app_ref)
