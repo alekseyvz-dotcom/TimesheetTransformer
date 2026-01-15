@@ -801,7 +801,13 @@ def _compute_day_summary_from_events(
         minutes = int((last_out - first_in).total_seconds() // 60)
         if minutes < 0:
             minutes = 0
-
+        
+        # --- НОВОЕ: вычитаем обед ---
+        # условие: если отработано строго больше 4 часов (240 минут) -> минус 60 минут
+        if minutes > 4 * 60:
+            minutes = max(0, minutes - 60)
+        # --- /НОВОЕ ---
+        
         summary[fio] = {
             "first_in": first_in,
             "last_out": last_out,
@@ -810,6 +816,7 @@ def _compute_day_summary_from_events(
             "count_in": len(ins),
             "count_out": len(outs),
         }
+
 
     return summary, problems
 
@@ -1106,7 +1113,8 @@ class SkudMappingReviewDialog(tk.Toplevel):
 
         ttk.Button(btns, text="Отметить всех", command=self._select_all).pack(side="left")
         ttk.Button(btns, text="Снять всех", command=self._clear_all).pack(side="left", padx=(6, 0))
-
+        ttk.Button(btns, text="Выгрузить проблемы в Excel", command=self._export_problems_to_excel).pack(side="left", padx=(6, 0))
+        
         ttk.Button(btns, text="Применить", command=self._on_apply).pack(side="right", padx=(6, 0))
         ttk.Button(btns, text="Отмена", command=self._on_cancel).pack(side="right")
 
@@ -1154,6 +1162,76 @@ class SkudMappingReviewDialog(tk.Toplevel):
             if vals:
                 vals[0] = "[ ]"
                 self.tree.item(iid, values=tuple(vals))
+
+    def _export_problems_to_excel(self):
+        if not self._problems:
+            messagebox.showinfo("СКУД", "Проблем нет — выгружать нечего.", parent=self)
+            return
+    
+        from tkinter import filedialog
+        default_name = f"СКУД_проблемы_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Сохранить проблемы СКУД в Excel",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Excel", "*.xlsx"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+    
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Проблемы СКУД"
+    
+            header = [
+                "ФИО (СКУД)",
+                "Проблема",
+                "Входов",
+                "Выходов",
+                "Первый вход",
+                "Последний выход",
+            ]
+            ws.append(header)
+    
+            # ширины колонок
+            ws.column_dimensions["A"].width = 32
+            ws.column_dimensions["B"].width = 26
+            ws.column_dimensions["C"].width = 10
+            ws.column_dimensions["D"].width = 10
+            ws.column_dimensions["E"].width = 20
+            ws.column_dimensions["F"].width = 20
+    
+            for p in self._problems:
+                skud_fio = p.get("skud_fio", "") or ""
+                has_in = bool(p.get("has_in"))
+                has_out = bool(p.get("has_out"))
+    
+                if has_in and not has_out:
+                    problem = "Есть вход, нет выхода"
+                elif has_out and not has_in:
+                    problem = "Есть выход, нет входа"
+                else:
+                    problem = "Неопределено"
+    
+                cnt_in = int(p.get("count_in") or 0)
+                cnt_out = int(p.get("count_out") or 0)
+    
+                first_in = p.get("first_in")
+                last_out = p.get("last_out")
+    
+                first_in_str = first_in.strftime("%d.%m.%Y %H:%M:%S") if isinstance(first_in, datetime) else ""
+                last_out_str = last_out.strftime("%d.%m.%Y %H:%M:%S") if isinstance(last_out, datetime) else ""
+    
+                ws.append([skud_fio, problem, cnt_in, cnt_out, first_in_str, last_out_str])
+    
+            wb.save(path)
+            messagebox.showinfo("СКУД", f"Проблемы сохранены:\n{path}", parent=self)
+    
+        except Exception as e:
+            messagebox.showerror("СКУД", f"Ошибка выгрузки проблем в Excel:\n{e}", parent=self)
+
 
     def _on_apply(self):
         selected_rows = []
