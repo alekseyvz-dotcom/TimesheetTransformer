@@ -608,119 +608,53 @@ class MainApp(tk.Tk):
         self.lbl_header_hint.config(text=hint or "")
 
     def _apply_permissions_visibility(self):
-        def set_state(menu, label_text, condition):
+        from menu_spec import MENU_SPEC, TOP_LEVEL
+    
+        def set_state(menu: tk.Menu, label_text: str, allowed: bool):
             if not menu:
                 return
             try:
                 idx = menu.index(label_text)
-                menu.entryconfig(idx, state="normal" if condition else "disabled")
+                menu.entryconfig(idx, state="normal" if allowed else "disabled")
             except tk.TclError:
+                # label не найден (например, если в меню другой текст) — просто пропускаем
                 pass
     
-        # Объектный табель
-        set_state(self._menu_timesheets, "Создать", self.has_perm("page.timesheet"))
-        set_state(self._menu_timesheets, "Мои табели", self.has_perm("page.my_timesheets"))
-        set_state(self._menu_timesheets, "Реестр табелей", self.has_perm("page.timesheet_registry"))
-        set_state(self._menu_timesheets, "Работники", self.has_perm("page.workers"))
-        set_state(self._menu_timesheets, "Сравнение с 1С", self.has_perm("page.timesheet_compare"))
+        # 1) карта: название секции -> объект submenu в Tk
+        menus_by_section = {
+            "Объектный табель": getattr(self, "_menu_timesheets", None),
+            "Автотранспорт": getattr(self, "_menu_transport", None),
+            "Питание": getattr(self, "_menu_meals", None),
+            "Проживание": getattr(self, "_menu_lodging", None),
+            "Объекты": getattr(self, "_menu_objects", None),
+            "Аналитика": getattr(self, "_menu_analytics", None),
+            "Инструменты": getattr(self, "_menu_tools", None),
+        }
     
-        # Автотранспорт
-        set_state(self._menu_transport, "Создать заявку", self.has_perm("page.transport"))
-        set_state(self._menu_transport, "Мои заявки", self.has_perm("page.my_transport_orders"))
-        set_state(self._menu_transport, "Планирование", self.has_perm("page.planning"))
-        set_state(self._menu_transport, "Реестр", self.has_perm("page.transport_registry"))
+        # 2) внутренние пункты: включаем/выключаем по perm из MENU_SPEC
+        for sec in MENU_SPEC:
+            menu = menus_by_section.get(sec.label)
+            for e in sec.entries:
+                if e.kind != "page":
+                    continue
+                allowed = True if not e.perm else self.has_perm(e.perm)
+                set_state(menu, e.label, allowed)
     
-        # Питание
-        set_state(self._menu_meals, "Создать заявку", self.has_perm("page.meals_order"))
-        set_state(self._menu_meals, "Мои заявки", self.has_perm("page.my_meals_orders"))
-        set_state(self._menu_meals, "Планирование", self.has_perm("page.meals_planning"))
-        set_state(self._menu_meals, "Реестр", self.has_perm("page.meals_registry"))
-        set_state(self._menu_meals, "Работники (питание)", self.has_perm("page.meals_workers"))
-        set_state(self._menu_meals, "Настройки", self.has_perm("page.meals_settings"))
+        # 3) корневые пункты menubar (разделы): если нет ни одного доступного пункта — disable
+        # "Главная" всегда доступна
+        set_state(self._menubar, "Главная", True)
     
-        # Проживание
-        set_state(self._menu_lodging, "Реестр проживаний", self.has_perm("page.lodging_registry"))
-        set_state(self._menu_lodging, "Общежития и комнаты", self.has_perm("page.lodging_dorms"))
-        set_state(self._menu_lodging, "Тарифы (цена за сутки)", self.has_perm("page.lodging_rates"))
+        for sec in MENU_SPEC:
+            any_allowed = any(
+                (e.kind == "page") and ((not e.perm) or self.has_perm(e.perm))
+                for e in sec.entries
+            )
+            set_state(self._menubar, sec.label, any_allowed)
     
-        # Объекты
-        set_state(self._menu_objects, "Создать/Редактировать", self.has_perm("page.object_create"))
-        set_state(self._menu_objects, "Реестр", self.has_perm("page.objects_registry"))
-
-        set_state(self._menu_tools, "Анализ смет", self.has_perm("page.budget"))
-    
-        # Аналитика
-        set_state(self._menu_analytics, "Операционная аналитика", self.has_perm("page.analytics_dashboard"))
-
-        # --- Корневые пункты верхнего меню (разделы) ---
-        def set_menubar_state(label_text: str, allowed: bool):
-            try:
-                idx = self._menubar.index(label_text)
-                self._menubar.entryconfig(idx, state="normal" if allowed else "disabled")
-            except tk.TclError:
-                pass
-
-        # Главная обычно всегда доступна
-        set_menubar_state("Главная", True)
-
-        # Объектный табель
-        timesheets_allowed = any([
-            self.has_perm("page.timesheet"),
-            self.has_perm("page.my_timesheets"),
-            self.has_perm("page.timesheet_registry"),
-            self.has_perm("page.workers"),
-            self.has_perm("page.timesheet_compare"),
-        ])
-        set_menubar_state("Объектный табель", timesheets_allowed)
-
-        # Автотранспорт
-        transport_allowed = any([
-            self.has_perm("page.transport"),
-            self.has_perm("page.my_transport_orders"),
-            self.has_perm("page.planning"),
-            self.has_perm("page.transport_registry"),
-        ])
-        set_menubar_state("Автотранспорт", transport_allowed)
-
-        # Питание
-        meals_allowed = any([
-            self.has_perm("page.meals_order"),
-            self.has_perm("page.my_meals_orders"),
-            self.has_perm("page.meals_planning"),
-            self.has_perm("page.meals_registry"),
-            self.has_perm("page.meals_workers"),
-            self.has_perm("page.meals_settings"),
-        ])
-        set_menubar_state("Питание", meals_allowed)
-
-        # Проживание
-        lodging_allowed = any([
-            self.has_perm("page.lodging_registry"),
-            self.has_perm("page.lodging_dorms"),
-            self.has_perm("page.lodging_rates"),
-        ])
-        set_menubar_state("Проживание", lodging_allowed)
-
-        # Объекты
-        objects_allowed = any([
-            self.has_perm("page.object_create"),
-            self.has_perm("page.objects_registry"),
-        ])
-        set_menubar_state("Объекты", objects_allowed)
-
-        # Аналитика
-        set_menubar_state("Аналитика", self.has_perm("page.analytics_dashboard"))
-
-        # Инструменты (если хотите контролировать)
-        tools_allowed = any([
-            self.has_perm("page.budget"),
-            # если позже добавите права на конвертер — включите сюда
-            # self.has_perm("page.timesheet_converter"),
-        ])
-        set_menubar_state("Инструменты", tools_allowed)
-
-        # Настройки
-        set_menubar_state("Настройки", self.has_perm("page.settings"))
+        # 4) top-level команды (например "Настройки")
+        for e in TOP_LEVEL:
+            allowed = True if not e.perm else self.has_perm(e.perm)
+            set_state(self._menubar, e.label, allowed)
 
     def destroy(self):
         """Корректное завершение работы приложения."""
