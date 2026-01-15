@@ -2,6 +2,7 @@ import calendar
 import re
 import sys
 import logging
+import difflib
 from datetime import datetime, date
 from pathlib import Path
 from typing import List, Tuple, Optional, Any, Dict
@@ -646,6 +647,198 @@ def calc_row_totals(hours_list: List[Optional[str]], year: int, month: int) -> D
 def safe_filename(s: str, maxlen: int = 60) -> str:
     s = re.sub(r'[<>:"/\\|?*\n\r\t]+', "_", str(s or "")).strip()
     return re.sub(r"_+", "_", s)[:maxlen]
+
+def _norm_fio(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = s.replace("ё", "е")
+    s = re.sub(r"[.\t\r\n]+", " ", s)
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+def _best_fio_match_with_score(skud_fio: str, candidates: List[str]) -> Tuple[Optional[str], float]:
+    """
+    Возвращает (best_candidate, score).
+    Score 0..1, где 1 — полное совпадение.
+    """
+    nf = _norm_fio(skud_fio)
+    if not nf:
+        return None, 0.0
+
+    best_name = None
+    best_score = 0.0
+    for cand in candidates:
+        nc = _norm_fio(cand)
+        if not nc:
+            continue
+        score = difflib.SequenceMatcher(None, nf, nc).ratio()
+        if score > best_score:
+            best_score = score
+            best_name = cand
+
+    return best_name, float(best_score)
+
+def _round_hours_nearest(duration_minutes: int) -> int:
+    """
+    Округление до ближайшего часа с порогом 30 минут:
+      7:29 -> 7
+      7:30 -> 8
+    """
+    if duration_minutes <= 0:
+        return 0
+    return int((duration_minutes + 30) // 60)
+
+def _read_skud_events_from_xlsx(path: str) -> List[Dict[str, Any]]:
+    """
+    Читает Excel-отчёт СКУД.
+    Возвращает события:
+      {"dt": datetime, "fio": str, "event": "in"|"out"}
+    """
+    wb = load_workbook(path, data_only=True)
+    ws = wb.active  # обычно нужный лист первый
+
+    # Ищем строку заголовков (где есть "Время", "ФИО сотрудника", "Событие")
+    header_row = None
+    header_map: Dict[str, int] = {}
+
+    max_scan = min(ws.max_row or 0, 60)
+    max_cols = ws.max_column or 0
+
+    for r in range(1, max_scan + 1):
+        row_vals = [str(ws.cell(r, c).value or "").strip() for c in range(1, max_cols + 1)]
+        if "Время" in row_vals and "Событие" in row_vals and "ФИО сотрудника" in row_vals:
+            header_row = r
+            for c, name in enumerate(row_vals, start=1):
+                if name:
+                    header_map[name] = c
+            break
+
+    if not header_row:
+        raise RuntimeError("Не найден заголовок отчёта СКУД (колонки 'Время', 'ФИО сотрудника', 'Событие').")
+
+    c_time = header_map.get("Время")
+    c_fio = header_map.get("ФИО сотрудника")
+    c_event = header_map.get("Событие")
+    if not (c_time and c_fio and c_event):
+        raise RuntimeError("В отчёте СКУД не найдены нужные колонки ('Время','ФИО сотрудника','Событие').")
+
+    events: List[Dict[str, Any]] = []
+    for r in range(header_row + 1, (ws.max_row or header_row) + 1):
+        tval = ws.cell(r, c_time).value
+        fio = str(ws.cell(r, c_fio).value or "").strip()
+        ev = str(ws.cell(r, c_event).value or "").strip()
+
+        if not fio:
+            continue
+        if ev not in ("Вход", "Выход"):
+            continue
+
+        dt = None
+        if isinstance(tval, datetime):
+            dt = tval
+        else:
+            s = str(tval or "").strip()
+            if not s:
+                continue
+            try:
+                dt = datetime.strptime(s, "%d.%m.%Y %H:%M:%S")
+            except Exception:
+                try:
+                    dt = datetime.strptime(s, "%d.%m.%Y %H:%M")
+                except Exception:
+                    continue
+
+        events.append({
+            "dt": dt,
+            "fio": fio,
+            "event": ("in" if ev == "Вход" else "out"),
+        })
+
+    return events
+
+def _compute_day_summary_from_events(
+    events: List[Dict[str, Any]],
+    target_date: date,
+) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Вариант А:
+      - если нет входа или нет выхода -> НЕ применять, только в problems.
+      - если есть и вход и выход -> считаем first_in..last_out и округляем до часа.
+    """
+    by_fio: Dict[str, List[Dict[str, Any]]] = {}
+    for e in events:
+        dt = e.get("dt")
+        if not isinstance(dt, datetime):
+            continue
+        if dt.date() != target_date:
+            continue
+        fio = (e.get("fio") or "").strip()
+        if not fio:
+            continue
+        by_fio.setdefault(fio, []).append(e)
+
+    summary: Dict[str, Dict[str, Any]] = {}
+    problems: List[Dict[str, Any]] = []
+
+    for fio, lst in by_fio.items():
+        lst.sort(key=lambda x: x["dt"])
+        ins = [x["dt"] for x in lst if x.get("event") == "in"]
+        outs = [x["dt"] for x in lst if x.get("event") == "out"]
+
+        if not ins or not outs:
+            problems.append({
+                "skud_fio": fio,
+                "has_in": bool(ins),
+                "has_out": bool(outs),
+                "first_in": ins[0] if ins else None,
+                "last_out": outs[-1] if outs else None,
+                "count_in": len(ins),
+                "count_out": len(outs),
+            })
+            continue
+
+        first_in = ins[0]
+        last_out = outs[-1]
+        minutes = int((last_out - first_in).total_seconds() // 60)
+        if minutes < 0:
+            minutes = 0
+
+        summary[fio] = {
+            "first_in": first_in,
+            "last_out": last_out,
+            "minutes": minutes,
+            "hours_rounded": _round_hours_nearest(minutes),
+            "count_in": len(ins),
+            "count_out": len(outs),
+        }
+
+    return summary, problems
+
+class SelectDateDialog(simpledialog.Dialog):
+    def __init__(self, parent, init_date: date):
+        self.init_date = init_date
+        self.result = None
+        super().__init__(parent, title="Выбор даты (СКУД)")
+
+    def body(self, master):
+        tk.Label(master, text="Дата (дд.мм.гггг):").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=(4, 4))
+        self.ent = ttk.Entry(master, width=16)
+        self.ent.grid(row=0, column=1, sticky="w", pady=(4, 4))
+        self.ent.insert(0, self.init_date.strftime("%d.%m.%Y"))
+        return self.ent
+
+    def validate(self):
+        s = (self.ent.get() or "").strip()
+        try:
+            d = datetime.strptime(s, "%d.%m.%Y").date()
+            self._d = d
+            return True
+        except Exception:
+            messagebox.showwarning("СКУД", "Введите дату в формате дд.мм.гггг")
+            return False
+
+    def apply(self):
+        self.result = self._d
+
 class CopyFromDialog(simpledialog.Dialog):
     def __init__(self, parent, init_year: int, init_month: int):
         self.init_year = init_year
@@ -781,6 +974,199 @@ class SelectObjectIdDialog(tk.Toplevel):
 
     def _on_cancel(self, event=None):
         self.result = None
+        self.destroy()
+
+class SkudMappingReviewDialog(tk.Toplevel):
+    """
+    Таблица сопоставления СКУД -> справочник с чекбоксами и score,
+    + список проблем (нет входа/выхода).
+    Вариант А: проблемные строки не применяются (их нет в таблице применения).
+    """
+    def __init__(self, parent, rows: List[Dict[str, Any]], problems: List[Dict[str, Any]]):
+        super().__init__(parent)
+        self.parent = parent
+        self.title("СКУД — проверка сопоставления перед применением")
+        self.resizable(True, True)
+        self.grab_set()
+
+        self.result = None
+        self._rows = rows
+        self._problems = problems
+
+        main = tk.Frame(self, padx=10, pady=10)
+        main.pack(fill="both", expand=True)
+
+        tk.Label(
+            main,
+            text="Проверьте сопоставления. Снимите галочки с неверных строк.\n"
+                 "Проблемы (нет входа/выхода) показаны ниже и НЕ применяются.",
+            justify="left",
+        ).pack(anchor="w")
+
+        table_frame = tk.Frame(main)
+        table_frame.pack(fill="both", expand=True, pady=(8, 6))
+
+        cols = ("apply", "skud_fio", "matched_fio", "score", "hours", "interval", "counts")
+        self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=12)
+        self.tree.heading("apply", text="Применять")
+        self.tree.heading("skud_fio", text="ФИО из СКУД")
+        self.tree.heading("matched_fio", text="Сопоставлено")
+        self.tree.heading("score", text="Score")
+        self.tree.heading("hours", text="Часы")
+        self.tree.heading("interval", text="Интервал")
+        self.tree.heading("counts", text="Вх/Вых")
+
+        self.tree.column("apply", width=90, anchor="center", stretch=False)
+        self.tree.column("skud_fio", width=280, anchor="w")
+        self.tree.column("matched_fio", width=280, anchor="w")
+        self.tree.column("score", width=70, anchor="center", stretch=False)
+        self.tree.column("hours", width=60, anchor="center", stretch=False)
+        self.tree.column("interval", width=220, anchor="w")
+        self.tree.column("counts", width=70, anchor="center", stretch=False)
+
+        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        self.tree.tag_configure("low_score", foreground="#b00020")
+        self.tree.tag_configure("normal", foreground="#000000")
+
+        self._apply_state: Dict[str, bool] = {}
+
+        for i, r in enumerate(self._rows):
+            iid = f"m_{i}"
+            apply_default = bool(r.get("apply", True))
+            self._apply_state[iid] = apply_default
+
+            score = r.get("score")
+            score_str = f"{score:.2f}" if isinstance(score, (int, float)) else ""
+            hours = r.get("hours_rounded")
+            hours_str = str(hours) if hours is not None else ""
+
+            first_in = r.get("first_in")
+            last_out = r.get("last_out")
+            interval = ""
+            if isinstance(first_in, datetime) and isinstance(last_out, datetime):
+                interval = f"{first_in.strftime('%H:%M:%S')} – {last_out.strftime('%H:%M:%S')}"
+
+            counts = f"{r.get('count_in', 0)}/{r.get('count_out', 0)}"
+
+            apply_mark = "[x]" if apply_default else "[ ]"
+
+            tag = "normal"
+            if isinstance(score, (int, float)) and score < 0.90:
+                tag = "low_score"
+
+            self.tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(apply_mark, r.get("skud_fio", ""), r.get("matched_fio", ""), score_str, hours_str, interval, counts),
+                tags=(tag,),
+            )
+
+        self.tree.bind("<Button-1>", self._on_click)
+        self.tree.bind("<Double-1>", self._on_click)
+
+        prob_frame = tk.LabelFrame(main, text="Проблемы (нет входа/выхода) — НЕ применяются", padx=8, pady=8)
+        prob_frame.pack(fill="both", expand=True, pady=(6, 8))
+        
+        if not self._problems:
+            tk.Label(prob_frame, text="Проблем не найдено.").pack(anchor="w")
+        else:
+            txt = tk.Text(prob_frame, height=7, wrap="word")
+            txt.pack(fill="both", expand=True)
+
+            txt.insert("end", "Невозможно посчитать часы автоматически:\n\n")
+            for p in self._problems:
+                skud_fio = p.get("skud_fio", "")
+                has_in = bool(p.get("has_in"))
+                has_out = bool(p.get("has_out"))
+
+                parts = []
+                if has_in and not has_out:
+                    parts.append("есть ВХОД, нет ВЫХОДА")
+                if has_out and not has_in:
+                    parts.append("есть ВЫХОД, нет ВХОДА")
+
+                first_in = p.get("first_in")
+                last_out = p.get("last_out")
+                t_in = first_in.strftime("%H:%M:%S") if isinstance(first_in, datetime) else "-"
+                t_out = last_out.strftime("%H:%M:%S") if isinstance(last_out, datetime) else "-"
+                cnt_in = p.get("count_in", 0)
+                cnt_out = p.get("count_out", 0)
+
+                txt.insert("end", f"- {skud_fio} ({'/'.join(parts)}) | Вх/Вых {cnt_in}/{cnt_out} | {t_in} – {t_out}\n")
+
+            txt.configure(state="disabled")
+
+        btns = tk.Frame(main)
+        btns.pack(fill="x")
+
+        ttk.Button(btns, text="Отметить всех", command=self._select_all).pack(side="left")
+        ttk.Button(btns, text="Снять всех", command=self._clear_all).pack(side="left", padx=(6, 0))
+
+        ttk.Button(btns, text="Применить", command=self._on_apply).pack(side="right", padx=(6, 0))
+        ttk.Button(btns, text="Отмена", command=self._on_cancel).pack(side="right")
+
+        try:
+            self.update_idletasks()
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            sw = self.winfo_width()
+            sh = self.winfo_height()
+            self.geometry(f"+{px + (pw - sw)//2}+{py + (ph - sh)//2}")
+        except Exception:
+            pass
+
+    def _toggle_iid(self, iid: str):
+        cur = bool(self._apply_state.get(iid, True))
+        new = not cur
+        self._apply_state[iid] = new
+
+        vals = list(self.tree.item(iid, "values"))
+        if vals:
+            vals[0] = "[x]" if new else "[ ]"
+            self.tree.item(iid, values=tuple(vals))
+
+    def _on_click(self, event=None):
+        row_id = self.tree.identify_row(event.y) if event else None
+        col = self.tree.identify_column(event.x) if event else None
+        if not row_id or col != "#1":  # apply колонка
+            return
+        self._toggle_iid(row_id)
+
+    def _select_all(self):
+        for iid in self.tree.get_children():
+            self._apply_state[iid] = True
+            vals = list(self.tree.item(iid, "values"))
+            if vals:
+                vals[0] = "[x]"
+                self.tree.item(iid, values=tuple(vals))
+
+    def _clear_all(self):
+        for iid in self.tree.get_children():
+            self._apply_state[iid] = False
+            vals = list(self.tree.item(iid, "values"))
+            if vals:
+                vals[0] = "[ ]"
+                self.tree.item(iid, values=tuple(vals))
+
+    def _on_apply(self):
+        selected_rows = []
+        for i, r in enumerate(self._rows):
+            iid = f"m_{i}"
+            if self._apply_state.get(iid, False):
+                selected_rows.append(r)
+
+        self.result = {"apply": True, "rows": selected_rows}
+        self.destroy()
+
+    def _on_cancel(self):
+        self.result = {"apply": False, "rows": []}
         self.destroy()
 
 class SelectEmployeesDialog(tk.Toplevel):
@@ -1529,7 +1915,8 @@ class TimesheetPage(tk.Frame):
         ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=6, padx=4)
         ttk.Button(btns, text="Загрузить из Excel", command=self.import_from_excel).grid(row=0, column=7, padx=4)
         ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=8, padx=4)
-        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=9, padx=4)
+        ttk.Button(btns, text="Загрузить СКУД…", command=self.import_from_skud).grid(row=0, column=9, padx=4)
+        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=10, padx=4)
 
         filter_frame = tk.Frame(self)
         filter_frame.pack(fill="x", padx=8, pady=(0, 4))
@@ -2097,6 +2484,148 @@ class TimesheetPage(tk.Frame):
         self._apply_filter()
         self._schedule_auto_save()
         messagebox.showinfo("Очистка", "Все часы были стерты.")
+
+    def import_from_skud(self):
+        """
+        Импорт часов из Excel-отчёта СКУД за выбранный день.
+        Вариант А: если у сотрудника нет входа или выхода — НЕ применять, только показать в проблемах.
+        Перед применением показываем таблицу сопоставления с score и чекбоксами.
+        """
+        if self.read_only:
+            return
+    
+        current_dep = (self.cmb_department.get() or "").strip()
+        if current_dep == "Все":
+            messagebox.showwarning("СКУД", "Выберите конкретное подразделение (не 'Все').")
+            return
+    
+        # дата
+        y, m = self.get_year_month()
+        dlg_date = SelectDateDialog(self, init_date=date(y, m, 1))
+        d = dlg_date.result
+        if d is None:
+            return
+        d = dlg_date.result
+    
+        # файл
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Выберите Excel-отчёт СКУД",
+            filetypes=[("Excel", "*.xlsx"), ("Все", "*.*")]
+        )
+        if not path:
+            return
+    
+        try:
+            events = _read_skud_events_from_xlsx(path)
+    
+            summary_by_skud_fio, problems = _compute_day_summary_from_events(events, target_date=d)
+    
+            if not summary_by_skud_fio and not problems:
+                messagebox.showinfo("СКУД", "В отчёте нет событий с ФИО на выбранную дату.")
+                return
+    
+            # кандидаты для сопоставления: ограничиваем текущим подразделением
+            candidates = list(self.allowed_fio_names) if getattr(self, "allowed_fio_names", None) else self.emp_names
+    
+            mapping_rows: List[Dict[str, Any]] = []
+            for skud_fio, info in sorted(summary_by_skud_fio.items(), key=lambda x: x[0].lower()):
+                best, score = _best_fio_match_with_score(skud_fio, candidates)
+    
+                hours_val = info.get("hours_rounded")
+                # политика по умолчанию:
+                # - если score < 0.90 -> НЕ применять (пусть человек решит)
+                # - если нет best -> НЕ применять
+                # - если hours<=0 -> НЕ применять
+                apply_default = bool(best) and (score >= 0.90) and isinstance(hours_val, int) and hours_val > 0
+    
+                mapping_rows.append({
+                    "skud_fio": skud_fio,
+                    "matched_fio": best or "",
+                    "score": score,
+                    "hours_rounded": hours_val,
+                    "minutes": info.get("minutes"),
+                    "first_in": info.get("first_in"),
+                    "last_out": info.get("last_out"),
+                    "count_in": info.get("count_in"),
+                    "count_out": info.get("count_out"),
+                    "apply": apply_default,
+                })
+    
+            dlg = SkudMappingReviewDialog(self, rows=mapping_rows, problems=problems)
+            self.wait_window(dlg)
+    
+            if not dlg.result or not dlg.result.get("apply"):
+                return
+    
+            chosen = dlg.result.get("rows") or []
+            if not chosen:
+                messagebox.showinfo("СКУД", "Ничего не выбрано для применения.")
+                return
+    
+            # применяем
+            day_idx = max(0, min(30, d.day - 1))
+    
+            idx_by_fio: Dict[str, Dict[str, Any]] = {}
+            for rec in self.model_rows_all:
+                fio = (rec.get("fio") or "").strip()
+                if fio:
+                    idx_by_fio[fio] = rec
+    
+            applied = 0
+            added = 0
+            skipped = 0
+    
+            for r in chosen:
+                matched_fio = (r.get("matched_fio") or "").strip()
+                if not matched_fio:
+                    skipped += 1
+                    continue
+    
+                hours_val = r.get("hours_rounded")
+                if not isinstance(hours_val, int) or hours_val <= 0:
+                    skipped += 1
+                    continue
+    
+                rec = idx_by_fio.get(matched_fio)
+                if rec is None:
+                    tbn, _pos = self.emp_info.get(matched_fio, ("", ""))
+                    rec = {"fio": matched_fio, "tbn": tbn or "", "hours": [None] * 31}
+                    self.model_rows_all.append(rec)
+                    idx_by_fio[matched_fio] = rec
+                    added += 1
+    
+                hours = rec.get("hours") or [None] * 31
+                if len(hours) < 31:
+                    hours = (hours + [None] * 31)[:31]
+    
+                # ставим целое число часов строкой
+                hours[day_idx] = str(hours_val)
+                rec["hours"] = hours
+    
+                applied += 1
+    
+            self._recalc_all_row_totals()
+            self._apply_filter()
+            self._schedule_auto_save()
+    
+            messagebox.showinfo(
+                "СКУД",
+                f"Готово.\n"
+                f"Применено строк: {applied}\n"
+                f"Добавлено сотрудников: {added}\n"
+                f"Проблем (нет входа/выхода): {len(problems)}\n"
+                f"Пропущено строк: {skipped}",
+            )
+    
+        except Exception as e:
+            try:
+                logging.exception("Ошибка импорта СКУД")
+            except Exception:
+                pass
+            messagebox.showerror("СКУД", f"Ошибка при загрузке СКУД:\n{e}")
+
 
     def import_from_excel(self):
         if self.read_only:
