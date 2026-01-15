@@ -734,22 +734,22 @@ def create_app_user(
 
     pwd_hash = _hash_password(password)
     conn = None
-        try:
-            conn = get_db_connection()
-            with conn, conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO app_users (username, password_hash, is_active, full_name, "role", department_id)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    RETURNING id
-                    """,
-                    (username, pwd_hash, is_active, full_name, role_code, department_id),
-                )
-                new_id = cur.fetchone()[0]
-            return new_id
-        finally:
-            if conn:
-                release_db_connection(conn)
+    try:
+        conn = get_db_connection()
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO app_users (username, password_hash, is_active, full_name, "role", department_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (username, pwd_hash, is_active, full_name, role_code, department_id),
+            )
+            new_id = cur.fetchone()[0]
+        return new_id
+    finally:
+        if conn:
+            release_db_connection(conn)
 
 def update_app_user(
     user_id: int,
