@@ -733,7 +733,7 @@ def create_app_user(
         raise ValueError("Роль не указана")
 
     pwd_hash = _hash_password(password)
-     conn = None
+    conn = None
         try:
             conn = get_db_connection()
             with conn, conn.cursor() as cur:
