@@ -300,6 +300,69 @@ def load_timesheet_rows_from_db(object_id: str, object_addr: str, department: st
         if conn:
             release_db_connection(conn)
 
+def load_timesheet_rows_for_copy_from_db(
+    object_id: Optional[str],
+    object_addr: str,
+    department: str,
+    year: int,
+    month: int,
+    user_id: int,
+    with_hours: bool,
+) -> List[Dict[str, Any]]:
+    """
+    Возвращает строки табеля-источника из БД для копирования.
+    Если with_hours=False — часы очищаются.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT h.id
+                FROM timesheet_headers h
+                WHERE COALESCE(h.object_id, '') = COALESCE(%s, '')
+                  AND h.object_addr = %s
+                  AND COALESCE(h.department, '') = COALESCE(%s, '')
+                  AND h.year = %s
+                  AND h.month = %s
+                  AND h.user_id = %s
+                """,
+                (object_id or None, object_addr, department or None, year, month, user_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                return []
+            header_id = row[0]
+
+            cur.execute(
+                """
+                SELECT fio, tbn, hours_raw
+                FROM timesheet_rows
+                WHERE header_id = %s
+                ORDER BY fio, tbn
+                """,
+                (header_id,),
+            )
+
+            result: List[Dict[str, Any]] = []
+            for fio, tbn, hours_raw in cur.fetchall():
+                if with_hours:
+                    hrs = list(hours_raw) if hours_raw is not None else [None] * 31
+                    hrs = (hrs + [None] * 31)[:31]
+                else:
+                    hrs = [None] * 31
+
+                result.append({
+                    "fio": fio or "",
+                    "tbn": tbn or "",
+                    "hours": hrs,
+                })
+            return result
+    finally:
+        if conn:
+            release_db_connection(conn)
+
 def load_timesheet_rows_by_header_id(header_id: int) -> List[Dict[str, Any]]:
     """Загружает строки табеля по ID заголовка."""
     conn = None
@@ -2115,86 +2178,95 @@ class TimesheetPage(tk.Frame):
     def copy_from_month(self):
         if self.read_only:
             return
-
+    
         addr, oid = self.cmb_address.get().strip(), self.cmb_object_id.get().strip()
-        current_dep = self.cmb_department.get().strip()
+        current_dep = (self.cmb_department.get() or "").strip()
+    
         if not addr and not oid:
             messagebox.showwarning("Копирование", "Укажите адрес/ID объекта.")
             return
-
+    
+        if current_dep == "Все":
+            messagebox.showwarning("Копирование", "Выберите конкретное подразделение (не 'Все').")
+            return
+    
+        # user_id (важно: копирование логично делать из табеля того же пользователя)
+        user_id = self.owner_user_id
+        if user_id is None and hasattr(self, "app_ref") and getattr(self.app_ref, "current_user", None):
+            user_id = (self.app_ref.current_user or {}).get("id")
+    
+        if not user_id:
+            messagebox.showerror("Копирование", "Не удалось определить пользователя.")
+            return
+    
         cy, cm = self.get_year_month()
         dlg = CopyFromDialog(self, init_year=cy if cm > 1 else cy - 1, init_month=cm - 1 if cm > 1 else 12)
         if not dlg.result:
             return
-
+    
         src_y = dlg.result["year"]
         src_m = dlg.result["month"]
         with_hours = dlg.result["with_hours"]
         mode = dlg.result["mode"]
-
-        src_path = self._file_path_for(src_y, src_m, addr=addr, oid=oid, department=current_dep)
-        if not src_path or not src_path.exists():
-            messagebox.showwarning(
-                "Копирование",
-                f"Файл-источник не найден:\n{src_path.name if src_path else 'N/A'}",
-            )
-            return
-
+    
         try:
-            wb = load_workbook(src_path, data_only=True)
-            ws = self._ensure_sheet(wb)
-
-            found = []
-            for r in range(2, ws.max_row + 1):
-                if int(ws.cell(r, 3).value or 0) != src_m or int(ws.cell(r, 4).value or 0) != src_y:
-                    continue
-                if oid and (ws.cell(r, 1).value or "") != oid:
-                    continue
-                elif not oid and (ws.cell(r, 2).value or "") != addr:
-                    continue
-                if current_dep != "Все" and (ws.cell(r, 7).value or "") != current_dep:
-                    continue
-
-                fio = str(ws.cell(r, 5).value or "").strip()
-                if not fio:
-                    continue
-
-                hrs = (
-                    [
-                        str(ws.cell(r, c).value or "").strip() or None
-                        for c in range(8, 8 + 31)
-                    ]
-                    if with_hours
-                    else [None] * 31
+            found_rows = load_timesheet_rows_for_copy_from_db(
+                object_id=oid or None,
+                object_addr=addr,
+                department=current_dep,
+                year=src_y,
+                month=src_m,
+                user_id=user_id,
+                with_hours=with_hours,
+            )
+    
+            if not found_rows:
+                messagebox.showinfo(
+                    "Копирование",
+                    "В БД не найден табель-источник для выбранного месяца/объекта/подразделения.\n"
+                    "Проверьте, что в прошлом месяце табель был сохранён в БД.",
                 )
-                found.append((fio, str(ws.cell(r, 6).value or "").strip(), hrs))
-
-            if not found:
-                messagebox.showinfo("Копирование", "В источнике не найдено подходящих сотрудников.")
                 return
-
-            uniq = {((f.lower(), t)): (f, t, h) for f, t, h in found}
+    
+            # уникализация источника
+            uniq = {}
+            for rec in found_rows:
+                fio = (rec.get("fio") or "").strip()
+                tbn = (rec.get("tbn") or "").strip()
+                if not fio and not tbn:
+                    continue
+                uniq[(fio.lower(), tbn)] = rec
             found_uniq = list(uniq.values())
-
+    
             if mode == "replace":
                 self.model_rows_all.clear()
                 self.clear_selection()
-            
-            existing = {(r["fio"].lower(), (r.get("tbn") or "")) for r in self.model_rows_all}
+    
+            existing = {(r["fio"].lower(), (r.get("tbn") or "").strip()) for r in self.model_rows_all}
             added = 0
-            for fio, tbn, hrs in found_uniq:
-                if (fio.lower(), tbn) not in existing:
-                    self.model_rows_all.append({"fio": fio, "tbn": tbn, "hours": hrs})
-                    existing.add((fio.lower(), tbn))
-                    added += 1
-            
+            for rec in found_uniq:
+                key = (rec["fio"].lower(), (rec.get("tbn") or "").strip())
+                if key in existing:
+                    continue
+                self.model_rows_all.append({
+                    "fio": rec["fio"],
+                    "tbn": rec.get("tbn") or "",
+                    "hours": rec.get("hours") or ([None] * 31),
+                })
+                existing.add(key)
+                added += 1
+    
             self._recalc_all_row_totals()
             self._apply_filter()
             self._schedule_auto_save()
             messagebox.showinfo("Копирование", f"Скопировано {added} сотрудников.")
-
+    
         except Exception as e:
-            messagebox.showerror("Копирование", f"Ошибка при копировании:\n{e}")
+            try:
+                logging.exception("Ошибка при копировании из месяца (БД)")
+            except Exception:
+                pass
+            messagebox.showerror("Копирование", f"Ошибка при копировании из БД:\n{e}")
 
     # ---------------- saving / excel sheet ----------------
 
