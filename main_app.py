@@ -123,6 +123,49 @@ def close_db_pool():
         db_connection_pool.closeall()
         db_connection_pool = None
 
+def sync_permissions_from_menu_spec():
+    from menu_spec import MENU_SPEC, TOP_LEVEL
+
+    rows = []
+    for sec in MENU_SPEC:
+        for e in sec.entries:
+            if e.perm:
+                rows.append((e.perm, e.title or e.perm, e.group or "core"))
+
+    for e in TOP_LEVEL:
+        if e.perm:
+            rows.append((e.perm, e.title or e.perm, e.group or "core"))
+
+    # уникализируем по code
+    uniq = {}
+    for code, title, group in rows:
+        uniq[code] = (code, title, group)
+    rows = list(uniq.values())
+
+    if not rows:
+        return
+
+    conn = None
+    try:
+        if not db_connection_pool:
+            raise RuntimeError("Пул соединений недоступен.")
+        conn = db_connection_pool.getconn()
+        with conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO public.app_permissions(code, title, group_name)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (code) DO UPDATE
+                      SET title = EXCLUDED.title,
+                          group_name = EXCLUDED.group_name
+                    """,
+                    rows,
+                )
+    finally:
+        if conn and db_connection_pool:
+            db_connection_pool.putconn(conn)
+
 # --- АУТЕНТИФИКАЦИЯ ---
 
 def _hash_password(password: str, salt: Optional[bytes] = None) -> str:
@@ -339,6 +382,14 @@ class MainApp(tk.Tk):
         self._set_user(None)
         self.show_login()
 
+    def _perm_for_key(self, key: str) -> Optional[str]:
+        from menu_spec import MENU_SPEC
+        for sec in MENU_SPEC:
+            for e in sec.entries:
+                if e.kind == "page" and e.key == key:
+                    return e.perm
+        return None
+
     def _build_menu(self):
         self._menubar = tk.Menu(self)
         self.config(menu=self._menubar)
@@ -457,6 +508,7 @@ class MainApp(tk.Tk):
         if BudgetAnalyzer and hasattr(BudgetAnalyzer, "create_page"):
             m_tools.add_command(label="Анализ смет", command=lambda: self._show_page("budget", lambda p: BudgetAnalyzer.create_page(p)))
         self._menubar.add_cascade(label="Инструменты", menu=m_tools)
+        self._menu_tools = m_tools
         
         self._menu_settings_index = self._menubar.index("end")
         self._menubar.add_command(label="Настройки", command=lambda: Settings.open_settings_window(self))
@@ -464,14 +516,9 @@ class MainApp(tk.Tk):
     def _set_user(self, user: Optional[Dict[str, Any]]):
         self.current_user = user or {}
         self.is_authenticated = bool(user)
-        caption = f" — {user.get('full_name') or user.get('username')}" if user else ""
+        caption = f" — {self.current_user.get('full_name') or self.current_user.get('username')}" if user else ""
         self.title(APP_NAME + caption)
-    
-        if self.current_user.get("permissions") is not None:
-            self._apply_permissions_visibility()
-        else:
-            self._apply_role_visibility()
-
+        self._apply_permissions_visibility()
 
     def on_login_success(self, user: Dict[str, Any]):
         logging.debug(f"MainApp.on_login_success: {user!r}")
@@ -501,34 +548,7 @@ class MainApp(tk.Tk):
             self.show_login()
             return
 
-        PAGE_PERMS = {
-            "home": "page.home",
-            "timesheet": "page.timesheet",
-            "my_timesheets": "page.my_timesheets",
-            "timesheet_registry": "page.timesheet_registry",
-            "workers": "page.workers",
-            "timesheet_compare": "page.timesheet_compare",
-            "transport": "page.transport",
-            "my_transport_orders": "page.my_transport_orders",
-            "planning": "page.planning",
-            "transport_registry": "page.transport_registry",
-            "meals_order": "page.meals_order",
-            "my_meals_orders": "page.my_meals_orders",
-            "meals_planning": "page.meals_planning",
-            "meals_registry": "page.meals_registry",
-            "meals_workers": "page.meals_workers",
-            "meals_settings": "page.meals_settings",
-            "lodging_registry": "page.lodging_registry",
-            "lodging_dorms": "page.lodging_dorms",
-            "lodging_rates": "page.lodging_rates",
-            "object_create": "page.object_create",
-            "objects_registry": "page.objects_registry",
-            "budget": "page.budget",
-            "analytics_dashboard": "page.analytics_dashboard",
-            "login": None,
-        }
-        
-        required = PAGE_PERMS.get(key)
+        required = self._perm_for_key(key)
         if key not in ("login", "home") and required and not self.has_perm(required):
             messagebox.showwarning("Доступ запрещён", "У вас нет прав на этот пункт.")
             self.show_home()
@@ -626,6 +646,8 @@ class MainApp(tk.Tk):
         # Объекты
         set_state(self._menu_objects, "Создать/Редактировать", self.has_perm("page.object_create"))
         set_state(self._menu_objects, "Реестр", self.has_perm("page.objects_registry"))
+
+        set_state(self._menu_tools, "Анализ смет", self.has_perm("page.budget"))
     
         # Аналитика
         set_state(self._menu_analytics, "Операционная аналитика", self.has_perm("page.analytics_dashboard"))
@@ -700,111 +722,6 @@ class MainApp(tk.Tk):
         # Настройки
         set_menubar_state("Настройки", self.has_perm("page.settings"))
 
-    def _apply_role_visibility(self):
-        """
-        Настраивает видимость пунктов меню в зависимости от роли пользователя.
-        Использует названия пунктов меню (label) вместо индексов для надежности.
-        """
-        role = self.current_user.get("role", "specialist")  # по умолчанию 'specialist'
-
-        is_admin = (role == "admin")
-        is_manager = (role in ("admin", "manager"))
-        is_planner = (role in ("admin", "planner", "manager"))
-        is_logist = (role == "logist")
-        can_lodging = (role in ("admin", "manager"))
-
-        def set_state(menu, label_text, condition):
-            """Меняет состояние пункта меню по его тексту."""
-            if not menu:
-                return
-            try:
-                idx = menu.index(label_text)
-                menu.entryconfig(idx, state="normal" if condition else "disabled")
-            except tk.TclError:
-                # Пункт не найден — пропускаем
-                pass
-
-        # === Если ЛОГИСТ ===
-        if is_logist:
-            # --- ВНУТРЕННИЕ пункты разделов ---
-
-            set_state(self._menubar, "Проживание", False)
-
-            # Объектный табель
-            set_state(self._menu_timesheets, "Создать", False)
-            set_state(self._menu_timesheets, "Мои табели", False)
-            set_state(self._menu_timesheets, "Реестр табелей", False)
-            set_state(self._menu_timesheets, "Работники", False)
-            set_state(self._menu_timesheets, "Сравнение с 1С", False)
-
-            # Автотранспорт – только два пункта
-            set_state(self._menu_transport, "Создать заявку", True)
-            set_state(self._menu_transport, "Мои заявки", True)
-            set_state(self._menu_transport, "Планирование", False)
-            set_state(self._menu_transport, "Реестр", False)
-
-            # Питание
-            set_state(self._menu_meals, "Создать заявку", False)
-            set_state(self._menu_meals, "Мои заявки", False)
-            set_state(self._menu_meals, "Планирование", False)
-            set_state(self._menu_meals, "Реестр", False)
-            set_state(self._menu_meals, "Работники (питание)", False)
-            set_state(self._menu_meals, "Настройки", False)
-
-            # Объекты
-            set_state(self._menu_objects, "Создать/Редактировать", False)
-            set_state(self._menu_objects, "Реестр", False)
-
-            # --- Корневые пункты (разделы верхнего меню) ---
-            # Отключаем целиком разделы
-            set_state(self._menubar, "Объектный табель", False)
-            set_state(self._menubar, "Питание", False)
-            set_state(self._menubar, "Объекты", False)
-            set_state(self._menubar, "Аналитика", False)
-            set_state(self._menubar, "Инструменты", False)
-            set_state(self._menubar, "Настройки", False)
-            # "Главная" и "Автотранспорт" остаются активными
-
-            return  # для логиста дальше не продолжаем
-
-        # === Остальные роли (старое поведение) ===
-
-        # Объектный табель
-        set_state(self._menu_timesheets, "Создать", True)
-        set_state(self._menu_timesheets, "Мои табели", True)
-        set_state(self._menu_timesheets, "Реестр табелей", is_manager)
-        set_state(self._menu_timesheets, "Работники", True)
-        set_state(self._menu_timesheets, "Сравнение с 1С", True)
-
-        # Автотранспорт
-        set_state(self._menu_transport, "Создать заявку", True)
-        set_state(self._menu_transport, "Мои заявки", True)
-        set_state(self._menu_transport, "Планирование", is_planner)
-        set_state(self._menu_transport, "Реестр", is_planner)
-
-        # Питание
-        set_state(self._menu_meals, "Создать заявку", True)
-        set_state(self._menu_meals, "Мои заявки", True)
-        set_state(self._menu_meals, "Планирование", is_planner)
-        set_state(self._menu_meals, "Реестр", is_planner)
-        set_state(self._menu_meals, "Работники (питание)", is_planner)
-        set_state(self._menu_meals, "Настройки", is_admin)
-
-        # Проживание
-        set_state(self._menubar, "Проживание", can_lodging)
-
-        # Объекты
-        set_state(self._menu_objects, "Создать/Редактировать", is_manager)
-        set_state(self._menu_objects, "Реестр", True)
-
-        # Корневые пункты (разделы верхнего меню)
-        set_state(self._menubar, "Объектный табель", True)
-        set_state(self._menubar, "Питание", True)
-        set_state(self._menubar, "Объекты", True)
-        set_state(self._menubar, "Аналитика", is_manager)
-        set_state(self._menubar, "Инструменты", True)  # если когда‑то нужно ограничить – можно добавить по ролям
-        set_state(self._menubar, "Настройки", is_admin)
-
     def destroy(self):
         """Корректное завершение работы приложения."""
         logging.info("Приложение закрывается. Закрываем пул соединений.")
@@ -834,6 +751,8 @@ if __name__ == "__main__":
 
             splash.update_status("Подключение к базе данных...")
             initialize_db_pool()
+
+            sync_permissions_from_menu_spec()
 
             splash.update_status("Передача настроек в модули...")
             modules_to_init = [
