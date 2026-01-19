@@ -198,10 +198,18 @@ class AnalyticsData:
         return df
 
     def get_labor_by_department(self) -> pd.DataFrame:
+        """
+        Суммарные человеко-часы и количество людей по подразделениям.
+        Источник названия:
+          1) departments.name по timesheet_headers.department_id
+          2) timesheet_headers.department (текст)
+          3) '—'
+        Людей считаем как DISTINCT по tbn (если есть), иначе по fio.
+        """
         base_query = """
         SELECT
-            COALESCE(d.name,'—') AS department_name,
-            SUM(tr.total_hours) AS total_hours,
+            COALESCE(d.name, NULLIF(th.department,''), '—') AS department_name,
+            SUM(COALESCE(tr.total_hours,0)) AS total_hours,
             COUNT(DISTINCT COALESCE(NULLIF(tr.tbn,''), tr.fio)) AS people_cnt
         FROM timesheet_headers th
         JOIN timesheet_rows tr ON th.id = tr.header_id
@@ -209,26 +217,29 @@ class AnalyticsData:
         {join_clause}
         WHERE (th.year * 100 + th.month) BETWEEN %s AND %s
         {filter_clause}
-        GROUP BY d.name
+        GROUP BY COALESCE(d.name, NULLIF(th.department,''), '—')
         ORDER BY total_hours DESC;
         """
+    
         start_period = self.start_date.year * 100 + self.start_date.month
         end_period = self.end_date.year * 100 + self.end_date.month
         params: List[Any] = [start_period, end_period]
-
+    
         join_clause = ""
         filter_clause = ""
         if self.object_type_filter:
             join_clause = "LEFT JOIN objects o ON th.object_db_id = o.id"
             filter_clause = "AND o.short_name = %s"
             params.append(self.object_type_filter)
-
+    
         query = base_query.format(join_clause=join_clause, filter_clause=filter_clause)
         data = self._execute_query(query, tuple(params))
+    
         df = pd.DataFrame(data)
         if not df.empty:
             df["total_hours"] = df["total_hours"].astype(float)
             df["people_cnt"] = df["people_cnt"].astype(int)
+            df["department_name"] = df["department_name"].fillna("—")
         return df
 
     # ============================================================
