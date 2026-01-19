@@ -1,4 +1,13 @@
 # analytics_module.py
+# Добавлено: таб "Проживание", KPI/графики/таблицы, а также срез
+# "из какого общежития на каких объектах работают люди" (по табелям).
+#
+# Важно:
+# - День выезда НЕ включаем (условие: check_out > d).
+# - Денежный расчёт делаем в валюте RUB (если в БД есть другие валюты — их
+#   можно показать отдельно, но здесь суммируем только RUB и считаем missing_rate.
+# - object_type_filter (short_name objects) влияет на срез "общежитие -> объекты",
+#   и не влияет на финансовую часть проживания (там нет связи с objects).
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -99,7 +108,6 @@ class AnalyticsData:
         query = base_query.format(join_clause=join_clause, filter_clause=filter_clause)
         result = self._execute_query(query, tuple(params))
         row = result[0] if result else {}
-        # приводим к "обычным" питоновским типам
         for k in ("total_hours", "total_days", "total_overtime"):
             if k in row and row[k] is not None:
                 row[k] = float(row[k])
@@ -136,7 +144,6 @@ class AnalyticsData:
             df["total_hours"] = df["total_hours"].astype(float)
         return df
 
-    # 1.1. Динамика трудозатрат по месяцам
     def get_labor_trend_by_month(self) -> pd.DataFrame:
         """Возвращает суммарные человеко-часы по месяцам в выбранном периоде."""
         base_query = """
@@ -170,7 +177,6 @@ class AnalyticsData:
             df["total_hours"] = df["total_hours"].astype(float)
         return df
 
-    # 1.2. ТОП‑сотрудники по часам
     def get_top_employees_by_hours(self, limit: int = 10) -> pd.DataFrame:
         """ТОП сотрудников по суммарным часам за период."""
         base_query = """
@@ -209,7 +215,6 @@ class AnalyticsData:
             df["total_overtime"] = df["total_overtime"].astype(float)
         return df
 
-    # 1.3. Нагрузка по подразделениям
     def get_labor_by_department(self) -> pd.DataFrame:
         """Суммарные человеко-часы по подразделениям."""
         base_query = """
@@ -273,10 +278,7 @@ class AnalyticsData:
         total_hours = float(kpi.get("total_machine_hours", 0) or 0)
         total_orders = int(kpi.get("total_orders", 0) or 0)
         total_units = float(kpi.get("total_units", 0) or 0)
-        if total_orders > 0:
-            avg = total_hours / total_orders
-        else:
-            avg = 0.0
+        avg = (total_hours / total_orders) if total_orders > 0 else 0.0
         kpi["total_machine_hours"] = total_hours
         kpi["total_orders"] = total_orders
         kpi["total_units"] = total_units
@@ -391,7 +393,6 @@ class AnalyticsData:
         df = pd.DataFrame(data)
         return df
 
-    # 3.2 Питание по объектам
     def get_meals_by_object(self, limit: int = 10) -> pd.DataFrame:
         """Количество порций и людей по объектам."""
         base_query = """
@@ -422,7 +423,6 @@ class AnalyticsData:
         df = pd.DataFrame(data)
         return df
 
-    # 3.3 Питание по подразделениям
     def get_meals_by_department(self) -> pd.DataFrame:
         """Питание по подразделениям: порции и люди."""
         base_query = """
@@ -576,6 +576,362 @@ class AnalyticsData:
                 df[col] = df[col].astype(float)
         return df
 
+    # ============================================================
+    #                      6. ПРОЖИВАНИЕ (НОВОЕ)
+    # ============================================================
+
+    def get_lodging_kpi(self) -> Dict[str, Any]:
+        """
+        KPI по проживанию за период:
+        - bed_days: койко-дни (занятые места * дни)
+        - amount_rub: начислено по тарифам (учитываются смены тарифов), только RUB
+        - avg_price_rub: средняя цена койко-дня RUB
+        - active_on_end: проживающих на end_date
+        - missing_rate_bed_days: койко-дни без тарифа
+        """
+        query = """
+        WITH days AS (
+            SELECT generate_series(%s::date, %s::date, interval '1 day')::date AS d
+        ),
+        stays_on_day AS (
+            SELECT
+                dd.d,
+                s.id AS stay_id,
+                s.employee_id,
+                s.dorm_id,
+                s.room_id
+            FROM days dd
+            JOIN dorm_stays s
+              ON s.check_in <= dd.d
+             AND (s.check_out IS NULL OR s.check_out > dd.d)  -- день выезда НЕ включаем
+        ),
+        dorm_mode AS (
+            SELECT id, rate_mode FROM dorms
+        ),
+        rate_on_day AS (
+            SELECT
+                sod.d,
+                sod.stay_id,
+                CASE
+                    WHEN dm.rate_mode = 'PER_ROOM' THEN (
+                        SELECT dr.price_per_day
+                        FROM dorm_rates dr
+                        WHERE dr.room_id = sod.room_id
+                          AND dr.valid_from <= sod.d
+                          AND COALESCE(dr.currency,'RUB') = 'RUB'
+                        ORDER BY dr.valid_from DESC
+                        LIMIT 1
+                    )
+                    ELSE (
+                        SELECT dr.price_per_day
+                        FROM dorm_rates dr
+                        WHERE dr.dorm_id = sod.dorm_id
+                          AND dr.valid_from <= sod.d
+                          AND COALESCE(dr.currency,'RUB') = 'RUB'
+                        ORDER BY dr.valid_from DESC
+                        LIMIT 1
+                    )
+                END AS price_per_day
+            FROM stays_on_day sod
+            JOIN dorm_mode dm ON dm.id = sod.dorm_id
+        )
+        SELECT
+            COUNT(*)::int AS bed_days,
+            COALESCE(SUM(COALESCE(price_per_day, 0)), 0)::numeric AS amount_rub,
+            COALESCE(AVG(price_per_day), 0)::numeric AS avg_price_rub,
+            (
+                SELECT COUNT(*)
+                FROM dorm_stays s2
+                WHERE s2.check_in <= %s::date
+                  AND (s2.check_out IS NULL OR s2.check_out > %s::date)
+            )::int AS active_on_end,
+            (
+                SELECT COUNT(*)
+                FROM rate_on_day
+                WHERE price_per_day IS NULL
+            )::int AS missing_rate_bed_days
+        FROM rate_on_day;
+        """
+        rows = self._execute_query(query, (self.start_date, self.end_date, self.end_date, self.end_date))
+        return rows[0] if rows else {}
+
+    def get_lodging_daily(self) -> pd.DataFrame:
+        """
+        Динамика по дням:
+        - occupied_beds: сколько мест занято в конкретный день
+        - amount_rub: начислено за день (RUB)
+        - missing_rate_beds: сколько мест в этот день без тарифа
+        """
+        query = """
+        WITH days AS (
+            SELECT generate_series(%s::date, %s::date, interval '1 day')::date AS d
+        ),
+        stays_on_day AS (
+            SELECT
+                dd.d,
+                s.dorm_id,
+                s.room_id
+            FROM days dd
+            JOIN dorm_stays s
+              ON s.check_in <= dd.d
+             AND (s.check_out IS NULL OR s.check_out > dd.d) -- день выезда НЕ включаем
+        ),
+        dorm_mode AS (
+            SELECT id, rate_mode FROM dorms
+        ),
+        rated AS (
+            SELECT
+                sod.d,
+                CASE
+                    WHEN dm.rate_mode = 'PER_ROOM' THEN (
+                        SELECT dr.price_per_day
+                        FROM dorm_rates dr
+                        WHERE dr.room_id = sod.room_id
+                          AND dr.valid_from <= sod.d
+                          AND COALESCE(dr.currency,'RUB') = 'RUB'
+                        ORDER BY dr.valid_from DESC
+                        LIMIT 1
+                    )
+                    ELSE (
+                        SELECT dr.price_per_day
+                        FROM dorm_rates dr
+                        WHERE dr.dorm_id = sod.dorm_id
+                          AND dr.valid_from <= sod.d
+                          AND COALESCE(dr.currency,'RUB') = 'RUB'
+                        ORDER BY dr.valid_from DESC
+                        LIMIT 1
+                    )
+                END AS price_per_day
+            FROM stays_on_day sod
+            JOIN dorm_mode dm ON dm.id = sod.dorm_id
+        )
+        SELECT
+            d,
+            COUNT(*)::int AS occupied_beds,
+            COALESCE(SUM(COALESCE(price_per_day,0)),0)::numeric AS amount_rub,
+            SUM(CASE WHEN price_per_day IS NULL THEN 1 ELSE 0 END)::int AS missing_rate_beds
+        FROM rated
+        GROUP BY d
+        ORDER BY d;
+        """
+        data = self._execute_query(query, (self.start_date, self.end_date))
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df["occupied_beds"] = df["occupied_beds"].astype(int)
+            df["amount_rub"] = df["amount_rub"].astype(float)
+            df["missing_rate_beds"] = df["missing_rate_beds"].astype(int)
+        return df
+
+    def get_lodging_by_dorm(self, limit: int = 10) -> pd.DataFrame:
+        """ТОП общежитий по начислениям (RUB) и койко-дням."""
+        query = """
+        WITH days AS (
+            SELECT generate_series(%s::date, %s::date, interval '1 day')::date AS d
+        ),
+        stays_on_day AS (
+            SELECT
+                dd.d,
+                s.dorm_id,
+                s.room_id
+            FROM days dd
+            JOIN dorm_stays s
+              ON s.check_in <= dd.d
+             AND (s.check_out IS NULL OR s.check_out > dd.d)
+        ),
+        dorm_mode AS (
+            SELECT id, rate_mode, name FROM dorms
+        ),
+        rated AS (
+            SELECT
+                sod.d,
+                sod.dorm_id,
+                CASE
+                    WHEN dm.rate_mode = 'PER_ROOM' THEN (
+                        SELECT dr.price_per_day
+                        FROM dorm_rates dr
+                        WHERE dr.room_id = sod.room_id
+                          AND dr.valid_from <= sod.d
+                          AND COALESCE(dr.currency,'RUB') = 'RUB'
+                        ORDER BY dr.valid_from DESC
+                        LIMIT 1
+                    )
+                    ELSE (
+                        SELECT dr.price_per_day
+                        FROM dorm_rates dr
+                        WHERE dr.dorm_id = sod.dorm_id
+                          AND dr.valid_from <= sod.d
+                          AND COALESCE(dr.currency,'RUB') = 'RUB'
+                        ORDER BY dr.valid_from DESC
+                        LIMIT 1
+                    )
+                END AS price_per_day
+            FROM stays_on_day sod
+            JOIN dorm_mode dm ON dm.id = sod.dorm_id
+        )
+        SELECT
+            dm.name AS dorm_name,
+            COUNT(*)::int AS bed_days,
+            COALESCE(SUM(COALESCE(r.price_per_day,0)),0)::numeric AS amount_rub,
+            COALESCE(AVG(r.price_per_day),0)::numeric AS avg_price_rub,
+            SUM(CASE WHEN r.price_per_day IS NULL THEN 1 ELSE 0 END)::int AS missing_rate_bed_days
+        FROM rated r
+        JOIN dorm_mode dm ON dm.id = r.dorm_id
+        GROUP BY dm.name
+        ORDER BY amount_rub DESC
+        LIMIT %s;
+        """
+        data = self._execute_query(query, (self.start_date, self.end_date, limit))
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df["bed_days"] = df["bed_days"].astype(int)
+            df["amount_rub"] = df["amount_rub"].astype(float)
+            df["avg_price_rub"] = df["avg_price_rub"].astype(float)
+            df["missing_rate_bed_days"] = df["missing_rate_bed_days"].astype(int)
+        return df
+
+    def get_lodging_by_department(self) -> pd.DataFrame:
+        """Проживание по подразделениям (employees.department_id)."""
+        query = """
+        WITH days AS (
+            SELECT generate_series(%s::date, %s::date, interval '1 day')::date AS d
+        ),
+        stays_on_day AS (
+            SELECT
+                dd.d,
+                s.employee_id,
+                s.dorm_id,
+                s.room_id
+            FROM days dd
+            JOIN dorm_stays s
+              ON s.check_in <= dd.d
+             AND (s.check_out IS NULL OR s.check_out > dd.d)
+        ),
+        dorm_mode AS (
+            SELECT id, rate_mode FROM dorms
+        ),
+        rated AS (
+            SELECT
+                sod.d,
+                sod.employee_id,
+                CASE
+                    WHEN dm.rate_mode = 'PER_ROOM' THEN (
+                        SELECT dr.price_per_day
+                        FROM dorm_rates dr
+                        WHERE dr.room_id = sod.room_id
+                          AND dr.valid_from <= sod.d
+                          AND COALESCE(dr.currency,'RUB') = 'RUB'
+                        ORDER BY dr.valid_from DESC
+                        LIMIT 1
+                    )
+                    ELSE (
+                        SELECT dr.price_per_day
+                        FROM dorm_rates dr
+                        WHERE dr.dorm_id = sod.dorm_id
+                          AND dr.valid_from <= sod.d
+                          AND COALESCE(dr.currency,'RUB') = 'RUB'
+                        ORDER BY dr.valid_from DESC
+                        LIMIT 1
+                    )
+                END AS price_per_day
+            FROM stays_on_day sod
+            JOIN dorm_mode dm ON dm.id = sod.dorm_id
+        )
+        SELECT
+            COALESCE(dep.name,'—') AS department_name,
+            COUNT(*)::int AS bed_days,
+            COALESCE(SUM(COALESCE(r.price_per_day,0)),0)::numeric AS amount_rub,
+            SUM(CASE WHEN r.price_per_day IS NULL THEN 1 ELSE 0 END)::int AS missing_rate_bed_days
+        FROM rated r
+        JOIN employees e ON e.id = r.employee_id
+        LEFT JOIN departments dep ON dep.id = e.department_id
+        GROUP BY dep.name
+        ORDER BY amount_rub DESC;
+        """
+        data = self._execute_query(query, (self.start_date, self.end_date))
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df["bed_days"] = df["bed_days"].astype(int)
+            df["amount_rub"] = df["amount_rub"].astype(float)
+            df["missing_rate_bed_days"] = df["missing_rate_bed_days"].astype(int)
+        return df
+
+    def get_dorm_to_objects(self, limit: int = 15) -> pd.DataFrame:
+        """
+        "Из какого общежития на каких объектах работают люди" за период
+        (по объектным табелям, привязка сотрудников к общежитию на конкретный месяц).
+
+        Логика:
+        - берём табельные строки tr за период (год*100+месяц)
+        - на каждый месяц ищем проживание сотрудника, которое пересекает этот месяц
+          (мы берём факт проживания на 1-е число месяца; если нужно иначе — скажи)
+        - агрегируем часы по (общежитие, объект)
+        - object_type_filter применяется (если выбран)
+        """
+        start_period = self.start_date.year * 100 + self.start_date.month
+        end_period = self.end_date.year * 100 + self.end_date.month
+
+        join_obj = "LEFT JOIN objects o ON th.object_db_id = o.id"
+        obj_filter = ""
+        params: List[Any] = [start_period, end_period]
+        if self.object_type_filter:
+            obj_filter = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
+
+        query = f"""
+        WITH labor AS (
+            SELECT
+                th.year,
+                th.month,
+                th.object_db_id AS object_id,
+                tr.employee_id,
+                SUM(tr.total_hours) AS total_hours
+            FROM timesheet_headers th
+            JOIN timesheet_rows tr ON th.id = tr.header_id
+            {join_obj}
+            WHERE (th.year * 100 + th.month) BETWEEN %s AND %s
+            {obj_filter}
+            GROUP BY th.year, th.month, th.object_db_id, tr.employee_id
+        ),
+        labor_month AS (
+            SELECT
+                l.*,
+                make_date(l.year, l.month, 1)::date AS month_date
+            FROM labor l
+        ),
+        with_dorm AS (
+            SELECT
+                lm.object_id,
+                lm.total_hours,
+                (
+                    SELECT d.name
+                    FROM dorm_stays s
+                    JOIN dorms d ON d.id = s.dorm_id
+                    WHERE s.employee_id = lm.employee_id
+                      AND s.check_in <= lm.month_date
+                      AND (s.check_out IS NULL OR s.check_out > lm.month_date)
+                    ORDER BY s.check_in DESC
+                    LIMIT 1
+                ) AS dorm_name
+            FROM labor_month lm
+        )
+        SELECT
+            COALESCE(wd.dorm_name, '— (без проживания)') AS dorm_name,
+            COALESCE(o.address, '—') AS object_name,
+            SUM(wd.total_hours)::numeric AS total_hours
+        FROM with_dorm wd
+        LEFT JOIN objects o ON o.id = wd.object_id
+        GROUP BY dorm_name, object_name
+        ORDER BY total_hours DESC
+        LIMIT {int(limit)};
+        """
+        data = self._execute_query(query, tuple(params))
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df["total_hours"] = df["total_hours"].astype(float)
+            df["dorm_name"] = df["dorm_name"].fillna("—")
+            df["object_name"] = df["object_name"].fillna("—")
+        return df
+
 
 # ============================================================
 #                      UI: ANALYTICS PAGE
@@ -628,12 +984,14 @@ class AnalyticsPage(ttk.Frame):
         self.tab_meals = ttk.Frame(self.notebook)
         self.tab_objects = ttk.Frame(self.notebook)
         self.tab_users = ttk.Frame(self.notebook)
+        self.tab_lodging = ttk.Frame(self.notebook)  # НОВОЕ
 
         self.notebook.add(self.tab_labor, text="  Трудозатраты  ")
         self.notebook.add(self.tab_transport, text="  Транспорт и Техника  ")
         self.notebook.add(self.tab_meals, text="  Питание  ")
         self.notebook.add(self.tab_objects, text="  Объекты  ")
         self.notebook.add(self.tab_users, text="  Активность пользователей  ")
+        self.notebook.add(self.tab_lodging, text="  Проживание  ")  # НОВОЕ
 
         self.data_provider: Optional[AnalyticsData] = None
         self.load_filters()
@@ -689,6 +1047,7 @@ class AnalyticsPage(ttk.Frame):
         self._build_meals_tab()
         self._build_objects_tab()
         self._build_users_tab()
+        self._build_lodging_tab()  # НОВОЕ
 
     # ---------- Вспомогательные методы UI ----------
 
@@ -734,7 +1093,6 @@ class AnalyticsPage(ttk.Frame):
     def _build_labor_tab(self):
         self._clear_tab(self.tab_labor)
 
-        # KPI
         kpi_frame = ttk.Frame(self.tab_labor)
         kpi_frame.pack(fill="x", pady=10, padx=5)
 
@@ -753,7 +1111,6 @@ class AnalyticsPage(ttk.Frame):
         charts_frame = ttk.Frame(self.tab_labor)
         charts_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # левая часть — ТОП объектов
         left_frame = ttk.LabelFrame(charts_frame, text="ТОП-10 объектов по трудозатратам")
         left_frame.pack(side="left", fill="both", expand=True, padx=(0, 5))
 
@@ -793,7 +1150,6 @@ class AnalyticsPage(ttk.Frame):
             canvas1.draw()
             canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # правая часть — тренд + топ сотрудников
         right_frame = ttk.Frame(charts_frame)
         right_frame.pack(side="left", fill="both", expand=True, padx=(5, 0))
 
@@ -956,7 +1312,6 @@ class AnalyticsPage(ttk.Frame):
                     total = float(sum(values))
                     val = int(round(pct * total / 100.0))
                     return f"{pct:.1f}%\n({val:d} шт.)"
-
                 return my_format
 
             ax1.pie(
@@ -1236,3 +1591,196 @@ class AnalyticsPage(ttk.Frame):
         canvas = FigureCanvasTkAgg(fig, master=chart_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+    # ============================================================
+    #                   TAB 6: ПРОЖИВАНИЕ (НОВОЕ)
+    # ============================================================
+
+    def _build_lodging_tab(self):
+        self._clear_tab(self.tab_lodging)
+
+        # KPI
+        kpi_frame = ttk.Frame(self.tab_lodging)
+        kpi_frame.pack(fill="x", pady=10, padx=5)
+
+        kpi = self.data_provider.get_lodging_kpi()
+        bed_days = int(kpi.get("bed_days", 0) or 0)
+        amount_rub = float(kpi.get("amount_rub", 0) or 0)
+        avg_price = float(kpi.get("avg_price_rub", 0) or 0)
+        active_on_end = int(kpi.get("active_on_end", 0) or 0)
+        missing_rate_bed_days = int(kpi.get("missing_rate_bed_days", 0) or 0)
+
+        cards = [
+            ("Койко-дней", bed_days, "дней"),
+            ("Начислено (RUB)", f"{amount_rub:,.0f}".replace(",", " "), "₽"),
+            ("Средняя цена", f"{avg_price:,.0f}".replace(",", " "), "₽/день"),
+            ("Проживает на конец", active_on_end, "чел."),
+        ]
+        for i, (title, value, unit) in enumerate(cards):
+            card = self._create_kpi_card(kpi_frame, title, value, unit)
+            card.grid(row=0, column=i, padx=5, sticky="ew")
+            kpi_frame.grid_columnconfigure(i, weight=1)
+
+        # предупреждение про тарифы
+        if missing_rate_bed_days > 0:
+            warn = ttk.Label(
+                self.tab_lodging,
+                text=f"Внимание: {missing_rate_bed_days} койко-дней без тарифа (RUB). Проверьте dorm_rates.",
+                foreground="#B00020",
+            )
+            warn.pack(anchor="w", padx=10, pady=(0, 8))
+
+        # Верх: 2 графика
+        charts_frame = ttk.Frame(self.tab_lodging)
+        charts_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        left = ttk.LabelFrame(charts_frame, text="Занято мест по дням")
+        left.pack(side="left", fill="both", expand=True, padx=(0, 5))
+
+        right = ttk.LabelFrame(charts_frame, text="Начисления (RUB) по дням")
+        right.pack(side="left", fill="both", expand=True, padx=(5, 0))
+
+        df_daily = self.data_provider.get_lodging_daily()
+        if not df_daily.empty:
+            df_daily = df_daily.copy()
+            df_daily["d"] = pd.to_datetime(df_daily["d"])
+            df_daily["label"] = df_daily["d"].dt.strftime("%d.%m")
+
+            # Занятость
+            fig1 = Figure(figsize=(5, 3.6), dpi=100)
+            ax1 = fig1.add_subplot(111)
+            ax1.plot(df_daily["label"], df_daily["occupied_beds"], marker="o", color="#0078D7")
+            ax1.set_ylabel("Занято мест")
+            step = max(1, len(df_daily) // 10)
+            ax1.set_xticks(list(range(0, len(df_daily), step)))
+            ax1.set_xticklabels(df_daily["label"].iloc[::step], rotation=45, ha="right")
+            ax1.grid(True, linestyle="--", alpha=0.4)
+            fig1.tight_layout()
+            canvas1 = FigureCanvasTkAgg(fig1, master=left)
+            canvas1.draw()
+            canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+            # Начисления
+            fig2 = Figure(figsize=(5, 3.6), dpi=100)
+            ax2 = fig2.add_subplot(111)
+            ax2.plot(df_daily["label"], df_daily["amount_rub"], marker="o", color="#5E9A2C")
+            ax2.set_ylabel("₽")
+            ax2.set_xticks(list(range(0, len(df_daily), step)))
+            ax2.set_xticklabels(df_daily["label"].iloc[::step], rotation=45, ha="right")
+            ax2.grid(True, linestyle="--", alpha=0.4)
+            fig2.tight_layout()
+            canvas2 = FigureCanvasTkAgg(fig2, master=right)
+            canvas2.draw()
+            canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        else:
+            ttk.Label(left, text="Нет данных за период.").pack(padx=10, pady=10)
+            ttk.Label(right, text="Нет данных за период.").pack(padx=10, pady=10)
+
+        # Низ: таблицы
+        bottom = ttk.Frame(self.tab_lodging)
+        bottom.pack(fill="both", expand=True, padx=5, pady=5)
+
+        dorm_frame = ttk.LabelFrame(bottom, text="ТОП общежитий по начислениям (RUB)")
+        dorm_frame.pack(side="left", fill="both", expand=True, padx=(0, 5))
+
+        dept_frame = ttk.LabelFrame(bottom, text="По подразделениям (RUB)")
+        dept_frame.pack(side="left", fill="both", expand=True, padx=(5, 0))
+
+        df_dorm = self.data_provider.get_lodging_by_dorm(limit=10)
+        if not df_dorm.empty:
+            tree = self._create_treeview(
+                dorm_frame,
+                columns=[
+                    ("dorm", "Общежитие"),
+                    ("bed_days", "Койко-дней"),
+                    ("amount", "Начислено, ₽"),
+                    ("avg", "Средн., ₽/день"),
+                    ("miss", "Без тарифа"),
+                ],
+                height=10,
+            )
+            tree.column("dorm", width=220)
+            tree.column("bed_days", width=90, anchor="e")
+            tree.column("amount", width=110, anchor="e")
+            tree.column("avg", width=110, anchor="e")
+            tree.column("miss", width=90, anchor="e")
+            for _, r in df_dorm.iterrows():
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        r["dorm_name"],
+                        int(r["bed_days"]),
+                        f"{float(r['amount_rub']):,.0f}".replace(",", " "),
+                        f"{float(r['avg_price_rub']):,.0f}".replace(",", " "),
+                        int(r["missing_rate_bed_days"]),
+                    ),
+                )
+        else:
+            ttk.Label(dorm_frame, text="Нет данных.").pack(padx=10, pady=10)
+
+        df_dept = self.data_provider.get_lodging_by_department()
+        if not df_dept.empty:
+            tree2 = self._create_treeview(
+                dept_frame,
+                columns=[
+                    ("dept", "Подразделение"),
+                    ("bed_days", "Койко-дней"),
+                    ("amount", "Начислено, ₽"),
+                    ("miss", "Без тарифа"),
+                ],
+                height=10,
+            )
+            tree2.column("dept", width=220)
+            tree2.column("bed_days", width=90, anchor="e")
+            tree2.column("amount", width=110, anchor="e")
+            tree2.column("miss", width=90, anchor="e")
+            for _, r in df_dept.iterrows():
+                tree2.insert(
+                    "",
+                    "end",
+                    values=(
+                        r["department_name"],
+                        int(r["bed_days"]),
+                        f"{float(r['amount_rub']):,.0f}".replace(",", " "),
+                        int(r["missing_rate_bed_days"]),
+                    ),
+                )
+        else:
+            ttk.Label(dept_frame, text="Нет данных.").pack(padx=10, pady=10)
+
+        # Самый низ: "общежитие -> объекты"
+        map_frame = ttk.LabelFrame(
+            self.tab_lodging,
+            text="Из какого общежития на каких объектах работают люди (по табелям, TOP)"
+        )
+        map_frame.pack(fill="both", expand=False, padx=5, pady=(0, 8))
+
+        df_map = self.data_provider.get_dorm_to_objects(limit=15)
+        if not df_map.empty:
+            tree3 = self._create_treeview(
+                map_frame,
+                columns=[
+                    ("dorm", "Общежитие"),
+                    ("obj", "Объект"),
+                    ("hours", "Чел.-часы"),
+                ],
+                height=10,
+            )
+            tree3.column("dorm", width=220)
+            tree3.column("obj", width=260)
+            tree3.column("hours", width=100, anchor="e")
+            for _, r in df_map.iterrows():
+                tree3.insert(
+                    "",
+                    "end",
+                    values=(
+                        r["dorm_name"],
+                        r["object_name"],
+                        f"{float(r['total_hours']):.1f}",
+                    ),
+                )
+        else:
+            ttk.Label(map_frame, text="Нет данных для связки общежитие → объекты за период.").pack(
+                padx=10, pady=10
+            )
