@@ -1,13 +1,18 @@
 # analytics_module.py
-# Добавлено: таб "Проживание", KPI/графики/таблицы, а также срез
-# "из какого общежития на каких объектах работают люди" (по табелям).
 #
-# Важно:
-# - День выезда НЕ включаем (условие: check_out > d).
-# - Денежный расчёт делаем в валюте RUB (если в БД есть другие валюты — их
-#   можно показать отдельно, но здесь суммируем только RUB и считаем missing_rate.
-# - object_type_filter (short_name objects) влияет на срез "общежитие -> объекты",
-#   и не влияет на финансовую часть проживания (там нет связи с objects).
+# Готовая замена модуля аналитики с добавленным табом "Проживание".
+# Исправлено: связка "общежитие -> объекты" делается через табельный tbn (timesheet_rows.tbn)
+# и employees.tbn (employee_id в табеле у вас отсутствует).
+#
+# День выезда НЕ включаем: (check_out IS NULL OR check_out > d)
+#
+# Денежная аналитика:
+# - считается по дням (generate_series) — при ~500 проживающих/сутки это обычно нормально.
+# - считаем только RUB (currency='RUB'); отсутствующий тариф учитываем отдельно (missing_rate_*).
+#
+# Дополнительно: если у вас уже есть таблица dorm_charges (она есть),
+# и вы хотите считать начисления по ней (быстрее и "как в бухгалтерии"),
+# скажите — я дам вариант переключателя (rates vs charges).
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -21,15 +26,13 @@ import pandas as pd
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-# Глобальная переменная для хранения пула соединений
 db_connection_pool: Optional[pool.SimpleConnectionPool] = None
 
 
 def set_db_pool(db_pool: pool.SimpleConnectionPool):
-    """Принимает пул соединений от главного приложения."""
     global db_connection_pool
     db_connection_pool = db_pool
-    logging.info("Analytics Module: Пул соединений с БД установлен.")
+    logging.info("Analytics Module: DB pool set.")
 
 
 # ============================================================
@@ -37,17 +40,12 @@ def set_db_pool(db_pool: pool.SimpleConnectionPool):
 # ============================================================
 
 class AnalyticsData:
-    """Класс для выполнения SQL-запросов и получения данных для дашбордов."""
-
     def __init__(self, start_date, end_date, object_type_filter: str):
         self.start_date = start_date
         self.end_date = end_date
-        self.object_type_filter = object_type_filter  # short_name из objects
-
-    # ---------- Внутренние утилиты ----------
+        self.object_type_filter = object_type_filter  # objects.short_name
 
     def _execute_query(self, query: str, params: tuple = None) -> List[Dict[str, Any]]:
-        """Универсальный метод для выполнения запросов к БД."""
         if not db_connection_pool:
             raise ConnectionError("Пул соединений с БД не был инициализирован.")
         conn = None
@@ -57,7 +55,7 @@ class AnalyticsData:
                 cur.execute(query, params)
                 return cur.fetchall()
         except Exception as e:
-            logging.error(f"Ошибка выполнения SQL-запроса в модуле аналитики: {e}")
+            logging.exception("Analytics query error")
             messagebox.showerror("Ошибка БД", f"Не удалось получить данные для аналитики:\n{e}")
             return []
         finally:
@@ -65,7 +63,6 @@ class AnalyticsData:
                 db_connection_pool.putconn(conn)
 
     def get_object_types(self) -> List[str]:
-        """Получает уникальные значения 'short_name' из таблицы объектов для фильтра."""
         query = """
         SELECT DISTINCT short_name
         FROM objects
@@ -80,7 +77,6 @@ class AnalyticsData:
     # ============================================================
 
     def get_labor_kpi(self) -> Dict[str, Any]:
-        """KPI по трудозатратам за период."""
         base_query = """
         SELECT
             COALESCE(SUM(tr.total_hours), 0)                      AS total_hours,
@@ -114,7 +110,6 @@ class AnalyticsData:
         return row
 
     def get_labor_by_object(self) -> pd.DataFrame:
-        """Трудозатраты в разрезе объектов."""
         base_query = """
         SELECT 
             o.address AS object_name,
@@ -145,7 +140,6 @@ class AnalyticsData:
         return df
 
     def get_labor_trend_by_month(self) -> pd.DataFrame:
-        """Возвращает суммарные человеко-часы по месяцам в выбранном периоде."""
         base_query = """
         SELECT
             th.year,
@@ -178,7 +172,6 @@ class AnalyticsData:
         return df
 
     def get_top_employees_by_hours(self, limit: int = 10) -> pd.DataFrame:
-        """ТОП сотрудников по суммарным часам за период."""
         base_query = """
         SELECT
             tr.fio,
@@ -205,9 +198,7 @@ class AnalyticsData:
             filter_clause = "AND o.short_name = %s"
             params.append(self.object_type_filter)
 
-        query = base_query.format(join_clause=join_clause,
-                                  filter_clause=filter_clause,
-                                  limit=limit)
+        query = base_query.format(join_clause=join_clause, filter_clause=filter_clause, limit=limit)
         data = self._execute_query(query, tuple(params))
         df = pd.DataFrame(data)
         if not df.empty:
@@ -216,7 +207,6 @@ class AnalyticsData:
         return df
 
     def get_labor_by_department(self) -> pd.DataFrame:
-        """Суммарные человеко-часы по подразделениям."""
         base_query = """
         SELECT
             d.name AS department_name,
@@ -253,7 +243,6 @@ class AnalyticsData:
     # ============================================================
 
     def get_transport_kpi(self) -> Dict[str, Any]:
-        """KPI по транспорту и технике."""
         base_query = """
         SELECT
             COALESCE(SUM(tp.hours), 0) AS total_machine_hours,
@@ -278,15 +267,13 @@ class AnalyticsData:
         total_hours = float(kpi.get("total_machine_hours", 0) or 0)
         total_orders = int(kpi.get("total_orders", 0) or 0)
         total_units = float(kpi.get("total_units", 0) or 0)
-        avg = (total_hours / total_orders) if total_orders > 0 else 0.0
+        kpi["avg_hours_per_order"] = (total_hours / total_orders) if total_orders > 0 else 0.0
         kpi["total_machine_hours"] = total_hours
         kpi["total_orders"] = total_orders
         kpi["total_units"] = total_units
-        kpi["avg_hours_per_order"] = avg
         return kpi
 
     def get_transport_by_tech(self) -> pd.DataFrame:
-        """Машино-часы в разрезе техники."""
         base_query = """
         SELECT
             tp.tech,
@@ -318,7 +305,6 @@ class AnalyticsData:
     # ============================================================
 
     def get_meals_kpi(self) -> Dict[str, Any]:
-        """KPI по питанию."""
         base_query = """
         SELECT
             COUNT(moi.id)                   AS total_portions,
@@ -342,7 +328,6 @@ class AnalyticsData:
         return result[0] if result else {}
 
     def get_meals_by_type(self) -> pd.DataFrame:
-        """Количество порций в разрезе типов питания."""
         base_query = """
         SELECT
             moi.meal_type_text,
@@ -364,11 +349,9 @@ class AnalyticsData:
 
         query = base_query.format(filter_clause=filter_clause)
         data = self._execute_query(query, tuple(params))
-        df = pd.DataFrame(data)
-        return df
+        return pd.DataFrame(data)
 
     def get_meals_trend_by_month(self) -> pd.DataFrame:
-        """Количество порций по месяцам в периоде."""
         base_query = """
         SELECT
             date_trunc('month', mo.date) AS period,
@@ -390,11 +373,9 @@ class AnalyticsData:
 
         query = base_query.format(filter_clause=filter_clause)
         data = self._execute_query(query, tuple(params))
-        df = pd.DataFrame(data)
-        return df
+        return pd.DataFrame(data)
 
     def get_meals_by_object(self, limit: int = 10) -> pd.DataFrame:
-        """Количество порций и людей по объектам."""
         base_query = """
         SELECT
             o.address AS object_name,
@@ -412,7 +393,6 @@ class AnalyticsData:
         """
 
         params: List[Any] = [self.start_date, self.end_date]
-
         filter_clause = ""
         if self.object_type_filter:
             filter_clause = "AND o.short_name = %s"
@@ -420,12 +400,10 @@ class AnalyticsData:
 
         query = base_query.format(filter_clause=filter_clause, limit=limit)
         data = self._execute_query(query, tuple(params))
-        df = pd.DataFrame(data)
-        return df
+        return pd.DataFrame(data)
 
     def get_meals_by_department(self) -> pd.DataFrame:
-        """Питание по подразделениям: порции и люди."""
-        base_query = """
+        query = """
         SELECT
             d.name AS department_name,
             COUNT(moi.id) AS total_portions,
@@ -437,21 +415,14 @@ class AnalyticsData:
         GROUP BY d.name
         ORDER BY total_portions DESC;
         """
-
-        params: List[Any] = [self.start_date, self.end_date]
-        data = self._execute_query(base_query, tuple(params))
-        df = pd.DataFrame(data)
-        return df
+        data = self._execute_query(query, (self.start_date, self.end_date))
+        return pd.DataFrame(data)
 
     # ============================================================
     #        4. СКВОЗНАЯ АНАЛИТИКА ПО ОБЪЕКТАМ (TOP-N)
     # ============================================================
 
     def get_objects_overview(self, limit: int = 20) -> pd.DataFrame:
-        """
-        Сводная информация по объектам: человеко-часы, машино-часы, порции.
-        Ограничивается TOP-N по человеко-часам.
-        """
         start_period = self.start_date.year * 100 + self.start_date.month
         end_period = self.end_date.year * 100 + self.end_date.month
 
@@ -528,10 +499,6 @@ class AnalyticsData:
     # ============================================================
 
     def get_users_activity(self) -> pd.DataFrame:
-        """
-        Активность пользователей: сколько табелей, заявок на транспорт и питание
-        ввёл каждый пользователь за период.
-        """
         query = """
         SELECT
             u.username,
@@ -581,14 +548,6 @@ class AnalyticsData:
     # ============================================================
 
     def get_lodging_kpi(self) -> Dict[str, Any]:
-        """
-        KPI по проживанию за период:
-        - bed_days: койко-дни (занятые места * дни)
-        - amount_rub: начислено по тарифам (учитываются смены тарифов), только RUB
-        - avg_price_rub: средняя цена койко-дня RUB
-        - active_on_end: проживающих на end_date
-        - missing_rate_bed_days: койко-дни без тарифа
-        """
         query = """
         WITH days AS (
             SELECT generate_series(%s::date, %s::date, interval '1 day')::date AS d
@@ -618,7 +577,7 @@ class AnalyticsData:
                         FROM dorm_rates dr
                         WHERE dr.room_id = sod.room_id
                           AND dr.valid_from <= sod.d
-                          AND COALESCE(dr.currency,'RUB') = 'RUB'
+                          AND dr.currency = 'RUB'
                         ORDER BY dr.valid_from DESC
                         LIMIT 1
                     )
@@ -627,7 +586,7 @@ class AnalyticsData:
                         FROM dorm_rates dr
                         WHERE dr.dorm_id = sod.dorm_id
                           AND dr.valid_from <= sod.d
-                          AND COALESCE(dr.currency,'RUB') = 'RUB'
+                          AND dr.currency = 'RUB'
                         ORDER BY dr.valid_from DESC
                         LIMIT 1
                     )
@@ -656,12 +615,6 @@ class AnalyticsData:
         return rows[0] if rows else {}
 
     def get_lodging_daily(self) -> pd.DataFrame:
-        """
-        Динамика по дням:
-        - occupied_beds: сколько мест занято в конкретный день
-        - amount_rub: начислено за день (RUB)
-        - missing_rate_beds: сколько мест в этот день без тарифа
-        """
         query = """
         WITH days AS (
             SELECT generate_series(%s::date, %s::date, interval '1 day')::date AS d
@@ -674,7 +627,7 @@ class AnalyticsData:
             FROM days dd
             JOIN dorm_stays s
               ON s.check_in <= dd.d
-             AND (s.check_out IS NULL OR s.check_out > dd.d) -- день выезда НЕ включаем
+             AND (s.check_out IS NULL OR s.check_out > dd.d)
         ),
         dorm_mode AS (
             SELECT id, rate_mode FROM dorms
@@ -688,7 +641,7 @@ class AnalyticsData:
                         FROM dorm_rates dr
                         WHERE dr.room_id = sod.room_id
                           AND dr.valid_from <= sod.d
-                          AND COALESCE(dr.currency,'RUB') = 'RUB'
+                          AND dr.currency = 'RUB'
                         ORDER BY dr.valid_from DESC
                         LIMIT 1
                     )
@@ -697,7 +650,7 @@ class AnalyticsData:
                         FROM dorm_rates dr
                         WHERE dr.dorm_id = sod.dorm_id
                           AND dr.valid_from <= sod.d
-                          AND COALESCE(dr.currency,'RUB') = 'RUB'
+                          AND dr.currency = 'RUB'
                         ORDER BY dr.valid_from DESC
                         LIMIT 1
                     )
@@ -723,7 +676,6 @@ class AnalyticsData:
         return df
 
     def get_lodging_by_dorm(self, limit: int = 10) -> pd.DataFrame:
-        """ТОП общежитий по начислениям (RUB) и койко-дням."""
         query = """
         WITH days AS (
             SELECT generate_series(%s::date, %s::date, interval '1 day')::date AS d
@@ -751,7 +703,7 @@ class AnalyticsData:
                         FROM dorm_rates dr
                         WHERE dr.room_id = sod.room_id
                           AND dr.valid_from <= sod.d
-                          AND COALESCE(dr.currency,'RUB') = 'RUB'
+                          AND dr.currency = 'RUB'
                         ORDER BY dr.valid_from DESC
                         LIMIT 1
                     )
@@ -760,7 +712,7 @@ class AnalyticsData:
                         FROM dorm_rates dr
                         WHERE dr.dorm_id = sod.dorm_id
                           AND dr.valid_from <= sod.d
-                          AND COALESCE(dr.currency,'RUB') = 'RUB'
+                          AND dr.currency = 'RUB'
                         ORDER BY dr.valid_from DESC
                         LIMIT 1
                     )
@@ -790,7 +742,6 @@ class AnalyticsData:
         return df
 
     def get_lodging_by_department(self) -> pd.DataFrame:
-        """Проживание по подразделениям (employees.department_id)."""
         query = """
         WITH days AS (
             SELECT generate_series(%s::date, %s::date, interval '1 day')::date AS d
@@ -819,7 +770,7 @@ class AnalyticsData:
                         FROM dorm_rates dr
                         WHERE dr.room_id = sod.room_id
                           AND dr.valid_from <= sod.d
-                          AND COALESCE(dr.currency,'RUB') = 'RUB'
+                          AND dr.currency = 'RUB'
                         ORDER BY dr.valid_from DESC
                         LIMIT 1
                     )
@@ -828,7 +779,7 @@ class AnalyticsData:
                         FROM dorm_rates dr
                         WHERE dr.dorm_id = sod.dorm_id
                           AND dr.valid_from <= sod.d
-                          AND COALESCE(dr.currency,'RUB') = 'RUB'
+                          AND dr.currency = 'RUB'
                         ORDER BY dr.valid_from DESC
                         LIMIT 1
                     )
@@ -858,19 +809,20 @@ class AnalyticsData:
     def get_dorm_to_objects(self, limit: int = 15) -> pd.DataFrame:
         """
         "Из какого общежития на каких объектах работают люди" за период
-        (по объектным табелям, привязка сотрудников к общежитию на конкретный месяц).
+        по табелям (timesheet_headers/timesheet_rows) и проживанию (dorm_stays).
 
-        Логика:
-        - берём табельные строки tr за период (год*100+месяц)
-        - на каждый месяц ищем проживание сотрудника, которое пересекает этот месяц
-          (мы берём факт проживания на 1-е число месяца; если нужно иначе — скажи)
-        - агрегируем часы по (общежитие, объект)
-        - object_type_filter применяется (если выбран)
+        Связка employee:
+        - timesheet_rows.tbn -> employees.tbn (если tbn NULL/пустой — строка не участвует)
+
+        Привязка проживания к месяцу:
+        - считаем, что сотрудник "живет" в общежитии на 1-е число месяца табеля:
+          check_in <= month_date AND (check_out IS NULL OR check_out > month_date)
+
+        object_type_filter применяется (если выбран).
         """
         start_period = self.start_date.year * 100 + self.start_date.month
         end_period = self.end_date.year * 100 + self.end_date.month
 
-        join_obj = "LEFT JOIN objects o ON th.object_db_id = o.id"
         obj_filter = ""
         params: List[Any] = [start_period, end_period]
         if self.object_type_filter:
@@ -883,14 +835,15 @@ class AnalyticsData:
                 th.year,
                 th.month,
                 th.object_db_id AS object_id,
-                tr.employee_id,
-                SUM(tr.total_hours) AS total_hours
+                tr.tbn AS tbn,
+                SUM(COALESCE(tr.total_hours,0)) AS total_hours
             FROM timesheet_headers th
             JOIN timesheet_rows tr ON th.id = tr.header_id
-            {join_obj}
+            LEFT JOIN objects o ON th.object_db_id = o.id
             WHERE (th.year * 100 + th.month) BETWEEN %s AND %s
-            {obj_filter}
-            GROUP BY th.year, th.month, th.object_db_id, tr.employee_id
+              AND COALESCE(tr.tbn,'') <> ''
+              {obj_filter}
+            GROUP BY th.year, th.month, th.object_db_id, tr.tbn
         ),
         labor_month AS (
             SELECT
@@ -898,21 +851,30 @@ class AnalyticsData:
                 make_date(l.year, l.month, 1)::date AS month_date
             FROM labor l
         ),
-        with_dorm AS (
+        labor_emp AS (
             SELECT
                 lm.object_id,
                 lm.total_hours,
+                e.id AS employee_id,
+                lm.month_date
+            FROM labor_month lm
+            JOIN employees e ON COALESCE(e.tbn,'') <> '' AND e.tbn = lm.tbn
+        ),
+        with_dorm AS (
+            SELECT
+                le.object_id,
+                le.total_hours,
                 (
                     SELECT d.name
                     FROM dorm_stays s
                     JOIN dorms d ON d.id = s.dorm_id
-                    WHERE s.employee_id = lm.employee_id
-                      AND s.check_in <= lm.month_date
-                      AND (s.check_out IS NULL OR s.check_out > lm.month_date)
+                    WHERE s.employee_id = le.employee_id
+                      AND s.check_in <= le.month_date
+                      AND (s.check_out IS NULL OR s.check_out > le.month_date)
                     ORDER BY s.check_in DESC
                     LIMIT 1
                 ) AS dorm_name
-            FROM labor_month lm
+            FROM labor_emp le
         )
         SELECT
             COALESCE(wd.dorm_name, '— (без проживания)') AS dorm_name,
@@ -938,13 +900,10 @@ class AnalyticsData:
 # ============================================================
 
 class AnalyticsPage(ttk.Frame):
-    """Главный фрейм для страницы аналитики."""
-
     def __init__(self, master, app_ref):
         super().__init__(master)
         self.app_ref = app_ref
 
-        # ——— Панель фильтров ———
         filter_frame = ttk.Frame(self, padding="10")
         filter_frame.pack(fill="x", side="top")
 
@@ -971,11 +930,8 @@ class AnalyticsPage(ttk.Frame):
         self.object_type_combo.pack(side="left", padx=5)
         self.object_type_combo.bind("<<ComboboxSelected>>", self.refresh_data)
 
-        ttk.Button(filter_frame, text="Обновить", command=self.refresh_data).pack(
-            side="left", padx=10
-        )
+        ttk.Button(filter_frame, text="Обновить", command=self.refresh_data).pack(side="left", padx=10)
 
-        # ——— Табы ———
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=5)
 
@@ -984,33 +940,29 @@ class AnalyticsPage(ttk.Frame):
         self.tab_meals = ttk.Frame(self.notebook)
         self.tab_objects = ttk.Frame(self.notebook)
         self.tab_users = ttk.Frame(self.notebook)
-        self.tab_lodging = ttk.Frame(self.notebook)  # НОВОЕ
+        self.tab_lodging = ttk.Frame(self.notebook)  # NEW
 
         self.notebook.add(self.tab_labor, text="  Трудозатраты  ")
         self.notebook.add(self.tab_transport, text="  Транспорт и Техника  ")
         self.notebook.add(self.tab_meals, text="  Питание  ")
         self.notebook.add(self.tab_objects, text="  Объекты  ")
         self.notebook.add(self.tab_users, text="  Активность пользователей  ")
-        self.notebook.add(self.tab_lodging, text="  Проживание  ")  # НОВОЕ
+        self.notebook.add(self.tab_lodging, text="  Проживание  ")
 
         self.data_provider: Optional[AnalyticsData] = None
         self.load_filters()
         self.refresh_data()
 
-    # ---------- Фильтры ----------
-
     def load_filters(self):
-        """Загружает уникальные типы объектов из БД."""
         try:
             temp_provider = AnalyticsData(datetime.now().date(), datetime.now().date(), "")
             types = temp_provider.get_object_types()
             self.object_type_combo["values"] = ["Все типы"] + types
         except Exception as e:
-            logging.error(f"Не удалось загрузить типы объектов для фильтра: {e}")
+            logging.error(f"Не удалось загрузить типы объектов: {e}")
             self.object_type_combo["values"] = ["Все типы"]
 
     def get_dates_from_period(self):
-        """Возвращает начальную и конечную дату в зависимости от выбранного периода."""
         period = self.period_var.get()
         today = datetime.today()
         if period == "Текущий месяц":
@@ -1029,17 +981,13 @@ class AnalyticsPage(ttk.Frame):
         else:
             start_date = today.replace(day=1)
             end_date = (start_date + timedelta(days=32)).replace(day=1) - timedelta(days=1)
-
         return start_date.date(), end_date.date()
 
     def refresh_data(self, event=None):
-        """Обновляет все данные и перерисовывает дашборды."""
         start_date, end_date = self.get_dates_from_period()
-
         obj_type_filter = self.object_type_var.get()
         if obj_type_filter == "Все типы":
             obj_type_filter = ""
-
         self.data_provider = AnalyticsData(start_date, end_date, obj_type_filter)
 
         self._build_labor_tab()
@@ -1047,9 +995,9 @@ class AnalyticsPage(ttk.Frame):
         self._build_meals_tab()
         self._build_objects_tab()
         self._build_users_tab()
-        self._build_lodging_tab()  # НОВОЕ
+        self._build_lodging_tab()
 
-    # ---------- Вспомогательные методы UI ----------
+    # ---------- UI helpers ----------
 
     def _clear_tab(self, tab):
         for widget in tab.winfo_children():
@@ -1058,22 +1006,11 @@ class AnalyticsPage(ttk.Frame):
     def _create_kpi_card(self, parent, title, value, unit):
         card = ttk.Frame(parent, borderwidth=2, relief="groove", padding=10)
         ttk.Label(card, text=title, font=("Segoe UI", 10, "bold")).pack()
-        ttk.Label(
-            card,
-            text=f"{value}",
-            font=("Segoe UI", 18, "bold"),
-            foreground="#0078D7",
-        ).pack(pady=(5, 0))
+        ttk.Label(card, text=f"{value}", font=("Segoe UI", 18, "bold"), foreground="#0078D7").pack(pady=(5, 0))
         ttk.Label(card, text=unit, font=("Segoe UI", 9)).pack()
         return card
 
-    def _create_treeview(
-        self,
-        parent,
-        columns: List[tuple],
-        show: str = "headings",
-        height: int = 10,
-    ) -> ttk.Treeview:
+    def _create_treeview(self, parent, columns: List[tuple], show: str = "headings", height: int = 10) -> ttk.Treeview:
         tree = ttk.Treeview(parent, columns=[c[0] for c in columns], show=show, height=height)
         for col_id, col_text in columns:
             tree.heading(col_id, text=col_text)
@@ -1128,7 +1065,6 @@ class AnalyticsPage(ttk.Frame):
 
             fig1 = Figure(figsize=(5, 4), dpi=100)
             ax1 = fig1.add_subplot(111)
-
             df_plot = df_objects.head(10).sort_values("total_hours", ascending=True)
             bars = ax1.barh(df_plot["short_name"], df_plot["total_hours"], color="#0078D7")
             ax1.set_xlabel("Человеко-часы")
@@ -1137,15 +1073,9 @@ class AnalyticsPage(ttk.Frame):
             max_val = float(df_plot["total_hours"].max() or 0.0)
             for bar in bars:
                 width = float(bar.get_width() or 0.0)
-                ax1.text(
-                    width + max_val * 0.02,
-                    bar.get_y() + bar.get_height() / 2,
-                    f"{width:.0f}",
-                    va="center",
-                )
+                ax1.text(width + max_val * 0.02, bar.get_y() + bar.get_height() / 2, f"{width:.0f}", va="center")
 
             fig1.tight_layout(rect=(0.15, 0.05, 0.95, 0.95))
-
             canvas1 = FigureCanvasTkAgg(fig1, master=left_frame)
             canvas1.draw()
             canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -1160,9 +1090,8 @@ class AnalyticsPage(ttk.Frame):
         if not df_trend.empty:
             df_trend = df_trend.copy()
             df_trend["total_hours"] = df_trend["total_hours"].fillna(0).astype(float)
-            df_trend["period"] = df_trend.apply(
-                lambda r: f"{int(r['year'])}-{int(r['month']):02d}", axis=1
-            )
+            df_trend["period"] = df_trend.apply(lambda r: f"{int(r['year'])}-{int(r['month']):02d}", axis=1)
+
             fig2 = Figure(figsize=(5, 2.5), dpi=100)
             ax2 = fig2.add_subplot(111)
             ax2.plot(df_trend["period"], df_trend["total_hours"], marker="o", color="#5E9A2C")
@@ -1193,12 +1122,7 @@ class AnalyticsPage(ttk.Frame):
             fig3.tight_layout()
             for bar in bars_emp:
                 width = float(bar.get_width() or 0.0)
-                ax3.text(
-                    width + 2.0,
-                    bar.get_y() + bar.get_height() / 2,
-                    f"{width:.0f}",
-                    va="center",
-                )
+                ax3.text(width + 2.0, bar.get_y() + bar.get_height() / 2, f"{width:.0f}", va="center")
             canvas3 = FigureCanvasTkAgg(fig3, master=top_emp_frame)
             canvas3.draw()
             canvas3.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -1210,23 +1134,12 @@ class AnalyticsPage(ttk.Frame):
         if not df_dept.empty:
             df_dept = df_dept.copy()
             df_dept["total_hours"] = df_dept["total_hours"].fillna(0).astype(float)
-            tree = self._create_treeview(
-                dept_frame,
-                columns=[("department", "Подразделение"), ("hours", "Чел.-часы")],
-                height=8,
-            )
+            tree = self._create_treeview(dept_frame, columns=[("department", "Подразделение"), ("hours", "Чел.-часы")], height=8)
             tree.column("department", width=200)
             tree.column("hours", width=100, anchor="e")
             for _, row in df_dept.iterrows():
                 dept_name = row["department_name"] if row["department_name"] else "—"
-                tree.insert(
-                    "",
-                    "end",
-                    values=(
-                        dept_name,
-                        f"{row['total_hours']:.1f}",
-                    ),
-                )
+                tree.insert("", "end", values=(dept_name, f"{row['total_hours']:.1f}"))
 
     # ============================================================
     #                   TAB 2: ТРАНСПОРТ
@@ -1266,9 +1179,7 @@ class AnalyticsPage(ttk.Frame):
             fig.tight_layout(pad=2.0)
             canvas = FigureCanvasTkAgg(fig, master=self.tab_transport)
             canvas.draw()
-            canvas.get_tk_widget().pack(
-                side=tk.TOP, fill=tk.BOTH, expand=True, pady=10, padx=5
-            )
+            canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=10, padx=5)
 
     # ============================================================
     #                   TAB 3: ПИТАНИЕ
@@ -1302,8 +1213,10 @@ class AnalyticsPage(ttk.Frame):
             df_types = df_types.copy()
             df_types["total_count"] = df_types["total_count"].fillna(0)
             df_types["meal_type_text"] = df_types["meal_type_text"].fillna("—")
+
             fig1 = Figure(figsize=(5, 4), dpi=100)
             ax1 = fig1.add_subplot(111)
+
             labels = df_types["meal_type_text"]
             sizes = df_types["total_count"]
 
@@ -1324,6 +1237,7 @@ class AnalyticsPage(ttk.Frame):
             )
             ax1.axis("equal")
             fig1.tight_layout()
+
             canvas1 = FigureCanvasTkAgg(fig1, master=left_frame)
             canvas1.draw()
             canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -1335,7 +1249,8 @@ class AnalyticsPage(ttk.Frame):
         if not df_trend.empty:
             df_trend = df_trend.copy()
             df_trend["total_portions"] = df_trend["total_portions"].fillna(0)
-            df_trend["period"] = df_trend["period"].dt.strftime("%Y-%m")
+            df_trend["period"] = pd.to_datetime(df_trend["period"]).dt.strftime("%Y-%m")
+
             fig2 = Figure(figsize=(5, 4), dpi=100)
             ax2 = fig2.add_subplot(111)
             ax2.plot(df_trend["period"], df_trend["total_portions"], marker="o", color="#0078D7")
@@ -1344,6 +1259,7 @@ class AnalyticsPage(ttk.Frame):
             ax2.set_xticklabels(df_trend["period"], rotation=45, ha="right")
             ax2.grid(True, linestyle="--", alpha=0.5)
             fig2.tight_layout()
+
             canvas2 = FigureCanvasTkAgg(fig2, master=right_frame)
             canvas2.draw()
             canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -1358,26 +1274,14 @@ class AnalyticsPage(ttk.Frame):
         if not df_obj.empty:
             tree1 = self._create_treeview(
                 obj_frame,
-                columns=[
-                    ("object", "Объект"),
-                    ("portions", "Порций"),
-                    ("people", "Людей"),
-                ],
+                columns=[("object", "Объект"), ("portions", "Порций"), ("people", "Людей")],
                 height=8,
             )
             tree1.column("object", width=220)
             tree1.column("portions", width=80, anchor="e")
             tree1.column("people", width=80, anchor="e")
             for _, row in df_obj.iterrows():
-                tree1.insert(
-                    "",
-                    "end",
-                    values=(
-                        row["object_name"],
-                        row["total_portions"],
-                        row["unique_employees"],
-                    ),
-                )
+                tree1.insert("", "end", values=(row["object_name"], row["total_portions"], row["unique_employees"]))
 
         dept_frame = ttk.LabelFrame(bottom_frame, text="Питание по подразделениям")
         dept_frame.pack(side="left", fill="both", expand=True, padx=(5, 0))
@@ -1386,11 +1290,7 @@ class AnalyticsPage(ttk.Frame):
         if not df_dept.empty:
             tree2 = self._create_treeview(
                 dept_frame,
-                columns=[
-                    ("dept", "Подразделение"),
-                    ("portions", "Порций"),
-                    ("people", "Людей"),
-                ],
+                columns=[("dept", "Подразделение"), ("portions", "Порций"), ("people", "Людей")],
                 height=8,
             )
             tree2.column("dept", width=200)
@@ -1398,15 +1298,7 @@ class AnalyticsPage(ttk.Frame):
             tree2.column("people", width=80, anchor="e")
             for _, row in df_dept.iterrows():
                 dept_name = row["department_name"] if row["department_name"] else "—"
-                tree2.insert(
-                    "",
-                    "end",
-                    values=(
-                        dept_name,
-                        row["total_portions"],
-                        row["unique_employees"],
-                    ),
-                )
+                tree2.insert("", "end", values=(dept_name, row["total_portions"], row["unique_employees"]))
 
     # ============================================================
     #                   TAB 4: ОБЪЕКТЫ
@@ -1420,9 +1312,7 @@ class AnalyticsPage(ttk.Frame):
 
         df = self.data_provider.get_objects_overview(limit=20)
         if df.empty:
-            ttk.Label(frame, text="Нет данных по объектам за выбранный период.").pack(
-                padx=10, pady=10
-            )
+            ttk.Label(frame, text="Нет данных по объектам за выбранный период.").pack(padx=10, pady=10)
             return
 
         df = df.copy()
@@ -1436,12 +1326,7 @@ class AnalyticsPage(ttk.Frame):
 
         tree = self._create_treeview(
             table_frame,
-            columns=[
-                ("address", "Объект"),
-                ("labor", "Чел.-часы"),
-                ("machine", "Маш.-часы"),
-                ("meals", "Порции"),
-            ],
+            columns=[("address", "Объект"), ("labor", "Чел.-часы"), ("machine", "Маш.-часы"), ("meals", "Порции")],
             height=15,
         )
         tree.column("address", width=260)
@@ -1450,16 +1335,7 @@ class AnalyticsPage(ttk.Frame):
         tree.column("meals", width=80, anchor="e")
 
         for _, row in df.iterrows():
-            tree.insert(
-                "",
-                "end",
-                values=(
-                    row["address"],
-                    f"{row['labor_hours']:.1f}",
-                    f"{row['machine_hours']:.1f}",
-                    int(row["portions"]),
-                ),
-            )
+            tree.insert("", "end", values=(row["address"], f"{row['labor_hours']:.1f}", f"{row['machine_hours']:.1f}", int(row["portions"])))
 
         chart_frame = ttk.LabelFrame(frame, text="Сравнение по объектам (ТОП-10)")
         chart_frame.pack(side="left", fill="both", expand=True, padx=(5, 0), pady=5)
@@ -1470,35 +1346,12 @@ class AnalyticsPage(ttk.Frame):
 
         x = list(range(len(df_top)))
         width = 0.25
-
-        ax.bar(
-            [i - width for i in x],
-            df_top["labor_hours"],
-            width=width,
-            label="Чел.-часы",
-            color="#0078D7",
-        )
-        ax.bar(
-            x,
-            df_top["machine_hours"],
-            width=width,
-            label="Маш.-часы",
-            color="#5E9A2C",
-        )
-        ax.bar(
-            [i + width for i in x],
-            df_top["portions"],
-            width=width,
-            label="Порции",
-            color="#FF8C00",
-        )
+        ax.bar([i - width for i in x], df_top["labor_hours"], width=width, label="Чел.-часы", color="#0078D7")
+        ax.bar(x, df_top["machine_hours"], width=width, label="Маш.-часы", color="#5E9A2C")
+        ax.bar([i + width for i in x], df_top["portions"], width=width, label="Порции", color="#FF8C00")
 
         ax.set_xticks(x)
-        ax.set_xticklabels(
-            [a[:15] + "..." if len(a) > 15 else a for a in df_top["address"]],
-            rotation=45,
-            ha="right",
-        )
+        ax.set_xticklabels([a[:15] + "..." if len(a) > 15 else a for a in df_top["address"]], rotation=45, ha="right")
         ax.legend()
         ax.grid(axis="y", alpha=0.3, linestyle="--")
         fig.tight_layout()
@@ -1519,9 +1372,7 @@ class AnalyticsPage(ttk.Frame):
 
         df = self.data_provider.get_users_activity()
         if df.empty:
-            ttk.Label(frame, text="Нет активности пользователей за выбранный период.").pack(
-                padx=10, pady=10
-            )
+            ttk.Label(frame, text="Нет активности пользователей за выбранный период.").pack(padx=10, pady=10)
             return
 
         df = df.copy()
@@ -1529,11 +1380,7 @@ class AnalyticsPage(ttk.Frame):
             df[col] = df[col].fillna(0).astype(float)
         df["username"] = df["username"].fillna("—")
         df["full_name"] = df["full_name"].fillna("")
-        df["total_ops"] = (
-            df["timesheets_created"]
-            + df["transport_orders_created"]
-            + df["meal_orders_created"]
-        )
+        df["total_ops"] = df["timesheets_created"] + df["transport_orders_created"] + df["meal_orders_created"]
 
         top_frame = ttk.Frame(frame)
         top_frame.pack(fill="both", expand=True, pady=(0, 5))
@@ -1543,13 +1390,7 @@ class AnalyticsPage(ttk.Frame):
 
         tree = self._create_treeview(
             table_frame,
-            columns=[
-                ("user", "Логин"),
-                ("name", "ФИО"),
-                ("th", "Табелей"),
-                ("tr", "Заявок на транспорт"),
-                ("mo", "Заявок на питание"),
-            ],
+            columns=[("user", "Логин"), ("name", "ФИО"), ("th", "Табелей"), ("tr", "Заявок на транспорт"), ("mo", "Заявок на питание")],
             height=15,
         )
         tree.column("user", width=100)
@@ -1559,21 +1400,9 @@ class AnalyticsPage(ttk.Frame):
         tree.column("mo", width=120, anchor="e")
 
         for _, row in df.iterrows():
-            tree.insert(
-                "",
-                "end",
-                values=(
-                    row["username"],
-                    row["full_name"] or "",
-                    int(row["timesheets_created"]),
-                    int(row["transport_orders_created"]),
-                    int(row["meal_orders_created"]),
-                ),
-            )
+            tree.insert("", "end", values=(row["username"], row["full_name"] or "", int(row["timesheets_created"]), int(row["transport_orders_created"]), int(row["meal_orders_created"])))
 
-        chart_frame = ttk.LabelFrame(
-            top_frame, text="ТОП пользователей по количеству операций"
-        )
+        chart_frame = ttk.LabelFrame(top_frame, text="ТОП пользователей по количеству операций")
         chart_frame.pack(side="left", fill="both", expand=True, padx=(5, 0))
 
         df_top = df.sort_values("total_ops", ascending=False).head(10)
@@ -1593,13 +1422,12 @@ class AnalyticsPage(ttk.Frame):
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
     # ============================================================
-    #                   TAB 6: ПРОЖИВАНИЕ (НОВОЕ)
+    #                   TAB 6: ПРОЖИВАНИЕ
     # ============================================================
 
     def _build_lodging_tab(self):
         self._clear_tab(self.tab_lodging)
 
-        # KPI
         kpi_frame = ttk.Frame(self.tab_lodging)
         kpi_frame.pack(fill="x", pady=10, padx=5)
 
@@ -1621,16 +1449,13 @@ class AnalyticsPage(ttk.Frame):
             card.grid(row=0, column=i, padx=5, sticky="ew")
             kpi_frame.grid_columnconfigure(i, weight=1)
 
-        # предупреждение про тарифы
         if missing_rate_bed_days > 0:
-            warn = ttk.Label(
+            ttk.Label(
                 self.tab_lodging,
                 text=f"Внимание: {missing_rate_bed_days} койко-дней без тарифа (RUB). Проверьте dorm_rates.",
                 foreground="#B00020",
-            )
-            warn.pack(anchor="w", padx=10, pady=(0, 8))
+            ).pack(anchor="w", padx=10, pady=(0, 8))
 
-        # Верх: 2 графика
         charts_frame = ttk.Frame(self.tab_lodging)
         charts_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
@@ -1646,7 +1471,6 @@ class AnalyticsPage(ttk.Frame):
             df_daily["d"] = pd.to_datetime(df_daily["d"])
             df_daily["label"] = df_daily["d"].dt.strftime("%d.%m")
 
-            # Занятость
             fig1 = Figure(figsize=(5, 3.6), dpi=100)
             ax1 = fig1.add_subplot(111)
             ax1.plot(df_daily["label"], df_daily["occupied_beds"], marker="o", color="#0078D7")
@@ -1660,7 +1484,6 @@ class AnalyticsPage(ttk.Frame):
             canvas1.draw()
             canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-            # Начисления
             fig2 = Figure(figsize=(5, 3.6), dpi=100)
             ax2 = fig2.add_subplot(111)
             ax2.plot(df_daily["label"], df_daily["amount_rub"], marker="o", color="#5E9A2C")
@@ -1676,7 +1499,6 @@ class AnalyticsPage(ttk.Frame):
             ttk.Label(left, text="Нет данных за период.").pack(padx=10, pady=10)
             ttk.Label(right, text="Нет данных за период.").pack(padx=10, pady=10)
 
-        # Низ: таблицы
         bottom = ttk.Frame(self.tab_lodging)
         bottom.pack(fill="both", expand=True, padx=5, pady=5)
 
@@ -1690,13 +1512,7 @@ class AnalyticsPage(ttk.Frame):
         if not df_dorm.empty:
             tree = self._create_treeview(
                 dorm_frame,
-                columns=[
-                    ("dorm", "Общежитие"),
-                    ("bed_days", "Койко-дней"),
-                    ("amount", "Начислено, ₽"),
-                    ("avg", "Средн., ₽/день"),
-                    ("miss", "Без тарифа"),
-                ],
+                columns=[("dorm", "Общежитие"), ("bed_days", "Койко-дней"), ("amount", "Начислено, ₽"), ("avg", "Средн., ₽/день"), ("miss", "Без тарифа")],
                 height=10,
             )
             tree.column("dorm", width=220)
@@ -1723,12 +1539,7 @@ class AnalyticsPage(ttk.Frame):
         if not df_dept.empty:
             tree2 = self._create_treeview(
                 dept_frame,
-                columns=[
-                    ("dept", "Подразделение"),
-                    ("bed_days", "Койко-дней"),
-                    ("amount", "Начислено, ₽"),
-                    ("miss", "Без тарифа"),
-                ],
+                columns=[("dept", "Подразделение"), ("bed_days", "Койко-дней"), ("amount", "Начислено, ₽"), ("miss", "Без тарифа")],
                 height=10,
             )
             tree2.column("dept", width=220)
@@ -1749,38 +1560,20 @@ class AnalyticsPage(ttk.Frame):
         else:
             ttk.Label(dept_frame, text="Нет данных.").pack(padx=10, pady=10)
 
-        # Самый низ: "общежитие -> объекты"
-        map_frame = ttk.LabelFrame(
-            self.tab_lodging,
-            text="Из какого общежития на каких объектах работают люди (по табелям, TOP)"
-        )
+        map_frame = ttk.LabelFrame(self.tab_lodging, text="Общежитие → объекты (по табелям, TOP)")
         map_frame.pack(fill="both", expand=False, padx=5, pady=(0, 8))
 
         df_map = self.data_provider.get_dorm_to_objects(limit=15)
         if not df_map.empty:
             tree3 = self._create_treeview(
                 map_frame,
-                columns=[
-                    ("dorm", "Общежитие"),
-                    ("obj", "Объект"),
-                    ("hours", "Чел.-часы"),
-                ],
+                columns=[("dorm", "Общежитие"), ("obj", "Объект"), ("hours", "Чел.-часы")],
                 height=10,
             )
             tree3.column("dorm", width=220)
             tree3.column("obj", width=260)
             tree3.column("hours", width=100, anchor="e")
             for _, r in df_map.iterrows():
-                tree3.insert(
-                    "",
-                    "end",
-                    values=(
-                        r["dorm_name"],
-                        r["object_name"],
-                        f"{float(r['total_hours']):.1f}",
-                    ),
-                )
+                tree3.insert("", "end", values=(r["dorm_name"], r["object_name"], f"{float(r['total_hours']):.1f}"))
         else:
-            ttk.Label(map_frame, text="Нет данных для связки общежитие → объекты за период.").pack(
-                padx=10, pady=10
-            )
+            ttk.Label(map_frame, text="Нет данных для связки общежитие → объекты (проверьте наличие tbn в табелях и employees).").pack(padx=10, pady=10)
