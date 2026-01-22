@@ -790,7 +790,13 @@ def get_details_from_db(
                     mo.date::text        AS date,
                     COALESCE(mo.fact_address, o.address, '')       AS address,
                     COALESCE(o.excel_id, '')        AS object_excel_id,
-                    COALESCE(d.name, '')          AS department,
+            
+                    -- Подразделение из заявки
+                    COALESCE(d_order.name, '')     AS department,
+            
+                    -- Подразделение сотрудника из справочника (1С)
+                    COALESCE(d_emp.name, '')       AS employee_department,
+            
                     COALESCE(mo.team_name, '')    AS team_name,
                     COALESCE(moi.fio_text, '')    AS fio,
                     COALESCE(moi.tbn_text, '')    AS tbn,
@@ -801,10 +807,12 @@ def get_details_from_db(
                 FROM meal_orders mo
                 JOIN meal_order_items moi ON moi.order_id = mo.id
                 LEFT JOIN objects o       ON o.id = mo.object_id
-                LEFT JOIN departments d   ON d.id = mo.department_id
+                LEFT JOIN departments d_order ON d_order.id = mo.department_id
+                LEFT JOIN employees e        ON e.id = moi.employee_id
+                LEFT JOIN departments d_emp  ON d_emp.id = e.department_id
                 LEFT JOIN meal_types mti  ON mti.id = moi.meal_type_id
                 {where_sql}
-                ORDER BY mo.date, o.address, d.name, mo.team_name, moi.fio_text
+                ORDER BY mo.date, o.address, d_order.name, mo.team_name, moi.fio_text
             """
             cur.execute(sql, params)
             rows = cur.fetchall()
@@ -816,6 +824,7 @@ def get_details_from_db(
                 address,
                 object_excel_id,
                 department,
+                employee_department,
                 team_name,
                 fio,
                 tbn,
@@ -830,6 +839,7 @@ def get_details_from_db(
                     "address": address,
                     "object_id": object_excel_id,
                     "department": department,
+                    "employee_department": employee_department,  # из employees (1С)
                     "team_name": team_name,
                     "fio": fio,
                     "tbn": tbn,
@@ -2889,7 +2899,8 @@ class AllMealsOrdersPage(tk.Frame):
                 "Дата",
                 "Адрес",
                 "ID объекта",
-                "Подразделение",
+                "Подразделение (из заявки)"
+                "Подразделение сотрудника (из 1С)",
                 "Наименование бригады",
                 "ФИО",
                 "Табельный №",
@@ -2913,6 +2924,7 @@ class AllMealsOrdersPage(tk.Frame):
                     order.get("address", ""),
                     order.get("object_id", ""),
                     order.get("department", ""),
+                    order.get("employee_department", ""),
                     order.get("team_name", ""),
                     order.get("fio", ""),
                     order.get("tbn", ""),
