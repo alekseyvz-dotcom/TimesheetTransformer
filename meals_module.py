@@ -2856,7 +2856,25 @@ class AllMealsOrdersPage(tk.Frame):
                 mt_dict["count"] += qty
                 mt_dict["amount"] += price * qty
 
+            # 5.2. Детальный список по людям
+            headers = [
+                "Дата",
+                "Адрес",
+                "ID объекта",
+                "Подразделение (из заявки)",
+                "Подразделение сотрудника (из 1С)",
+                "Наименование бригады",
+                "ФИО",
+                "Табельный №",
+                "Должность",
+                "Тип питания",
+                "Цена, руб.",
+                "Сумма, руб.",
+                "Комментарий",
+                "Дубликаты",
+            ]
 
+            end_col = len(headers)
             # Шапка
             period_str = ""
             if date_from:
@@ -2868,8 +2886,6 @@ class AllMealsOrdersPage(tk.Frame):
             dep_str = dep_filter or "Все"
             addr_str = addr_filter or "(любой адрес)"
 
-            
-            end_col = len(headers)
             ws.append([f"Реестр питания ({period_str})"])
             ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=end_col)
 
@@ -2896,23 +2912,6 @@ class AllMealsOrdersPage(tk.Frame):
 
             ws.append([])
 
-            # 5.2. Детальный список по людям
-            headers = [
-                "Дата",
-                "Адрес",
-                "ID объекта",
-                "Подразделение (из заявки)",
-                "Подразделение сотрудника (из 1С)",
-                "Наименование бригады",
-                "ФИО",
-                "Табельный №",
-                "Должность",
-                "Тип питания",
-                "Цена, руб.",
-                "Сумма, руб.",
-                "Комментарий",
-                "Дубликаты",
-            ]
             ws.append(headers)
 
             for order, mark in zip(orders, duplicates_mark):
@@ -2944,6 +2943,7 @@ class AllMealsOrdersPage(tk.Frame):
                 40,  # Адрес
                 15,  # ID объекта
                 25,  # Подразделение
+                28,  # Подразделение сотрудника (из 1С)
                 25,  # Наименование бригады
                 30,  # ФИО
                 15,  # Табельный №
