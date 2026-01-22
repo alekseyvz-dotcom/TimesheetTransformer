@@ -2868,14 +2868,16 @@ class AllMealsOrdersPage(tk.Frame):
             dep_str = dep_filter or "Все"
             addr_str = addr_filter or "(любой адрес)"
 
+            
+            end_col = len(headers)
             ws.append([f"Реестр питания ({period_str})"])
-            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=6)
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=end_col)
 
             ws.append([f"Подразделение: {dep_str}"])
-            ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=6)
+            ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=end_col)
 
             ws.append([f"Адрес содержит: {addr_str}"])
-            ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=6)
+            ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=end_col)
 
             ws.append([])
 
@@ -2899,7 +2901,7 @@ class AllMealsOrdersPage(tk.Frame):
                 "Дата",
                 "Адрес",
                 "ID объекта",
-                "Подразделение (из заявки)"
+                "Подразделение (из заявки)",
                 "Подразделение сотрудника (из 1С)",
                 "Наименование бригады",
                 "ФИО",
