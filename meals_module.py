@@ -7,14 +7,11 @@ import urllib.error
 import urllib.parse
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
-
 import tkinter as tk
 from tkinter import ttk, messagebox
-
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 from datetime import datetime, date, timedelta
-
 import psycopg2
 from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
@@ -23,12 +20,10 @@ from urllib.parse import urlparse, parse_qs
 db_connection_pool = None
 
 def set_db_pool(pool):
-    """Функция для установки пула соединений извне."""
     global db_connection_pool
     db_connection_pool = pool
 
 def release_db_connection(conn):
-    """Возвращает соединение обратно в пул."""
     if db_connection_pool:
         db_connection_pool.putconn(conn)
 
@@ -46,7 +41,6 @@ KEY_MEALS_PLANNING_ENABLED = "meals_planning_enabled"
 SPRAVOCHNIK_FILE = "Справочник.xlsx"  # оставлен для совместимости, больше не используется
 ORDERS_DIR = "Заявки_питание"
 
-
 def exe_dir() -> Path:
     """Каталог, откуда запущена программа/скрипт."""
     if getattr(sys, "frozen", False):
@@ -57,15 +51,11 @@ def exe_dir() -> Path:
 def config_path() -> Path:
     """Путь к ini‑конфигу для fallback‑режима (без settings_manager)."""
     return exe_dir() / CONFIG_FILE
-    
-
-# ========================= РАБОТА С НАСТРОЙКАМИ =========================
 
 try:
     import settings_manager as Settings
 except Exception:
     Settings = None
-
 
 if Settings:
     ensure_config = Settings.ensure_config
@@ -136,7 +126,6 @@ else:
         cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = dep or "Все"
         write_config(cfg)
 
-
 def get_meals_planning_enabled() -> bool:
     if Settings and hasattr(Settings, "get_meals_planning_enabled_from_config"):
         return Settings.get_meals_planning_enabled_from_config()
@@ -144,15 +133,11 @@ def get_meals_planning_enabled() -> bool:
     v = cfg.get(CONFIG_SECTION_INTEGR, KEY_MEALS_PLANNING_ENABLED, fallback="true").strip().lower()
     return v in ("1", "true", "yes", "on")
 
-
-# ========================= РАБОТА С БД =========================
-
 def get_db_connection():
     """Получает соединение из установленного пула."""
     if db_connection_pool is None:
          raise RuntimeError("Пул соединений не был установлен из главного приложения.")
     return db_connection_pool.getconn()
-
 
 def get_or_create_department(cur, name: str):
     if not name:
@@ -178,7 +163,6 @@ def get_setting(key: str, default: str = "") -> str:
         if conn:
             release_db_connection(conn)
 
-
 def set_setting(key: str, value: str):
     conn = None
     try:
@@ -198,24 +182,17 @@ def set_setting(key: str, value: str):
             release_db_connection(conn)
 
 def get_meals_limit_next_day_only() -> bool:
-    """
-    True  – заявки только на следующий день (жёсткое правило).
-    False – можно на любые будущие даты.
-    """
+
     v = (get_setting("meals_limit_next_day_only", "1") or "").strip().lower()
     return v in ("1", "true", "yes", "on")
 
-
 def get_meals_next_day_deadline() -> Optional[datetime.time]:
-    """
-    Время (часы:минуты) до которого сегодня можно подать заявку на завтра.
-    Формат в БД: 'HH:MM'. Если не задано – возвращает None (без ограничения по времени).
-    """
+
     s = (get_setting("meals_next_day_deadline", "").strip())
     if not s:
         return None
     try:
-        # поддержим 'HH:MM' и 'HH:MM:SS' на всякий случай
+
         for fmt in ("%H:%M", "%H:%M:%S"):
             try:
                 return datetime.strptime(s, fmt).time()
@@ -225,15 +202,8 @@ def get_meals_next_day_deadline() -> Optional[datetime.time]:
         pass
     return None
 
-# ------- НОВАЯ ЛОГИКА ПОИСКА/СОЗДАНИЯ ОБЪЕКТОВ --------
-
 def get_object_id(cur, excel_id: str, address: str) -> Optional[int]:
-    """
-    Возвращает id объекта, если найден.
-    Если excel_id указан — ищем по нему.
-    Если нет — ищем только по адресу.
-    НИКАКИХ вставок здесь нет.
-    """
+
     excel_id = (excel_id or "").strip()
     address = (address or "").strip()
 
@@ -251,12 +221,8 @@ def get_object_id(cur, excel_id: str, address: str) -> Optional[int]:
 
     return None
 
-
 def get_or_create_object_by_excel_id(cur, excel_id: str, address: str) -> int:
-    """
-    Создаёт объект ТОЛЬКО если есть excel_id.
-    По одному адресу без ID объект не создаём.
-    """
+
     excel_id = (excel_id or "").strip()
     address = (address or "").strip()
 
@@ -274,9 +240,6 @@ def get_or_create_object_by_excel_id(cur, excel_id: str, address: str) -> int:
     )
     return cur.fetchone()[0]
 
-# ------------------------------------------------------
-
-
 def get_or_create_meal_type(cur, name: str):
     name = (name or "").strip()
     if not name:
@@ -287,7 +250,6 @@ def get_or_create_meal_type(cur, name: str):
         return row[0]
     cur.execute("INSERT INTO meal_types (name, price) VALUES (%s, 0) RETURNING id", (name,))
     return cur.fetchone()[0]
-
 
 def find_employee(cur, fio: str, tbn: str = None):
     fio = (fio or "").strip()
@@ -304,14 +266,9 @@ def find_employee(cur, fio: str, tbn: str = None):
             return row[0]
     return None
 
-
 # ---------- Загрузка справочников из БД ----------
 
 def load_employees_from_db() -> List[Dict[str, Any]]:
-    """
-    Возвращает список сотрудников:
-      [{'fio': ..., 'tbn': ..., 'pos': ..., 'dep': ...}, ...]
-    """
     conn = None
     try:
         conn = get_db_connection()
@@ -338,11 +295,7 @@ def load_employees_from_db() -> List[Dict[str, Any]]:
         if conn:
             release_db_connection(conn)
 
-
 def load_objects_from_db() -> List[Tuple[str, str]]:
-    """
-    Возвращает список объектов: [(excel_id, address), ...]
-    """
     conn = None
     try:
         conn = get_db_connection()
@@ -365,10 +318,6 @@ def load_objects_from_db() -> List[Tuple[str, str]]:
             release_db_connection(conn)
 
 def load_meal_types_from_db() -> List[Dict[str, Any]]:
-    """
-    Возвращает список типов питания с ценой:
-      [{'id': 1, 'name': 'Одноразовое', 'price': 200.0}, ...]
-    """
     conn = None
     try:
         conn = get_db_connection()
@@ -397,10 +346,6 @@ def load_meal_types_from_db() -> List[Dict[str, Any]]:
             release_db_connection(conn)
 
 def get_meal_type_price_map() -> Dict[str, float]:
-    """
-    Возвращает словарь: {имя_типа_питания: цена}.
-    Если в meal_types нет записи, цена считается 0.
-    """
     conn = None
     try:
         conn = get_db_connection()
@@ -419,19 +364,9 @@ def get_meal_type_price_map() -> Dict[str, float]:
 # ---------------- Сохранение заказов, реестры, проверки ----------------
 
 def get_current_user_id() -> Optional[int]:
-    """
-    Возвращает id текущего пользователя, если модуль питания
-    запущен внутри главного приложения.
-    """
     return None
 
 def save_order_to_db(data: dict) -> int:
-    """
-    Сохраняет заявку (dict из _build_order_dict) в PostgreSQL.
-
-    Старый вариант использовался автономно; оставляем,
-    но приводим к новой логике объектов.
-    """
     conn = None
     try:
         conn = get_db_connection()
@@ -444,10 +379,8 @@ def save_order_to_db(data: dict) -> int:
                 obj_excel_id = (obj.get("id") or "").strip()
                 obj_address = (obj.get("address") or "").strip()
 
-                # новая логика: сначала ищем объект
                 object_id = get_object_id(cur, obj_excel_id, obj_address)
                 if object_id is None:
-                    # если есть код — можно создать
                     if obj_excel_id:
                         object_id = get_or_create_object_by_excel_id(cur, obj_excel_id, obj_address)
                     else:
@@ -552,10 +485,6 @@ def get_registry_from_db(
     filter_address: Optional[str] = None,
     filter_department: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Возвращает агрегированный реестр по:
-      (date, address, department, team_name).
-    """
     conn = None
     try:
         conn = get_db_connection()
@@ -641,10 +570,6 @@ def load_all_meal_orders(
     department: Optional[str] = None,
     address_substr: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Возвращает список заголовков всех заявок на питание
-    с опциональными фильтрами по периоду, подразделению и адресу.
-    """
     conn = None
     try:
         conn = get_db_connection()
@@ -710,9 +635,6 @@ def load_all_meal_orders(
             release_db_connection(conn)
 
 def load_user_meal_orders(user_id: int) -> List[Dict[str, Any]]:
-    """
-    Возвращает список заголовков заявок на питание, созданных пользователем.
-    """
     if not user_id:
         return []
 
@@ -759,9 +681,6 @@ def get_details_from_db(
     filter_address: Optional[str] = None,
     filter_department: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Возвращает детализированный список заявок.
-    """
     conn = None
     try:
         conn = get_db_connection()
@@ -855,12 +774,7 @@ def get_details_from_db(
         if conn:
             release_db_connection(conn)
 
-
 def find_conflicting_meal_orders_same_date_other_object(data: dict) -> List[Dict[str, Any]]:
-    """
-    Ищет в БД записи о том, что на этих же людей уже оформлено питание
-    в ТУ ЖЕ дату, но на ДРУГОМ объекте.
-    """
     conn = None
     try:
         conn = get_db_connection()
@@ -931,9 +845,6 @@ def find_conflicting_meal_orders_same_date_other_object(data: dict) -> List[Dict
         if conn:
             release_db_connection(conn)
 
-
-# ========================= УТИЛИТЫ =========================
-
 def parse_date_any(s: str) -> Optional[date]:
     s = (s or "").strip()
     if not s:
@@ -944,7 +855,6 @@ def parse_date_any(s: str) -> Optional[date]:
         except Exception:
             pass
     return None
-
 
 def post_json(url: str, payload: dict, token: str = "") -> Tuple[bool, str]:
     try:
@@ -971,7 +881,6 @@ def post_json(url: str, payload: dict, token: str = "") -> Tuple[bool, str]:
     except Exception as e:
         return (False, f"Error: {e}")
 
-
 def safe_filename(s: str, maxlen: int = 60) -> str:
     if not s:
         return "NOID"
@@ -980,12 +889,9 @@ def safe_filename(s: str, maxlen: int = 60) -> str:
     return s[:maxlen] if len(s) > maxlen else s
 
 def disable_mousewheel(widget: tk.Widget):
-    """Запрещает прокрутку колёсиком для данного виджета (Windows)."""
     def _block(event):
         return "break"
     widget.bind("<MouseWheel>", _block)
-
-# ========================= ВИДЖЕТЫ =========================
 
 class AutoCompleteCombobox(ttk.Combobox):
     def __init__(self, master=None, **kw):
@@ -1021,7 +927,6 @@ class AutoCompleteCombobox(ttk.Combobox):
             return
         self["values"] = [x for x in self._all_values if typed.lower() in x.lower()]
 
-
 EMP_COL_WIDTHS = {
     0: 320,
     1: 90,
@@ -1033,9 +938,7 @@ EMP_COL_WIDTHS = {
 }
 
 class SelectEmployeesDialog(tk.Toplevel):
-    """
-    Диалог выбора сотрудников в виде таблицы с "чекбоксами".
-    """
+
     def __init__(self, parent, employees: List[Dict[str, Any]], current_dep: str):
         super().__init__(parent)
         self.parent = parent
@@ -1055,7 +958,6 @@ class SelectEmployeesDialog(tk.Toplevel):
         main = tk.Frame(self, padx=10, pady=10)
         main.pack(fill="both", expand=True)
 
-        # --- Верхняя панель ---
         top = tk.Frame(main)
         top.pack(fill="x")
 
@@ -1079,7 +981,6 @@ class SelectEmployeesDialog(tk.Toplevel):
         ent_search.grid(row=2, column=1, sticky="w", pady=(4, 2))
         ent_search.bind("<KeyRelease>", lambda e: self._refilter())
 
-        # --- Таблица сотрудников ---
         tbl_frame = tk.Frame(main)
         tbl_frame.pack(fill="both", expand=True, pady=(8, 4))
 
@@ -1262,8 +1163,6 @@ class SelectEmployeesDialog(tk.Toplevel):
         self.result = None
         self.destroy()
 
-# ========================= СТРОКА СОТРУДНИКА =========================
-
 class EmployeeRow:
     ERR_BG = "#ffccbc"
     ZEBRA_EVEN = "#ffffff"
@@ -1282,7 +1181,6 @@ class EmployeeRow:
         self.cmb_fio.set_completion_list(emp_names)
         self.cmb_fio.grid(row=0, column=0, padx=2, pady=1, sticky="w")
 
-        # Блокируем прокрутку списка ФИО колёсиком мыши (Windows)
         def _block_mousewheel(event):
             return "break"
 
@@ -1299,13 +1197,11 @@ class EmployeeRow:
             self.cmb_meal_type.set(meal_types[0])
         self.cmb_meal_type.grid(row=0, column=3, padx=2)
 
-        # блокируем прокрутку типа питания
         disable_mousewheel(self.cmb_meal_type)
 
         self.ent_comment = ttk.Entry(self.frame, width=32)
         self.ent_comment.grid(row=0, column=4, padx=2, sticky="w")
         
-
         self.ent_quantity = ttk.Entry(self.frame, width=7)
         self.ent_quantity.insert(0, "1")
         self.ent_quantity.grid(row=0, column=5, padx=2, sticky="w")
@@ -1349,7 +1245,6 @@ class EmployeeRow:
         else:
             self._clear_err(self.cmb_meal_type)
 
-        # проверка количества
         qty_str = (self.ent_quantity.get() or "").replace(",", ".").strip()
         try:
             qty = float(qty_str) if qty_str else 1.0
@@ -1390,10 +1285,7 @@ class EmployeeRow:
             "quantity": qty,
         }
 
-# ========================= СТРАНИЦА СОЗДАНИЯ ЗАЯВКИ =========================
-
 class MealOrderPage(tk.Frame):
-    """Страница для создания/редактирования заявок на питание"""
 
     def __init__(self, master, existing_data: dict = None, order_id: int = None, on_saved=None):
         super().__init__(master, bg="#f7f7f7")
@@ -1458,7 +1350,6 @@ class MealOrderPage(tk.Frame):
         self.cmb_dep.grid(row=0, column=3, columnspan=3, sticky="we", padx=(4, 12))
 
         disable_mousewheel(self.cmb_dep)  # блокируем прокрутку подразделения
-
 
         def on_dep_changed(event=None):
             set_saved_dep(self.cmb_dep.get())
@@ -1567,7 +1458,6 @@ class MealOrderPage(tk.Frame):
             side="left", padx=4
         )
 
-        # --- новый счётчик сотрудников ---
         self.lbl_emp_count = tk.Label(
             bottom,
             text="Сотрудников в заявке: 0",
@@ -1642,7 +1532,6 @@ class MealOrderPage(tk.Frame):
             row.ent_comment.delete(0, "end")
             row.ent_comment.insert(0, emp.get("comment", ""))
 
-            # количество
             qty = emp.get("quantity")
             if qty is None:
                 qty = 1
@@ -1669,7 +1558,6 @@ class MealOrderPage(tk.Frame):
                 user_id = int((app_ref.current_user or {}).get("id") or 0) or None
             except Exception:
                 user_id = None
-
         core = {
             "date": req_date.strftime("%Y-%m-%d"),
             "department": (self.cmb_dep.get() or "").strip(),
@@ -1727,13 +1615,7 @@ class MealOrderPage(tk.Frame):
             self.lbl_date_hint.config(text="", fg="#555")
 
     def _sync_ids_by_address(self, address_value: Optional[str] = None):
-        """
-        Синхронизирует список ID объекта и фактический адрес по заданному адресу.
-        Если address_value не задан, берёт текущее значение из cmb_address.
-        """
         addr = (address_value if address_value is not None else self.cmb_address.get() or "").strip()
-
-        # если передали новый полный адрес — обновим комбобокс
         if address_value is not None:
             try:
                 self.cmb_address.set(addr)
@@ -1749,7 +1631,6 @@ class MealOrderPage(tk.Frame):
             self.cmb_object_id.config(state="normal", values=[])
             self.cmb_object_id.set("")
 
-        # если фактический адрес пока пустой – заполняем выбранным адресом
         fact = (self.ent_fact_address.get() or "").strip() if hasattr(self, "ent_fact_address") else ""
         if not fact and addr:
             try:
@@ -1811,13 +1692,11 @@ class MealOrderPage(tk.Frame):
             )
             return False
 
-        # --- новая логика с учётом настроек из БД ---
         limit_next_day_only = get_meals_limit_next_day_only()
         deadline_time = get_meals_next_day_deadline()
         now = datetime.now()
 
         if limit_next_day_only:
-            # Разрешаем только заявки на ЗАВТРА
             if req != tomorrow:
                 messagebox.showwarning(
                     "Заявка",
@@ -1825,7 +1704,6 @@ class MealOrderPage(tk.Frame):
                 )
                 return False
 
-            # Если задано время дедлайна – проверяем его
             if deadline_time is not None:
                 deadline_dt = datetime.combine(today, deadline_time)
                 if now > deadline_dt:
@@ -1836,7 +1714,6 @@ class MealOrderPage(tk.Frame):
                     )
                     return False
         else:
-            # Более мягкое правило: нельзя на прошедшие даты
             if req < today:
                 messagebox.showwarning(
                     "Заявка",
@@ -1844,7 +1721,6 @@ class MealOrderPage(tk.Frame):
                 )
                 return False
 
-        # --- дальше твоя старая логика без изменений ---
         if not (self.cmb_dep.get() or "").strip():
             messagebox.showwarning("Заявка", "Выберите Подразделение.")
             return False
@@ -2254,32 +2130,20 @@ class MealOrderPage(tk.Frame):
             messagebox.showerror("Папка", f"Не удалось открыть папку:\n{e}")
 
     def _on_address_selected(self, event=None):
-        """
-        Обработчик выбора адреса из выпадающего списка комбобокса.
-        Здесь self.cmb_address.get() уже содержит полное значение из списка.
-        """
         full_addr = (self.cmb_address.get() or "").strip()
         if not full_addr:
             return
-        # на всякий случай убеждаемся, что это один из известных нам адресов
-        # (если нет — оставляем как есть)
         if full_addr not in self.addresses:
-            # попытаемся найти первый адрес, который начинается с введённого
             typed = full_addr.lower()
             for a in self.addresses:
                 if a.lower().startswith(typed):
                     full_addr = a
                     break
 
-        # ставим в комбобокс полный адрес
         self.cmb_address.set(full_addr)
-        # синхронизируем ID и фактический адрес по полному
         self._sync_ids_by_address(full_addr)
 
 class MyMealsOrdersPage(tk.Frame):
-    """
-    Реестр заявок на питание текущего пользователя.
-    """
     def __init__(self, master, app_ref=None):
         super().__init__(master, bg="#f7f7f7")
         self.app_ref = app_ref
@@ -2379,7 +2243,6 @@ class MyMealsOrdersPage(tk.Frame):
                 parent=self,
             )
             return
-
         self._orders = orders
 
         for o in orders:
@@ -2402,7 +2265,6 @@ class MyMealsOrdersPage(tk.Frame):
                 created_str = created_at.strftime("%d.%m.%Y %H:%M")
             else:
                 created_str = str(created_at or "")
-
             iid = str(oid)
             self.tree.insert(
                 "",
@@ -2431,7 +2293,6 @@ class MyMealsOrdersPage(tk.Frame):
             return
 
         order_id = int(info["id"])
-
         try:
             order_data = get_order_with_items_from_db(order_id)
         except Exception as e:
@@ -2485,10 +2346,6 @@ class MyMealsOrdersPage(tk.Frame):
         page.pack(fill="both", expand=True)
 
 class AllMealsOrdersPage(tk.Frame):
-    """
-    Реестр заявок на питание всех пользователей
-    с фильтром по периоду.
-    """
     def __init__(self, master, app_ref=None):
         super().__init__(master, bg="#f7f7f7")
         self.app_ref = app_ref
@@ -2508,7 +2365,6 @@ class AllMealsOrdersPage(tk.Frame):
             bg="#f7f7f7",
         ).grid(row=0, column=0, columnspan=8, sticky="w")
 
-        # Период: Дата с / по
         tk.Label(top, text="Дата с:", bg="#f7f7f7").grid(row=1, column=0, sticky="w", pady=(4, 0))
         self.ent_date_from = ttk.Entry(top, width=12)
         self.ent_date_from.grid(row=1, column=1, sticky="w", padx=(4, 8), pady=(4, 0))
@@ -2516,18 +2372,15 @@ class AllMealsOrdersPage(tk.Frame):
         tk.Label(top, text="по:", bg="#f7f7f7").grid(row=1, column=2, sticky="w", pady=(4, 0))
         self.ent_date_to = ttk.Entry(top, width=12)
         self.ent_date_to.grid(row=1, column=3, sticky="w", padx=(4, 8), pady=(4, 0))
-
-        # Фильтр по подразделению
+        
         tk.Label(top, text="Подразделение:", bg="#f7f7f7").grid(row=1, column=4, sticky="w", pady=(4, 0))
         self.cmb_dep_filter = ttk.Combobox(top, state="readonly", width=40)
         self.cmb_dep_filter.grid(row=1, column=5, sticky="w", padx=(4, 8), pady=(4, 0))
 
-        # Фильтр по адресу
         tk.Label(top, text="Адрес (часть):", bg="#f7f7f7").grid(row=1, column=6, sticky="w", pady=(4, 0))
         self.ent_address_filter = ttk.Entry(top, width=24)
         self.ent_address_filter.grid(row=1, column=7, sticky="w", padx=(4, 8), pady=(4, 0))
 
-        # Кнопки справа
         btn_frame = tk.Frame(top, bg="#f7f7f7")
         btn_frame.grid(row=0, column=9, rowspan=2, sticky="e")
 
@@ -2549,11 +2402,8 @@ class AllMealsOrdersPage(tk.Frame):
             command=self._load_data,
         ).pack(side="right", padx=4)
 
-
-        # Инициализируем список подразделений
         self._init_dep_filter()
 
-        # Таблица
         frame = tk.Frame(self, bg="#f7f7f7")
         frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
@@ -2607,13 +2457,9 @@ class AllMealsOrdersPage(tk.Frame):
             command=self._on_delete_clicked,
         )
         self.btn_delete.pack(side="right")
-
         self._update_delete_button_state()
 
     def _get_current_role(self) -> str:
-        """
-        Возвращает роль текущего пользователя из app_ref, если она есть.
-        """
         if self.app_ref is not None and hasattr(self.app_ref, "current_user"):
             try:
                 return str((self.app_ref.current_user or {}).get("role") or "").lower()
@@ -2622,9 +2468,6 @@ class AllMealsOrdersPage(tk.Frame):
         return ""
 
     def _update_delete_button_state(self):
-        """
-        Делает кнопку 'Удалить заявку' активной только для роли admin.
-        """
         role = self._get_current_role()
         is_admin = (role == "admin")
         state = "normal" if is_admin else "disabled"
@@ -2634,10 +2477,6 @@ class AllMealsOrdersPage(tk.Frame):
             pass
 
     def _parse_period(self) -> Tuple[Optional[date], Optional[date]]:
-        """
-        Читает поля 'Дата с' / 'по' и возвращает (date_from, date_to).
-        Пустое поле = без ограничения.
-        """
         txt_from = (self.ent_date_from.get() or "").strip()
         txt_to = (self.ent_date_to.get() or "").strip()
 
@@ -2647,9 +2486,6 @@ class AllMealsOrdersPage(tk.Frame):
         return d_from, d_to
 
     def _init_dep_filter(self):
-        """
-        Загружает список подразделений из БД для фильтра.
-        """
         conn = None
         try:
             conn = get_db_connection()
@@ -2663,7 +2499,6 @@ class AllMealsOrdersPage(tk.Frame):
                 self.cmb_dep_filter["values"] = deps
                 self.cmb_dep_filter.set("Все")
         except Exception:
-            # В случае любой ошибки просто оставляем "Все"
             self.cmb_dep_filter["values"] = ["Все"]
             self.cmb_dep_filter.set("Все")
         finally:
@@ -2671,7 +2506,6 @@ class AllMealsOrdersPage(tk.Frame):
                 release_db_connection(conn)
 
     def _load_data(self):
-        # очищаем таблицу
         self.tree.delete(*self.tree.get_children())
         self._orders.clear()
 
@@ -2736,13 +2570,7 @@ class AllMealsOrdersPage(tk.Frame):
             )
 
     def _export_to_excel(self):
-        """
-        Выгружает детализированный реестр (все сотрудники, все адреса, типы питания и стоимость)
-        с учётом фильтров (дата с/по, подразделение, адрес),
-        аналогично выгрузке в разделе 'Планирование питания'.
-        """
         try:
-            # --- 1. Разбираем период ---
             date_from, date_to = self._parse_period()
 
             if date_from and date_to and date_from > date_to:
@@ -2760,12 +2588,10 @@ class AllMealsOrdersPage(tk.Frame):
             if date_from and date_to and date_from == date_to:
                 filter_date_str = date_from.strftime("%Y-%m-%d")
             elif date_from and not date_to:
-                # только "с": если нужно строго одну дату — можно тоже считать это как один день
                 filter_date_str = date_from.strftime("%Y-%m-%d")
             elif date_to and not date_from:
                 filter_date_str = date_to.strftime("%Y-%m-%d")
             else:
-                # период больше одного дня — фильтра по дате в SQL не делаем
                 filter_date_str = None
 
             try:
@@ -2789,15 +2615,13 @@ class AllMealsOrdersPage(tk.Frame):
                     parent=self,
                 )
                 return
-
-            # 2.2. Если задан период более одного дня, дополнительно фильтруем по нему в Python
+                
             orders: List[Dict[str, Any]] = []
             for o in raw_orders:
                 d_str = o.get("date") or ""
                 try:
                     d = datetime.strptime(d_str, "%Y-%m-%d").date()
                 except Exception:
-                    # если формат неожиданно иной — просто пропускаем проверку
                     d = None
 
                 if date_from and d and d < date_from:
@@ -2814,10 +2638,8 @@ class AllMealsOrdersPage(tk.Frame):
                 )
                 return
 
-            # --- 3. Берём цены типов питания ---
             price_map = get_meal_type_price_map()
-
-            # --- 4. Определяем дубликаты по (ФИО, Таб.№) так же, как в Планировании ---
+            
             freq: Dict[tuple, int] = {}
             for o in orders:
                 fio = (o.get("fio") or "").strip()
@@ -2834,14 +2656,11 @@ class AllMealsOrdersPage(tk.Frame):
                 mark = "дубль" if (fio or tbn) and freq.get(key, 0) > 1 else ""
                 duplicates_mark.append(mark)
 
-            # --- 5. Формируем Excel аналогично MealPlanningPage.export_to_excel ---
             wb = Workbook()
             ws = wb.active
             ws.title = "Реестр питания"
 
-            # 5.1. Свод по объектам, типам питания и стоимости
             summary: Dict[str, Dict[str, Dict[str, float]]] = {}
-            # summary[addr][meal_type] = {"count": N, "amount": S}
 
             for o in orders:
                 addr = o.get("address", "") or ""
@@ -2856,7 +2675,6 @@ class AllMealsOrdersPage(tk.Frame):
                 mt_dict["count"] += qty
                 mt_dict["amount"] += price * qty
 
-            # 5.2. Детальный список по людям
             headers = [
                 "Дата",
                 "Адрес",
@@ -2937,7 +2755,6 @@ class AllMealsOrdersPage(tk.Frame):
                     mark,
                 ])
 
-            # Ширины колонок
             widths = [
                 12,  # Дата
                 40,  # Адрес
@@ -2957,10 +2774,8 @@ class AllMealsOrdersPage(tk.Frame):
             for col, width in enumerate(widths, start=1):
                 ws.column_dimensions[get_column_letter(col)].width = width
 
-            # Замораживаем панель чуть выше шапки детальной таблицы
             ws.freeze_panes = "A7"
 
-            # --- 6. Сохраняем файл ---
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
             period_part = ""
@@ -3010,10 +2825,6 @@ class AllMealsOrdersPage(tk.Frame):
         return None
 
     def _on_delete_clicked(self):
-        """
-        Обработчик кнопки 'Удалить заявку'.
-        Доступен только для администратора (кнопка у остальных отключена).
-        """
         role = self._get_current_role()
         if role != "admin":
             messagebox.showwarning(
@@ -3076,7 +2887,6 @@ class AllMealsOrdersPage(tk.Frame):
             parent=self,
         )
 
-        # Перезагрузим реестр с теми же фильтрами
         self._load_data()
 
     def _on_open(self, event=None):
@@ -3107,7 +2917,6 @@ class AllMealsOrdersPage(tk.Frame):
             return
 
         if choice is False:
-            # создаём копию на следующий день
             try:
                 old_date = datetime.strptime(order_data["date"], "%Y-%m-%d").date()
                 new_date = old_date + timedelta(days=1)
@@ -3139,11 +2948,7 @@ class AllMealsOrdersPage(tk.Frame):
         page.app_ref = self.app_ref
         page.pack(fill="both", expand=True)
 
-# ========================= СТРАНИЦА ПЛАНИРОВАНИЯ ПИТАНИЯ =========================
-
 class MealPlanningPage(tk.Frame):
-    """Страница планирования питания"""
-
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
         self.row_meta: Dict[str, Dict[str, Any]] = {}
@@ -3161,8 +2966,7 @@ class MealPlanningPage(tk.Frame):
         tk.Label(top, text="Подразделение:", bg="#f7f7f7").grid(
             row=0, column=2, sticky="w", padx=(12, 0)
         )
-        # возможные подразделения можно отдельно тянуть из БД;
-        # для простоты вводим вручную
+
         self.cmb_filter_dep = ttk.Combobox(top, state="readonly", values=["Все"], width=20)
         self.cmb_filter_dep.grid(row=0, column=3, padx=4)
         self.cmb_filter_dep.set("Все")
@@ -3225,13 +3029,6 @@ class MealPlanningPage(tk.Frame):
         self.tree.bind("<Double-1>", self.on_row_double_click)
 
     def export_supplier_order(self):
-        """
-        Формирует Excel:
-          Заголовок: "Заявка питания на <дата>"
-          Далее итоги по видам питания.
-          Ниже таблица:
-            Объект (адрес) | Бригада | <Тип1> | <Тип2> | ...  (каждая пара Адрес+Бригада в одной строке)
-        """
         try:
             filter_date = self.ent_filter_date.get().strip()
             if not filter_date:
@@ -3251,9 +3048,7 @@ class MealPlanningPage(tk.Frame):
                 )
                 return
 
-            # агрегируем по видам питания (для шапки)
             total_by_type: Dict[str, int] = {}
-            # агрегируем для таблицы: (адрес, бригада, тип) -> количество
             per_object_team_type: Dict[tuple, int] = {}
 
             for o in orders:
@@ -3267,19 +3062,15 @@ class MealPlanningPage(tk.Frame):
                 key_row = (addr, team, mt)
                 per_object_team_type[key_row] = per_object_team_type.get(key_row, 0) + qty
 
-
-            # формируем Excel
             wb = Workbook()
             ws = wb.active
             ws.title = "Заявка поставщика"
 
-            # Заголовок
             ws.append([f"Заявка питания на {filter_date}"])
             ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=10)
 
             ws.append([])  # пустая строка
 
-            # Итоги по типам питания
             ws.append(["Итоги по видам питания"])
             ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=10)
             ws.append(["Тип питания", "Кол-во человек"])
@@ -3288,24 +3079,17 @@ class MealPlanningPage(tk.Frame):
 
             ws.append([])
 
-            # ---------- Поворот таблицы: типы питания -> столбцы ----------
-
-            # множество всех типов питания
             all_meal_types = sorted({mt for _, _, mt in per_object_team_type.keys()})
 
-            # шапка таблицы: Адрес | Бригада | <тип1> | <тип2> | ...
             header = ["Объект (адрес)", "Бригада"] + all_meal_types
             ws.append(header)
 
-            # собираем строки по ключу (адрес, бригада)
-            # row_data[(addr, team)][mt] = count
             row_data: Dict[tuple, Dict[str, int]] = {}
             for (addr, team, mt), cnt in per_object_team_type.items():
                 key = (addr, team)
                 mt_map = row_data.setdefault(key, {})
                 mt_map[mt] = mt_map.get(mt, 0) + cnt
 
-            # выводим по одной строке на (адрес, бригада)
             for (addr, team) in sorted(row_data.keys(), key=lambda x: (x[0], x[1])):
                 mt_map = row_data[(addr, team)]
                 row = [addr, team]
@@ -3313,7 +3097,6 @@ class MealPlanningPage(tk.Frame):
                     row.append(mt_map.get(mt, 0))
                 ws.append(row)
 
-            # ширины колонок: первая пошире, вторая средняя, остальные узкие
             ws.column_dimensions[get_column_letter(1)].width = 40  # Объект
             ws.column_dimensions[get_column_letter(2)].width = 30  # Бригада
             for col in range(3, 3 + len(all_meal_types)):
@@ -3363,7 +3146,6 @@ class MealPlanningPage(tk.Frame):
             )
 
     def _populate_tree(self, registry: List[Dict]):
-        # очистка дерева
         for item in self.tree.get_children():
             self.tree.delete(item)
         self.row_meta = {}
@@ -3384,9 +3166,6 @@ class MealPlanningPage(tk.Frame):
             self.row_meta[item_id] = entry
 
     def _format_details(self, by_meal_type: Dict[str, int]) -> str:
-        """
-        Формирует краткое описание по типам питания: "Одноразовое: 10 | Двухразовое: 5 ..."
-        """
         if not by_meal_type:
             return "Нет данных"
         parts = [f"{mt}: {cnt}" for mt, cnt in sorted(by_meal_type.items())]
@@ -3409,8 +3188,6 @@ class MealPlanningPage(tk.Frame):
             messagebox.showinfo("Заявка", "Для этого объекта нет связанных заявок.")
             return
 
-        # Если на объекте несколько заявок, пока откроем первую.
-        # При необходимости можно сделать выбор конкретной.
         order_id = order_ids[0]
 
         try:
@@ -3423,18 +3200,15 @@ class MealPlanningPage(tk.Frame):
             )
             return
 
-        # Окно с формой заявки
         win = tk.Toplevel(self)
         win.title(f"Редактирование заявки #{order_id}")
         win.geometry("1300x720")
 
         def on_saved_callback():
-            # после сохранения перезагружаем реестр
             self.load_registry()
 
         page = MealOrderPage(win, existing_data=order_data, order_id=order_id, on_saved=on_saved_callback)
         page.pack(fill="both", expand=True)
-
 
     def _show_details_dialog(self, entry: Dict):
         dialog = tk.Toplevel(self)
@@ -3535,10 +3309,8 @@ class MealPlanningPage(tk.Frame):
                 )
                 return
 
-            # цены типов питания
             price_map = get_meal_type_price_map()
 
-            # ---------- определяем дубликаты по (ФИО, Таб.№) ----------
             freq: Dict[tuple, int] = {}
             for o in orders:
                 fio = (o.get("fio") or "").strip()
@@ -3555,14 +3327,11 @@ class MealPlanningPage(tk.Frame):
                 mark = "дубль" if (fio or tbn) and freq.get(key, 0) > 1 else ""
                 duplicates_mark.append(mark)
 
-            # ---------- формируем Excel ----------
             wb = Workbook()
             ws = wb.active
             ws.title = "Реестр питания"
 
-            # 1) Свод по объектам и типам питания: считаем и людей, и сумму
             summary: Dict[str, Dict[str, Dict[str, float]]] = {}
-            # summary[addr][meal_type] = {"count": N, "amount": S}
 
             for o in orders:
                 addr = o.get("address", "") or ""
@@ -3592,7 +3361,6 @@ class MealPlanningPage(tk.Frame):
 
             ws.append([])
 
-            # 2) Детальный список
             headers = [
                 "Дата",
                 "Адрес",
@@ -3632,7 +3400,6 @@ class MealPlanningPage(tk.Frame):
                     mark,
                 ])
 
-            # подстроим ширины с учётом новых двух столбцов цены/суммы
             widths = [
                 12,  # Дата
                 40,  # Адрес
@@ -3651,10 +3418,6 @@ class MealPlanningPage(tk.Frame):
             for col, width in enumerate(widths, start=1):
                 ws.column_dimensions[get_column_letter(col)].width = width
 
-            # заморозим строки до шапки детальной таблицы
-            # сейчас: 1 — заголовок свода, 2 — заголовки свода, 3..N — свод, потом пустая строка, потом шапка детально.
-            # Чтобы не вычислять динамически, можно заморозить произвольную строку выше детальной шапки.
-            # Предположим ограниченно, что свод небольшой — замораживаем всегда строку 5 (будет работать приемлемо).
             ws.freeze_panes = "A5"
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -3679,13 +3442,7 @@ class MealPlanningPage(tk.Frame):
                 f"Не удалось сформировать реестр из БД:\n{e}",
             )
 
-# ========================= СТРАНИЦА НАСТРОЕК ТИПОВ ПИТАНИЯ =========================
-
 class MealsSettingsPage(tk.Frame):
-    """
-    Вкладка "Настройки" для типов питания и цен.
-    Доступна только администраторам (роль 'admin' контролирует внешний код).
-    """
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
         self.name_vars: List[tk.StringVar] = []
@@ -3781,9 +3538,6 @@ class MealsSettingsPage(tk.Frame):
         ).pack(side="left", padx=4)
 
     def load_meals_order_rules(self):
-        """
-        Читает настройки приёма заявок из БД и заполняет виджеты.
-        """
         try:
             limit = get_meals_limit_next_day_only()
             deadline = get_meals_next_day_deadline()
@@ -3801,10 +3555,6 @@ class MealsSettingsPage(tk.Frame):
             )
 
     def save_meals_order_rules(self):
-        """
-        Сохраняет настройки приёма заявок в БД.
-        """
-        # проверяем корректность времени
         t_str = (self.var_deadline_time.get() or "").strip()
         if t_str:
             try:
@@ -3893,7 +3643,6 @@ class MealsSettingsPage(tk.Frame):
                     cur.execute("SELECT id, name, price FROM meal_types;")
                     existing = list(cur.fetchall())
 
-                    # индекс по имени (в нижнем регистре, чтобы не было проблем с регистром)
                     by_name: Dict[str, Dict[str, Any]] = {
                         (row["name"] or "").strip().lower(): row for row in existing
                     }
@@ -3902,13 +3651,11 @@ class MealsSettingsPage(tk.Frame):
                         key = name.strip().lower()
                         row = by_name.get(key)
                         if row:
-                            # обновляем цену у существующей записи
                             cur.execute(
                                 "UPDATE meal_types SET price = %s WHERE id = %s",
                                 (price, row["id"]),
                             )
                         else:
-                            # создаём новую запись
                             cur.execute(
                                 "INSERT INTO meal_types (name, price) VALUES (%s, %s)",
                                 (name, price),
@@ -3919,7 +3666,6 @@ class MealsSettingsPage(tk.Frame):
                 "Типы питания и цены сохранены.",
                 parent=self,
             )
-            # перечитаем и отобразим сохранённые значения
             self.load_meal_types()
 
         except Exception as e:
@@ -3932,10 +3678,7 @@ class MealsSettingsPage(tk.Frame):
             if conn:
                 release_db_connection(conn)
 
-# ========================= STANDALONE ОКНО =========================
-
 class MealsApp(tk.Tk):
-    """Standalone приложение для модуля питания"""
 
     def __init__(self, current_user_role: str = "user"):
         super().__init__()
@@ -3966,24 +3709,7 @@ class MealsApp(tk.Tk):
             db_connection_pool = None
         super().destroy()
 
-# ========================= API ДЛЯ ВСТРАИВАНИЯ =========================
-
 def get_order_with_items_from_db(order_id: int) -> Dict[str, Any]:
-    """
-    Возвращает заявку с сотрудниками по id:
-    {
-        'id': ...,
-        'created_at': 'YYYY-MM-DDTHH:MM:SS',
-        'date': 'YYYY-MM-DD',
-        'department': '...',
-        'team_name': '...',
-        'object': {'id': excel_id, 'address': '...'},
-        'employees': [
-            {'fio': ..., 'tbn': ..., 'position': ..., 'meal_type': ..., 'comment': ...},
-            ...
-        ]
-    }
-    """
     conn = None
     try:
         conn = get_db_connection()
@@ -4013,7 +3739,6 @@ def get_order_with_items_from_db(order_id: int) -> Dict[str, Any]:
             (oid, created_at, date_str,
              department, team_name, obj_excel_id, obj_address, fact_address) = row
 
-            # сотрудники
             cur.execute(
                 """
                 SELECT
@@ -4060,7 +3785,6 @@ def get_order_with_items_from_db(order_id: int) -> Dict[str, Any]:
 def create_meals_order_page(parent, app_ref=None) -> tk.Frame:
     ensure_config()
     try:
-        # app_ref просто сохраняем в self.app_ref, чтобы при желании иметь доступ к current_user
         page = MealOrderPage(parent)
         page.app_ref = app_ref
         return page
@@ -4072,9 +3796,6 @@ def create_meals_order_page(parent, app_ref=None) -> tk.Frame:
         return tk.Frame(parent)
 
 def create_all_meals_orders_page(parent, app_ref=None) -> tk.Frame:
-    """
-    Вкладка 'Реестр заявок' (все пользователи) для главного приложения.
-    """
     ensure_config()
     try:
         page = AllMealsOrdersPage(parent, app_ref=app_ref)
@@ -4112,7 +3833,6 @@ def create_meals_planning_page(parent, app_ref=None) -> tk.Frame:
         return tk.Frame(parent)
 
 def delete_order_items_from_db(order_id: int):
-    """Удаляет все строки сотрудников по заявке (оставляя сам заголовок заявки)."""
     conn = None
     try:
         conn = get_db_connection()
@@ -4124,21 +3844,15 @@ def delete_order_items_from_db(order_id: int):
             release_db_connection(conn)
 
 def delete_meal_order_from_db(order_id: int):
-    """
-    Полностью удаляет заявку на питание:
-    сначала строки meal_order_items, затем сам meal_orders.
-    """
     conn = None
     try:
         conn = get_db_connection()
         with conn:
             with conn.cursor() as cur:
-                # сначала удалим строки
                 cur.execute(
                     "DELETE FROM meal_order_items WHERE order_id = %s",
                     (order_id,),
                 )
-                # затем заголовок
                 cur.execute(
                     "DELETE FROM meal_orders WHERE id = %s",
                     (order_id,),
@@ -4148,10 +3862,6 @@ def delete_meal_order_from_db(order_id: int):
             release_db_connection(conn)
 
 def create_meals_settings_page(parent, current_user_role: str) -> Optional[tk.Frame]:
-    """
-    Вкладка настроек для главного приложения.
-    Если роль не admin — возвращает None.
-    """
     if current_user_role != "admin":
         return None
     ensure_config()
@@ -4163,7 +3873,6 @@ def create_meals_settings_page(parent, current_user_role: str) -> Optional[tk.Fr
             "Настройки питания — ошибка", traceback.format_exc(), parent=parent
         )
         return tk.Frame(parent)
-
 
 def open_meals_module(parent=None, current_user_role: str = "user"):
     if parent is None:
@@ -4191,12 +3900,9 @@ def open_meals_module(parent=None, current_user_role: str = "user"):
 
     return win
 
-
 if __name__ == "__main__":
     ensure_config()
-    # --- ДОБАВЬТЕ ПРОВЕРКУ ПРИ СТАРТЕ ---
     try:
-        # Пробный вызов для инициализации локального пула
         conn = get_db_connection()
         release_db_connection(conn)
     except Exception as e:
