@@ -60,18 +60,20 @@ analytics_module = None
 timesheet_transformer = None
 employees_module = None
 timesheet_compare = None
+meals_reports_module = None
 
 def perform_heavy_imports():
     global BudgetAnalyzer, _assets_logo, _LOGO_BASE64, SpecialOrders, \
            meals_module, objects, Settings, timesheet_module, \
            analytics_module, timesheet_transformer, employees_module, \
-           timesheet_compare, meals_employees_module, lodging_module
+           timesheet_compare, meals_employees_module, lodging_module, meals_reports_module
            
     import BudgetAnalyzer
     import assets_logo as _assets_logo
     _LOGO_BASE64 = getattr(_assets_logo, "LOGO_BASE64", None)
     import SpecialOrders
     import meals_module
+    import meals_reports as meals_reports_module
     import objects
     import settings_manager as Settings
     import timesheet_module 
@@ -454,6 +456,7 @@ class MainApp(tk.Tk):
         m_meals.add_command(label="Мои заявки", command=lambda: self._show_page("my_meals_orders", lambda p: meals_module.create_my_meals_orders_page(p, self)))
         m_meals.add_command(label="Планирование", command=lambda: self._show_page("meals_planning", lambda p: meals_module.create_meals_planning_page(p, self)))
         m_meals.add_command(label="Реестр", command=lambda: self._show_page("meals_registry", lambda p: meals_module.create_all_meals_orders_page(p, self)))
+        m_meals.add_command(label="Отчеты", command=lambda: self._show_page("meals_reports", lambda p: meals_reports_module.create_meals_reports_page(p, self)))
         m_meals.add_command(label="Работники (питание)", command=lambda: self._show_page("meals_workers", lambda p: meals_employees_module.create_meals_workers_page(p, self)))
         self._menu_meals_settings_index = m_meals.index("end")
         m_meals.add_command(label="Настройки", command=lambda: self._show_page("meals_settings", lambda p: meals_module.create_meals_settings_page(p, self.current_user.get('role'))))
@@ -570,6 +573,7 @@ class MainApp(tk.Tk):
             "my_meals_orders": ("Мои заявки на питание", ""),
             "meals_planning": ("Планирование питания", ""),
             "meals_registry": ("Реестр заявок на питание", ""),
+            "meals_reports": ("Отчеты по питанию", "Дневной и месячный свод по комплексам"),
             "meals_workers": ("Работники (питание)", "История питания по сотруднику"),
             "meals_settings": ("Настройки питания", ""),
             "lodging_registry": ("Проживание", "Реестр заселений/выселений"),
@@ -691,6 +695,7 @@ if __name__ == "__main__":
             splash.update_status("Передача настроек в модули...")
             modules_to_init = [
                 meals_module,
+                meals_reports_module,
                 SpecialOrders,
                 objects,
                 Settings,
