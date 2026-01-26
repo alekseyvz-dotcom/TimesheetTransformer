@@ -22,7 +22,7 @@ def set_db_pool(pool):
 def get_db_connection():
     if db_connection_pool is None:
         raise RuntimeError("Пул соединений не был установлен из главного приложения.")
-    return db_pool.getconn()
+    return db_connection_pool.getconn()
 
 def release_db_connection(conn):
     if db_connection_pool and conn:
@@ -57,7 +57,7 @@ def _norm(s: str) -> str:
 
 # Соответствие "Комплекс 1/2/3" -> названия типов питания в БД
 COMPLEX_MAP = {
-    "Комплекс 1": _norm("одноразоваое питание"),
+    "Комплекс 1": _norm("одноразовое питание"),
     "Комплекс 2": _norm("двухразовое питание"),
     "Комплекс 3": _norm("трехразовое питание"),
 }
@@ -77,9 +77,12 @@ def _load_price_map(conn) -> Dict[str, float]:
 
 def _complex_by_meal_type_name(meal_type_name: str) -> Optional[str]:
     mt = _norm(meal_type_name)
-    for cx, need in COMPLEX_MAP.items():
-        if mt == need:
-            return cx
+    if "однораз" in mt:
+        return "Комплекс 1"
+    if "двухраз" in mt:
+        return "Комплекс 2"
+    if "трехраз" in mt or "трёхраз" in mt:
+        return "Комплекс 3"
     return None
 
 def _fetch_items_for_period(conn, date_from: date, date_to: date) -> List[Dict[str, Any]]:
