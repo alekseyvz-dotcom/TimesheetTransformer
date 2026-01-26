@@ -48,6 +48,7 @@ MENU_SPEC: List[MenuSection] = [
             MenuEntry("page", "Мои заявки", key="my_meals_orders", perm="page.my_meals_orders", group="meals", title="Питание: Мои заявки"),
             MenuEntry("page", "Планирование", key="meals_planning", perm="page.meals_planning", group="meals", title="Питание: Планирование"),
             MenuEntry("page", "Реестр", key="meals_registry", perm="page.meals_registry", group="meals", title="Питание: Реестр"),
+            MenuEntry("page", "Отчеты", key="meals_reports", perm="page.meals_reports", group="meals", title="Питание: Отчеты"),
             MenuEntry("page", "Работники (питание)", key="meals_workers", perm="page.meals_workers", group="meals", title="Питание: Работники"),
             MenuEntry("page", "Настройки", key="meals_settings", perm="page.meals_settings", group="meals", title="Питание: Настройки"),
         ],
