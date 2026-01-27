@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
 
 from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
@@ -339,6 +340,11 @@ class EmployeeCardPage(tk.Frame):
 
         self.status = tk.Label(right, text="", fg="#555", bg="#f7f7f7")
         self.status.pack(anchor="w", pady=(0, 6))
+
+        btns = tk.Frame(right, bg="#f7f7f7")
+        btns.pack(fill="x", pady=(0, 6))
+        
+        ttk.Button(btns, text="Экспорт досье…", command=self._export_dossier).pack(side="left")
 
         self.nb = ttk.Notebook(right)
         self.nb.pack(fill="both", expand=True)
@@ -792,6 +798,236 @@ class EmployeeCardPage(tk.Frame):
 
         self._run_bg("Загрузка проживания…", load, render)
 
+    def _export_dossier(self):
+        emp = self._selected_employee
+        if not emp:
+            messagebox.showinfo("Экспорт", "Сначала выберите сотрудника.", parent=self)
+            return
+
+        fio = (emp.get("fio") or "").strip() or "Сотрудник"
+        tbn = (emp.get("tbn") or "").strip() or "—"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"Досье_{tbn}_{fio}_{ts}.xlsx".replace("/", "_").replace("\\", "_")
+
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Сохранить досье сотрудника",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Excel", "*.xlsx"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+
+        # грузим все данные одним пакетом (сейчас “всё показываем всегда”)
+        self._run_bg(
+            "Формирование досье…",
+            func=lambda: self._collect_dossier_data(emp),
+            on_ok=lambda data: self._export_dossier_write_xlsx(path, data),
+        )
+
+    def _collect_dossier_data(self, emp: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Собирает полный набор данных для досье.
+        Вызывается в фоне.
+        """
+        emp_id = int(emp["id"])
+        tbn = (emp.get("tbn") or "").strip()
+
+        profile = load_employee_profile(emp_id) or emp
+
+        work_months = load_timesheet_summary_by_month(tbn)
+        work_objects = load_timesheet_by_object(tbn, limit=9999)
+
+        meals_kpi = load_meals_kpi(tbn)
+        meals_objects = load_meals_by_object(tbn, limit=9999)
+        meals_history = load_meals_history(tbn, limit=20000)
+
+        lodging_current = load_lodging_current(emp_id)
+        lodging_history = load_lodging_history(emp_id)
+        lodging_bed_days = load_lodging_bed_days_total(emp_id)
+        lodging_charges = load_lodging_charges(emp_id)
+
+        return {
+            "profile": profile,
+            "work_months": work_months,
+            "work_objects": work_objects,
+            "meals_kpi": meals_kpi,
+            "meals_objects": meals_objects,
+            "meals_history": meals_history,
+            "lodging_current": lodging_current,
+            "lodging_history": lodging_history,
+            "lodging_bed_days_total": lodging_bed_days,
+            "lodging_charges": lodging_charges,
+        }
+
+    def _export_dossier_write_xlsx(self, path: str, data: Dict[str, Any]):
+        """
+        Пишет xlsx в UI-потоке после того, как данные собраны.
+        """
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, Alignment
+            from openpyxl.utils import get_column_letter
+        except Exception as e:
+            messagebox.showerror("Экспорт", f"Не удалось импортировать openpyxl:\n{e}", parent=self)
+            return
+
+        prof = data.get("profile") or {}
+        fio = prof.get("fio") or ""
+        tbn = prof.get("tbn") or ""
+
+        def _autowidth(ws):
+            # простой автоширинщик
+            for col in range(1, ws.max_column + 1):
+                max_len = 0
+                for row in range(1, ws.max_row + 1):
+                    v = ws.cell(row=row, column=col).value
+                    if v is None:
+                        continue
+                    s = str(v)
+                    if len(s) > max_len:
+                        max_len = len(s)
+                ws.column_dimensions[get_column_letter(col)].width = min(60, max(10, max_len + 2))
+
+        wb = Workbook()
+        ws0 = wb.active
+        ws0.title = "Досье"
+
+        # ===== Заголовок =====
+        ws0["A1"] = "Досье сотрудника"
+        ws0["A1"].font = Font(size=16, bold=True)
+        ws0["A1"].alignment = Alignment(horizontal="left")
+        ws0["A3"] = "ФИО:"
+        ws0["B3"] = fio
+        ws0["A4"] = "Табельный №:"
+        ws0["B4"] = tbn
+        ws0["A5"] = "Должность:"
+        ws0["B5"] = prof.get("position") or ""
+        ws0["A6"] = "Подразделение:"
+        ws0["B6"] = prof.get("department") or ""
+        ws0["A7"] = "Уволен:"
+        ws0["B7"] = "Да" if prof.get("is_fired") else "Нет"
+        ws0["A9"] = "Сформировано:"
+        ws0["B9"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        _autowidth(ws0)
+
+        # ===== Табели: по месяцам =====
+        ws1 = wb.create_sheet("Табели_месяцы")
+        ws1.append(["Период", "Дней", "Часы", "Ночные", "Пер.день", "Пер.ночь"])
+        for r in data.get("work_months") or []:
+            period = f"{int(r['year']):04d}-{int(r['month']):02d}"
+            ws1.append([
+                period,
+                int(r.get("days", 0) or 0),
+                float(r.get("hours", 0) or 0),
+                float(r.get("night_hours", 0) or 0),
+                float(r.get("ot_day", 0) or 0),
+                float(r.get("ot_night", 0) or 0),
+            ])
+        _autowidth(ws1)
+
+        # ===== Табели: по объектам =====
+        ws2 = wb.create_sheet("Табели_объекты")
+        ws2.append(["Объект", "Часы", "Дней", "Месяцев"])
+        for r in data.get("work_objects") or []:
+            ws2.append([
+                r.get("address") or "—",
+                float(r.get("hours", 0) or 0),
+                int(r.get("days", 0) or 0),
+                int(r.get("months_cnt", 0) or 0),
+            ])
+        _autowidth(ws2)
+
+        # ===== Питание: KPI =====
+        ws3 = wb.create_sheet("Питание_KPI")
+        k = data.get("meals_kpi") or {}
+        ws3.append(["Метрика", "Значение"])
+        ws3.append(["Дней питания (distinct date)", int(k.get("days_cnt", 0) or 0)])
+        ws3.append(["Записей (rows)", int(k.get("rows_cnt", 0) or 0)])
+        ws3.append(["Порций (SUM quantity)", float(k.get("qty_sum", 0) or 0)])
+        _autowidth(ws3)
+
+        # ===== Питание: по объектам =====
+        ws4 = wb.create_sheet("Питание_объекты")
+        ws4.append(["Объект", "Дней", "Записей", "Порций"])
+        for r in data.get("meals_objects") or []:
+            ws4.append([
+                r.get("address") or "—",
+                int(r.get("days_cnt", 0) or 0),
+                int(r.get("rows_cnt", 0) or 0),
+                float(r.get("qty_sum", 0) or 0),
+            ])
+        _autowidth(ws4)
+
+        # ===== Питание: история =====
+        ws5 = wb.create_sheet("Питание_история")
+        ws5.append(["Дата", "Объект", "Тип питания", "Кол-во", "Бригада", "Подразделение"])
+        for r in data.get("meals_history") or []:
+            dt = r.get("date")
+            dt_s = dt.strftime("%Y-%m-%d") if hasattr(dt, "strftime") else str(dt or "")
+            ws5.append([
+                dt_s,
+                r.get("address") or "—",
+                r.get("meal_type") or "",
+                float(r.get("qty", 0) or 0),
+                r.get("team_name") or "",
+                r.get("department") or "",
+            ])
+        _autowidth(ws5)
+
+        # ===== Проживание =====
+        ws6 = wb.create_sheet("Проживание")
+        ws6.append(["Текущее проживание", ""])
+        cur = data.get("lodging_current")
+        if not cur:
+            ws6.append(["", "Нет активного проживания"])
+        else:
+            ci = cur.get("check_in")
+            co = cur.get("check_out")
+            ci_s = ci.strftime("%Y-%m-%d") if hasattr(ci, "strftime") else str(ci or "")
+            co_s = co.strftime("%Y-%m-%d") if hasattr(co, "strftime") else str(co or "")
+            ws6.append(["Общежитие", cur.get("dorm_name") or ""])
+            ws6.append(["Комната", cur.get("room_no") or ""])
+            ws6.append(["Заезд", ci_s])
+            ws6.append(["Выезд", co_s or "—"])
+
+        ws6.append([])
+        ws6.append(["Койко-дней всего (оценка)", int(data.get("lodging_bed_days_total") or 0)])
+
+        ws6.append([])
+        ws6.append(["История проживаний"])
+        ws6.append(["Заезд", "Выезд", "Статус", "Общежитие", "Комната"])
+        for r in data.get("lodging_history") or []:
+            ci = r.get("check_in")
+            co = r.get("check_out")
+            ci_s = ci.strftime("%Y-%m-%d") if hasattr(ci, "strftime") else str(ci or "")
+            co_s = co.strftime("%Y-%m-%d") if hasattr(co, "strftime") else str(co or "")
+            ws6.append([ci_s, co_s, r.get("status") or "", r.get("dorm_name") or "", r.get("room_no") or ""])
+        _autowidth(ws6)
+
+        ws7 = wb.create_sheet("Проживание_начисления")
+        ws7.append(["Период", "Дней", "Сумма", "Средняя", "Источник", "stay_id"])
+        for r in data.get("lodging_charges") or []:
+            period = f"{int(r.get('year') or 0):04d}-{int(r.get('month') or 0):02d}"
+            ws7.append([
+                period,
+                int(r.get("days", 0) or 0),
+                float(r.get("amount", 0) or 0),
+                float(r.get("avg_price_per_day", 0) or 0) if r.get("avg_price_per_day") is not None else None,
+                r.get("rate_source") or "",
+                int(r.get("stay_id", 0) or 0),
+            ])
+        _autowidth(ws7)
+
+        try:
+            wb.save(path)
+        except Exception as e:
+            messagebox.showerror("Экспорт", f"Не удалось сохранить файл:\n{e}", parent=self)
+            return
+
+        messagebox.showinfo("Экспорт", f"Досье сформировано:\n{path}", parent=self)
 
 def create_employee_card_page(parent, app_ref=None) -> tk.Frame:
     try:
