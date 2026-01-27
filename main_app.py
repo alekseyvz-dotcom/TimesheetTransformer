@@ -67,7 +67,8 @@ def perform_heavy_imports():
     global BudgetAnalyzer, _assets_logo, _LOGO_BASE64, SpecialOrders, \
            meals_module, objects, Settings, timesheet_module, \
            analytics_module, timesheet_transformer, employees_module, \
-           timesheet_compare, meals_employees_module, lodging_module, meals_reports_module
+           timesheet_compare, meals_employees_module, lodging_module, \
+           meals_reports_module, employee_card_module
            
     import BudgetAnalyzer
     import assets_logo as _assets_logo
@@ -641,6 +642,7 @@ class MainApp(tk.Tk):
             "Питание": getattr(self, "_menu_meals", None),
             "Проживание": getattr(self, "_menu_lodging", None),
             "Объекты": getattr(self, "_menu_objects", None),
+            "Сотрудники": getattr(self, "_menu_employees_card", None),
             "Аналитика": getattr(self, "_menu_analytics", None),
             "Инструменты": getattr(self, "_menu_tools", None),
         }
