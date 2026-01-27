@@ -61,6 +61,7 @@ timesheet_transformer = None
 employees_module = None
 timesheet_compare = None
 meals_reports_module = None
+employee_card_module = None
 
 def perform_heavy_imports():
     global BudgetAnalyzer, _assets_logo, _LOGO_BASE64, SpecialOrders, \
