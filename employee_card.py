@@ -862,63 +862,94 @@ class EmployeeCardPage(tk.Frame):
         }
 
     def _export_dossier_write_xlsx(self, path: str, data: Dict[str, Any]):
-        """
-        Пишет xlsx в UI-потоке после того, как данные собраны.
-        """
         try:
             from openpyxl import Workbook
-            from openpyxl.styles import Font, Alignment
+            from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
             from openpyxl.utils import get_column_letter
         except Exception as e:
             messagebox.showerror("Экспорт", f"Не удалось импортировать openpyxl:\n{e}", parent=self)
             return
-
+    
         prof = data.get("profile") or {}
-        fio = prof.get("fio") or ""
-        tbn = prof.get("tbn") or ""
-
-        def _autowidth(ws):
-            # простой автоширинщик
-            for col in range(1, ws.max_column + 1):
+        fio = (prof.get("fio") or "").strip()
+        tbn = (prof.get("tbn") or "").strip()
+    
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Досье"
+    
+        # --- styles
+        title_font = Font(size=16, bold=True)
+        section_font = Font(size=12, bold=True)
+        header_font = Font(bold=True)
+        gray_fill = PatternFill("solid", fgColor="F2F2F2")
+        blue_fill = PatternFill("solid", fgColor="DDEBFF")
+        thin = Side(style="thin", color="BFBFBF")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    
+        def write_section_title(row: int, text: str, col_from: int = 1, col_to: int = 8) -> int:
+            ws.cell(row=row, column=col_from, value=text).font = section_font
+            ws.cell(row=row, column=col_from).fill = blue_fill
+            ws.merge_cells(start_row=row, start_column=col_from, end_row=row, end_column=col_to)
+            return row + 1
+    
+        def write_kv(row: int, key: str, value: Any, key_col: int = 1, val_col: int = 2) -> int:
+            ws.cell(row=row, column=key_col, value=key).font = header_font
+            ws.cell(row=row, column=val_col, value=value if value is not None else "")
+            return row + 1
+    
+        def write_table(row: int, headers: List[str], rows: List[List[Any]], col_from: int = 1) -> int:
+            # header
+            for j, h in enumerate(headers):
+                c = ws.cell(row=row, column=col_from + j, value=h)
+                c.font = header_font
+                c.fill = gray_fill
+                c.border = border
+            row += 1
+    
+            # body
+            for r in rows:
+                for j, v in enumerate(r):
+                    c = ws.cell(row=row, column=col_from + j, value=v)
+                    c.border = border
+                row += 1
+    
+            return row
+    
+        def autosize(max_col: int, min_w: int = 10, max_w: int = 60):
+            for col in range(1, max_col + 1):
                 max_len = 0
-                for row in range(1, ws.max_row + 1):
-                    v = ws.cell(row=row, column=col).value
+                for r in range(1, ws.max_row + 1):
+                    v = ws.cell(r, col).value
                     if v is None:
                         continue
                     s = str(v)
                     if len(s) > max_len:
                         max_len = len(s)
-                ws.column_dimensions[get_column_letter(col)].width = min(60, max(10, max_len + 2))
-
-        wb = Workbook()
-        ws0 = wb.active
-        ws0.title = "Досье"
-
-        # ===== Заголовок =====
-        ws0["A1"] = "Досье сотрудника"
-        ws0["A1"].font = Font(size=16, bold=True)
-        ws0["A1"].alignment = Alignment(horizontal="left")
-        ws0["A3"] = "ФИО:"
-        ws0["B3"] = fio
-        ws0["A4"] = "Табельный №:"
-        ws0["B4"] = tbn
-        ws0["A5"] = "Должность:"
-        ws0["B5"] = prof.get("position") or ""
-        ws0["A6"] = "Подразделение:"
-        ws0["B6"] = prof.get("department") or ""
-        ws0["A7"] = "Уволен:"
-        ws0["B7"] = "Да" if prof.get("is_fired") else "Нет"
-        ws0["A9"] = "Сформировано:"
-        ws0["B9"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        _autowidth(ws0)
-
-        # ===== Табели: по месяцам =====
-        ws1 = wb.create_sheet("Табели_месяцы")
-        ws1.append(["Период", "Дней", "Часы", "Ночные", "Пер.день", "Пер.ночь"])
-        for r in data.get("work_months") or []:
+                ws.column_dimensions[get_column_letter(col)].width = min(max_w, max(min_w, max_len + 2))
+    
+        # ========== TOP TITLE ==========
+        ws["A1"] = "Досье сотрудника"
+        ws["A1"].font = title_font
+        ws["A2"] = f"Сформировано: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    
+        row = 4
+    
+        # ========== PROFILE ==========
+        row = write_section_title(row, "Профиль", 1, 8)
+        row = write_kv(row, "ФИО", fio)
+        row = write_kv(row, "Табельный №", tbn)
+        row = write_kv(row, "Должность", prof.get("position") or "")
+        row = write_kv(row, "Подразделение", prof.get("department") or "")
+        row = write_kv(row, "Уволен", "Да" if prof.get("is_fired") else "Нет")
+        row += 1
+    
+        # ========== WORK (timesheets) ==========
+        row = write_section_title(row, "Работа (табели) — итоги по месяцам", 1, 8)
+        months_rows: List[List[Any]] = []
+        for r in (data.get("work_months") or []):
             period = f"{int(r['year']):04d}-{int(r['month']):02d}"
-            ws1.append([
+            months_rows.append([
                 period,
                 int(r.get("days", 0) or 0),
                 float(r.get("hours", 0) or 0),
@@ -926,48 +957,67 @@ class EmployeeCardPage(tk.Frame):
                 float(r.get("ot_day", 0) or 0),
                 float(r.get("ot_night", 0) or 0),
             ])
-        _autowidth(ws1)
-
-        # ===== Табели: по объектам =====
-        ws2 = wb.create_sheet("Табели_объекты")
-        ws2.append(["Объект", "Часы", "Дней", "Месяцев"])
-        for r in data.get("work_objects") or []:
-            ws2.append([
+        row = write_table(
+            row,
+            headers=["Период", "Дней", "Часы", "Ночные", "Пер.день", "Пер.ночь"],
+            rows=months_rows,
+            col_from=1,
+        )
+        row += 2
+    
+        row = write_section_title(row, "Работа (табели) — ТОП объектов", 1, 8)
+        obj_rows: List[List[Any]] = []
+        for r in (data.get("work_objects") or []):
+            obj_rows.append([
                 r.get("address") or "—",
                 float(r.get("hours", 0) or 0),
                 int(r.get("days", 0) or 0),
                 int(r.get("months_cnt", 0) or 0),
             ])
-        _autowidth(ws2)
-
-        # ===== Питание: KPI =====
-        ws3 = wb.create_sheet("Питание_KPI")
+        row = write_table(
+            row,
+            headers=["Объект", "Часы", "Дней", "Месяцев"],
+            rows=obj_rows,
+            col_from=1,
+        )
+        row += 2
+    
+        # ========== MEALS ==========
+        row = write_section_title(row, "Питание — итоги", 1, 8)
         k = data.get("meals_kpi") or {}
-        ws3.append(["Метрика", "Значение"])
-        ws3.append(["Дней питания (distinct date)", int(k.get("days_cnt", 0) or 0)])
-        ws3.append(["Записей (rows)", int(k.get("rows_cnt", 0) or 0)])
-        ws3.append(["Порций (SUM quantity)", float(k.get("qty_sum", 0) or 0)])
-        _autowidth(ws3)
-
-        # ===== Питание: по объектам =====
-        ws4 = wb.create_sheet("Питание_объекты")
-        ws4.append(["Объект", "Дней", "Записей", "Порций"])
-        for r in data.get("meals_objects") or []:
-            ws4.append([
+        row = write_kv(row, "Дней питания (distinct date)", int(k.get("days_cnt", 0) or 0))
+        row = write_kv(row, "Записей (rows)", int(k.get("rows_cnt", 0) or 0))
+        row = write_kv(row, "Порций (SUM quantity)", float(k.get("qty_sum", 0) or 0))
+        row += 1
+    
+        row = write_section_title(row, "Питание — ТОП объектов", 1, 8)
+        meals_obj_rows: List[List[Any]] = []
+        for r in (data.get("meals_objects") or []):
+            meals_obj_rows.append([
                 r.get("address") or "—",
                 int(r.get("days_cnt", 0) or 0),
                 int(r.get("rows_cnt", 0) or 0),
                 float(r.get("qty_sum", 0) or 0),
             ])
-        _autowidth(ws4)
-
-        # ===== Питание: история =====
-        ws5 = wb.create_sheet("Питание_история")
-        ws5.append(["Дата", "Объект", "Тип питания", "Кол-во", "Бригада", "Подразделение"])
-        for r in data.get("meals_history") or []:
+        row = write_table(
+            row,
+            headers=["Объект", "Дней", "Записей", "Порций"],
+            rows=meals_obj_rows,
+            col_from=1,
+        )
+        row += 2
+    
+        # История питания — лучше ограничить, иначе “досье” будет огромным
+        meals_hist = data.get("meals_history") or []
+        max_hist = 1500  # можно настроить
+        meals_hist = meals_hist[:max_hist]
+    
+        row = write_section_title(row, f"Питание — история (последние {len(meals_hist)})", 1, 8)
+        hist_rows: List[List[Any]] = []
+        for r in meals_hist:
             dt = r.get("date")
             dt_s = dt.strftime("%Y-%m-%d") if hasattr(dt, "strftime") else str(dt or "")
-            ws5.append([
+            hist_rows.append([
                 dt_s,
                 r.get("address") or "—",
                 r.get("meal_type") or "",
@@ -975,59 +1025,79 @@ class EmployeeCardPage(tk.Frame):
                 r.get("team_name") or "",
                 r.get("department") or "",
             ])
-        _autowidth(ws5)
-
-        # ===== Проживание =====
-        ws6 = wb.create_sheet("Проживание")
-        ws6.append(["Текущее проживание", ""])
+        row = write_table(
+            row,
+            headers=["Дата", "Объект", "Тип питания", "Кол-во", "Бригада", "Подразделение"],
+            rows=hist_rows,
+            col_from=1,
+        )
+        row += 2
+    
+        # ========== LODGING ==========
+        row = write_section_title(row, "Проживание — текущее", 1, 8)
         cur = data.get("lodging_current")
         if not cur:
-            ws6.append(["", "Нет активного проживания"])
+            row = write_kv(row, "Статус", "Нет активного проживания")
         else:
             ci = cur.get("check_in")
             co = cur.get("check_out")
             ci_s = ci.strftime("%Y-%m-%d") if hasattr(ci, "strftime") else str(ci or "")
             co_s = co.strftime("%Y-%m-%d") if hasattr(co, "strftime") else str(co or "")
-            ws6.append(["Общежитие", cur.get("dorm_name") or ""])
-            ws6.append(["Комната", cur.get("room_no") or ""])
-            ws6.append(["Заезд", ci_s])
-            ws6.append(["Выезд", co_s or "—"])
-
-        ws6.append([])
-        ws6.append(["Койко-дней всего (оценка)", int(data.get("lodging_bed_days_total") or 0)])
-
-        ws6.append([])
-        ws6.append(["История проживаний"])
-        ws6.append(["Заезд", "Выезд", "Статус", "Общежитие", "Комната"])
-        for r in data.get("lodging_history") or []:
+            row = write_kv(row, "Общежитие", cur.get("dorm_name") or "")
+            row = write_kv(row, "Комната", cur.get("room_no") or "")
+            row = write_kv(row, "Заезд", ci_s)
+            row = write_kv(row, "Выезд", co_s or "—")
+        row += 1
+    
+        row = write_kv(row, "Койко-дней всего (оценка)", int(data.get("lodging_bed_days_total") or 0))
+        row += 1
+    
+        row = write_section_title(row, "Проживание — история", 1, 8)
+        lod_hist_rows: List[List[Any]] = []
+        for r in (data.get("lodging_history") or []):
             ci = r.get("check_in")
             co = r.get("check_out")
             ci_s = ci.strftime("%Y-%m-%d") if hasattr(ci, "strftime") else str(ci or "")
             co_s = co.strftime("%Y-%m-%d") if hasattr(co, "strftime") else str(co or "")
-            ws6.append([ci_s, co_s, r.get("status") or "", r.get("dorm_name") or "", r.get("room_no") or ""])
-        _autowidth(ws6)
-
-        ws7 = wb.create_sheet("Проживание_начисления")
-        ws7.append(["Период", "Дней", "Сумма", "Средняя", "Источник", "stay_id"])
-        for r in data.get("lodging_charges") or []:
+            lod_hist_rows.append([ci_s, co_s, r.get("status") or "", r.get("dorm_name") or "", r.get("room_no") or ""])
+        row = write_table(
+            row,
+            headers=["Заезд", "Выезд", "Статус", "Общежитие", "Комната"],
+            rows=lod_hist_rows,
+            col_from=1,
+        )
+        row += 2
+    
+        row = write_section_title(row, "Проживание — начисления (dorm_charges)", 1, 8)
+        ch_rows: List[List[Any]] = []
+        for r in (data.get("lodging_charges") or []):
             period = f"{int(r.get('year') or 0):04d}-{int(r.get('month') or 0):02d}"
-            ws7.append([
+            ch_rows.append([
                 period,
                 int(r.get("days", 0) or 0),
                 float(r.get("amount", 0) or 0),
-                float(r.get("avg_price_per_day", 0) or 0) if r.get("avg_price_per_day") is not None else None,
+                float(r.get("avg_price_per_day", 0) or 0) if r.get("avg_price_per_day") is not None else "",
                 r.get("rate_source") or "",
                 int(r.get("stay_id", 0) or 0),
             ])
-        _autowidth(ws7)
-
+        row = write_table(
+            row,
+            headers=["Период", "Дней", "Сумма", "Средняя", "Источник", "stay_id"],
+            rows=ch_rows,
+            col_from=1,
+        )
+    
+        # оформление
+        ws.freeze_panes = "A4"
+        autosize(max_col=8)
+    
         try:
             wb.save(path)
         except Exception as e:
             messagebox.showerror("Экспорт", f"Не удалось сохранить файл:\n{e}", parent=self)
             return
-
-        messagebox.showinfo("Экспорт", f"Досье сформировано:\n{path}", parent=self)
+    
+        messagebox.showinfo("Экспорт", f"Досье сформировано (1 лист):\n{path}", parent=self)
 
 def create_employee_card_page(parent, app_ref=None) -> tk.Frame:
     try:
