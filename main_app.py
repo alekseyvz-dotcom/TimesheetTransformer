@@ -82,6 +82,7 @@ def perform_heavy_imports():
     import timesheet_compare
     import meals_employees as meals_employees_module
     import lodging_module as lodging_module
+    import employee_card as employee_card_module
     try:
         import timesheet_transformer
     except ImportError:
@@ -501,6 +502,13 @@ class MainApp(tk.Tk):
         self._menubar.add_cascade(label="Аналитика", menu=m_analytics)
         self._menu_analytics = m_analytics
 
+        m_emp = tk.Menu(self._menubar, tearoff=0)
+        m_emp.add_command(label="Карточка сотрудника",
+                          command=lambda: self._show_page("employee_card",
+                              lambda p: employee_card_module.create_employee_card_page(p, self)))
+        self._menubar.add_cascade(label="Сотрудники", menu=m_emp)
+        self._menu_employees_card = m_emp
+
         # === Инструменты и Настройки ===
         m_tools = tk.Menu(self._menubar, tearoff=0)
         if timesheet_transformer and hasattr(timesheet_transformer, "open_converter"):
@@ -581,6 +589,7 @@ class MainApp(tk.Tk):
             "lodging_rates": ("Проживание", "Тарифы (цена за сутки)"),
             "object_create": ("Объекты: Создание/Редактирование", ""),
             "objects_registry": ("Реестр объектов", ""),
+            "employee_card": ("Сотрудники", "Карточка сотрудника (работа/питание/проживание)"),
             "budget": ("Анализ смет", ""),
             "login": ("Управление строительством", "Вход в систему"),
             "analytics_dashboard": (
@@ -705,6 +714,7 @@ if __name__ == "__main__":
                 timesheet_compare,
                 meals_employees_module,
                 lodging_module,
+                employee_card_module,
             ]
             for module in modules_to_init:
                 if module and hasattr(module, "set_db_pool"):
