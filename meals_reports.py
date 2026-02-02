@@ -224,12 +224,15 @@ def build_dept_employee_rows(department_id: int, date_from: date, date_to: date)
                     COALESCE(e.fio, moi.fio_text, '') AS fio,
                     COALESCE(e.tbn, moi.tbn_text, '') AS tbn,
                     COALESCE(e.position, moi.position_text, '') AS position_name,
+                    mo.team_name AS team_name,
+                    COALESCE(mo.fact_address, o.address, '') AS object_address,
                     COALESCE(mt.name, moi.meal_type_text, '') AS meal_type_name,
                     COALESCE(moi.quantity, 1) AS qty
                 FROM meal_orders mo
                 JOIN meal_order_items moi ON moi.order_id = mo.id
                 LEFT JOIN employees e ON e.id = moi.employee_id
                 LEFT JOIN meal_types mt ON mt.id = moi.meal_type_id
+                LEFT JOIN objects o ON o.id = mo.object_id
                 WHERE mo.date >= %s AND mo.date <= %s
                   AND mo.department_id = %s
                 """,
@@ -237,11 +240,13 @@ def build_dept_employee_rows(department_id: int, date_from: date, date_to: date)
             )
             items = [dict(r) for r in cur.fetchall()]
 
-        agg: Dict[Tuple[str, str, str], Dict[str, float]] = {}
+        agg: Dict[Tuple[str, str, str, str, str], Dict[str, float]] = {}
         for it in items:
             fio = (it.get("fio") or "").strip()
             tbn = (it.get("tbn") or "").strip()
             pos = (it.get("position_name") or "").strip()
+            team = (it.get("team_name") or "").strip() or "(без бригады)"
+            obj_addr = (it.get("object_address") or "").strip() or "(без адреса)"
             if not fio:
                 continue
 
@@ -250,12 +255,12 @@ def build_dept_employee_rows(department_id: int, date_from: date, date_to: date)
                 continue
 
             qty = float(it.get("qty") or 0)
-            m = agg.setdefault((fio, tbn, pos), {c: 0.0 for c in COMPLEX_ORDER})
+            m = agg.setdefault((fio, tbn, pos, team, obj_addr), {c: 0.0 for c in COMPLEX_ORDER})
             m[cx] += qty
 
         out: List[Dict[str, Any]] = []
-        for (fio, tbn, pos), cx_qty in sorted(agg.items(), key=lambda x: x[0][0]):
-            rec: Dict[str, Any] = {"fio": fio, "tbn": tbn, "position": pos, "qty": {}, "amount": {}}
+        for (fio, tbn, pos, team, obj_addr), cx_qty in sorted(agg.items(), key=lambda x: (x[0][3], x[0][4], x[0][0])):
+            rec = {"fio": fio, "tbn": tbn, "position": pos, "team": team, "object_address": obj_addr, "qty": {}, "amount": {}}
             for cx in COMPLEX_ORDER:
                 price = float(price_map.get(COMPLEX_MAP[cx], 0.0))
                 q = float(cx_qty.get(cx, 0.0))
@@ -392,6 +397,8 @@ def export_dept_employee_excel(dept_name: str, department_id: int, date_from: da
     header = [
         "№ п/п",
         "Наименование подразделения",
+        "Наименование бригады",
+        "Адрес объекта",
         "Табельный номер",
         "Фамилия, имя, отчество работника",
         "Наименование профессии, должности",
@@ -409,6 +416,8 @@ def export_dept_employee_excel(dept_name: str, department_id: int, date_from: da
         ws.append([
             i,
             dept_name,
+            r.get("team") or "",
+            r.get("object_address") or "",
             r.get("tbn") or "",
             r.get("fio") or "",
             r.get("position") or "",
@@ -424,7 +433,7 @@ def export_dept_employee_excel(dept_name: str, department_id: int, date_from: da
     if not rows:
         ws.append(["Нет данных за выбранный период/подразделение"])
 
-    widths = [6, 26, 14, 32, 26, 14, 14, 14, 22, 22, 22, 24]
+    widths = [6, 26, 22, 34, 14, 32, 26, 14, 14, 14, 22, 22, 22, 24]
     for col_idx, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(col_idx)].width = w
 
