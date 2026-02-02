@@ -188,6 +188,8 @@ class MealsWorkersPage(tk.Frame):
         self.var_year = tk.StringVar()
         self.var_month = tk.StringVar()
         self.var_dep = tk.StringVar()
+        self.var_total_qty = tk.StringVar(value="0")
+        self.var_total_amount = tk.StringVar(value="0.00")
 
         self.tree = None
         self._rows: List[Dict[str, Any]] = []
@@ -317,6 +319,21 @@ class MealsWorkersPage(tk.Frame):
             fg="#555",
         ).pack(side="left")
 
+        totals = tk.Frame(self)
+        totals.pack(fill="x", padx=8, pady=(0, 8))
+
+        ttk.Separator(totals, orient="horizontal").pack(fill="x", pady=(0, 6))
+
+        tk.Label(totals, text="ИТОГО:", font=("Segoe UI", 9, "bold")).pack(side="left")
+
+        tk.Label(totals, text="  Кол-во:").pack(side="left")
+        tk.Label(totals, textvariable=self.var_total_qty, font=("Segoe UI", 9, "bold")).pack(side="left")
+
+        tk.Label(totals, text="   Сумма:").pack(side="left", padx=(12, 0))
+        tk.Label(totals, textvariable=self.var_total_amount, font=("Segoe UI", 9, "bold")).pack(side="left")
+
+        tk.Label(totals, text=" руб.", fg="#555").pack(side="left")
+
     def _on_fio_selected(self, event=None):
         fio = self.var_fio.get().strip()
         tbn = self.emp_tbn_by_fio.get(fio, "")
@@ -331,6 +348,8 @@ class MealsWorkersPage(tk.Frame):
         self.var_dep.set("Все")
         self._rows.clear()
         self.tree.delete(*self.tree.get_children())
+        self.var_total_qty.set("0")
+        self.var_total_amount.set("0.00")
 
     def _search(self):
         fio = self.var_fio.get().strip()
@@ -402,6 +421,7 @@ class MealsWorkersPage(tk.Frame):
 
         self._rows = rows
         self._fill_tree()
+        self._recalc_totals()
 
         if not rows:
             messagebox.showinfo(
@@ -444,6 +464,27 @@ class MealsWorkersPage(tk.Frame):
                     fmt_num(r.get("amount")),
                 ),
             )
+
+    def _recalc_totals(self):
+        total_qty = 0.0
+        total_amount = 0.0
+
+        for r in self._rows:
+            try:
+                total_qty += float(r.get("quantity") or 0)
+            except Exception:
+                pass
+            try:
+                total_amount += float(r.get("amount") or 0)
+            except Exception:
+                pass
+
+        # формат
+        qty_str = f"{total_qty:.2f}".rstrip("0").rstrip(".")
+        amt_str = f"{total_amount:.2f}"
+
+        self.var_total_qty.set(qty_str)
+        self.var_total_amount.set(amt_str)
 
 
 # ------------------------- API для main_app -------------------------
