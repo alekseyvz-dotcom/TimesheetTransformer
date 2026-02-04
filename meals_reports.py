@@ -64,7 +64,10 @@ def safe_filename(name: str) -> str:
 
 COMPLEX_MAP = {
     "Комплекс 1": _norm("Одноразовое"),
-    "Комплекс 2лекс 1", "Комплекс 2", "Комплекс 3"]
+    "Комплекс 2": _norm("Двухразовое"),
+    "Комплекс 3": _norm("Трехразовое"),
+}
+COMPLEX_ORDER = ["Комплекс 1", "Комплекс 2", "Комплекс 3"]
 
 
 # ---------------- Data helpers ----------------
@@ -175,7 +178,9 @@ def build_monthly_rows(year: int, month: int) -> List[Dict[str, Any]]:
             items = [dict(r) for r in cur.fetchall()]
 
         agg: Dict[str, Dict[str, float]] = {}
-        for it in itemscomplex_by_meal_type_name(it.get("meal_type_name") or "")
+        for it in items:
+            addr = (it.get("object_address") or "").strip() or "(без адреса)"
+            cx = _complex_by_meal_type_name(it.get("meal_type_name") or "")
             if not cx:
                 continue
             qty = float(it.get("qty") or 0)
@@ -233,7 +238,6 @@ def build_dept_employee_rows(department_id: int, date_from: date, date_to: date)
             )
             items = [dict(r) for r in cur.fetchall()]
 
-        # ключ сотрудника (fio, tbn, position)
         agg_qty: Dict[Tuple[str, str, str], Dict[str, float]] = {}
         teams: Dict[Tuple[str, str, str], set[str]] = {}
         objs: Dict[Tuple[str, str, str], set[str]] = {}
@@ -245,10 +249,10 @@ def build_dept_employee_rows(department_id: int, date_from: date, date_to: date)
             if not fio:
                 continue
 
+            key = (fio, tbn, pos)
+
             team = (it.get("team_name") or "").strip()
             obj_addr = (it.get("object_address") or "").strip()
-
-            key = (fio, tbn, pos)
 
             if team:
                 teams.setdefault(key, set()).add(team)
@@ -280,13 +284,6 @@ def build_dept_employee_rows(department_id: int, date_from: date, date_to: date)
                 rec["qty"][cx] = q
                 rec["amount"][cx] = price * q
             out.append(rec)
-
-        # если вдруг сотрудник встретился только в teams/objs, но по комплексам не попал — добавим тоже
-        # (на практике редко, но пусть будет)
-        known_keys = set(agg_qty.keys())
-        extra_keys =},
-                "amount": {c: 0.0 for c in COMPLEX_ORDER},
-            })
 
         return out
     finally:
@@ -521,7 +518,56 @@ class MealsReportsPage(tk.Frame):
         self.frm_dept = tk.Frame(top, bg="#f7f7f7")
         self.frm_dept.grid(row=3, column=0, columnspan=6, sticky="w", pady=(10, 0))
 
-        tk.Label(self.frm_dept, text="Подразделение:", bg="#f7f7f7").grid(row=0, column=0 _on_export(self):
+        tk.Label(self.frm_dept, text="Подразделение:", bg="#f7f7f7").grid(row=0, column=0, sticky="w")
+        self.cmb_dept = ttk.Combobox(self.frm_dept, state="readonly", width=45)
+        self.cmb_dept.grid(row=0, column=1, sticky="w", padx=(6, 10))
+
+        btns = tk.Frame(self, bg="#f7f7f7")
+        btns.pack(fill="x", padx=12, pady=(0, 12))
+        ttk.Button(btns, text="Выгрузить в Excel", command=self._on_export).pack(side="left")
+
+    def _load_departments(self):
+        conn = None
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cur:
+                cur.execute("SELECT id, name FROM departments ORDER BY name")
+                rows = cur.fetchall()
+            self._dept_rows = [(int(r[0]), str(r[1])) for r in rows]
+            self.cmb_dept["values"] = [name for _, name in self._dept_rows]
+            if self._dept_rows:
+                self.cmb_dept.current(0)
+        except Exception as e:
+            messagebox.showerror("Отчеты", f"Не удалось загрузить подразделения:\n{e}", parent=self)
+            self._dept_rows = []
+            self.cmb_dept["values"] = []
+        finally:
+            if conn:
+                release_db_connection(conn)
+
+    def _selected_department_id(self) -> Optional[int]:
+        name = (self.cmb_dept.get() or "").strip()
+        for did, n in self._dept_rows:
+            if n == name:
+                return did
+        return None
+
+    def _update_mode(self):
+        kind = self.var_report_kind.get()
+        if kind == "daily":
+            self.frm_daily.grid()
+            self.frm_monthly.grid_remove()
+            self.frm_dept.grid_remove()
+        elif kind == "monthly":
+            self.frm_monthly.grid()
+            self.frm_daily.grid_remove()
+            self.frm_dept.grid_remove()
+        else:
+            self.frm_daily.grid()
+            self.frm_dept.grid()
+            self.frm_monthly.grid_remove()
+
+    def _on_export(self):
         kind = self.var_report_kind.get()
 
         out_dir = os.path.join(exe_dir(), "Заявки_питание")
