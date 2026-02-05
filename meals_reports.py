@@ -205,10 +205,18 @@ def build_monthly_rows(year: int, month: int) -> List[Dict[str, Any]]:
         if conn:
             release_db_connection(conn)
 
-def build_dept_employee_rows(department_id: int, date_from: date, date_to: date) -> List[Dict[str, Any]]:
+def build_dept_employee_rows(
+    department_id: Optional[int],
+    date_from: date,
+    date_to: date
+) -> List[Dict[str, Any]]:
     """
     Вариант B: одна строка на сотрудника.
-    В ячейках: список бригад/объектов (уникальные значения) + суммы/кол-ва по комплексам.
+    В ячейках: список подразделений/бригад/объектов (уникальные значения) + суммы/кол-ва по комплексам.
+
+    department_id:
+      - None  => "Все подразделения" (не фильтруем)
+      - int   => фильтруем по mo.department_id
     """
     conn = None
     try:
@@ -216,12 +224,22 @@ def build_dept_employee_rows(department_id: int, date_from: date, date_to: date)
         price_map = _load_price_map(conn)
 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            where = ["mo.date >= %s", "mo.date <= %s"]
+            params: List[Any] = [date_from, date_to]
+
+            if department_id is not None:
+                where.append("mo.department_id = %s")
+                params.append(department_id)
+
+            where_sql = " AND ".join(where)
+
             cur.execute(
-                """
+                f"""
                 SELECT
                     COALESCE(e.fio, moi.fio_text, '') AS fio,
                     COALESCE(e.tbn, moi.tbn_text, '') AS tbn,
                     COALESCE(e.position, moi.position_text, '') AS position_name,
+                    COALESCE(d.name, '') AS department_name,
                     COALESCE(mo.team_name, '') AS team_name,
                     COALESCE(mo.fact_address, o.address, '') AS object_address,
                     COALESCE(mt.name, moi.meal_type_text, '') AS meal_type_name,
@@ -229,16 +247,18 @@ def build_dept_employee_rows(department_id: int, date_from: date, date_to: date)
                 FROM meal_orders mo
                 JOIN meal_order_items moi ON moi.order_id = mo.id
                 LEFT JOIN employees e ON e.id = moi.employee_id
+                LEFT JOIN departments d ON d.id = mo.department_id
                 LEFT JOIN meal_types mt ON mt.id = moi.meal_type_id
                 LEFT JOIN objects o ON o.id = mo.object_id
-                WHERE mo.date >= %s AND mo.date <= %s
-                  AND mo.department_id = %s
+                WHERE {where_sql}
                 """,
-                (date_from, date_to, department_id),
+                params,
             )
             items = [dict(r) for r in cur.fetchall()]
 
+        # key сотрудника
         agg_qty: Dict[Tuple[str, str, str], Dict[str, float]] = {}
+        deps: Dict[Tuple[str, str, str], set[str]] = {}
         teams: Dict[Tuple[str, str, str], set[str]] = {}
         objs: Dict[Tuple[str, str, str], set[str]] = {}
 
@@ -251,11 +271,15 @@ def build_dept_employee_rows(department_id: int, date_from: date, date_to: date)
 
             key = (fio, tbn, pos)
 
-            team = (it.get("team_name") or "").strip()
-            obj_addr = (it.get("object_address") or "").strip()
+            dep_name = (it.get("department_name") or "").strip()
+            if dep_name:
+                deps.setdefault(key, set()).add(dep_name)
 
+            team = (it.get("team_name") or "").strip()
             if team:
                 teams.setdefault(key, set()).add(team)
+
+            obj_addr = (it.get("object_address") or "").strip()
             if obj_addr:
                 objs.setdefault(key, set()).add(obj_addr)
 
@@ -273,6 +297,7 @@ def build_dept_employee_rows(department_id: int, date_from: date, date_to: date)
                 "fio": fio,
                 "tbn": tbn,
                 "position": pos,
+                "departments": "; ".join(sorted(deps.get((fio, tbn, pos), set()))),
                 "teams": "; ".join(sorted(teams.get((fio, tbn, pos), set()))),
                 "objects": "; ".join(sorted(objs.get((fio, tbn, pos), set()))),
                 "qty": {},
@@ -289,6 +314,7 @@ def build_dept_employee_rows(department_id: int, date_from: date, date_to: date)
     finally:
         if conn:
             release_db_connection(conn)
+
 
 
 # ---------------- Excel exports ----------------
@@ -385,7 +411,17 @@ def export_monthly_excel(year: int, month: int, out_path: str):
 
     wb.save(out_path)
 
-def export_dept_employee_excel(dept_name: str, department_id: int, date_from: date, date_to: date, out_path: str):
+def export_dept_employee_excel(
+    dept_name: str,
+    department_id: Optional[int],
+    date_from: date,
+    date_to: date,
+    out_path: str
+):
+    """
+    Экспорт отчета "по подразделению (сотрудники)".
+    В колонке "Наименование подразделения" выводим реальное(ые) подразделение(я) из данных.
+    """
     rows = build_dept_employee_rows(department_id, date_from, date_to)
 
     conn = None
@@ -406,7 +442,7 @@ def export_dept_employee_excel(dept_name: str, department_id: int, date_from: da
 
     ws.append(["г. Москва"])
     ws.append(["Отчет по расходам на питание (по подразделению)"])
-    ws.append([f"Подразделение: {dept_name}"])
+    ws.append([f"Фильтр подразделение: {dept_name}"])
     ws.append([f"Период: {date_from:%Y-%m-%d} — {date_to:%Y-%m-%d}"])
     ws.append([])
 
@@ -431,7 +467,7 @@ def export_dept_employee_excel(dept_name: str, department_id: int, date_from: da
     for i, r in enumerate(rows, start=1):
         ws.append([
             i,
-            dept_name,
+            r.get("departments") or "",
             r.get("teams") or "",
             r.get("objects") or "",
             r.get("tbn") or "",
@@ -454,7 +490,6 @@ def export_dept_employee_excel(dept_name: str, department_id: int, date_from: da
         ws.column_dimensions[get_column_letter(col_idx)].width = w
 
     wb.save(out_path)
-
 
 # ---------------- UI Page (no tables) ----------------
 
@@ -533,14 +568,15 @@ class MealsReportsPage(tk.Frame):
             with conn.cursor() as cur:
                 cur.execute("SELECT id, name FROM departments ORDER BY name")
                 rows = cur.fetchall()
-            self._dept_rows = [(int(r[0]), str(r[1])) for r in rows]
+    
+            self._dept_rows = [(0, "Все")] + [(int(r[0]), str(r[1])) for r in rows]
             self.cmb_dept["values"] = [name for _, name in self._dept_rows]
-            if self._dept_rows:
-                self.cmb_dept.current(0)
+            self.cmb_dept.current(0)  # "Все"
         except Exception as e:
             messagebox.showerror("Отчеты", f"Не удалось загрузить подразделения:\n{e}", parent=self)
-            self._dept_rows = []
-            self.cmb_dept["values"] = []
+            self._dept_rows = [(0, "Все")]
+            self.cmb_dept["values"] = ["Все"]
+            self.cmb_dept.current(0)
         finally:
             if conn:
                 release_db_connection(conn)
@@ -549,7 +585,7 @@ class MealsReportsPage(tk.Frame):
         name = (self.cmb_dept.get() or "").strip()
         for did, n in self._dept_rows:
             if n == name:
-                return did
+                return None if did == 0 else did
         return None
 
     def _update_mode(self):
@@ -609,13 +645,10 @@ class MealsReportsPage(tk.Frame):
                 if d_from > d_to:
                     messagebox.showwarning("Отчеты", "Дата 'с' больше даты 'по'.", parent=self)
                     return
-
+                    
                 dept_id = self._selected_department_id()
-                dept_name = (self.cmb_dept.get() or "").strip()
-                if not dept_id:
-                    messagebox.showwarning("Отчеты", "Выберите подразделение.", parent=self)
-                    return
-
+                dept_name = (self.cmb_dept.get() or "").strip() or "Все"
+                
                 dept_safe = safe_filename(dept_name)
                 out_path = os.path.join(out_dir, f"Питание_подразделение_{dept_safe}_{d_from:%Y%m%d}-{d_to:%Y%m%d}_{ts}.xlsx")
                 export_dept_employee_excel(dept_name, dept_id, d_from, d_to, out_path)
