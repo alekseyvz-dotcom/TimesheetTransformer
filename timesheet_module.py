@@ -3561,6 +3561,7 @@ class TimesheetRegistryPage(tk.Frame):
 
         self.tree = None
         self._headers: List[Dict[str, Any]] = []
+        self._all_departments: List[str] = []  # кэш подразделений
 
         self.var_year = tk.StringVar()
         self.var_month = tk.StringVar()
@@ -3568,8 +3569,35 @@ class TimesheetRegistryPage(tk.Frame):
         self.var_obj_addr = tk.StringVar()
         self.var_obj_id = tk.StringVar()
 
+        self._addr_filter_job = None  # для отложенной фильтрации по адресу
+
         self._build_ui()
+        self._load_departments()
         self._load_data()
+
+    # ------------------------------------------------------------------ #
+    #  Загрузка списка подразделений из БД
+    # ------------------------------------------------------------------ #
+    def _load_departments(self):
+        """Загружает список подразделений из таблицы departments."""
+        try:
+            from db import get_connection  # подставьте свой импорт
+            conn = get_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT name FROM departments ORDER BY name")
+                    self._all_departments = [row[0] for row in cur.fetchall()]
+            finally:
+                conn.close()
+        except Exception:
+            logging.exception("Не удалось загрузить список подразделений")
+            self._all_departments = []
+
+        # Обновляем значения комбобокса
+        values = ["Все"] + self._all_departments
+        self._cmb_dep.configure(values=values)
+        if not self.var_dep.get():
+            self.var_dep.set("Все")
 
     def _build_ui(self):
         top = tk.Frame(self)
@@ -3579,13 +3607,12 @@ class TimesheetRegistryPage(tk.Frame):
             row=0, column=0, columnspan=6, sticky="w", pady=(0, 4)
         )
 
-        # Фильтры
+        # ---- Фильтры (строка 1) ----
         row_f = 1
 
         tk.Label(top, text="Год:").grid(row=row_f, column=0, sticky="e", padx=(0, 4))
         spn_year = tk.Spinbox(top, from_=2000, to=2100, width=6, textvariable=self.var_year)
         spn_year.grid(row=row_f, column=1, sticky="w")
-        # по умолчанию текущий год
         self.var_year.set(str(datetime.now().year))
 
         tk.Label(top, text="Месяц:").grid(row=row_f, column=2, sticky="e", padx=(12, 4))
@@ -3594,22 +3621,32 @@ class TimesheetRegistryPage(tk.Frame):
             state="readonly",
             width=12,
             textvariable=self.var_month,
-            values=["Все"] + [month_name_ru(i) for i in range(1, 12 + 1)],
+            values=["Все"] + [month_name_ru(i) for i in range(1, 13)],
         )
         cmb_month.grid(row=row_f, column=3, sticky="w")
         self.var_month.set("Все")
 
+        # --- Подразделение: выпадающий список (Combobox readonly) ---
         tk.Label(top, text="Подразделение:").grid(row=row_f, column=4, sticky="e", padx=(12, 4))
-        # список подразделений возьмём из TimesheetPage: employees уже загружены там,
-        # но здесь мы не хотим зависеть; поэтому просто будем вводить текстом.
-        ent_dep = ttk.Entry(top, width=24, textvariable=self.var_dep)
-        ent_dep.grid(row=row_f, column=5, sticky="w")
+        self._cmb_dep = ttk.Combobox(
+            top,
+            state="readonly",
+            width=24,
+            textvariable=self.var_dep,
+            values=["Все"],  # будет обновлено в _load_departments
+        )
+        self._cmb_dep.grid(row=row_f, column=5, sticky="w")
+        self.var_dep.set("Все")
 
+        # ---- Фильтры (строка 2) ----
         row_f += 1
 
         tk.Label(top, text="Объект (адрес):").grid(row=row_f, column=0, sticky="e", padx=(0, 4), pady=(4, 0))
         ent_addr = ttk.Entry(top, width=34, textvariable=self.var_obj_addr)
         ent_addr.grid(row=row_f, column=1, columnspan=2, sticky="w", pady=(4, 0))
+
+        # --- Автофильтрация по адресу при вводе (с задержкой 400 мс) ---
+        self.var_obj_addr.trace_add("write", self._on_addr_changed)
 
         tk.Label(top, text="ID объекта:").grid(row=row_f, column=3, sticky="e", padx=(12, 4), pady=(4, 0))
         ent_oid = ttk.Entry(top, width=18, textvariable=self.var_obj_id)
@@ -3620,8 +3657,9 @@ class TimesheetRegistryPage(tk.Frame):
         ttk.Button(btns, text="Применить фильтр", command=self._load_data).pack(side="left", padx=2)
         ttk.Button(btns, text="Сброс", command=self._reset_filters).pack(side="left", padx=2)
         ttk.Button(btns, text="Выгрузить в Excel", command=self._export_to_excel).pack(side="left", padx=2)
+        ttk.Button(btns, text="Отчёт по заполненности", command=self._export_fill_report).pack(side="left", padx=2)
 
-        # Таблица
+        # ---- Таблица ----
         frame = tk.Frame(self)
         frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
@@ -3653,7 +3691,6 @@ class TimesheetRegistryPage(tk.Frame):
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
-        # Открытие табеля
         self.tree.bind("<Double-1>", self._on_open)
         self.tree.bind("<Return>", self._on_open)
 
@@ -3667,21 +3704,277 @@ class TimesheetRegistryPage(tk.Frame):
             fg="#555",
         ).pack(side="left")
 
+    # ------------------------------------------------------------------ #
+    #  Автофильтрация по адресу (с debounce 400 мс)
+    # ------------------------------------------------------------------ #
+    def _on_addr_changed(self, *_args):
+        """Вызывается при каждом изменении поля «Объект (адрес)»."""
+        if self._addr_filter_job is not None:
+            self.after_cancel(self._addr_filter_job)
+        self._addr_filter_job = self.after(400, self._load_data)
+
+    # ------------------------------------------------------------------ #
+    #  Сброс фильтров
+    # ------------------------------------------------------------------ #
     def _reset_filters(self):
         self.var_year.set(str(datetime.now().year))
         self.var_month.set("Все")
-        self.var_dep.set("")
-        self.var_obj_addr.set("")
+        self.var_dep.set("Все")
+        self.var_obj_addr.set("")   # вызовет _on_addr_changed → _load_data
         self.var_obj_id.set("")
         self._load_data()
 
+    # ------------------------------------------------------------------ #
+    #  Загрузка данных в таблицу
+    # ------------------------------------------------------------------ #
+    def _load_data(self):
+        self._addr_filter_job = None  # сбрасываем pending-задачу
+
+        self.tree.delete(*self.tree.get_children())
+        self._headers.clear()
+
+        # --- фильтры ---
+        year = None
+        try:
+            y = int(self.var_year.get().strip())
+            if 2000 <= y <= 2100:
+                year = y
+        except Exception:
+            pass
+
+        month = None
+        m_name = (self.var_month.get() or "").strip()
+        if m_name and m_name != "Все":
+            for i in range(1, 13):
+                if month_name_ru(i) == m_name:
+                    month = i
+                    break
+
+        # Подразделение: если «Все» — не фильтруем
+        dep = self.var_dep.get().strip()
+        if not dep or dep == "Все":
+            dep = None
+
+        addr_sub = self.var_obj_addr.get().strip() or None
+        oid_sub = self.var_obj_id.get().strip() or None
+
+        try:
+            headers = load_all_timesheet_headers(
+                year=year,
+                month=month,
+                department=dep,
+                object_addr_substr=addr_sub,
+                object_id_substr=oid_sub,
+            )
+        except Exception as e:
+            logging.exception("Ошибка загрузки реестра табелей")
+            messagebox.showerror("Реестр табелей", f"Ошибка загрузки реестра из БД:\n{e}")
+            return
+
+        self._headers = headers
+
+        for h in headers:
+            yr = h["year"]
+            mn = h["month"]
+            addr = h["object_addr"] or ""
+            obj_id = h.get("object_id") or ""
+            dep_val = h.get("department") or ""
+            upd = h.get("updated_at")
+            full_name = h.get("full_name") or h.get("username") or ""
+
+            month_ru = month_name_ru(mn) if 1 <= mn <= 12 else str(mn)
+            obj_display = addr
+            if obj_id:
+                obj_display = f"[{obj_id}] {addr}"
+
+            if isinstance(upd, datetime):
+                upd_str = upd.strftime("%d.%m.%Y %H:%M")
+            else:
+                upd_str = str(upd or "")
+
+            iid = str(h["id"])
+            self.tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(yr, month_ru, obj_display, dep_val, full_name, upd_str),
+            )
+
+    # ------------------------------------------------------------------ #
+    #  Выгрузка отчёта по заполненности
+    # ------------------------------------------------------------------ #
+    def _export_fill_report(self):
+        """
+        Выгружает отчёт по заполненности табелей в Excel.
+
+        Для каждого табеля, отображённого в реестре:
+        - Объект (адрес), Подразделение, Пользователь, Дата обновления
+        - Процент заполненности = (кол-во дней с 1-го числа месяца по
+          сегодняшний день, в которых есть хотя бы одна непустая запись
+          у хотя бы одного сотрудника) / (кол-во дней с 1-го по сегодня) × 100%
+        """
+        if not self._headers:
+            messagebox.showinfo("Отчёт по заполненности", "Нет данных для выгрузки.")
+            return
+
+        from tkinter import filedialog
+        import calendar
+
+        today = datetime.now().date()
+
+        default_name = f"Заполненность_табелей_{today.strftime('%Y%m%d')}.xlsx"
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Сохранить отчёт по заполненности",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Excel файлы", "*.xlsx"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Заполненность"
+
+            # Заголовки
+            ws.append([
+                "Объект (адрес)",
+                "ID объекта",
+                "Подразделение",
+                "Пользователь",
+                "Год",
+                "Месяц",
+                "Дата обновления",
+                "Дней в периоде",
+                "Дней заполнено",
+                "Заполненность, %",
+            ])
+
+            # Ширины столбцов
+            ws.column_dimensions["A"].width = 45
+            ws.column_dimensions["B"].width = 14
+            ws.column_dimensions["C"].width = 24
+            ws.column_dimensions["D"].width = 24
+            ws.column_dimensions["E"].width = 8
+            ws.column_dimensions["F"].width = 12
+            ws.column_dimensions["G"].width = 20
+            ws.column_dimensions["H"].width = 16
+            ws.column_dimensions["I"].width = 16
+            ws.column_dimensions["J"].width = 18
+
+            # Стиль процента
+            from openpyxl.styles import Font, Alignment, PatternFill
+            header_font = Font(bold=True)
+            for cell in ws[1]:
+                cell.font = header_font
+
+            row_num = 1
+            for h in self._headers:
+                header_id = int(h["id"])
+                yr = int(h["year"])
+                mn = int(h["month"])
+                addr = h.get("object_addr") or ""
+                obj_id = h.get("object_id") or ""
+                dep = h.get("department") or ""
+                user_display = h.get("full_name") or h.get("username") or ""
+                upd = h.get("updated_at")
+
+                if isinstance(upd, datetime):
+                    upd_str = upd.strftime("%d.%m.%Y %H:%M")
+                else:
+                    upd_str = str(upd or "")
+
+                month_ru = month_name_ru(mn) if 1 <= mn <= 12 else str(mn)
+
+                # --- Определяем период: с 1-го числа месяца по min(сегодня, последний день месяца) ---
+                last_day_of_month = calendar.monthrange(yr, mn)[1]
+                period_end_date = min(today, datetime(yr, mn, last_day_of_month).date())
+                period_start_date = datetime(yr, mn, 1).date()
+
+                if period_end_date < period_start_date:
+                    # Месяц ещё не начался (будущий) — 0%
+                    days_in_period = 0
+                    days_filled = 0
+                else:
+                    days_in_period = (period_end_date - period_start_date).days + 1  # включительно
+
+                    # --- Загружаем строки табеля и считаем заполненность ---
+                    rows = load_timesheet_rows_by_header_id(header_id)
+                    # Для каждого дня (1-based индекс) проверяем,
+                    # есть ли хотя бы одна непустая ячейка у любого сотрудника
+                    days_filled = 0
+                    for day_idx in range(days_in_period):  # 0-based
+                        day_num = day_idx + 1  # 1..N
+                        arr_idx = day_num - 1  # индекс в hours_raw (0..30)
+                        has_data = False
+                        for row in rows:
+                            hours_raw = row.get("hours_raw") or []
+                            if arr_idx < len(hours_raw):
+                                val = hours_raw[arr_idx]
+                                if val is not None and str(val).strip() != "":
+                                    has_data = True
+                                    break
+                        if has_data:
+                            days_filled += 1
+
+                if days_in_period > 0:
+                    pct = round(days_filled / days_in_period * 100, 1)
+                else:
+                    pct = 0.0
+
+                ws.append([
+                    addr,
+                    obj_id,
+                    dep,
+                    user_display,
+                    yr,
+                    month_ru,
+                    upd_str,
+                    days_in_period,
+                    days_filled,
+                    pct,
+                ])
+                row_num += 1
+
+            # Условное форматирование (цветовая подсветка процента)
+            from openpyxl.styles import PatternFill
+            red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+            yellow_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+            green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+
+            for row_idx in range(2, row_num + 2):
+                cell = ws.cell(row=row_idx, column=10)
+                if cell.value is not None:
+                    try:
+                        v = float(cell.value)
+                        if v < 50:
+                            cell.fill = red_fill
+                        elif v < 90:
+                            cell.fill = yellow_fill
+                        else:
+                            cell.fill = green_fill
+                    except (ValueError, TypeError):
+                        pass
+
+            wb.save(path)
+            messagebox.showinfo(
+                "Отчёт по заполненности",
+                f"Отчёт сохранён.\nФайл: {path}\nТабелей: {len(self._headers)}",
+                parent=self,
+            )
+        except Exception as e:
+            logging.exception("Ошибка выгрузки отчёта по заполненности")
+            messagebox.showerror("Отчёт по заполненности", f"Ошибка:\n{e}", parent=self)
+
+    # ------------------------------------------------------------------ #
+    #  Выгрузка в Excel (без изменений)
+    # ------------------------------------------------------------------ #
     def _export_to_excel(self):
         """
         Выгружает все табели, показанные в реестре (с учётом фильтров),
         в один Excel-файл.
-        Формат строк:
-          Год, Месяц, Адрес, ID объекта, Подразделение, Пользователь,
-          ФИО, Таб.№, D1..D31, Итого_дней, Итого_часов, Переработка_день, Переработка_ночь
         """
         if not self._headers:
             messagebox.showinfo("Экспорт в Excel", "Нет данных для выгрузки.")
@@ -3689,7 +3982,6 @@ class TimesheetRegistryPage(tk.Frame):
 
         from tkinter import filedialog
 
-        # Выбор файла для сохранения
         default_name = f"Реестр_табелей_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         path = filedialog.asksaveasfilename(
             parent=self,
@@ -3702,12 +3994,10 @@ class TimesheetRegistryPage(tk.Frame):
             return
 
         try:
-            # Создаём новую рабочую книгу
             wb = Workbook()
             ws = wb.active
             ws.title = "Реестр табелей"
 
-            # Заголовок
             header_row = [
                 "Год",
                 "Месяц",
@@ -3717,7 +4007,7 @@ class TimesheetRegistryPage(tk.Frame):
                 "Пользователь",
                 "ФИО",
                 "Табельный №",
-                ] + [f"{i}" for i in range(1, 32)] + [
+            ] + [f"{i}" for i in range(1, 32)] + [
                 "Итого_дней",
                 "Итого_часов",
                 "В т.ч. ночных",
@@ -3726,25 +4016,22 @@ class TimesheetRegistryPage(tk.Frame):
             ]
             ws.append(header_row)
 
-            # Немного ширин столбцов
-            ws.column_dimensions["A"].width = 6   # Год
-            ws.column_dimensions["B"].width = 10  # Месяц
-            ws.column_dimensions["C"].width = 40  # Адрес
-            ws.column_dimensions["D"].width = 14  # ID объекта
-            ws.column_dimensions["E"].width = 22  # Подразделение
-            ws.column_dimensions["F"].width = 22  # Пользователь
-            ws.column_dimensions["G"].width = 28  # ФИО
-            ws.column_dimensions["H"].width = 12  # Таб.№
-            for col_idx in range(9, 9 + 31):      # дни
+            ws.column_dimensions["A"].width = 6
+            ws.column_dimensions["B"].width = 10
+            ws.column_dimensions["C"].width = 40
+            ws.column_dimensions["D"].width = 14
+            ws.column_dimensions["E"].width = 22
+            ws.column_dimensions["F"].width = 22
+            ws.column_dimensions["G"].width = 28
+            ws.column_dimensions["H"].width = 12
+            for col_idx in range(9, 9 + 31):
                 ws.column_dimensions[get_column_letter(col_idx)].width = 6
-            # Итоги
             base = 9 + 31
-            ws.column_dimensions[get_column_letter(base)].width = 10   # Итого_дней
-            ws.column_dimensions[get_column_letter(base + 1)].width = 14  # Итого_часов
-            ws.column_dimensions[get_column_letter(base + 2)].width = 16  # Переработка_день
-            ws.column_dimensions[get_column_letter(base + 3)].width = 16  # Переработка_ночь
+            ws.column_dimensions[get_column_letter(base)].width = 10
+            ws.column_dimensions[get_column_letter(base + 1)].width = 14
+            ws.column_dimensions[get_column_letter(base + 2)].width = 16
+            ws.column_dimensions[get_column_letter(base + 3)].width = 16
 
-            # Заполняем данные
             total_rows = 0
             for h in self._headers:
                 header_id = int(h["id"])
@@ -3768,20 +4055,10 @@ class TimesheetRegistryPage(tk.Frame):
                     ot_night = row.get("overtime_night")
 
                     excel_row = [
-                        year,
-                        month,
-                        addr,
-                        obj_id,
-                        dep,
-                        user_display,
-                        fio,
-                        tbn,
+                        year, month, addr, obj_id, dep, user_display, fio, tbn,
                     ]
-
-                    # 1..31 дни (как в БД/табеле — строковые значения)
                     for v in hours_raw:
                         excel_row.append(v if v is not None else None)
-
                     excel_row.append(total_days if total_days is not None else None)
                     excel_row.append(total_hours if total_hours is not None else None)
                     excel_row.append(night_hours if night_hours is not None else None)
@@ -3801,77 +4078,9 @@ class TimesheetRegistryPage(tk.Frame):
             logging.exception("Ошибка экспорта реестра табелей в Excel")
             messagebox.showerror("Экспорт в Excel", f"Ошибка при выгрузке:\n{e}", parent=self)
 
-    def _load_data(self):
-        self.tree.delete(*self.tree.get_children())
-        self._headers.clear()
-
-        # Определяем фильтры
-        year = None
-        try:
-            y = int(self.var_year.get().strip())
-            if 2000 <= y <= 2100:
-                year = y
-        except Exception:
-            pass
-
-        month = None
-        m_name = (self.var_month.get() or "").strip()
-        if m_name and m_name != "Все":
-            # преобразуем русское имя в номер
-            for i in range(1, 13):
-                if month_name_ru(i) == m_name:
-                    month = i
-                    break
-
-        dep = self.var_dep.get().strip()
-        if not dep:
-            dep = None
-
-        addr_sub = self.var_obj_addr.get().strip() or None
-        oid_sub = self.var_obj_id.get().strip() or None
-
-        try:
-            headers = load_all_timesheet_headers(
-                year=year,
-                month=month,
-                department=dep,
-                object_addr_substr=addr_sub,
-                object_id_substr=oid_sub,
-            )
-        except Exception as e:
-            logging.exception("Ошибка загрузки реестра табелей")
-            messagebox.showerror("Реестр табелей", f"Ошибка загрузки реестра из БД:\n{e}")
-            return
-
-        self._headers = headers
-
-        for h in headers:
-            year = h["year"]
-            month = h["month"]
-            addr = h["object_addr"] or ""
-            obj_id = h.get("object_id") or ""
-            dep = h.get("department") or ""
-            upd = h.get("updated_at")
-            full_name = h.get("full_name") or h.get("username") or ""
-
-            month_ru = month_name_ru(month) if 1 <= month <= 12 else str(month)
-            obj_display = addr
-            if obj_id:
-                obj_display = f"[{obj_id}] {addr}"
-
-            if isinstance(upd, datetime):
-                upd_str = upd.strftime("%d.%m.%Y %H:%M")
-            else:
-                upd_str = str(upd or "")
-
-            iid = str(h["id"])
-            self.tree.insert(
-                "",
-                "end",
-                iid=iid,
-                values=(year, month_ru, obj_display, dep, full_name, upd_str),
-            )
-
+    # ------------------------------------------------------------------ #
+    #  Вспомогательные методы
+    # ------------------------------------------------------------------ #
     def _get_selected_header(self) -> Optional[Dict[str, Any]]:
         sel = self.tree.selection()
         if not sel:
@@ -3897,11 +4106,9 @@ class TimesheetRegistryPage(tk.Frame):
         year = int(h.get("year") or 0)
         month = int(h.get("month") or 0)
 
-        owner_user_id = h.get("user_id")  # владелец табеля в БД
+        owner_user_id = h.get("user_id")
 
-        # роль текущего пользователя
         role = (self.app_ref.current_user or {}).get("role") or "specialist"
-        # только admin может редактировать, остальные — только просмотр
         read_only = (role != "admin")
 
         self.app_ref._show_page(
@@ -3915,9 +4122,10 @@ class TimesheetRegistryPage(tk.Frame):
                 init_year=year,
                 init_month=month,
                 read_only=read_only,
-                owner_user_id=owner_user_id,   # <-- передаём id автора
+                owner_user_id=owner_user_id,
             ),
         )
+
 # ------------------------- API для встраивания в main_app -------------------------
 
 def create_timesheet_page(parent, app_ref, **kwargs) -> TimesheetPage:
