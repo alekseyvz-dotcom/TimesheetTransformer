@@ -3579,28 +3579,28 @@ class TimesheetRegistryPage(tk.Frame):
     #  Загрузка подразделений ИЗ РЕАЛЬНЫХ ТАБЕЛЕЙ
     # ------------------------------------------------------------------ #
     def _load_departments(self):
-        """Загружает уникальные подразделения из timesheet_headers."""
+        """Загружает уникальные подразделения из timesheet_headers через пул соединений."""
+        self._all_departments = []
+        conn = None
         try:
-            from db import get_connection
-            conn = get_connection()
-            try:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        SELECT DISTINCT department 
-                        FROM timesheet_headers 
-                        WHERE department IS NOT NULL 
-                          AND department != ''
-                        ORDER BY department
-                    """)
-                    self._all_departments = [row[0] for row in cur.fetchall()]
-            finally:
-                conn.close()
+            # Используем тот же пул, что и timesheet_module
+            pool = timesheet_module.db_connection_pool
+            if not pool:
+                raise RuntimeError("Пул соединений не инициализирован в timesheet_module")
+            conn = pool.getconn()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT DISTINCT department 
+                    FROM timesheet_headers 
+                    WHERE department IS NOT NULL 
+                      AND TRIM(department) != ''
+                    ORDER BY department
+                """)
+                self._all_departments = [row[0] for row in cur.fetchall()]
         except Exception:
-            # Запасной вариант: пробуем через пул
+            logging.exception("Не удалось загрузить подразделения из timesheet_headers")
+            # Запасной вариант: собрать из уже загруженных данных
             try:
-                if hasattr(self.app_ref, '_get_conn_from_pool'):
-                    pass  # не у всех есть
-                # Пробуем через load_all_timesheet_headers без фильтров
                 headers = load_all_timesheet_headers()
                 deps = set()
                 for h in headers:
@@ -3609,12 +3609,20 @@ class TimesheetRegistryPage(tk.Frame):
                         deps.add(d)
                 self._all_departments = sorted(deps)
             except Exception:
-                logging.exception("Не удалось загрузить список подразделений из табелей")
+                logging.exception("Запасной вариант загрузки подразделений тоже не сработал")
                 self._all_departments = []
-
+        finally:
+            if conn:
+                try:
+                    pool = timesheet_module.db_connection_pool
+                    if pool:
+                        pool.putconn(conn)
+                except Exception:
+                    pass
+    
         values = ["Все"] + self._all_departments
         self._cmb_dep.configure(values=values)
-        if not self.var_dep.get():
+        if not self.var_dep.get() or self.var_dep.get() == "Все":
             self.var_dep.set("Все")
 
     def _build_ui(self):
