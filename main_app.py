@@ -383,117 +383,319 @@ def embedded_logo_image(parent, max_w=360, max_h=160):
 # ================================================================== #
 
 class _StatCard(tk.Frame):
-    """Одна карточка со счётчиком для домашней страницы."""
-    def __init__(self, master, icon_char: str, value: Any, label: str,
-                 bg_color="#ffffff", fg_accent="#2563EB", **kw):
-        super().__init__(master, bg=bg_color, highlightbackground="#ddd",
-                         highlightthickness=1, **kw)
-        self.configure(padx=18, pady=14)
+    """Карточка-виджет статистики с эффектом наведения."""
 
-        top = tk.Frame(self, bg=bg_color)
-        top.pack(fill="x")
+    def __init__(self, master, icon_char: str, value: Any, label: str,
+                 bg_color="#ffffff", fg_accent="#2563EB",
+                 on_click=None, **kw):
+        super().__init__(master, bg=bg_color, highlightbackground="#d0d0d0",
+                         highlightthickness=1, cursor="hand2" if on_click else "",
+                         **kw)
+        self._bg = bg_color
+        self._on_click = on_click
+        self.configure(padx=20, pady=16)
+
+        # --- Иконка + число ---
+        row_top = tk.Frame(self, bg=bg_color)
+        row_top.pack(fill="x")
 
         tk.Label(
-            top, text=icon_char, font=("Segoe UI Emoji", 22),
+            row_top, text=icon_char, font=("Segoe UI Emoji", 26),
             bg=bg_color, fg=fg_accent,
         ).pack(side="left")
 
         tk.Label(
-            top, text=str(value), font=("Segoe UI", 22, "bold"),
+            row_top, text=str(value), font=("Segoe UI", 26, "bold"),
             bg=bg_color, fg="#111",
-        ).pack(side="right", padx=(8, 0))
+        ).pack(side="right", padx=(12, 0))
+
+        # --- Подпись ---
+        tk.Label(
+            self, text=label, font=("Segoe UI", 9), fg="#555", bg=bg_color,
+            wraplength=150, justify="center",
+        ).pack(pady=(8, 0))
+
+        # --- Hover-эффект ---
+        if on_click:
+            self.bind("<Enter>", self._on_enter)
+            self.bind("<Leave>", self._on_leave)
+            self.bind("<Button-1>", self._on_press)
+            for child in self.winfo_children():
+                child.bind("<Button-1>", self._on_press)
+                for sub in child.winfo_children():
+                    sub.bind("<Button-1>", self._on_press)
+
+    def _on_enter(self, _e=None):
+        self.configure(highlightbackground="#999", highlightthickness=2)
+
+    def _on_leave(self, _e=None):
+        self.configure(highlightbackground="#d0d0d0", highlightthickness=1)
+
+    def _on_press(self, _e=None):
+        if self._on_click:
+            self._on_click()
+
+
+class _QuickButton(tk.Frame):
+    """Кнопка быстрого доступа с иконкой, заголовком и подписью."""
+
+    def __init__(self, master, icon: str, title: str, subtitle: str,
+                 command=None, enabled: bool = True, **kw):
+        bg = "#ffffff" if enabled else "#f0f0f0"
+        fg_title = "#111" if enabled else "#aaa"
+        fg_sub = "#666" if enabled else "#bbb"
+        fg_icon = "#2563EB" if enabled else "#ccc"
+        cursor = "hand2" if enabled else ""
+
+        super().__init__(master, bg=bg, highlightbackground="#ddd",
+                         highlightthickness=1, cursor=cursor, **kw)
+        self.configure(padx=16, pady=12)
+        self._command = command if enabled else None
+        self._enabled = enabled
+        self._bg = bg
 
         tk.Label(
-            self, text=label, font=("Segoe UI", 9), fg="#666", bg=bg_color,
-            wraplength=140, justify="center",
-        ).pack(pady=(6, 0))
+            self, text=icon, font=("Segoe UI Emoji", 20),
+            bg=bg, fg=fg_icon,
+        ).pack(anchor="w")
+
+        tk.Label(
+            self, text=title, font=("Segoe UI", 10, "bold"),
+            bg=bg, fg=fg_title, anchor="w",
+        ).pack(fill="x", pady=(6, 0))
+
+        tk.Label(
+            self, text=subtitle, font=("Segoe UI", 8),
+            bg=bg, fg=fg_sub, anchor="w", wraplength=160, justify="left",
+        ).pack(fill="x", pady=(2, 0))
+
+        if enabled:
+            self.bind("<Enter>", self._on_enter)
+            self.bind("<Leave>", self._on_leave)
+            self.bind("<Button-1>", self._on_press)
+            for child in self.winfo_children():
+                child.bind("<Button-1>", self._on_press)
+
+    def _on_enter(self, _e=None):
+        self.configure(highlightbackground="#888", highlightthickness=2)
+
+    def _on_leave(self, _e=None):
+        self.configure(highlightbackground="#ddd", highlightthickness=1)
+
+    def _on_press(self, _e=None):
+        if self._command:
+            self._command()
 
 
 class HomePage(tk.Frame):
-    """Домашняя страница с логотипом, приветствием и информационными карточками."""
+    """
+    Профессиональная домашняя страница — дашборд.
+    - Персональное приветствие + дата
+    - Карточки статистики (кликабельные)
+    - Кнопки быстрого доступа с учётом прав пользователя
+    - Логотип компании
+    """
+
+    # Определение кнопок быстрого доступа:
+    # (icon, title, subtitle, page_key, perm_code_or_None)
+    QUICK_ACTIONS = [
+        ("📋", "Создать табель",     "Объектный табель\nучёта рабочего времени",  "timesheet",            None),
+        ("📑", "Мои табели",          "Просмотр и редактирование\nсвоих табелей",  "my_timesheets",        None),
+        ("🚛", "Заявка на транспорт", "Оформить заявку\nна спецтехнику",           "transport",            None),
+        ("🍽️", "Заказ питания",       "Создать заявку\nна питание бригады",        "meals_order",          None),
+        ("📊", "Аналитика",           "Операционная аналитика\nпо ключевым метрикам", "analytics_dashboard", None),
+        ("🏗️", "Реестр объектов",     "Все строительные\nобъекты компании",        "objects_registry",     None),
+        ("🏠", "Проживание",          "Реестр заселений\nи выселений",             "lodging_registry",     None),
+        ("👤", "Карточка сотрудника",  "Работа, питание,\nпроживание",             "employee_card",        None),
+    ]
+
+    # Карта page_key -> builder
+    PAGE_BUILDERS = {
+        "timesheet":            lambda p, app: timesheet_module.create_timesheet_page(p, app),
+        "my_timesheets":        lambda p, app: timesheet_module.create_my_timesheets_page(p, app),
+        "transport":            lambda p, app: SpecialOrders.create_page(p, app),
+        "meals_order":          lambda p, app: meals_module.create_meals_order_page(p, app),
+        "analytics_dashboard":  lambda p, app: analytics_module.AnalyticsPage(p, app),
+        "objects_registry":     lambda p, app: objects.ObjectsRegistryPage(p, app),
+        "lodging_registry":     lambda p, app: lodging_module.create_lodging_registry_page(p, app),
+        "employee_card":        lambda p, app: employee_card_module.create_employee_card_page(p, app),
+    }
+
     def __init__(self, master, app_ref: "MainApp" = None):
-        super().__init__(master, bg="#f7f7f7")
+        super().__init__(master, bg="#f0f2f5")
         self._app_ref = app_ref
 
-        # --- Верхний блок: лого + приветствие ---
-        top = tk.Frame(self, bg="#f7f7f7")
-        top.pack(pady=(24, 8))
+        # === Скроллируемая область ===
+        canvas = tk.Canvas(self, bg="#f0f2f5", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
+        self._inner = tk.Frame(canvas, bg="#f0f2f5")
 
-        self.logo_img = embedded_logo_image(top, max_w=280, max_h=280)
+        self._inner.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.create_window((0, 0), window=self._inner, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # Скролл колёсиком
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        self._build_content()
+
+    def _build_content(self):
+        container = self._inner
+
+        # ── 1. Шапка: лого + приветствие ──────────────────────────────
+        header_frame = tk.Frame(container, bg="#ffffff")
+        header_frame.pack(fill="x", padx=0, pady=0)
+
+        header_inner = tk.Frame(header_frame, bg="#ffffff")
+        header_inner.pack(padx=32, pady=(20, 16))
+
+        # Лого слева
+        self.logo_img = embedded_logo_image(header_inner, max_w=200, max_h=80)
         if self.logo_img:
-            tk.Label(top, image=self.logo_img, bg="#f7f7f7").pack(anchor="center", pady=(0, 8))
+            tk.Label(header_inner, image=self.logo_img, bg="#ffffff").pack(
+                side="left", padx=(0, 24),
+            )
+
+        # Текст справа от лого
+        text_frame = tk.Frame(header_inner, bg="#ffffff")
+        text_frame.pack(side="left", fill="x", expand=True)
 
         greeting = "Добро пожаловать!"
-        if app_ref and app_ref.current_user:
-            name = app_ref.current_user.get("full_name") or app_ref.current_user.get("username") or ""
+        if self._app_ref and self._app_ref.current_user:
+            name = (self._app_ref.current_user.get("full_name")
+                    or self._app_ref.current_user.get("username") or "")
             if name:
                 greeting = f"Добро пожаловать, {name}!"
-        tk.Label(
-            top, text=greeting, font=("Segoe UI", 16, "bold"), bg="#f7f7f7",
-        ).pack(anchor="center", pady=(0, 2))
 
-        today_str = datetime.now().strftime("%d.%m.%Y, %A")
         tk.Label(
-            top, text=today_str, font=("Segoe UI", 10), fg="#888", bg="#f7f7f7",
-        ).pack(anchor="center")
+            text_frame, text=greeting,
+            font=("Segoe UI", 18, "bold"), bg="#ffffff", fg="#111", anchor="w",
+        ).pack(fill="x")
 
-        # --- Карточки статистики ---
-        cards_frame = tk.Frame(self, bg="#f7f7f7")
-        cards_frame.pack(pady=(16, 12))
+        # Дата + день недели (русский)
+        _weekdays_ru = {
+            "Monday": "Понедельник", "Tuesday": "Вторник",
+            "Wednesday": "Среда", "Thursday": "Четверг",
+            "Friday": "Пятница", "Saturday": "Суббота", "Sunday": "Воскресенье",
+        }
+        now = datetime.now()
+        wd = _weekdays_ru.get(now.strftime("%A"), now.strftime("%A"))
+        date_str = f"{now.strftime('%d.%m.%Y')}, {wd}"
+
+        tk.Label(
+            text_frame, text=date_str,
+            font=("Segoe UI", 10), bg="#ffffff", fg="#888", anchor="w",
+        ).pack(fill="x", pady=(2, 0))
+
+        # Разделитель
+        tk.Frame(container, height=1, bg="#e0e0e0").pack(fill="x")
+
+        # ── 2. Карточки статистики ────────────────────────────────────
+        section_stats = tk.Frame(container, bg="#f0f2f5")
+        section_stats.pack(fill="x", padx=32, pady=(20, 8))
+
+        tk.Label(
+            section_stats, text="Сводка", font=("Segoe UI", 12, "bold"),
+            bg="#f0f2f5", fg="#333", anchor="w",
+        ).pack(fill="x", pady=(0, 10))
+
+        cards_row = tk.Frame(section_stats, bg="#f0f2f5")
+        cards_row.pack(fill="x")
 
         stats = _load_home_stats()
-        now = datetime.now()
 
-        cards_data = [
-            ("👷", stats["employees_count"], "Сотрудников\n(активных)", "#E0F2FE", "#0284C7"),
-            ("🏗️", stats["objects_count"], "Объектов\nв базе", "#FEF3C7", "#D97706"),
-            ("📋", stats["timesheets_month"], f"Табелей\nза {now.strftime('%B %Y')}", "#DCFCE7", "#16A34A"),
-            ("🚛", stats["transport_today"], "Заявок на транспорт\nсегодня", "#EDE9FE", "#7C3AED"),
-            ("🍽️", stats["meals_today"], "Заявок на питание\nсегодня", "#FFE4E6", "#E11D48"),
+        cards_cfg = [
+            ("👷", stats["employees_count"],  "Сотрудников\n(активных)",           "#E0F2FE", "#0284C7", None),
+            ("🏗️", stats["objects_count"],     "Объектов\nв базе",                  "#FEF3C7", "#D97706", "objects_registry"),
+            ("📋", stats["timesheets_month"],  f"Табелей\nза {now.strftime('%m.%Y')}", "#DCFCE7", "#16A34A", "my_timesheets"),
+            ("🚛", stats["transport_today"],   "Транспорт\nсегодня",                "#EDE9FE", "#7C3AED", "transport"),
+            ("🍽️", stats["meals_today"],       "Питание\nсегодня",                  "#FFE4E6", "#E11D48", "meals_order"),
         ]
 
-        for i, (icon, val, lbl, bg_c, fg_c) in enumerate(cards_data):
-            card = _StatCard(cards_frame, icon, val, lbl, bg_color=bg_c, fg_accent=fg_c)
-            card.grid(row=0, column=i, padx=8, pady=4)
-
-        # --- Подсказка ---
-        tk.Label(
-            self, text="Выберите раздел в верхнем меню для начала работы.",
-            font=("Segoe UI", 10), fg="#555", bg="#f7f7f7",
-        ).pack(pady=(8, 0))
-
-        # --- Кнопки быстрого доступа ---
-        quick = tk.Frame(self, bg="#f7f7f7")
-        quick.pack(pady=(16, 8))
-
-        quick_buttons = [
-            ("📋  Создать табель", "timesheet"),
-            ("🚛  Заявка на транспорт", "transport"),
-            ("🍽️  Заказ питания", "meals_order"),
-            ("📊  Аналитика", "analytics_dashboard"),
-        ]
-
-        for text, page_key in quick_buttons:
-            btn = ttk.Button(
-                quick, text=text, width=26,
-                command=lambda k=page_key: self._go(k),
+        for i, (icon, val, lbl, bg_c, fg_c, page_key) in enumerate(cards_cfg):
+            cmd = (lambda k=page_key: self._go(k)) if page_key else None
+            card = _StatCard(
+                cards_row, icon, val, lbl,
+                bg_color=bg_c, fg_accent=fg_c, on_click=cmd,
             )
-            btn.pack(side="left", padx=6)
+            card.grid(row=0, column=i, padx=6, pady=4, sticky="nsew")
+            cards_row.columnconfigure(i, weight=1)
+
+        # ── 3. Быстрый доступ ─────────────────────────────────────────
+        section_quick = tk.Frame(container, bg="#f0f2f5")
+        section_quick.pack(fill="x", padx=32, pady=(20, 8))
+
+        tk.Label(
+            section_quick, text="Быстрый доступ", font=("Segoe UI", 12, "bold"),
+            bg="#f0f2f5", fg="#333", anchor="w",
+        ).pack(fill="x", pady=(0, 10))
+
+        grid_frame = tk.Frame(section_quick, bg="#f0f2f5")
+        grid_frame.pack(fill="x")
+
+        col = 0
+        row = 0
+        max_cols = 4
+
+        for icon, title, subtitle, page_key, perm in self.QUICK_ACTIONS:
+            # Проверяем права
+            enabled = self._has_access(page_key, perm)
+
+            btn = _QuickButton(
+                grid_frame, icon=icon, title=title, subtitle=subtitle,
+                command=(lambda k=page_key: self._go(k)) if enabled else None,
+                enabled=enabled,
+            )
+            btn.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
+            grid_frame.columnconfigure(col, weight=1)
+
+            col += 1
+            if col >= max_cols:
+                col = 0
+                row += 1
+
+        # ── 4. Подсказка внизу ────────────────────────────────────────
+        tk.Label(
+            container,
+            text="Используйте верхнее меню для доступа ко всем разделам системы.",
+            font=("Segoe UI", 9), fg="#999", bg="#f0f2f5",
+        ).pack(pady=(20, 24))
+
+    def _has_access(self, page_key: str, perm: Optional[str] = None) -> bool:
+        """Проверяет, доступен ли раздел текущему пользователю."""
+        if not self._app_ref:
+            return True
+
+        # Если передан явный perm — проверяем
+        if perm:
+            return self._app_ref.has_perm(perm)
+
+        # Иначе ищем perm через menu_spec (как в _show_page)
+        required = self._app_ref._perm_for_key(page_key)
+        if not required:
+            return True  # нет ограничения — доступно всем
+        return self._app_ref.has_perm(required)
 
     def _go(self, page_key: str):
-        if self._app_ref:
-            # Используем уже существующие лямбды из _build_menu
-            # Самый простой путь — вызвать _show_page с билдером
-            builders = {
-                "timesheet": lambda p: timesheet_module.create_timesheet_page(p, self._app_ref),
-                "transport": lambda p: SpecialOrders.create_page(p, self._app_ref),
-                "meals_order": lambda p: meals_module.create_meals_order_page(p, self._app_ref),
-                "analytics_dashboard": lambda p: analytics_module.AnalyticsPage(p, self._app_ref),
-            }
-            builder = builders.get(page_key)
-            if builder:
-                self._app_ref._show_page(page_key, builder)
+        """Переход на страницу."""
+        if not self._app_ref:
+            return
 
+        builder_fn = self.PAGE_BUILDERS.get(page_key)
+        if builder_fn:
+            app = self._app_ref
+            self._app_ref._show_page(
+                page_key,
+                lambda p, _fn=builder_fn, _app=app: _fn(p, _app),
+            )
 
 # ================================================================== #
 #  LoginPage — с галочкой «Запомнить меня»
