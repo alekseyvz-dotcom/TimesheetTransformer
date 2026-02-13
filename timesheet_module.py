@@ -3561,7 +3561,7 @@ class TimesheetRegistryPage(tk.Frame):
 
         self.tree = None
         self._headers: List[Dict[str, Any]] = []
-        self._all_departments: List[str] = []  # кэш подразделений
+        self._all_departments: List[str] = []
 
         self.var_year = tk.StringVar()
         self.var_month = tk.StringVar()
@@ -3569,31 +3569,49 @@ class TimesheetRegistryPage(tk.Frame):
         self.var_obj_addr = tk.StringVar()
         self.var_obj_id = tk.StringVar()
 
-        self._addr_filter_job = None  # для отложенной фильтрации по адресу
+        self._filter_job = None  # общий debounce для текстовых полей
 
         self._build_ui()
         self._load_departments()
         self._load_data()
 
     # ------------------------------------------------------------------ #
-    #  Загрузка списка подразделений из БД
+    #  Загрузка подразделений ИЗ РЕАЛЬНЫХ ТАБЕЛЕЙ
     # ------------------------------------------------------------------ #
     def _load_departments(self):
-        """Загружает список подразделений из таблицы departments."""
+        """Загружает уникальные подразделения из timesheet_headers."""
         try:
-            from db import get_connection  # подставьте свой импорт
+            from db import get_connection
             conn = get_connection()
             try:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT name FROM departments ORDER BY name")
+                    cur.execute("""
+                        SELECT DISTINCT department 
+                        FROM timesheet_headers 
+                        WHERE department IS NOT NULL 
+                          AND department != ''
+                        ORDER BY department
+                    """)
                     self._all_departments = [row[0] for row in cur.fetchall()]
             finally:
                 conn.close()
         except Exception:
-            logging.exception("Не удалось загрузить список подразделений")
-            self._all_departments = []
+            # Запасной вариант: пробуем через пул
+            try:
+                if hasattr(self.app_ref, '_get_conn_from_pool'):
+                    pass  # не у всех есть
+                # Пробуем через load_all_timesheet_headers без фильтров
+                headers = load_all_timesheet_headers()
+                deps = set()
+                for h in headers:
+                    d = (h.get("department") or "").strip()
+                    if d:
+                        deps.add(d)
+                self._all_departments = sorted(deps)
+            except Exception:
+                logging.exception("Не удалось загрузить список подразделений из табелей")
+                self._all_departments = []
 
-        # Обновляем значения комбобокса
         values = ["Все"] + self._all_departments
         self._cmb_dep.configure(values=values)
         if not self.var_dep.get():
@@ -3613,27 +3631,19 @@ class TimesheetRegistryPage(tk.Frame):
         tk.Label(top, text="Год:").grid(row=row_f, column=0, sticky="e", padx=(0, 4))
         spn_year = tk.Spinbox(top, from_=2000, to=2100, width=6, textvariable=self.var_year)
         spn_year.grid(row=row_f, column=1, sticky="w")
-        self.var_year.set(str(datetime.now().year))
+        self.var_year.set(str(datetime.now().year))  # ← установка ДО trace
 
         tk.Label(top, text="Месяц:").grid(row=row_f, column=2, sticky="e", padx=(12, 4))
         cmb_month = ttk.Combobox(
-            top,
-            state="readonly",
-            width=12,
-            textvariable=self.var_month,
+            top, state="readonly", width=12, textvariable=self.var_month,
             values=["Все"] + [month_name_ru(i) for i in range(1, 13)],
         )
         cmb_month.grid(row=row_f, column=3, sticky="w")
         self.var_month.set("Все")
 
-        # --- Подразделение: выпадающий список (Combobox readonly) ---
         tk.Label(top, text="Подразделение:").grid(row=row_f, column=4, sticky="e", padx=(12, 4))
         self._cmb_dep = ttk.Combobox(
-            top,
-            state="readonly",
-            width=24,
-            textvariable=self.var_dep,
-            values=["Все"],  # будет обновлено в _load_departments
+            top, state="readonly", width=24, textvariable=self.var_dep, values=["Все"],
         )
         self._cmb_dep.grid(row=row_f, column=5, sticky="w")
         self.var_dep.set("Все")
@@ -3645,9 +3655,6 @@ class TimesheetRegistryPage(tk.Frame):
         ent_addr = ttk.Entry(top, width=34, textvariable=self.var_obj_addr)
         ent_addr.grid(row=row_f, column=1, columnspan=2, sticky="w", pady=(4, 0))
 
-        # --- Автофильтрация по адресу при вводе (с задержкой 400 мс) ---
-        self.var_obj_addr.trace_add("write", self._on_addr_changed)
-
         tk.Label(top, text="ID объекта:").grid(row=row_f, column=3, sticky="e", padx=(12, 4), pady=(4, 0))
         ent_oid = ttk.Entry(top, width=18, textvariable=self.var_obj_id)
         ent_oid.grid(row=row_f, column=4, sticky="w", pady=(4, 0))
@@ -3658,6 +3665,15 @@ class TimesheetRegistryPage(tk.Frame):
         ttk.Button(btns, text="Сброс", command=self._reset_filters).pack(side="left", padx=2)
         ttk.Button(btns, text="Выгрузить в Excel", command=self._export_to_excel).pack(side="left", padx=2)
         ttk.Button(btns, text="Отчёт по заполненности", command=self._export_fill_report).pack(side="left", padx=2)
+
+        # ============================================================== #
+        #  ПРИВЯЗКА АВТОФИЛЬТРАЦИИ — ПОСЛЕ установки начальных значений!
+        # ============================================================== #
+        self.var_obj_addr.trace_add("write", self._on_text_filter_changed)
+        self.var_obj_id.trace_add("write", self._on_text_filter_changed)
+        cmb_month.bind("<<ComboboxSelected>>", lambda e: self._load_data())
+        self._cmb_dep.bind("<<ComboboxSelected>>", lambda e: self._load_data())
+        self.var_year.trace_add("write", self._on_year_changed)
 
         # ---- Таблица ----
         frame = tk.Frame(self)
@@ -3697,43 +3713,64 @@ class TimesheetRegistryPage(tk.Frame):
         # Нижняя панель
         bottom = tk.Frame(self)
         bottom.pack(fill="x", padx=8, pady=(0, 8))
-        tk.Label(
+        self._lbl_count = tk.Label(
             bottom,
-            text="Двойной щелчок или Enter по строке — открыть табель для просмотра/редактирования.",
+            text="",
             font=("Segoe UI", 9),
             fg="#555",
-        ).pack(side="left")
+        )
+        self._lbl_count.pack(side="left")
+        tk.Label(
+            bottom,
+            text="Двойной щелчок или Enter — открыть табель.",
+            font=("Segoe UI", 9),
+            fg="#888",
+        ).pack(side="right")
 
     # ------------------------------------------------------------------ #
-    #  Автофильтрация по адресу (с debounce 400 мс)
+    #  Автофильтрация
     # ------------------------------------------------------------------ #
-    def _on_addr_changed(self, *_args):
-        """Вызывается при каждом изменении поля «Объект (адрес)»."""
-        if self._addr_filter_job is not None:
-            self.after_cancel(self._addr_filter_job)
-        self._addr_filter_job = self.after(400, self._load_data)
+    def _on_text_filter_changed(self, *_args):
+        """Debounce для текстовых полей (адрес, ID объекта) — 400 мс."""
+        if self._filter_job is not None:
+            self.after_cancel(self._filter_job)
+        self._filter_job = self.after(400, self._load_data)
+
+    def _on_year_changed(self, *_args):
+        """При изменении года — перезагрузка с небольшой задержкой."""
+        if self._filter_job is not None:
+            self.after_cancel(self._filter_job)
+        self._filter_job = self.after(600, self._load_data)
 
     # ------------------------------------------------------------------ #
     #  Сброс фильтров
     # ------------------------------------------------------------------ #
     def _reset_filters(self):
+        # Временно отключаем автофильтрацию чтобы не дёргать _load_data многократно
+        if self._filter_job is not None:
+            self.after_cancel(self._filter_job)
+            self._filter_job = None
+
         self.var_year.set(str(datetime.now().year))
         self.var_month.set("Все")
         self.var_dep.set("Все")
-        self.var_obj_addr.set("")   # вызовет _on_addr_changed → _load_data
+        self.var_obj_addr.set("")
         self.var_obj_id.set("")
         self._load_data()
 
     # ------------------------------------------------------------------ #
-    #  Загрузка данных в таблицу
+    #  Загрузка данных
     # ------------------------------------------------------------------ #
     def _load_data(self):
-        self._addr_filter_job = None  # сбрасываем pending-задачу
+        # Сбрасываем pending-задачу
+        if self._filter_job is not None:
+            self.after_cancel(self._filter_job)
+        self._filter_job = None
 
         self.tree.delete(*self.tree.get_children())
         self._headers.clear()
 
-        # --- фильтры ---
+        # --- Фильтры ---
         year = None
         try:
             y = int(self.var_year.get().strip())
@@ -3750,7 +3787,6 @@ class TimesheetRegistryPage(tk.Frame):
                     month = i
                     break
 
-        # Подразделение: если «Все» — не фильтруем
         dep = self.var_dep.get().strip()
         if not dep or dep == "Все":
             dep = None
@@ -3799,6 +3835,8 @@ class TimesheetRegistryPage(tk.Frame):
                 iid=iid,
                 values=(yr, month_ru, obj_display, dep_val, full_name, upd_str),
             )
+
+        self._lbl_count.config(text=f"Найдено табелей: {len(headers)}")
 
     # ------------------------------------------------------------------ #
     #  Выгрузка отчёта по заполненности
