@@ -3579,15 +3579,11 @@ class TimesheetRegistryPage(tk.Frame):
     #  Загрузка подразделений ИЗ РЕАЛЬНЫХ ТАБЕЛЕЙ
     # ------------------------------------------------------------------ #
     def _load_departments(self):
-        """Загружает уникальные подразделения из timesheet_headers через пул соединений."""
+        """Загружает уникальные подразделения из timesheet_headers."""
         self._all_departments = []
         conn = None
         try:
-            # Используем тот же пул, что и timesheet_module
-            pool = timesheet_module.db_connection_pool
-            if not pool:
-                raise RuntimeError("Пул соединений не инициализирован в timesheet_module")
-            conn = pool.getconn()
+            conn = get_db_connection()
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT DISTINCT department 
@@ -3599,31 +3595,16 @@ class TimesheetRegistryPage(tk.Frame):
                 self._all_departments = [row[0] for row in cur.fetchall()]
         except Exception:
             logging.exception("Не удалось загрузить подразделения из timesheet_headers")
-            # Запасной вариант: собрать из уже загруженных данных
-            try:
-                headers = load_all_timesheet_headers()
-                deps = set()
-                for h in headers:
-                    d = (h.get("department") or "").strip()
-                    if d:
-                        deps.add(d)
-                self._all_departments = sorted(deps)
-            except Exception:
-                logging.exception("Запасной вариант загрузки подразделений тоже не сработал")
-                self._all_departments = []
+            self._all_departments = []
         finally:
             if conn:
-                try:
-                    pool = timesheet_module.db_connection_pool
-                    if pool:
-                        pool.putconn(conn)
-                except Exception:
-                    pass
+                release_db_connection(conn)
     
         values = ["Все"] + self._all_departments
         self._cmb_dep.configure(values=values)
         if not self.var_dep.get() or self.var_dep.get() == "Все":
             self.var_dep.set("Все")
+
 
     def _build_ui(self):
         top = tk.Frame(self)
