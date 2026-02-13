@@ -34,6 +34,7 @@ def exe_dir() -> Path:
     return Path(__file__).resolve().parent
 
 LOG_FILE = exe_dir() / "main_app_log.txt"
+SETTINGS_FILE = exe_dir() / "settings.dat"
 
 logging.basicConfig(
     filename=str(LOG_FILE),
@@ -42,6 +43,72 @@ logging.basicConfig(
     encoding="utf-8",
 )
 logging.debug("=== main_app запущен ===")
+
+
+# ================================================================== #
+#  Локальное хранилище учётных данных (settings.dat)
+# ================================================================== #
+
+def _load_local_settings() -> dict:
+    """Читает settings.dat и возвращает словарь."""
+    try:
+        if SETTINGS_FILE.exists():
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        logging.exception("Ошибка чтения settings.dat")
+    return {}
+
+
+def _save_local_settings(data: dict):
+    """Записывает словарь в settings.dat."""
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        logging.exception("Ошибка записи settings.dat")
+
+
+def _obfuscate(text: str) -> str:
+    """
+    Простая обфускация (base64).  НЕ является криптостойким шифрованием,
+    но не хранит пароль в открытом виде в файле.
+    """
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+def _deobfuscate(text: str) -> str:
+    try:
+        return base64.b64decode(text.encode("ascii")).decode("utf-8")
+    except Exception:
+        return ""
+
+
+def load_saved_credentials() -> Tuple[str, str, bool]:
+    """
+    Возвращает (username, password, remember_me).
+    Если данных нет — пустые строки и False.
+    """
+    cfg = _load_local_settings()
+    remember = cfg.get("remember_me", False)
+    if not remember:
+        return "", "", False
+    username = cfg.get("saved_username", "")
+    password = _deobfuscate(cfg.get("saved_password_b64", ""))
+    return username, password, True
+
+
+def save_credentials(username: str, password: str, remember: bool):
+    """Сохраняет или удаляет учётные данные в settings.dat."""
+    cfg = _load_local_settings()
+    cfg["remember_me"] = remember
+    if remember:
+        cfg["saved_username"] = username
+        cfg["saved_password_b64"] = _obfuscate(password)
+    else:
+        cfg.pop("saved_username", None)
+        cfg.pop("saved_password_b64", None)
+    _save_local_settings(cfg)
 
 
 # --- ИМПОРТ ВСЕХ МОДУЛЕЙ ПРИЛОЖЕНИЯ ---
@@ -141,7 +208,6 @@ def sync_permissions_from_menu_spec():
         if e.perm:
             rows.append((e.perm, e.title or e.perm, e.group or "core"))
 
-    # уникализируем по code
     uniq = {}
     for code, title, group in rows:
         uniq[code] = (code, title, group)
@@ -174,7 +240,6 @@ def sync_permissions_from_menu_spec():
 # --- АУТЕНТИФИКАЦИЯ ---
 
 def _hash_password(password: str, salt: Optional[bytes] = None) -> str:
-    """Хеширует пароль с использованием PBKDF2."""
     if salt is None:
         salt = _os.urandom(16)
     iterations = 260000
@@ -182,7 +247,6 @@ def _hash_password(password: str, salt: Optional[bytes] = None) -> str:
     return f"pbkdf2_sha256${iterations}${salt.hex()}${dk.hex()}"
 
 def _verify_password(password: str, stored_hash: str) -> bool:
-    """Проверяет пароль по хешу."""
     try:
         if stored_hash.startswith("pbkdf2_sha256$"):
             _, it_str, salt_hex, hash_hex = stored_hash.split("$", 3)
@@ -195,7 +259,6 @@ def _verify_password(password: str, stored_hash: str) -> bool:
         return False
 
 def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
-    """Проверяет логин/пароль в таблице app_users."""
     conn = None
     try:
         if not db_connection_pool: raise RuntimeError("Пул соединений недоступен.")
@@ -227,14 +290,70 @@ def load_user_permissions(user_id: int) -> set[str]:
             db_connection_pool.putconn(conn)
 
 
+# ================================================================== #
+#  Быстрая статистика для домашней страницы
+# ================================================================== #
+
+def _load_home_stats() -> Dict[str, Any]:
+    """
+    Загружает краткую сводку для главной страницы.
+    Возвращает словарь с ключами:
+      employees_count, objects_count, timesheets_month,
+      transport_today, meals_today
+    """
+    stats: Dict[str, Any] = {
+        "employees_count": 0,
+        "objects_count": 0,
+        "timesheets_month": 0,
+        "transport_today": 0,
+        "meals_today": 0,
+    }
+    if not db_connection_pool:
+        return stats
+    conn = None
+    try:
+        conn = db_connection_pool.getconn()
+        with conn.cursor() as cur:
+            # Сотрудники (не уволенные)
+            cur.execute("SELECT count(*) FROM employees WHERE NOT is_fired")
+            stats["employees_count"] = cur.fetchone()[0]
+
+            # Объекты
+            cur.execute("SELECT count(*) FROM objects")
+            stats["objects_count"] = cur.fetchone()[0]
+
+            # Табели за текущий месяц
+            now = datetime.now()
+            cur.execute(
+                "SELECT count(*) FROM timesheet_headers WHERE year=%s AND month=%s",
+                (now.year, now.month),
+            )
+            stats["timesheets_month"] = cur.fetchone()[0]
+
+            # Заявки на транспорт сегодня
+            cur.execute(
+                "SELECT count(*) FROM transport_orders WHERE date=%s",
+                (now.date(),),
+            )
+            stats["transport_today"] = cur.fetchone()[0]
+
+            # Заявки на питание сегодня
+            cur.execute(
+                "SELECT count(*) FROM meal_orders WHERE date=%s",
+                (now.date(),),
+            )
+            stats["meals_today"] = cur.fetchone()[0]
+    except Exception:
+        logging.exception("Ошибка загрузки статистики для главной страницы")
+    finally:
+        if conn and db_connection_pool:
+            db_connection_pool.putconn(conn)
+    return stats
+
+
 # --- ГРАФИЧЕСКИЙ ИНТЕРФЕЙС ---
 
 def embedded_logo_image(parent, max_w=360, max_h=160):
-    """
-    Загружает логотип из встроенной переменной _LOGO_BASE64.
-    Если переменная не найдена, использует крошечную заглушку.
-    """
-    # Используем либо найденный логотип, либо заглушку, если импорт провалился
     b64 = _LOGO_BASE64 or TINY_PNG_BASE64 
 
     if Image and ImageTk:
@@ -245,13 +364,10 @@ def embedded_logo_image(parent, max_w=360, max_h=160):
             return ImageTk.PhotoImage(im, master=parent)
         except Exception as e:
             logging.error(f"Ошибка загрузки логотипа через PIL: {e}")
-            # Пытаемся загрузить как обычный PhotoImage на случай, если PIL не справился
 
     try:
-        # Пытаемся напрямую через tkinter, он менее требователен
         ph = tk.PhotoImage(data=b64.strip(), master=parent)
         w, h = ph.width(), ph.height()
-        # Масштабирование, если нужно
         if w > max_w or h > max_h:
             k = max(w / max_w, h / max_h, 1)
             k = max(1, int(k))
@@ -259,76 +375,254 @@ def embedded_logo_image(parent, max_w=360, max_h=160):
         return ph
     except Exception as e:
         logging.error(f"Критическая ошибка загрузки логотипа через tkinter: {e}")
-        return None # Если ничего не сработало
+        return None
+
+
+# ================================================================== #
+#  HomePage — улучшенная главная с карточками-виджетами
+# ================================================================== #
+
+class _StatCard(tk.Frame):
+    """Одна карточка со счётчиком для домашней страницы."""
+    def __init__(self, master, icon_char: str, value: Any, label: str,
+                 bg_color="#ffffff", fg_accent="#2563EB", **kw):
+        super().__init__(master, bg=bg_color, highlightbackground="#ddd",
+                         highlightthickness=1, **kw)
+        self.configure(padx=18, pady=14)
+
+        top = tk.Frame(self, bg=bg_color)
+        top.pack(fill="x")
+
+        tk.Label(
+            top, text=icon_char, font=("Segoe UI Emoji", 22),
+            bg=bg_color, fg=fg_accent,
+        ).pack(side="left")
+
+        tk.Label(
+            top, text=str(value), font=("Segoe UI", 22, "bold"),
+            bg=bg_color, fg="#111",
+        ).pack(side="right", padx=(8, 0))
+
+        tk.Label(
+            self, text=label, font=("Segoe UI", 9), fg="#666", bg=bg_color,
+            wraplength=140, justify="center",
+        ).pack(pady=(6, 0))
+
 
 class HomePage(tk.Frame):
-    """Домашняя страница с логотипом и приветствием."""
-    def __init__(self, master):
+    """Домашняя страница с логотипом, приветствием и информационными карточками."""
+    def __init__(self, master, app_ref: "MainApp" = None):
         super().__init__(master, bg="#f7f7f7")
-        center = tk.Frame(self, bg="#f7f7f7")
-        center.place(relx=0.5, rely=0.5, anchor="center")
-        self.logo_img = embedded_logo_image(center, max_w=360, max_h=360)
+        self._app_ref = app_ref
+
+        # --- Верхний блок: лого + приветствие ---
+        top = tk.Frame(self, bg="#f7f7f7")
+        top.pack(pady=(24, 8))
+
+        self.logo_img = embedded_logo_image(top, max_w=280, max_h=280)
         if self.logo_img:
-            tk.Label(center, image=self.logo_img, bg="#f7f7f7").pack(anchor="center", pady=(0, 12))
-        tk.Label(center, text="Добро пожаловать!", font=("Segoe UI", 18, "bold"), bg="#f7f7f7").pack(anchor="center", pady=(4, 6))
-        tk.Label(center, text="Выберите раздел в верхнем меню.", font=("Segoe UI", 10), fg="#444", bg="#f7f7f7").pack(anchor="center")
+            tk.Label(top, image=self.logo_img, bg="#f7f7f7").pack(anchor="center", pady=(0, 8))
+
+        greeting = "Добро пожаловать!"
+        if app_ref and app_ref.current_user:
+            name = app_ref.current_user.get("full_name") or app_ref.current_user.get("username") or ""
+            if name:
+                greeting = f"Добро пожаловать, {name}!"
+        tk.Label(
+            top, text=greeting, font=("Segoe UI", 16, "bold"), bg="#f7f7f7",
+        ).pack(anchor="center", pady=(0, 2))
+
+        today_str = datetime.now().strftime("%d.%m.%Y, %A")
+        tk.Label(
+            top, text=today_str, font=("Segoe UI", 10), fg="#888", bg="#f7f7f7",
+        ).pack(anchor="center")
+
+        # --- Карточки статистики ---
+        cards_frame = tk.Frame(self, bg="#f7f7f7")
+        cards_frame.pack(pady=(16, 12))
+
+        stats = _load_home_stats()
+        now = datetime.now()
+
+        cards_data = [
+            ("👷", stats["employees_count"], "Сотрудников\n(активных)", "#E0F2FE", "#0284C7"),
+            ("🏗️", stats["objects_count"], "Объектов\nв базе", "#FEF3C7", "#D97706"),
+            ("📋", stats["timesheets_month"], f"Табелей\nза {now.strftime('%B %Y')}", "#DCFCE7", "#16A34A"),
+            ("🚛", stats["transport_today"], "Заявок на транспорт\nсегодня", "#EDE9FE", "#7C3AED"),
+            ("🍽️", stats["meals_today"], "Заявок на питание\nсегодня", "#FFE4E6", "#E11D48"),
+        ]
+
+        for i, (icon, val, lbl, bg_c, fg_c) in enumerate(cards_data):
+            card = _StatCard(cards_frame, icon, val, lbl, bg_color=bg_c, fg_accent=fg_c)
+            card.grid(row=0, column=i, padx=8, pady=4)
+
+        # --- Подсказка ---
+        tk.Label(
+            self, text="Выберите раздел в верхнем меню для начала работы.",
+            font=("Segoe UI", 10), fg="#555", bg="#f7f7f7",
+        ).pack(pady=(8, 0))
+
+        # --- Кнопки быстрого доступа ---
+        quick = tk.Frame(self, bg="#f7f7f7")
+        quick.pack(pady=(16, 8))
+
+        quick_buttons = [
+            ("📋  Создать табель", "timesheet"),
+            ("🚛  Заявка на транспорт", "transport"),
+            ("🍽️  Заказ питания", "meals_order"),
+            ("📊  Аналитика", "analytics_dashboard"),
+        ]
+
+        for text, page_key in quick_buttons:
+            btn = ttk.Button(
+                quick, text=text, width=26,
+                command=lambda k=page_key: self._go(k),
+            )
+            btn.pack(side="left", padx=6)
+
+    def _go(self, page_key: str):
+        if self._app_ref:
+            # Используем уже существующие лямбды из _build_menu
+            # Самый простой путь — вызвать _show_page с билдером
+            builders = {
+                "timesheet": lambda p: timesheet_module.create_timesheet_page(p, self._app_ref),
+                "transport": lambda p: SpecialOrders.create_page(p, self._app_ref),
+                "meals_order": lambda p: meals_module.create_meals_order_page(p, self._app_ref),
+                "analytics_dashboard": lambda p: analytics_module.AnalyticsPage(p, self._app_ref),
+            }
+            builder = builders.get(page_key)
+            if builder:
+                self._app_ref._show_page(page_key, builder)
+
+
+# ================================================================== #
+#  LoginPage — с галочкой «Запомнить меня»
+# ================================================================== #
 
 class LoginPage(tk.Frame):
-    """Страница входа в систему."""
+    """Страница входа в систему с возможностью сохранить учётные данные."""
     def __init__(self, master, app_ref: "MainApp"):
         super().__init__(master, bg="#f7f7f7")
         self.app_ref = app_ref
+
         center = tk.Frame(self, bg="#f7f7f7")
         center.place(relx=0.5, rely=0.5, anchor="center")
-        tk.Label(center, text="Управление строительством", font=("Segoe UI", 16, "bold"), bg="#f7f7f7").grid(row=0, column=0, columnspan=2, pady=(0, 10))
-        tk.Label(center, text="Вход в систему", font=("Segoe UI", 11), fg="#555", bg="#f7f7f7").grid(row=1, column=0, columnspan=2, pady=(0, 15))
-        tk.Label(center, text="Логин:", bg="#f7f7f7").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=4)
-        tk.Label(center, text="Пароль:", bg="#f7f7f7").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.ent_login = ttk.Entry(center, width=26)
+
+        # --- Заголовок ---
+        tk.Label(
+            center, text="Управление строительством",
+            font=("Segoe UI", 16, "bold"), bg="#f7f7f7",
+        ).grid(row=0, column=0, columnspan=2, pady=(0, 4))
+
+        tk.Label(
+            center, text="Вход в систему",
+            font=("Segoe UI", 11), fg="#555", bg="#f7f7f7",
+        ).grid(row=1, column=0, columnspan=2, pady=(0, 15))
+
+        # --- Логин ---
+        tk.Label(center, text="Логин:", bg="#f7f7f7").grid(
+            row=2, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.ent_login = ttk.Entry(center, width=28)
         self.ent_login.grid(row=2, column=1, sticky="w", pady=4)
-        self.ent_pass = ttk.Entry(center, width=26, show="*")
-        self.ent_pass.grid(row=3, column=1, sticky="w", pady=4)
+
+        # --- Пароль ---
+        tk.Label(center, text="Пароль:", bg="#f7f7f7").grid(
+            row=3, column=0, sticky="e", padx=(0, 6), pady=4)
+
+        pass_frame = tk.Frame(center, bg="#f7f7f7")
+        pass_frame.grid(row=3, column=1, sticky="w", pady=4)
+
+        self.ent_pass = ttk.Entry(pass_frame, width=22, show="*")
+        self.ent_pass.pack(side="left")
+
+        self._show_pass = False
+        self.btn_eye = ttk.Button(pass_frame, text="👁", width=3, command=self._toggle_password)
+        self.btn_eye.pack(side="left", padx=(4, 0))
+
+        # --- Запомнить меня ---
+        self.var_remember = tk.BooleanVar(value=False)
+        chk = ttk.Checkbutton(
+            center, text="Запомнить меня",
+            variable=self.var_remember,
+        )
+        chk.grid(row=4, column=1, sticky="w", pady=(4, 0))
+
+        # --- Кнопки ---
         btns = tk.Frame(center, bg="#f7f7f7")
-        btns.grid(row=4, column=0, columnspan=2, pady=(12, 0), sticky="e")
-        ttk.Button(btns, text="Войти", width=12, command=self._on_login).pack(side="left", padx=5)
-        ttk.Button(btns, text="Выход", width=10, command=self._on_exit).pack(side="left", padx=5)
-        self.ent_login.focus_set()
+        btns.grid(row=5, column=0, columnspan=2, pady=(14, 0))
+
+        ttk.Button(btns, text="Войти", width=14, command=self._on_login).pack(
+            side="left", padx=6)
+        ttk.Button(btns, text="Выход", width=10, command=self._on_exit).pack(
+            side="left", padx=6)
+
+        # --- Загрузка сохранённых данных ---
+        saved_user, saved_pass, remember = load_saved_credentials()
+        if remember:
+            self.ent_login.insert(0, saved_user)
+            self.ent_pass.insert(0, saved_pass)
+            self.var_remember.set(True)
+
+        # Фокус
+        if saved_user:
+            self.ent_pass.focus_set()
+        else:
+            self.ent_login.focus_set()
+
         self.bind_all("<Return>", self._on_enter)
+
+    def _toggle_password(self):
+        """Показать/скрыть пароль."""
+        self._show_pass = not self._show_pass
+        self.ent_pass.configure(show="" if self._show_pass else "*")
+        self.btn_eye.configure(text="🔒" if self._show_pass else "👁")
+
     def _on_enter(self, event):
-        if self.winfo_ismapped(): self._on_login()
+        if self.winfo_ismapped():
+            self._on_login()
+
     def _on_login(self):
         username = self.ent_login.get().strip()
         password = self.ent_pass.get().strip()
-        if not username or not password: messagebox.showwarning("Вход", "Укажите логин и пароль.", parent=self); return
-        try: user = authenticate_user(username, password)
-        except Exception as e: messagebox.showerror("Вход", f"Ошибка при обращении к БД:\n{e}", parent=self); return
-        if not user: messagebox.showerror("Вход", "Неверный логин или пароль.", parent=self); return
+
+        if not username or not password:
+            messagebox.showwarning("Вход", "Укажите логин и пароль.", parent=self)
+            return
+
+        try:
+            user = authenticate_user(username, password)
+        except Exception as e:
+            messagebox.showerror("Вход", f"Ошибка при обращении к БД:\n{e}", parent=self)
+            return
+
+        if not user:
+            messagebox.showerror("Вход", "Неверный логин или пароль.", parent=self)
+            return
+
+        # --- Сохраняем / удаляем учётные данные ---
+        save_credentials(username, password, self.var_remember.get())
+
         self.app_ref.on_login_success(user)
+
     def _on_exit(self):
         self.app_ref.destroy()
-        
+
+
 class SplashScreen(tk.Toplevel):
-    """
-    Класс для создания и управления окном-заставкой (splash screen).
-    """
     def __init__(self, parent):
         super().__init__(parent)
         self.title("Загрузка...")
-        
-        # Убираем рамки окна
         self.overrideredirect(True)
         
         width = 450
         height = 250
 
-        # Центрируем окно на экране
         screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
         x = (screen_width // 2) - (width // 2)
         y = (screen_height // 2) - (height // 2)
         self.geometry(f'{width}x{height}+{x}+{y}')
 
-        # Дизайн
         self.config(bg="#f0f0f0", relief="solid", borderwidth=1)
         
         tk.Label(
@@ -347,15 +641,14 @@ class SplashScreen(tk.Toplevel):
         )
         self.status_label.pack(side="bottom", fill="x", ipady=10)
 
-        # Прогресс-бар
         self.progress = ttk.Progressbar(self, mode='indeterminate')
         self.progress.pack(pady=20, padx=40, fill="x")
-        self.progress.start(10) # Запускаем анимацию
+        self.progress.start(10)
 
     def update_status(self, text):
-        """Обновляет текст статуса на заставке."""
         self.status_label.config(text=text)
-        self.update_idletasks() # Принудительно обновляем GUI
+        self.update_idletasks()
+
 
 class MainApp(tk.Tk):
     """Главный класс приложения (каркас)."""
@@ -372,19 +665,60 @@ class MainApp(tk.Tk):
         self._build_menu()
 
         # --- Основная компоновка окна ---
-        self.header = tk.Frame(self)
-        self.header.pack(fill="x", padx=12, pady=(10, 4))
-        self.lbl_header_title = tk.Label(self.header, text="", font=("Segoe UI", 16, "bold"))
+        # Верхний хедер с заголовком и информацией о пользователе
+        self.header = tk.Frame(self, bg="#ffffff", relief="flat")
+        self.header.pack(fill="x", padx=0, pady=0)
+
+        # Левая часть — заголовок
+        header_left = tk.Frame(self.header, bg="#ffffff")
+        header_left.pack(side="left", padx=12, pady=8)
+        self.lbl_header_title = tk.Label(
+            header_left, text="", font=("Segoe UI", 14, "bold"), bg="#ffffff",
+        )
         self.lbl_header_title.pack(side="left")
-        self.lbl_header_hint = tk.Label(self.header, text="", font=("Segoe UI", 10), fg="#555")
-        self.lbl_header_hint.pack(side="right")
+        self.lbl_header_hint = tk.Label(
+            header_left, text="", font=("Segoe UI", 9), fg="#888", bg="#ffffff",
+        )
+        self.lbl_header_hint.pack(side="left", padx=(12, 0))
+
+        # Правая часть — пользователь + выход
+        header_right = tk.Frame(self.header, bg="#ffffff")
+        header_right.pack(side="right", padx=12, pady=8)
+        self.lbl_user_info = tk.Label(
+            header_right, text="", font=("Segoe UI", 9), fg="#555", bg="#ffffff",
+        )
+        self.lbl_user_info.pack(side="left", padx=(0, 8))
+        self.btn_logout = ttk.Button(
+            header_right, text="⏻ Выйти", width=10, command=self._on_logout,
+        )
+        self.btn_logout.pack(side="left")
+        self.btn_logout.pack_forget()  # скрыт до авторизации
+
+        # Тонкая линия-разделитель
+        sep = tk.Frame(self, height=1, bg="#ddd")
+        sep.pack(fill="x")
+
         self.content = tk.Frame(self, bg="#f7f7f7")
         self.content.pack(fill="both", expand=True)
-        footer = tk.Frame(self)
-        footer.pack(fill="x", padx=12, pady=(0, 10))
-        tk.Label(footer, text="Разработал Алексей Зезюкин, 2025", font=("Segoe UI", 8), fg="#666").pack(side="right")
+
+        # Футер
+        footer = tk.Frame(self, bg="#fafafa", relief="flat")
+        footer.pack(fill="x", padx=0, pady=0)
+        sep2 = tk.Frame(footer, height=1, bg="#eee")
+        sep2.pack(fill="x")
+        tk.Label(
+            footer, text="Разработал Алексей Зезюкин, 2025",
+            font=("Segoe UI", 8), fg="#999", bg="#fafafa",
+        ).pack(side="right", padx=12, pady=4)
 
         self._set_user(None)
+        self.show_login()
+
+    # ------------------------------------------------------------------ #
+    #  Выход из аккаунта
+    # ------------------------------------------------------------------ #
+    def _on_logout(self):
+        """Выход из учётной записи — возврат на страницу логина."""
         self.show_login()
 
     def _perm_for_key(self, key: str) -> Optional[str]:
@@ -401,7 +735,7 @@ class MainApp(tk.Tk):
         
         self._menubar.add_command(label="Главная", command=self.show_home)
 
-        # === Объектный табель (через новый модуль) ===
+        # === Объектный табель ===
         m_ts = tk.Menu(self._menubar, tearoff=0)
         m_ts.add_command(
             label="Создать",
@@ -498,7 +832,7 @@ class MainApp(tk.Tk):
         self._menubar.add_cascade(label="Объекты", menu=m_objects)
         self._menu_objects = m_objects
 
-        # === АНАЛИТИКА (НОВЫЙ РАЗДЕЛ) ===
+        # === Аналитика ===
         m_analytics = tk.Menu(self._menubar, tearoff=0)
         m_analytics.add_command(label="Операционная аналитика", command=lambda: self._show_page("analytics_dashboard", lambda p: analytics_module.AnalyticsPage(p, self)))
         self._menubar.add_cascade(label="Аналитика", menu=m_analytics)
@@ -526,10 +860,21 @@ class MainApp(tk.Tk):
         self._menu_settings_index = self._menubar.index("end")
         self._menubar.add_command(label="Настройки", command=lambda: Settings.open_settings_window(self))
 
+    # ------------------------------------------------------------------ #
+    #  Управление пользователем
+    # ------------------------------------------------------------------ #
     def _set_user(self, user: Optional[Dict[str, Any]]):
         self.current_user = user or {}
         self.is_authenticated = bool(user)
-        caption = f" — {self.current_user.get('full_name') or self.current_user.get('username')}" if user else ""
+        caption = ""
+        if user:
+            name = user.get('full_name') or user.get('username') or ""
+            caption = f" — {name}"
+            self.lbl_user_info.config(text=f"👤 {name}")
+            self.btn_logout.pack(side="left")
+        else:
+            self.lbl_user_info.config(text="")
+            self.btn_logout.pack_forget()
         self.title(APP_NAME + caption)
         self._apply_permissions_visibility()
 
@@ -549,7 +894,7 @@ class MainApp(tk.Tk):
         return bool(perms and perm_code in perms)
 
     def show_home(self):
-        self._show_page("home", lambda p: HomePage(p))
+        self._show_page("home", lambda p: HomePage(p, app_ref=self))
 
     def show_login(self):
         self._set_user(None)
@@ -567,7 +912,6 @@ class MainApp(tk.Tk):
             self.show_home()
             return
 
-        
         headers = {
             "home": ("Управление строительством", "Выберите раздел в верхнем меню"),
             "timesheet": ("Объектный табель", ""),
@@ -602,15 +946,14 @@ class MainApp(tk.Tk):
         title, hint = headers.get(key, (key.replace("_", " ").title(), ""))
         self._set_header(title, hint)
 
-        for w in self.content.winfo_children(): w.destroy()
+        for w in self.content.winfo_children():
+            w.destroy()
         try:
             page = builder(self.content)
             page.pack(fill="both", expand=True)
             self._pages[key] = page
         except Exception as e:
-            # Логируем полную трассировку в файл
             logging.exception(f"Ошибка при открытии страницы '{key}'")
-            # И показываем пользователю краткое сообщение
             messagebox.showerror("Ошибка", f"Не удалось открыть страницу '{key}':\n{e}")
             if self.is_authenticated:
                 self.show_home()
@@ -618,7 +961,6 @@ class MainApp(tk.Tk):
                 self.show_login()
             
     def _set_header(self, title: str, hint: str = ""):
-        """Обновляет заголовок над содержимым."""
         self.lbl_header_title.config(text=title)
         self.lbl_header_hint.config(text=hint or "")
 
@@ -632,10 +974,8 @@ class MainApp(tk.Tk):
                 idx = menu.index(label_text)
                 menu.entryconfig(idx, state="normal" if allowed else "disabled")
             except tk.TclError:
-                # label не найден (например, если в меню другой текст) — просто пропускаем
                 pass
     
-        # 1) карта: название секции -> объект submenu в Tk
         menus_by_section = {
             "Объектный табель": getattr(self, "_menu_timesheets", None),
             "Автотранспорт": getattr(self, "_menu_transport", None),
@@ -647,7 +987,6 @@ class MainApp(tk.Tk):
             "Инструменты": getattr(self, "_menu_tools", None),
         }
     
-        # 2) внутренние пункты: включаем/выключаем по perm из MENU_SPEC
         for sec in MENU_SPEC:
             menu = menus_by_section.get(sec.label)
             for e in sec.entries:
@@ -656,8 +995,6 @@ class MainApp(tk.Tk):
                 allowed = True if not e.perm else self.has_perm(e.perm)
                 set_state(menu, e.label, allowed)
     
-        # 3) корневые пункты menubar (разделы): если нет ни одного доступного пункта — disable
-        # "Главная" всегда доступна
         set_state(self._menubar, "Главная", True)
     
         for sec in MENU_SPEC:
@@ -667,7 +1004,6 @@ class MainApp(tk.Tk):
             )
             set_state(self._menubar, sec.label, any_allowed)
     
-        # 4) top-level команды (например "Настройки")
         for e in TOP_LEVEL:
             allowed = True if not e.perm else self.has_perm(e.perm)
             set_state(self._menubar, e.label, allowed)
@@ -678,23 +1014,19 @@ class MainApp(tk.Tk):
         close_db_pool()
         super().destroy()
 
+
 # --- ТОЧКА ВХОДА ПРИЛОЖЕНИЯ ---
 
 if __name__ == "__main__":
-    # 1. Создаем временное корневое окно и сразу его скрываем.
-    # Оно нужно, чтобы наша заставка (Toplevel) могла существовать.
     root = tk.Tk()
     root.withdraw()
 
-    # 2. Создаем и отображаем заставку
     splash = SplashScreen(root)
     
-    # 3. Определяем функцию, которая выполнит всю тяжелую работу
     def start_application():
         try:
-            # Обновляем статус на заставке
             splash.update_status("Загрузка модулей приложения...")
-            perform_heavy_imports() # Выполняем отложенные импорты
+            perform_heavy_imports()
             
             splash.update_status("Проверка конфигурации...")
             Settings.ensure_config()
@@ -723,31 +1055,20 @@ if __name__ == "__main__":
                 if module and hasattr(module, "set_db_pool"):
                     module.set_db_pool(db_connection_pool)
 
-            # Вся инициализация прошла успешно.
-            # Уничтожаем заставку.
             splash.destroy()
-
-            # Уничтожаем временное скрытое окно.
             root.destroy()
             
-            # И запускаем наше настоящее главное приложение!
             logging.debug("Инициализация успешна. Запускаем главный цикл приложения.")
             app = MainApp()
             app.protocol("WM_DELETE_WINDOW", app.destroy)
             app.mainloop()
 
         except Exception as e:
-            # Если на этапе инициализации произошла ошибка
             logging.critical("Приложение не может быть запущено из-за ошибки инициализации.", exc_info=True)
-            splash.destroy() # Сначала убираем заставку
+            splash.destroy()
             messagebox.showerror("Критическая ошибка", f"Не удалось инициализировать приложение.\n\nОшибка: {e}\n\nПроверьте настройки и доступность БД.")
-            root.destroy() # Закрываем временное окно
+            root.destroy()
             sys.exit(1)
 
-    # 4. Запускаем тяжелую функцию с небольшой задержкой (например, 100 мс).
-    # Это дает tkinter время, чтобы гарантированно отрисовать окно заставки.
     root.after(100, start_application)
-    
-    # 5. Запускаем главный цикл для временного окна. 
-    # Он будет работать, пока мы не запустим основной app.mainloop() или не закроем все по ошибке.
     root.mainloop()
