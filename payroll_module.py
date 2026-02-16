@@ -16,8 +16,12 @@ import re
 import os
 
 import pandas as pd
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+# Для автоширины колонок Excel
+try:
+    from openpyxl.utils import get_column_letter
+except ImportError:
+    get_column_letter = None
 
 # ============================================================
 #  DB pool — устанавливается из main_app при старте
@@ -33,24 +37,40 @@ def set_db_pool(db_pool: pool.SimpleConnectionPool):
 
 
 # ============================================================
+#  Нормализация ТБН
+# ============================================================
+
+def normalize_tbn(raw: Any) -> str:
+    """
+    Приводит табельный номер к единому формату:
+    - убирает пробелы по краям
+    - если число — приводит к целому без .0
+    - если строка вида 'СТЗК-31896' — извлекает '31896'
+      (только если в БД tbn хранится без префикса)
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, float):
+        # 31896.0 -> "31896"
+        if raw == int(raw):
+            return str(int(raw))
+        return str(raw)
+    if isinstance(raw, int):
+        return str(raw)
+    s = str(raw).strip()
+    # Убираем .0 на конце (Excel иногда даёт "31896.0")
+    if s.endswith('.0') and s[:-2].isdigit():
+        s = s[:-2]
+    return s
+
+
+# ============================================================
 #  EXCEL PARSER
 # ============================================================
 
 class PayrollExcelParser:
     """
     Парсер Excel с начислениями ЗП.
-    Структура (из реального файла):
-      - Строки 1-6: шапка (организация, период и т.д.)
-      - Строка 7 (idx 6): заголовки колонок
-      - Строка 8 (idx 7): подзаголовки (Дней/Часов)
-      - С строки 9 (idx 8): данные
-      - Колонка A (0): Табельный номер
-      - Колонка C (2): ФИО
-      - Колонка E (4): Подразделение
-      - Колонка G (6): Должность
-      - Колонка K (10): Отработано дней
-      - Колонка L (11): Отработано часов
-      - Последняя колонка с «Всего» в заголовке: Всего начислено
     """
 
     MONTH_MAP = {
@@ -83,19 +103,25 @@ class PayrollExcelParser:
             for cell_val in all_rows[idx]:
                 if cell_val and isinstance(cell_val, str):
                     cell_lower = cell_val.strip().lower()
-                    for m_name, m_num in PayrollExcelParser.MONTH_MAP.items():
-                        if m_name in cell_lower:
-                            month = m_num
-                            year_match = re.search(r'(\d{4})', cell_val)
-                            if year_match:
-                                year = int(year_match.group(1))
-                            period_label = cell_val.strip()
-                            break
-                    if ('организация' in cell_lower or
-                            'ано' in cell_lower or
-                            'ооо' in cell_lower):
-                        if not organization:
-                            organization = cell_val.strip()
+                    # Ищем месяц
+                    if not month:
+                        for m_name, m_num in PayrollExcelParser.MONTH_MAP.items():
+                            if m_name in cell_lower:
+                                month = m_num
+                                year_match = re.search(r'(\d{4})', cell_val)
+                                if year_match:
+                                    year = int(year_match.group(1))
+                                period_label = cell_val.strip()
+                                break
+                    # Ищем организацию
+                    if not organization and (
+                        'организация' in cell_lower or
+                        'ано ' in cell_lower or
+                        'ооо ' in cell_lower or
+                        cell_lower.startswith('ано ') or
+                        cell_lower.startswith('ооо ')
+                    ):
+                        organization = cell_val.strip()
 
         now = datetime.now()
         year = year or now.year
@@ -113,7 +139,6 @@ class PayrollExcelParser:
                 total_col_idx = ci  # берём последнее «Всего»
 
         if total_col_idx is None:
-            # fallback — последняя колонка
             for ci in range(len(headers) - 1, -1, -1):
                 if headers[ci] is not None:
                     total_col_idx = ci
@@ -129,7 +154,7 @@ class PayrollExcelParser:
         COL_DAYS = 10
         COL_HOURS = 11
 
-        # --- Парсим данные ---
+        # --- Вспомогательные функции ---
         def safe_float(v):
             if v is None:
                 return None
@@ -147,28 +172,26 @@ class PayrollExcelParser:
         def cell(row_data, idx):
             return row_data[idx] if idx < len(row_data) else None
 
+        # --- Парсим данные ---
         parsed_rows = []
         data_start_idx = 8
+        skip_words = frozenset(('итого', 'всего', 'итого:', 'всего:', 'none', ''))
 
         for ri in range(data_start_idx, len(all_rows)):
             rd = all_rows[ri]
             if not rd or len(rd) < 3:
                 continue
 
-            tbn_raw = cell(rd, COL_TBN)
+            tbn_str = normalize_tbn(cell(rd, COL_TBN))
             fio_raw = cell(rd, COL_FIO)
-
-            tbn_str = str(tbn_raw).strip() if tbn_raw else ""
             fio_str = str(fio_raw).strip() if fio_raw else ""
 
             # Пропускаем пустые и итоговые строки
-            skip_words = ('итого', 'всего', 'none', '')
             if tbn_str.lower() in skip_words and fio_str.lower() in skip_words:
                 continue
             if not tbn_str and not fio_str:
                 continue
-            # Если тбн — «Итого» — пропускаем
-            if tbn_str.lower() in ('итого', 'всего', 'итого:', 'всего:'):
+            if tbn_str.lower() in skip_words:
                 continue
 
             total_accrued = safe_float(cell(rd, total_col_idx))
@@ -184,6 +207,11 @@ class PayrollExcelParser:
             })
 
         wb.close()
+
+        logging.info(
+            f"PayrollExcelParser: parsed {len(parsed_rows)} rows, "
+            f"period={month:02d}.{year}, org='{organization}'"
+        )
 
         return {
             "organization": organization,
@@ -231,8 +259,11 @@ class PayrollDataManager:
                    pu.year, pu.month, pu.file_name,
                    pu.uploaded_at, pu.note,
                    au.full_name AS uploaded_by_name,
-                   (SELECT COUNT(*) FROM payroll_rows pr WHERE pr.upload_id = pu.id) AS row_count,
-                   (SELECT COALESCE(SUM(pr.total_accrued),0) FROM payroll_rows pr WHERE pr.upload_id = pu.id) AS total_sum,
+                   (SELECT COUNT(*) FROM payroll_rows pr
+                    WHERE pr.upload_id = pu.id) AS row_count,
+                   (SELECT COALESCE(SUM(pr.total_accrued),0)
+                    FROM payroll_rows pr
+                    WHERE pr.upload_id = pu.id) AS total_sum,
                    (SELECT COUNT(*) FROM payroll_distribution pd
                     JOIN payroll_rows pr2 ON pd.payroll_row_id = pr2.id
                     WHERE pr2.upload_id = pu.id) AS dist_count
@@ -240,6 +271,17 @@ class PayrollDataManager:
             LEFT JOIN app_users au ON pu.uploaded_by = au.id
             ORDER BY pu.year DESC, pu.month DESC, pu.uploaded_at DESC
         """)
+
+    @staticmethod
+    def check_duplicate(year: int, month: int, file_name: str) -> Optional[Dict]:
+        """Проверяет, есть ли уже загрузка за этот период с таким файлом."""
+        rows = PayrollDataManager._query("""
+            SELECT id, period_label, uploaded_at
+            FROM payroll_uploads
+            WHERE year = %s AND month = %s AND file_name = %s
+            LIMIT 1
+        """, (year, month, file_name))
+        return rows[0] if rows else None
 
     @staticmethod
     def save_upload(parsed: Dict, file_name: str, user_id: int) -> int:
@@ -262,16 +304,18 @@ class PayrollDataManager:
                 ))
                 upload_id = cur.fetchone()[0]
 
+                # Batch-поиск всех employee_id по tbn
+                all_tbns = [r["tbn"] for r in parsed["rows"] if r["tbn"]]
+                tbn_to_emp: Dict[str, int] = {}
+                if all_tbns:
+                    cur.execute(
+                        "SELECT id, tbn FROM employees WHERE tbn = ANY(%s)",
+                        (all_tbns,))
+                    for row in cur.fetchall():
+                        tbn_to_emp[row[1]] = row[0]
+
                 for r in parsed["rows"]:
-                    # Пытаемся найти employee_id по tbn
-                    employee_id = None
-                    if r["tbn"]:
-                        cur.execute(
-                            "SELECT id FROM employees WHERE tbn = %s LIMIT 1",
-                            (r["tbn"],))
-                        emp = cur.fetchone()
-                        if emp:
-                            employee_id = emp[0]
+                    employee_id = tbn_to_emp.get(r["tbn"]) if r["tbn"] else None
 
                     cur.execute("""
                         INSERT INTO payroll_rows
@@ -303,7 +347,8 @@ class PayrollDataManager:
         conn = PayrollDataManager._get_conn()
         try:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM payroll_uploads WHERE id = %s", (upload_id,))
+                cur.execute(
+                    "DELETE FROM payroll_uploads WHERE id = %s", (upload_id,))
             conn.commit()
         except Exception:
             conn.rollback()
@@ -317,18 +362,11 @@ class PayrollDataManager:
     def distribute(upload_id: int) -> Dict[str, int]:
         """
         Распределяет ФОТ по объектам для загрузки upload_id.
-        Алгоритм:
-          1. Для каждой payroll_row находим все timesheet_rows
-             с тем же tbn за тот же year/month.
-          2. Считаем total_hours на каждом объекте.
-          3. fraction = hours_on_obj / sum(hours_all_objects).
-          4. amount = total_accrued * fraction.
-        Возвращает { "distributed": N, "not_found": M, "zero_hours": K }
+        Возвращает { "distributed": N, "not_found": M, "zero_accrued": K }
         """
         conn = PayrollDataManager._get_conn()
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Получаем параметры загрузки
                 cur.execute(
                     "SELECT year, month FROM payroll_uploads WHERE id = %s",
                     (upload_id,))
@@ -345,52 +383,57 @@ class PayrollDataManager:
                     )
                 """, (upload_id,))
 
-                # Получаем строки
+                # Получаем строки с ненулевым начислением и непустым tbn
                 cur.execute("""
                     SELECT id, tbn, total_accrued
                     FROM payroll_rows
-                    WHERE upload_id = %s AND tbn IS NOT NULL AND tbn <> ''
+                    WHERE upload_id = %s
+                      AND COALESCE(tbn, '') <> ''
+                      AND COALESCE(total_accrued, 0) > 0
                 """, (upload_id,))
                 rows = cur.fetchall()
 
-                stats = {"distributed": 0, "not_found": 0, "zero_hours": 0}
+                # Предзагрузка всех табельных данных за период —
+                # один запрос вместо N
+                all_tbns = [r["tbn"] for r in rows]
+                ts_map: Dict[str, List[Dict]] = {}
 
-                for pr in rows:
-                    pr_id = pr["id"]
-                    tbn = pr["tbn"]
-                    total_accrued = float(pr["total_accrued"] or 0)
-
-                    if total_accrued == 0:
-                        stats["zero_hours"] += 1
-                        continue
-
-                    # Находим часы по объектам из табеля
+                if all_tbns:
                     cur.execute("""
                         SELECT
+                            tr.tbn,
                             th.object_db_id AS object_id,
                             th.id AS header_id,
                             COALESCE(tr.total_hours, 0) AS hours
                         FROM timesheet_rows tr
                         JOIN timesheet_headers th ON th.id = tr.header_id
-                        WHERE tr.tbn = %s
+                        WHERE tr.tbn = ANY(%s)
                           AND th.year = %s
                           AND th.month = %s
                           AND COALESCE(tr.total_hours, 0) > 0
-                    """, (tbn, y, m))
-                    ts_rows = cur.fetchall()
+                    """, (all_tbns, y, m))
+                    for tsr in cur.fetchall():
+                        ts_map.setdefault(tsr["tbn"], []).append(tsr)
 
+                stats = {"distributed": 0, "not_found": 0, "zero_accrued": 0}
+                inserts = []
+
+                for pr in rows:
+                    pr_id = pr["id"]
+                    tbn = pr["tbn"]
+                    total_accrued = float(pr["total_accrued"])
+
+                    ts_rows = ts_map.get(tbn)
                     if not ts_rows:
                         stats["not_found"] += 1
                         continue
 
-                    # Суммарные часы по всем объектам
                     total_ts_hours = sum(float(r["hours"]) for r in ts_rows)
                     if total_ts_hours <= 0:
                         stats["not_found"] += 1
                         continue
 
-                    # Группируем по объекту (сотрудник может быть несколько
-                    # раз на одном объекте в разных строках)
+                    # Группируем по объекту
                     obj_hours: Dict[int, Tuple[float, int]] = {}
                     for tsr in ts_rows:
                         oid = tsr["object_id"]
@@ -402,28 +445,23 @@ class PayrollDataManager:
                         else:
                             obj_hours[oid] = (h, hid)
 
-                    # Распределяем
+                    # Распределяем с точным остатком
                     distributed_sum = Decimal("0")
                     items = list(obj_hours.items())
 
                     for i, (oid, (h_on_obj, hdr_id)) in enumerate(items):
-                        fraction = Decimal(str(h_on_obj)) / Decimal(str(total_ts_hours))
+                        fraction = Decimal(str(h_on_obj)) / Decimal(
+                            str(total_ts_hours))
 
                         if i == len(items) - 1:
-                            # Последний объект — остаток (чтобы сумма = total_accrued)
                             amount = Decimal(str(total_accrued)) - distributed_sum
                         else:
-                            amount = (Decimal(str(total_accrued)) * fraction).quantize(
-                                Decimal("0.01"), rounding=ROUND_HALF_UP)
+                            amount = (
+                                Decimal(str(total_accrued)) * fraction
+                            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
                             distributed_sum += amount
 
-                        cur.execute("""
-                            INSERT INTO payroll_distribution
-                                (payroll_row_id, object_id, timesheet_header_id,
-                                 hours_on_object, total_hours_all_objects,
-                                 fraction, amount)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """, (
+                        inserts.append((
                             pr_id, oid, hdr_id,
                             round(h_on_obj, 2),
                             round(total_ts_hours, 2),
@@ -433,7 +471,23 @@ class PayrollDataManager:
 
                     stats["distributed"] += 1
 
+                # Batch insert
+                if inserts:
+                    from psycopg2.extras import execute_values
+                    execute_values(
+                        cur,
+                        """INSERT INTO payroll_distribution
+                               (payroll_row_id, object_id, timesheet_header_id,
+                                hours_on_object, total_hours_all_objects,
+                                fraction, amount)
+                           VALUES %s""",
+                        inserts,
+                        template="(%s, %s, %s, %s, %s, %s, %s)",
+                    )
+
             conn.commit()
+            logging.info(
+                f"Payroll distribute upload_id={upload_id}: {stats}")
             return stats
         except Exception:
             conn.rollback()
@@ -470,10 +524,10 @@ class PayrollDataManager:
     def get_distribution_by_department(upload_id: int) -> pd.DataFrame:
         data = PayrollDataManager._query("""
             SELECT
-                COALESCE(pr.department_raw, '—') AS department_name,
+                COALESCE(NULLIF(pr.department_raw, ''), '—') AS department_name,
                 COUNT(DISTINCT pr.tbn) AS people_cnt,
                 SUM(pr.total_accrued) AS total_accrued,
-                SUM(pd_sum.distributed) AS total_distributed
+                COALESCE(SUM(pd_sum.distributed), 0) AS total_distributed
             FROM payroll_rows pr
             LEFT JOIN (
                 SELECT payroll_row_id, SUM(amount) AS distributed
@@ -481,7 +535,7 @@ class PayrollDataManager:
                 GROUP BY payroll_row_id
             ) pd_sum ON pd_sum.payroll_row_id = pr.id
             WHERE pr.upload_id = %s
-            GROUP BY COALESCE(pr.department_raw, '—')
+            GROUP BY COALESCE(NULLIF(pr.department_raw, ''), '—')
             ORDER BY total_accrued DESC
         """, (upload_id,))
         df = pd.DataFrame(data)
@@ -510,37 +564,60 @@ class PayrollDataManager:
 
     @staticmethod
     def get_upload_summary(upload_id: int) -> Dict[str, Any]:
+        """Сводка по загрузке — один оптимизированный запрос."""
         rows = PayrollDataManager._query("""
+            WITH pr AS (
+                SELECT id, total_accrued
+                FROM payroll_rows
+                WHERE upload_id = %s
+            ),
+            dist AS (
+                SELECT pd.payroll_row_id, pd.object_id, pd.amount
+                FROM payroll_distribution pd
+                JOIN pr ON pr.id = pd.payroll_row_id
+            )
             SELECT
-                (SELECT COUNT(*) FROM payroll_rows WHERE upload_id = %s) AS total_rows,
-                (SELECT COALESCE(SUM(total_accrued), 0) FROM payroll_rows WHERE upload_id = %s) AS total_accrued,
-                (SELECT COALESCE(SUM(pd.amount), 0)
-                 FROM payroll_distribution pd
-                 JOIN payroll_rows pr ON pd.payroll_row_id = pr.id
-                 WHERE pr.upload_id = %s) AS total_distributed,
-                (SELECT COUNT(DISTINCT pr2.id)
-                 FROM payroll_rows pr2
-                 WHERE pr2.upload_id = %s
-                   AND pr2.id IN (SELECT DISTINCT payroll_row_id FROM payroll_distribution)
-                ) AS rows_distributed,
-                (SELECT COUNT(DISTINCT pr3.id)
-                 FROM payroll_rows pr3
-                 WHERE pr3.upload_id = %s
-                   AND COALESCE(pr3.total_accrued, 0) > 0
-                   AND pr3.id NOT IN (SELECT DISTINCT payroll_row_id FROM payroll_distribution)
+                (SELECT COUNT(*) FROM pr) AS total_rows,
+                (SELECT COALESCE(SUM(total_accrued), 0) FROM pr) AS total_accrued,
+                (SELECT COALESCE(SUM(amount), 0) FROM dist) AS total_distributed,
+                (SELECT COUNT(DISTINCT payroll_row_id) FROM dist) AS rows_distributed,
+                (SELECT COUNT(*)
+                 FROM pr
+                 WHERE COALESCE(total_accrued, 0) > 0
+                   AND id NOT IN (SELECT DISTINCT payroll_row_id FROM dist)
                 ) AS rows_not_distributed,
-                (SELECT COUNT(DISTINCT pd2.object_id)
-                 FROM payroll_distribution pd2
-                 JOIN payroll_rows pr4 ON pd2.payroll_row_id = pr4.id
-                 WHERE pr4.upload_id = %s) AS objects_count
-        """, (upload_id, upload_id, upload_id, upload_id, upload_id, upload_id))
+                (SELECT COUNT(DISTINCT object_id) FROM dist) AS objects_count
+        """, (upload_id,))
         r = rows[0] if rows else {}
         for k in ("total_accrued", "total_distributed"):
             r[k] = float(r.get(k, 0) or 0)
-        for k in ("total_rows", "rows_distributed", "rows_not_distributed", "objects_count"):
+        for k in ("total_rows", "rows_distributed",
+                   "rows_not_distributed", "objects_count"):
             r[k] = int(r.get(k, 0) or 0)
         r["undistributed_amount"] = r["total_accrued"] - r["total_distributed"]
         return r
+
+    @staticmethod
+    def get_detail_by_employee(upload_id: int) -> pd.DataFrame:
+        """Детализация: каждый сотрудник → объект(ы) → сумма."""
+        data = PayrollDataManager._query("""
+            SELECT
+                pr.tbn,
+                pr.fio,
+                pr.department_raw,
+                pr.total_accrued,
+                o.address AS object_name,
+                pd.hours_on_object,
+                pd.total_hours_all_objects,
+                pd.fraction,
+                pd.amount
+            FROM payroll_rows pr
+            JOIN payroll_distribution pd ON pd.payroll_row_id = pr.id
+            JOIN objects o ON o.id = pd.object_id
+            WHERE pr.upload_id = %s
+            ORDER BY pr.fio, o.address
+        """, (upload_id,))
+        return pd.DataFrame(data)
 
 
 # ============================================================
@@ -558,14 +635,25 @@ class PayrollPage(ttk.Frame):
         toolbar = ttk.Frame(self, padding="8")
         toolbar.pack(fill="x", side="top")
 
-        ttk.Button(toolbar, text="📂 Загрузить Excel",
-                    command=self._on_upload).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="🔄 Распределить ФОТ",
-                    command=self._on_distribute).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="🗑 Удалить загрузку",
-                    command=self._on_delete).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="↻ Обновить",
-                    command=self._refresh).pack(side="left", padx=4)
+        ttk.Button(
+            toolbar, text="📂 Загрузить Excel",
+            command=self._on_upload).pack(side="left", padx=4)
+        ttk.Button(
+            toolbar, text="🔄 Распределить ФОТ",
+            command=self._on_distribute).pack(side="left", padx=4)
+        ttk.Button(
+            toolbar, text="🗑 Удалить загрузку",
+            command=self._on_delete).pack(side="left", padx=4)
+
+        ttk.Separator(toolbar, orient="vertical").pack(
+            side="left", fill="y", padx=8, pady=2)
+
+        ttk.Button(
+            toolbar, text="📥 Полный отчёт в Excel",
+            command=self._on_export_full).pack(side="left", padx=4)
+        ttk.Button(
+            toolbar, text="↻ Обновить",
+            command=self._refresh).pack(side="left", padx=4)
 
         # ---- Основная область: PanedWindow ----
         pw = ttk.PanedWindow(self, orient="horizontal")
@@ -590,9 +678,12 @@ class PayrollPage(ttk.Frame):
         ]
         for cid, text, w in cols_cfg:
             self.tree_uploads.heading(cid, text=text)
-            self.tree_uploads.column(cid, width=w, anchor="e" if cid in ("rows", "sum", "dist") else "w")
+            self.tree_uploads.column(
+                cid, width=w,
+                anchor="e" if cid in ("rows", "sum", "dist") else "w")
 
-        vsb = ttk.Scrollbar(left, orient="vertical", command=self.tree_uploads.yview)
+        vsb = ttk.Scrollbar(
+            left, orient="vertical", command=self.tree_uploads.yview)
         self.tree_uploads.configure(yscrollcommand=vsb.set)
         self.tree_uploads.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
@@ -609,11 +700,13 @@ class PayrollPage(ttk.Frame):
         self.tab_summary = ttk.Frame(self.detail_notebook)
         self.tab_by_object = ttk.Frame(self.detail_notebook)
         self.tab_by_dept = ttk.Frame(self.detail_notebook)
+        self.tab_detail = ttk.Frame(self.detail_notebook)
         self.tab_unmatched = ttk.Frame(self.detail_notebook)
 
         self.detail_notebook.add(self.tab_summary, text="  Сводка  ")
         self.detail_notebook.add(self.tab_by_object, text="  По объектам  ")
         self.detail_notebook.add(self.tab_by_dept, text="  По подразделениям  ")
+        self.detail_notebook.add(self.tab_detail, text="  Детализация  ")
         self.detail_notebook.add(self.tab_unmatched, text="  Не распределено  ")
 
         self._selected_upload_id: Optional[int] = None
@@ -638,11 +731,26 @@ class PayrollPage(ttk.Frame):
                                  f"Не удалось прочитать файл:\n{e}")
             return
 
+        file_name = os.path.basename(file_path)
         row_count = len(parsed["rows"])
         total = sum(r["total_accrued"] or 0 for r in parsed["rows"])
 
+        # Проверка дубликата
+        dup = PayrollDataManager.check_duplicate(
+            parsed["year"], parsed["month"], file_name)
+        if dup:
+            dt = dup.get("uploaded_at")
+            dt_str = dt.strftime("%d.%m.%Y %H:%M") if dt else "?"
+            if not messagebox.askyesno(
+                "Дубликат",
+                f"Файл «{file_name}» за период {parsed['period_label']} "
+                f"уже загружен (#{dup['id']}, {dt_str}).\n\n"
+                f"Загрузить повторно?"
+            ):
+                return
+
         msg = (
-            f"Файл: {os.path.basename(file_path)}\n"
+            f"Файл: {file_name}\n"
             f"Период: {parsed['period_label']}\n"
             f"Организация: {parsed['organization']}\n"
             f"Строк данных: {row_count}\n"
@@ -655,11 +763,13 @@ class PayrollPage(ttk.Frame):
         try:
             user_id = self.app_ref.current_user.get("id")
             upload_id = PayrollDataManager.save_upload(
-                parsed, os.path.basename(file_path), user_id)
-            messagebox.showinfo("Успех",
-                                f"Загрузка #{upload_id} сохранена.\n"
-                                f"{row_count} строк.\n\n"
-                                f"Теперь нажмите «Распределить ФОТ».")
+                parsed, file_name, user_id)
+            messagebox.showinfo(
+                "Успех",
+                f"Загрузка #{upload_id} сохранена.\n"
+                f"{row_count} строк.\n\n"
+                f"Теперь нажмите «Распределить ФОТ».")
+            self._selected_upload_id = upload_id
             self._refresh()
         except Exception as e:
             logging.exception("Ошибка сохранения загрузки")
@@ -667,7 +777,8 @@ class PayrollPage(ttk.Frame):
 
     def _on_distribute(self):
         if not self._selected_upload_id:
-            messagebox.showwarning("Внимание", "Выберите загрузку в списке слева.")
+            messagebox.showwarning(
+                "Внимание", "Выберите загрузку в списке слева.")
             return
         uid = self._selected_upload_id
 
@@ -683,7 +794,7 @@ class PayrollPage(ttk.Frame):
                 "Результат распределения",
                 f"Распределено сотрудников: {stats['distributed']}\n"
                 f"Не найдено в табелях: {stats['not_found']}\n"
-                f"Нулевое начисление: {stats['zero_hours']}")
+                f"Нулевое начисление: {stats['zero_accrued']}")
             self._refresh()
             self._show_upload_details(uid)
         except Exception as e:
@@ -692,7 +803,8 @@ class PayrollPage(ttk.Frame):
 
     def _on_delete(self):
         if not self._selected_upload_id:
-            messagebox.showwarning("Внимание", "Выберите загрузку в списке слева.")
+            messagebox.showwarning(
+                "Внимание", "Выберите загрузку в списке слева.")
             return
         uid = self._selected_upload_id
         if not messagebox.askyesno(
@@ -709,6 +821,112 @@ class PayrollPage(ttk.Frame):
         except Exception as e:
             logging.exception("Ошибка удаления загрузки")
             messagebox.showerror("Ошибка", f"Не удалось удалить:\n{e}")
+
+    def _on_export_full(self):
+        """Экспорт всех вкладок в один Excel-файл (разные листы)."""
+        if not self._selected_upload_id:
+            messagebox.showwarning(
+                "Внимание", "Выберите загрузку в списке слева.")
+            return
+        uid = self._selected_upload_id
+
+        path = self._ask_save_path(f"ФОТ_полный_отчет_{uid}.xlsx")
+        if not path:
+            return
+
+        try:
+            with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                # Лист 1: По объектам
+                df_obj = PayrollDataManager.get_distribution_by_object(uid)
+                if not df_obj.empty:
+                    grand_total = df_obj["total_amount"].sum()
+                    df_e = df_obj.copy()
+                    df_e["share_pct"] = df_e["total_amount"].apply(
+                        lambda x: round(x / grand_total * 100, 1)
+                        if grand_total > 0 else 0)
+                    df_e = df_e.rename(columns={
+                        "object_name": "Объект",
+                        "object_type": "Тип объекта",
+                        "people_cnt": "Кол-во сотрудников",
+                        "total_hours": "Часов на объекте",
+                        "total_amount": "Сумма ФОТ, ₽",
+                        "share_pct": "Доля, %",
+                    })
+                    totals = pd.DataFrame([{
+                        "Объект": "ИТОГО",
+                        "Тип объекта": "",
+                        "Кол-во сотрудников": int(
+                            df_e["Кол-во сотрудников"].sum()),
+                        "Часов на объекте": round(
+                            df_e["Часов на объекте"].sum(), 1),
+                        "Сумма ФОТ, ₽": round(
+                            df_e["Сумма ФОТ, ₽"].sum(), 2),
+                        "Доля, %": 100.0,
+                    }])
+                    df_e = pd.concat([df_e, totals], ignore_index=True)
+                    df_e.to_excel(
+                        writer, index=False, sheet_name="По объектам")
+                    self._autofit_columns(writer, "По объектам", df_e)
+
+                # Лист 2: По подразделениям
+                df_dept = PayrollDataManager.get_distribution_by_department(uid)
+                if not df_dept.empty:
+                    df_d = df_dept.copy()
+                    df_d["diff"] = (
+                        df_d["total_accrued"] - df_d["total_distributed"])
+                    df_d["pct"] = df_d.apply(
+                        lambda r: round(
+                            r["total_distributed"] / r["total_accrued"] * 100,
+                            1)
+                        if r["total_accrued"] > 0 else 0, axis=1)
+                    df_d = df_d.rename(columns={
+                        "department_name": "Подразделение",
+                        "people_cnt": "Кол-во сотрудников",
+                        "total_accrued": "Начислено, ₽",
+                        "total_distributed": "Распределено, ₽",
+                        "diff": "Остаток, ₽",
+                        "pct": "Распределено, %",
+                    })
+                    df_d.to_excel(
+                        writer, index=False, sheet_name="По подразделениям")
+                    self._autofit_columns(writer, "По подразделениям", df_d)
+
+                # Лист 3: Детализация
+                df_det = PayrollDataManager.get_detail_by_employee(uid)
+                if not df_det.empty:
+                    df_det2 = df_det.rename(columns={
+                        "tbn": "Таб. номер",
+                        "fio": "ФИО",
+                        "department_raw": "Подразделение",
+                        "total_accrued": "Всего начислено",
+                        "object_name": "Объект",
+                        "hours_on_object": "Часы на объекте",
+                        "total_hours_all_objects": "Всего часов",
+                        "fraction": "Доля",
+                        "amount": "Сумма на объект, ₽",
+                    })
+                    df_det2.to_excel(
+                        writer, index=False, sheet_name="Детализация")
+                    self._autofit_columns(writer, "Детализация", df_det2)
+
+                # Лист 4: Не распределено
+                df_un = PayrollDataManager.get_undistributed_rows(uid)
+                if not df_un.empty:
+                    df_un2 = df_un.rename(columns={
+                        "tbn": "Таб. номер",
+                        "fio": "ФИО",
+                        "department_raw": "Подразделение",
+                        "position_raw": "Должность",
+                        "total_accrued": "Начислено, ₽",
+                    })
+                    df_un2.to_excel(
+                        writer, index=False, sheet_name="Не распределено")
+                    self._autofit_columns(writer, "Не распределено", df_un2)
+
+            messagebox.showinfo("Экспорт", f"Полный отчёт сохранён:\n{path}")
+        except Exception as e:
+            logging.exception("Ошибка полного экспорта")
+            messagebox.showerror("Ошибка", f"Не удалось сохранить:\n{e}")
 
     # ---- Refresh / Select ----
 
@@ -739,6 +957,7 @@ class PayrollPage(ttk.Frame):
             if self.tree_uploads.exists(iid):
                 self.tree_uploads.selection_set(iid)
                 self.tree_uploads.focus(iid)
+                self._show_upload_details(self._selected_upload_id)
 
     def _on_upload_selected(self, event=None):
         sel = self.tree_uploads.selection()
@@ -758,6 +977,7 @@ class PayrollPage(ttk.Frame):
         self._clear_tab(self.tab_summary)
         self._clear_tab(self.tab_by_object)
         self._clear_tab(self.tab_by_dept)
+        self._clear_tab(self.tab_detail)
         self._clear_tab(self.tab_unmatched)
 
     def _show_upload_details(self, upload_id: int):
@@ -766,16 +986,19 @@ class PayrollPage(ttk.Frame):
             self._build_summary_tab(upload_id)
             self._build_by_object_tab(upload_id)
             self._build_by_dept_tab(upload_id)
+            self._build_detail_tab(upload_id)
             self._build_unmatched_tab(upload_id)
         except Exception as e:
             logging.exception("Ошибка построения деталей загрузки")
-            ttk.Label(self.tab_summary, text=f"Ошибка: {e}").pack(padx=10, pady=10)
+            ttk.Label(self.tab_summary,
+                      text=f"Ошибка: {e}").pack(padx=10, pady=10)
 
     # ---- Tab: Сводка ----
 
     def _create_kpi_card(self, parent, title, value, unit):
         card = ttk.Frame(parent, borderwidth=2, relief="groove", padding=10)
-        ttk.Label(card, text=title, font=("Segoe UI", 9, "bold")).pack()
+        ttk.Label(card, text=title,
+                  font=("Segoe UI", 9, "bold")).pack()
         ttk.Label(card, text=f"{value}",
                   font=("Segoe UI", 16, "bold"),
                   foreground="#0078D7").pack(pady=(4, 0))
@@ -817,32 +1040,33 @@ class PayrollPage(ttk.Frame):
         bar_bg.pack(fill="x", pady=4)
         bar_fill = tk.Frame(bar_bg, bg="#0078D7", height=20)
         bar_fill.pack(side="left", fill="y")
-        # Обновим ширину после отрисовки
+
         def _update_bar(event=None):
             total_w = bar_bg.winfo_width()
             fill_w = max(1, int(total_w * pct / 100))
             bar_fill.configure(width=fill_w)
         bar_bg.bind("<Configure>", _update_bar)
 
-        ttk.Label(pct_frame,
-                  text=f"Распределено {pct:.1f}% от общей суммы ФОТ",
-                  font=("Segoe UI", 9)).pack(anchor="w")
+        ttk.Label(
+            pct_frame,
+            text=f"Распределено {pct:.1f}% от общей суммы ФОТ",
+            font=("Segoe UI", 9)).pack(anchor="w")
 
-        # Предупреждение если не всё распределено
         if s["rows_not_distributed"] > 0:
             warn_frame = ttk.Frame(tab)
             warn_frame.pack(fill="x", padx=10, pady=5)
             ttk.Label(
                 warn_frame,
-                text=f"⚠ {s['rows_not_distributed']} сотрудник(ов) не найдены в табелях "
-                     f"за этот период. Их ФОТ ({s['undistributed_amount']:,.0f} ₽) "
-                     f"не распределён по объектам. См. вкладку «Не распределено».",
+                text=(
+                    f"⚠ {s['rows_not_distributed']} сотрудник(ов) "
+                    f"не найдены в табелях за этот период. "
+                    f"Их ФОТ ({s['undistributed_amount']:,.0f} ₽) "
+                    f"не распределён. См. вкладку «Не распределено»."),
                 foreground="#B00020",
                 wraplength=700,
                 justify="left",
             ).pack(anchor="w")
 
-    # ---- Tab: По объектам ----
     # ---- Tab: По объектам ----
 
     def _build_by_object_tab(self, upload_id: int):
@@ -850,18 +1074,18 @@ class PayrollPage(ttk.Frame):
         df = PayrollDataManager.get_distribution_by_object(upload_id)
 
         if df.empty:
-            ttk.Label(tab,
-                      text="Нет данных. Нажмите «Распределить ФОТ».",
-                      font=("Segoe UI", 10)).pack(padx=20, pady=20)
+            ttk.Label(
+                tab, text="Нет данных. Нажмите «Распределить ФОТ».",
+                font=("Segoe UI", 10)).pack(padx=20, pady=20)
             return
 
-        # Кнопка экспорта
         btn_frame = ttk.Frame(tab)
         btn_frame.pack(fill="x", padx=5, pady=(5, 0))
-        ttk.Button(btn_frame, text="📥 Выгрузить в Excel",
-                   command=lambda: self._export_by_object(upload_id)).pack(side="right", padx=5)
+        ttk.Button(
+            btn_frame, text="📥 Выгрузить в Excel",
+            command=lambda: self._export_by_object(upload_id)
+        ).pack(side="right", padx=5)
 
-        # Таблица на всю ширину
         table_frame = ttk.Frame(tab)
         table_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
@@ -882,8 +1106,10 @@ class PayrollPage(ttk.Frame):
             tree.heading(cid, text=text)
             tree.column(cid, width=w, anchor=anchor, minwidth=40)
 
-        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
-        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+        vsb = ttk.Scrollbar(
+            table_frame, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(
+            table_frame, orient="horizontal", command=tree.xview)
         tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
@@ -893,7 +1119,9 @@ class PayrollPage(ttk.Frame):
 
         grand_total = df["total_amount"].sum()
         for idx, (_, row) in enumerate(df.iterrows(), 1):
-            share = (row["total_amount"] / grand_total * 100) if grand_total > 0 else 0
+            share = (
+                row["total_amount"] / grand_total * 100
+            ) if grand_total > 0 else 0
             tree.insert("", "end", values=(
                 idx,
                 row.get("object_name", "—"),
@@ -904,7 +1132,6 @@ class PayrollPage(ttk.Frame):
                 f"{share:.1f}",
             ))
 
-        # Итого
         tree.insert("", "end", values=(
             "", "ИТОГО", "",
             int(df["people_cnt"].sum()),
@@ -924,13 +1151,13 @@ class PayrollPage(ttk.Frame):
             ttk.Label(tab, text="Нет данных.").pack(padx=20, pady=20)
             return
 
-        # Кнопка экспорта
         btn_frame = ttk.Frame(tab)
         btn_frame.pack(fill="x", padx=5, pady=(5, 0))
-        ttk.Button(btn_frame, text="📥 Выгрузить в Excel",
-                   command=lambda: self._export_by_dept(upload_id)).pack(side="right", padx=5)
+        ttk.Button(
+            btn_frame, text="📥 Выгрузить в Excel",
+            command=lambda: self._export_by_dept(upload_id)
+        ).pack(side="right", padx=5)
 
-        # Таблица на всю ширину
         table_frame = ttk.Frame(tab)
         table_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
@@ -950,8 +1177,10 @@ class PayrollPage(ttk.Frame):
             tree.heading(cid, text=text)
             tree.column(cid, width=w, anchor=anc, minwidth=40)
 
-        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
-        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+        vsb = ttk.Scrollbar(
+            table_frame, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(
+            table_frame, orient="horizontal", command=tree.xview)
         tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
@@ -961,7 +1190,9 @@ class PayrollPage(ttk.Frame):
 
         for idx, (_, row) in enumerate(df.iterrows(), 1):
             diff = row["total_accrued"] - row["total_distributed"]
-            pct = (row["total_distributed"] / row["total_accrued"] * 100) if row["total_accrued"] > 0 else 0
+            pct = (
+                row["total_distributed"] / row["total_accrued"] * 100
+            ) if row["total_accrued"] > 0 else 0
             tree.insert("", "end", values=(
                 idx,
                 row["department_name"],
@@ -972,11 +1203,12 @@ class PayrollPage(ttk.Frame):
                 f"{pct:.1f}",
             ))
 
-        # Итого
         total_accrued = df["total_accrued"].sum()
         total_distributed = df["total_distributed"].sum()
         total_diff = total_accrued - total_distributed
-        total_pct = (total_distributed / total_accrued * 100) if total_accrued > 0 else 0
+        total_pct = (
+            total_distributed / total_accrued * 100
+        ) if total_accrued > 0 else 0
         tree.insert("", "end", values=(
             "", "ИТОГО",
             int(df["people_cnt"].sum()),
@@ -987,17 +1219,94 @@ class PayrollPage(ttk.Frame):
         ), tags=("total",))
         tree.tag_configure("total", font=("Segoe UI", 9, "bold"))
 
-    # ---- Tab: Не распределено (тоже добавим экспорт) ----
+    # ---- Tab: Детализация ----
+
+    def _build_detail_tab(self, upload_id: int):
+        tab = self.tab_detail
+        df = PayrollDataManager.get_detail_by_employee(upload_id)
+
+        if df.empty:
+            ttk.Label(
+                tab,
+                text="Нет данных. Нажмите «Распределить ФОТ».",
+                font=("Segoe UI", 10)).pack(padx=20, pady=20)
+            return
+
+        btn_frame = ttk.Frame(tab)
+        btn_frame.pack(fill="x", padx=5, pady=(5, 0))
+        ttk.Button(
+            btn_frame, text="📥 Выгрузить в Excel",
+            command=lambda: self._export_detail(upload_id)
+        ).pack(side="right", padx=5)
+
+        table_frame = ttk.Frame(tab)
+        table_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        tree = ttk.Treeview(table_frame, columns=(
+            "num", "tbn", "fio", "dept", "accrued",
+            "object", "hours_obj", "hours_total", "fraction", "amount"
+        ), show="headings", height=22)
+
+        for cid, text, w, anc in [
+            ("num", "№", 35, "center"),
+            ("tbn", "ТБН", 80, "w"),
+            ("fio", "ФИО", 180, "w"),
+            ("dept", "Подразделение", 140, "w"),
+            ("accrued", "Начислено", 100, "e"),
+            ("object", "Объект", 250, "w"),
+            ("hours_obj", "Часы объект", 80, "e"),
+            ("hours_total", "Часы всего", 80, "e"),
+            ("fraction", "Доля", 55, "e"),
+            ("amount", "Сумма, ₽", 100, "e"),
+        ]:
+            tree.heading(cid, text=text)
+            tree.column(cid, width=w, anchor=anc, minwidth=30)
+
+        vsb = ttk.Scrollbar(
+            table_frame, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(
+            table_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
+
+        for idx, (_, row) in enumerate(df.iterrows(), 1):
+            frac = float(row.get("fraction", 0) or 0)
+            tree.insert("", "end", values=(
+                idx,
+                row.get("tbn", ""),
+                row.get("fio", ""),
+                row.get("department_raw", ""),
+                f"{float(row.get('total_accrued', 0) or 0):,.2f}".replace(
+                    ",", " "),
+                row.get("object_name", ""),
+                f"{float(row.get('hours_on_object', 0) or 0):,.1f}",
+                f"{float(row.get('total_hours_all_objects', 0) or 0):,.1f}",
+                f"{frac:.4f}",
+                f"{float(row.get('amount', 0) or 0):,.2f}".replace(",", " "),
+            ))
+
+        ttk.Label(
+            tab,
+            text=f"Всего строк: {len(df)}",
+            font=("Segoe UI", 8), foreground="#888"
+        ).pack(anchor="w", padx=10, pady=(0, 5))
+
+    # ---- Tab: Не распределено ----
 
     def _build_unmatched_tab(self, upload_id: int):
         tab = self.tab_unmatched
         df = PayrollDataManager.get_undistributed_rows(upload_id)
 
         if df.empty:
-            ttk.Label(tab,
-                      text="✅ Все сотрудники успешно распределены по объектам!",
-                      font=("Segoe UI", 11),
-                      foreground="#16A34A").pack(padx=20, pady=30)
+            ttk.Label(
+                tab,
+                text="✅ Все сотрудники успешно распределены по объектам!",
+                font=("Segoe UI", 11),
+                foreground="#16A34A").pack(padx=20, pady=30)
             return
 
         total_lost = df["total_accrued"].fillna(0).astype(float).sum()
@@ -1007,13 +1316,14 @@ class PayrollPage(ttk.Frame):
 
         ttk.Label(
             info_frame,
-            text=f"⚠ {len(df)} сотрудник(ов) не найдены в объектном табеле "
-                 f"за данный месяц.\n"
-                 f"Нераспределённая сумма: {total_lost:,.2f} ₽\n\n"
-                 f"Возможные причины:\n"
-                 f"  • Табельный номер в Excel не совпадает с tbn в табеле\n"
-                 f"  • Сотрудник не внесён в объектный табель за этот месяц\n"
-                 f"  • Административный/офисный персонал без объекта",
+            text=(
+                f"⚠ {len(df)} сотрудник(ов) не найдены в объектном табеле "
+                f"за данный месяц.\n"
+                f"Нераспределённая сумма: {total_lost:,.2f} ₽\n\n"
+                f"Возможные причины:\n"
+                f"  • Табельный номер в Excel не совпадает с tbn в табеле\n"
+                f"  • Сотрудник не внесён в объектный табель за этот месяц\n"
+                f"  • Административный/офисный персонал без объекта"),
             foreground="#B00020",
             wraplength=700,
             justify="left",
@@ -1042,7 +1352,8 @@ class PayrollPage(ttk.Frame):
             tree.heading(cid, text=text)
             tree.column(cid, width=w, anchor=anc, minwidth=40)
 
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        vsb = ttk.Scrollbar(
+            tree_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
@@ -1079,6 +1390,24 @@ class PayrollPage(ttk.Frame):
         )
         return path if path else None
 
+    def _autofit_columns(self, writer, sheet_name: str, df: pd.DataFrame):
+        """Автоподбор ширины колонок в Excel."""
+        try:
+            ws = writer.sheets[sheet_name]
+            for i, col in enumerate(df.columns):
+                max_len = max(
+                    len(str(col)),
+                    df[col].astype(str).str.len().max() if len(df) > 0 else 0
+                )
+                col_letter = (
+                    get_column_letter(i + 1) if get_column_letter
+                    else chr(65 + i) if i < 26
+                    else chr(64 + i // 26) + chr(65 + i % 26)
+                )
+                ws.column_dimensions[col_letter].width = min(max_len + 3, 55)
+        except Exception:
+            pass
+
     def _export_by_object(self, upload_id: int):
         df = PayrollDataManager.get_distribution_by_object(upload_id)
         if df.empty:
@@ -1093,8 +1422,8 @@ class PayrollPage(ttk.Frame):
             grand_total = df["total_amount"].sum()
             df_export = df.copy()
             df_export["share_pct"] = df_export["total_amount"].apply(
-                lambda x: round(x / grand_total * 100, 1) if grand_total > 0 else 0
-            )
+                lambda x: round(x / grand_total * 100, 1)
+                if grand_total > 0 else 0)
             df_export = df_export.rename(columns={
                 "object_name": "Объект",
                 "object_type": "Тип объекта",
@@ -1103,26 +1432,28 @@ class PayrollPage(ttk.Frame):
                 "total_amount": "Сумма ФОТ, ₽",
                 "share_pct": "Доля, %",
             })
-
-            # Добавляем строку итого
             totals = pd.DataFrame([{
                 "Объект": "ИТОГО",
                 "Тип объекта": "",
-                "Кол-во сотрудников": int(df_export["Кол-во сотрудников"].sum()),
-                "Часов на объекте": round(df_export["Часов на объекте"].sum(), 1),
+                "Кол-во сотрудников": int(
+                    df_export["Кол-во сотрудников"].sum()),
+                "Часов на объекте": round(
+                    df_export["Часов на объекте"].sum(), 1),
                 "Сумма ФОТ, ₽": round(df_export["Сумма ФОТ, ₽"].sum(), 2),
                 "Доля, %": 100.0,
             }])
             df_export = pd.concat([df_export, totals], ignore_index=True)
 
             with pd.ExcelWriter(path, engine="openpyxl") as writer:
-                df_export.to_excel(writer, index=False, sheet_name="По объектам")
+                df_export.to_excel(
+                    writer, index=False, sheet_name="По объектам")
                 self._autofit_columns(writer, "По объектам", df_export)
 
             messagebox.showinfo("Экспорт", f"Файл сохранён:\n{path}")
         except Exception as e:
             logging.exception("Ошибка экспорта по объектам")
-            messagebox.showerror("Ошибка", f"Не удалось сохранить файл:\n{e}")
+            messagebox.showerror("Ошибка",
+                                 f"Не удалось сохранить файл:\n{e}")
 
     def _export_by_dept(self, upload_id: int):
         df = PayrollDataManager.get_distribution_by_department(upload_id)
@@ -1130,17 +1461,19 @@ class PayrollPage(ttk.Frame):
             messagebox.showinfo("Экспорт", "Нет данных для выгрузки.")
             return
 
-        path = self._ask_save_path(f"ФОТ_по_подразделениям_{upload_id}.xlsx")
+        path = self._ask_save_path(
+            f"ФОТ_по_подразделениям_{upload_id}.xlsx")
         if not path:
             return
 
         try:
             df_export = df.copy()
-            df_export["diff"] = df_export["total_accrued"] - df_export["total_distributed"]
+            df_export["diff"] = (
+                df_export["total_accrued"] - df_export["total_distributed"])
             df_export["pct"] = df_export.apply(
-                lambda r: round(r["total_distributed"] / r["total_accrued"] * 100, 1)
-                if r["total_accrued"] > 0 else 0, axis=1
-            )
+                lambda r: round(
+                    r["total_distributed"] / r["total_accrued"] * 100, 1)
+                if r["total_accrued"] > 0 else 0, axis=1)
             df_export = df_export.rename(columns={
                 "department_name": "Подразделение",
                 "people_cnt": "Кол-во сотрудников",
@@ -1149,47 +1482,87 @@ class PayrollPage(ttk.Frame):
                 "diff": "Остаток, ₽",
                 "pct": "Распределено, %",
             })
-
             totals = pd.DataFrame([{
                 "Подразделение": "ИТОГО",
-                "Кол-во сотрудников": int(df_export["Кол-во сотрудников"].sum()),
-                "Начислено, ₽": round(df_export["Начислено, ₽"].sum(), 2),
-                "Распределено, ₽": round(df_export["Распределено, ₽"].sum(), 2),
+                "Кол-во сотрудников": int(
+                    df_export["Кол-во сотрудников"].sum()),
+                "Начислено, ₽": round(
+                    df_export["Начислено, ₽"].sum(), 2),
+                "Распределено, ₽": round(
+                    df_export["Распределено, ₽"].sum(), 2),
                 "Остаток, ₽": round(df_export["Остаток, ₽"].sum(), 2),
                 "Распределено, %": "",
             }])
             df_export = pd.concat([df_export, totals], ignore_index=True)
 
             with pd.ExcelWriter(path, engine="openpyxl") as writer:
-                df_export.to_excel(writer, index=False, sheet_name="По подразделениям")
-                self._autofit_columns(writer, "По подразделениям", df_export)
+                df_export.to_excel(
+                    writer, index=False, sheet_name="По подразделениям")
+                self._autofit_columns(
+                    writer, "По подразделениям", df_export)
 
             messagebox.showinfo("Экспорт", f"Файл сохранён:\n{path}")
         except Exception as e:
             logging.exception("Ошибка экспорта по подразделениям")
-            messagebox.showerror("Ошибка", f"Не удалось сохранить файл:\n{e}")
+            messagebox.showerror("Ошибка",
+                                 f"Не удалось сохранить файл:\n{e}")
 
-    def _export_unmatched(self, upload_id: int):
-        df = PayrollDataManager.get_undistributed_rows(upload_id)
+    def _export_detail(self, upload_id: int):
+        df = PayrollDataManager.get_detail_by_employee(upload_id)
         if df.empty:
-            messagebox.showinfo("Экспорт", "Нет нераспределённых сотрудников.")
+            messagebox.showinfo("Экспорт", "Нет данных для выгрузки.")
             return
 
-        path = self._ask_save_path(f"ФОТ_нераспределено_{upload_id}.xlsx")
+        path = self._ask_save_path(f"ФОТ_детализация_{upload_id}.xlsx")
         if not path:
             return
 
         try:
-            df_export = df.copy()
-            df_export = df_export.rename(columns={
+            df_export = df.rename(columns={
+                "tbn": "Таб. номер",
+                "fio": "ФИО",
+                "department_raw": "Подразделение",
+                "total_accrued": "Всего начислено",
+                "object_name": "Объект",
+                "hours_on_object": "Часы на объекте",
+                "total_hours_all_objects": "Всего часов",
+                "fraction": "Доля",
+                "amount": "Сумма на объект, ₽",
+            })
+
+            with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                df_export.to_excel(
+                    writer, index=False, sheet_name="Детализация")
+                self._autofit_columns(writer, "Детализация", df_export)
+
+            messagebox.showinfo("Экспорт", f"Файл сохранён:\n{path}")
+        except Exception as e:
+            logging.exception("Ошибка экспорта детализации")
+            messagebox.showerror("Ошибка",
+                                 f"Не удалось сохранить файл:\n{e}")
+
+    def _export_unmatched(self, upload_id: int):
+        df = PayrollDataManager.get_undistributed_rows(upload_id)
+        if df.empty:
+            messagebox.showinfo(
+                "Экспорт", "Нет нераспределённых сотрудников.")
+            return
+
+        path = self._ask_save_path(
+            f"ФОТ_нераспределено_{upload_id}.xlsx")
+        if not path:
+            return
+
+        try:
+            df_export = df.rename(columns={
                 "tbn": "Таб. номер",
                 "fio": "ФИО",
                 "department_raw": "Подразделение",
                 "position_raw": "Должность",
                 "total_accrued": "Начислено, ₽",
             })
-
-            total_lost = df_export["Начислено, ₽"].fillna(0).astype(float).sum()
+            total_lost = (
+                df_export["Начислено, ₽"].fillna(0).astype(float).sum())
             totals = pd.DataFrame([{
                 "Таб. номер": "",
                 "ФИО": "ИТОГО",
@@ -1200,28 +1573,16 @@ class PayrollPage(ttk.Frame):
             df_export = pd.concat([df_export, totals], ignore_index=True)
 
             with pd.ExcelWriter(path, engine="openpyxl") as writer:
-                df_export.to_excel(writer, index=False, sheet_name="Не распределено")
-                self._autofit_columns(writer, "Не распределено", df_export)
+                df_export.to_excel(
+                    writer, index=False, sheet_name="Не распределено")
+                self._autofit_columns(
+                    writer, "Не распределено", df_export)
 
             messagebox.showinfo("Экспорт", f"Файл сохранён:\n{path}")
         except Exception as e:
             logging.exception("Ошибка экспорта нераспределённых")
-            messagebox.showerror("Ошибка", f"Не удалось сохранить файл:\n{e}")
-
-    def _autofit_columns(self, writer, sheet_name: str, df: pd.DataFrame):
-        """Автоподбор ширины колонок в Excel."""
-        try:
-            ws = writer.sheets[sheet_name]
-            for i, col in enumerate(df.columns):
-                max_len = max(
-                    len(str(col)),
-                    df[col].astype(str).str.len().max() if len(df) > 0 else 0
-                )
-                ws.column_dimensions[chr(65 + i) if i < 26
-                                     else chr(64 + i // 26) + chr(65 + i % 26)
-                                     ].width = min(max_len + 3, 50)
-        except Exception:
-            pass  # не критично если автоширина не сработает
+            messagebox.showerror("Ошибка",
+                                 f"Не удалось сохранить файл:\n{e}")
 
 # ============================================================
 #  Функция-фабрика для main_app
