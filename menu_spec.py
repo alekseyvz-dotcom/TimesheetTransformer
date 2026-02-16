@@ -79,6 +79,7 @@ MENU_SPEC: List[MenuSection] = [
         label="Аналитика",
         entries=[
             MenuEntry("page", "Операционная аналитика", key="analytics_dashboard", perm="page.analytics_dashboard", group="analytics", title="Аналитика: Операционная"),
+            MenuEntry("page", "Затраты (ФОТ)", key="payroll", perm="page.payroll", group="analytics", title="Аналитика: Затраты (ФОТ)"),
         ],
     ),
     MenuSection(
