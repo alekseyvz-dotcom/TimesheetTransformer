@@ -843,6 +843,7 @@ class PayrollPage(ttk.Frame):
             ).pack(anchor="w")
 
     # ---- Tab: По объектам ----
+    # ---- Tab: По объектам ----
 
     def _build_by_object_tab(self, upload_id: int):
         tab = self.tab_by_object
@@ -854,38 +855,47 @@ class PayrollPage(ttk.Frame):
                       font=("Segoe UI", 10)).pack(padx=20, pady=20)
             return
 
-        # --- Таблица ---
-        top_frame = ttk.Frame(tab)
-        top_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        # Кнопка экспорта
+        btn_frame = ttk.Frame(tab)
+        btn_frame.pack(fill="x", padx=5, pady=(5, 0))
+        ttk.Button(btn_frame, text="📥 Выгрузить в Excel",
+                   command=lambda: self._export_by_object(upload_id)).pack(side="right", padx=5)
 
-        table_frame = ttk.LabelFrame(top_frame, text="Распределение ФОТ по объектам")
-        table_frame.pack(side="left", fill="both", expand=True, padx=(0, 5))
+        # Таблица на всю ширину
+        table_frame = ttk.Frame(tab)
+        table_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
         tree = ttk.Treeview(table_frame, columns=(
-            "object", "type", "people", "hours", "amount", "share"
-        ), show="headings", height=18)
+            "num", "object", "type", "people", "hours", "amount", "share"
+        ), show="headings", height=22)
 
         cols = [
-            ("object", "Объект", 280, "w"),
-            ("type", "Тип", 80, "w"),
-            ("people", "Людей", 60, "e"),
-            ("hours", "Часов", 80, "e"),
-            ("amount", "Сумма, ₽", 120, "e"),
-            ("share", "Доля %", 65, "e"),
+            ("num", "№", 40, "center"),
+            ("object", "Объект", 400, "w"),
+            ("type", "Тип", 100, "w"),
+            ("people", "Людей", 65, "e"),
+            ("hours", "Часов", 90, "e"),
+            ("amount", "Сумма, ₽", 130, "e"),
+            ("share", "Доля %", 70, "e"),
         ]
         for cid, text, w, anchor in cols:
             tree.heading(cid, text=text)
-            tree.column(cid, width=w, anchor=anchor)
+            tree.column(cid, width=w, anchor=anchor, minwidth=40)
 
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=vsb.set)
-        tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
+        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
 
         grand_total = df["total_amount"].sum()
-        for _, row in df.iterrows():
+        for idx, (_, row) in enumerate(df.iterrows(), 1):
             share = (row["total_amount"] / grand_total * 100) if grand_total > 0 else 0
             tree.insert("", "end", values=(
+                idx,
                 row.get("object_name", "—"),
                 row.get("object_type", ""),
                 int(row["people_cnt"]),
@@ -896,47 +906,13 @@ class PayrollPage(ttk.Frame):
 
         # Итого
         tree.insert("", "end", values=(
-            "ИТОГО", "",
+            "", "ИТОГО", "",
             int(df["people_cnt"].sum()),
             f"{df['total_hours'].sum():,.1f}".replace(",", " "),
             f"{grand_total:,.2f}".replace(",", " "),
             "100.0",
         ), tags=("total",))
         tree.tag_configure("total", font=("Segoe UI", 9, "bold"))
-
-        # --- Диаграмма ---
-        chart_frame = ttk.LabelFrame(top_frame, text="ТОП-10 объектов по ФОТ")
-        chart_frame.pack(side="left", fill="both", expand=True, padx=(5, 0))
-
-        df_top = df.head(10).copy()
-        if not df_top.empty:
-            fig = Figure(figsize=(5, 5), dpi=100)
-            ax = fig.add_subplot(111)
-
-            def short_addr(a, max_len=25):
-                a = str(a or "—")
-                return a if len(a) <= max_len else a[:max_len] + "…"
-
-            df_plot = df_top.sort_values("total_amount", ascending=True)
-            labels = df_plot["object_name"].apply(short_addr)
-            values = df_plot["total_amount"]
-
-            bars = ax.barh(labels, values, color="#2563EB")
-            ax.set_xlabel("Сумма ФОТ, ₽")
-            ax.grid(axis="x", linestyle="--", alpha=0.5)
-
-            max_val = float(values.max()) if len(values) > 0 else 0
-            for bar in bars:
-                w = float(bar.get_width())
-                ax.text(w + max_val * 0.02,
-                        bar.get_y() + bar.get_height() / 2,
-                        f"{w:,.0f}".replace(",", " "),
-                        va="center", fontsize=7)
-
-            fig.tight_layout(rect=(0.02, 0.05, 0.98, 0.95))
-            canvas = FigureCanvasTkAgg(fig, master=chart_frame)
-            canvas.draw()
-            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
     # ---- Tab: По подразделениям ----
 
@@ -948,85 +924,70 @@ class PayrollPage(ttk.Frame):
             ttk.Label(tab, text="Нет данных.").pack(padx=20, pady=20)
             return
 
-        top_frame = ttk.Frame(tab)
-        top_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        # Кнопка экспорта
+        btn_frame = ttk.Frame(tab)
+        btn_frame.pack(fill="x", padx=5, pady=(5, 0))
+        ttk.Button(btn_frame, text="📥 Выгрузить в Excel",
+                   command=lambda: self._export_by_dept(upload_id)).pack(side="right", padx=5)
 
-        # Таблица
-        table_frame = ttk.LabelFrame(top_frame, text="ФОТ по подразделениям")
-        table_frame.pack(side="left", fill="both", expand=True, padx=(0, 5))
+        # Таблица на всю ширину
+        table_frame = ttk.Frame(tab)
+        table_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
         tree = ttk.Treeview(table_frame, columns=(
-            "dept", "people", "accrued", "distributed", "diff"
-        ), show="headings", height=18)
+            "num", "dept", "people", "accrued", "distributed", "diff", "pct"
+        ), show="headings", height=22)
 
         for cid, text, w, anc in [
-            ("dept", "Подразделение", 220, "w"),
-            ("people", "Людей", 60, "e"),
-            ("accrued", "Начислено, ₽", 120, "e"),
-            ("distributed", "Распределено, ₽", 120, "e"),
-            ("diff", "Остаток, ₽", 110, "e"),
+            ("num", "№", 40, "center"),
+            ("dept", "Подразделение", 300, "w"),
+            ("people", "Людей", 65, "e"),
+            ("accrued", "Начислено, ₽", 130, "e"),
+            ("distributed", "Распределено, ₽", 130, "e"),
+            ("diff", "Остаток, ₽", 120, "e"),
+            ("pct", "Распр. %", 75, "e"),
         ]:
             tree.heading(cid, text=text)
-            tree.column(cid, width=w, anchor=anc)
+            tree.column(cid, width=w, anchor=anc, minwidth=40)
 
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=vsb.set)
-        tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
+        hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
 
-        for _, row in df.iterrows():
+        for idx, (_, row) in enumerate(df.iterrows(), 1):
             diff = row["total_accrued"] - row["total_distributed"]
+            pct = (row["total_distributed"] / row["total_accrued"] * 100) if row["total_accrued"] > 0 else 0
             tree.insert("", "end", values=(
+                idx,
                 row["department_name"],
                 int(row["people_cnt"]),
                 f"{row['total_accrued']:,.2f}".replace(",", " "),
                 f"{row['total_distributed']:,.2f}".replace(",", " "),
                 f"{diff:,.2f}".replace(",", " "),
+                f"{pct:.1f}",
             ))
 
         # Итого
+        total_accrued = df["total_accrued"].sum()
+        total_distributed = df["total_distributed"].sum()
+        total_diff = total_accrued - total_distributed
+        total_pct = (total_distributed / total_accrued * 100) if total_accrued > 0 else 0
         tree.insert("", "end", values=(
-            "ИТОГО",
+            "", "ИТОГО",
             int(df["people_cnt"].sum()),
-            f"{df['total_accrued'].sum():,.2f}".replace(",", " "),
-            f"{df['total_distributed'].sum():,.2f}".replace(",", " "),
-            f"{(df['total_accrued'].sum() - df['total_distributed'].sum()):,.2f}".replace(",", " "),
+            f"{total_accrued:,.2f}".replace(",", " "),
+            f"{total_distributed:,.2f}".replace(",", " "),
+            f"{total_diff:,.2f}".replace(",", " "),
+            f"{total_pct:.1f}",
         ), tags=("total",))
         tree.tag_configure("total", font=("Segoe UI", 9, "bold"))
 
-        # Диаграмма — pie
-        chart_frame = ttk.LabelFrame(top_frame, text="Доля ФОТ по подразделениям")
-        chart_frame.pack(side="left", fill="both", expand=True, padx=(5, 0))
-
-        df_pie = df[df["total_accrued"] > 0].head(8).copy()
-        if not df_pie.empty:
-            fig = Figure(figsize=(5, 5), dpi=100)
-            ax = fig.add_subplot(111)
-
-            labels = df_pie["department_name"]
-            sizes = df_pie["total_accrued"]
-
-            def autopct_fn(values):
-                def fmt(pct):
-                    total = sum(values)
-                    val = pct * total / 100.0
-                    return f"{pct:.1f}%\n({val:,.0f})".replace(",", " ")
-                return fmt
-
-            ax.pie(sizes, labels=labels,
-                   autopct=autopct_fn(sizes),
-                   startangle=90,
-                   wedgeprops=dict(width=0.45),
-                   pctdistance=0.75,
-                   textprops={"fontsize": 7})
-            ax.axis("equal")
-            fig.tight_layout()
-
-            canvas = FigureCanvasTkAgg(fig, master=chart_frame)
-            canvas.draw()
-            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-    # ---- Tab: Не распределено ----
+    # ---- Tab: Не распределено (тоже добавим экспорт) ----
 
     def _build_unmatched_tab(self, upload_id: int):
         tab = self.tab_unmatched
@@ -1043,6 +1004,7 @@ class PayrollPage(ttk.Frame):
 
         info_frame = ttk.Frame(tab)
         info_frame.pack(fill="x", padx=10, pady=8)
+
         ttk.Label(
             info_frame,
             text=f"⚠ {len(df)} сотрудник(ов) не найдены в объектном табеле "
@@ -1055,16 +1017,22 @@ class PayrollPage(ttk.Frame):
             foreground="#B00020",
             wraplength=700,
             justify="left",
-        ).pack(anchor="w")
+        ).pack(side="left", anchor="w")
+
+        ttk.Button(
+            info_frame, text="📥 Выгрузить в Excel",
+            command=lambda: self._export_unmatched(upload_id),
+        ).pack(side="right", padx=5)
 
         tree_frame = ttk.Frame(tab)
         tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
         tree = ttk.Treeview(tree_frame, columns=(
-            "tbn", "fio", "dept", "pos", "accrued"
+            "num", "tbn", "fio", "dept", "pos", "accrued"
         ), show="headings", height=20)
 
         for cid, text, w, anc in [
+            ("num", "№", 40, "center"),
             ("tbn", "Таб. номер", 100, "w"),
             ("fio", "ФИО", 250, "w"),
             ("dept", "Подразделение", 200, "w"),
@@ -1072,16 +1040,19 @@ class PayrollPage(ttk.Frame):
             ("accrued", "Начислено, ₽", 120, "e"),
         ]:
             tree.heading(cid, text=text)
-            tree.column(cid, width=w, anchor=anc)
+            tree.column(cid, width=w, anchor=anc, minwidth=40)
 
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
-        tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
 
-        for _, row in df.iterrows():
+        for idx, (_, row) in enumerate(df.iterrows(), 1):
             accrued = float(row.get("total_accrued", 0) or 0)
             tree.insert("", "end", values=(
+                idx,
                 row.get("tbn", ""),
                 row.get("fio", ""),
                 row.get("department_raw", ""),
@@ -1089,13 +1060,168 @@ class PayrollPage(ttk.Frame):
                 f"{accrued:,.2f}".replace(",", " "),
             ))
 
-        # Итого внизу
         tree.insert("", "end", values=(
-            "", "ИТОГО", "", "",
+            "", "", "ИТОГО", "", "",
             f"{total_lost:,.2f}".replace(",", " "),
         ), tags=("total",))
         tree.tag_configure("total", font=("Segoe UI", 9, "bold"))
 
+    # ============================================================
+    #  ЭКСПОРТ В EXCEL
+    # ============================================================
+
+    def _ask_save_path(self, default_name: str) -> Optional[str]:
+        path = filedialog.asksaveasfilename(
+            title="Сохранить как",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+        )
+        return path if path else None
+
+    def _export_by_object(self, upload_id: int):
+        df = PayrollDataManager.get_distribution_by_object(upload_id)
+        if df.empty:
+            messagebox.showinfo("Экспорт", "Нет данных для выгрузки.")
+            return
+
+        path = self._ask_save_path(f"ФОТ_по_объектам_{upload_id}.xlsx")
+        if not path:
+            return
+
+        try:
+            grand_total = df["total_amount"].sum()
+            df_export = df.copy()
+            df_export["share_pct"] = df_export["total_amount"].apply(
+                lambda x: round(x / grand_total * 100, 1) if grand_total > 0 else 0
+            )
+            df_export = df_export.rename(columns={
+                "object_name": "Объект",
+                "object_type": "Тип объекта",
+                "people_cnt": "Кол-во сотрудников",
+                "total_hours": "Часов на объекте",
+                "total_amount": "Сумма ФОТ, ₽",
+                "share_pct": "Доля, %",
+            })
+
+            # Добавляем строку итого
+            totals = pd.DataFrame([{
+                "Объект": "ИТОГО",
+                "Тип объекта": "",
+                "Кол-во сотрудников": int(df_export["Кол-во сотрудников"].sum()),
+                "Часов на объекте": round(df_export["Часов на объекте"].sum(), 1),
+                "Сумма ФОТ, ₽": round(df_export["Сумма ФОТ, ₽"].sum(), 2),
+                "Доля, %": 100.0,
+            }])
+            df_export = pd.concat([df_export, totals], ignore_index=True)
+
+            with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                df_export.to_excel(writer, index=False, sheet_name="По объектам")
+                self._autofit_columns(writer, "По объектам", df_export)
+
+            messagebox.showinfo("Экспорт", f"Файл сохранён:\n{path}")
+        except Exception as e:
+            logging.exception("Ошибка экспорта по объектам")
+            messagebox.showerror("Ошибка", f"Не удалось сохранить файл:\n{e}")
+
+    def _export_by_dept(self, upload_id: int):
+        df = PayrollDataManager.get_distribution_by_department(upload_id)
+        if df.empty:
+            messagebox.showinfo("Экспорт", "Нет данных для выгрузки.")
+            return
+
+        path = self._ask_save_path(f"ФОТ_по_подразделениям_{upload_id}.xlsx")
+        if not path:
+            return
+
+        try:
+            df_export = df.copy()
+            df_export["diff"] = df_export["total_accrued"] - df_export["total_distributed"]
+            df_export["pct"] = df_export.apply(
+                lambda r: round(r["total_distributed"] / r["total_accrued"] * 100, 1)
+                if r["total_accrued"] > 0 else 0, axis=1
+            )
+            df_export = df_export.rename(columns={
+                "department_name": "Подразделение",
+                "people_cnt": "Кол-во сотрудников",
+                "total_accrued": "Начислено, ₽",
+                "total_distributed": "Распределено, ₽",
+                "diff": "Остаток, ₽",
+                "pct": "Распределено, %",
+            })
+
+            totals = pd.DataFrame([{
+                "Подразделение": "ИТОГО",
+                "Кол-во сотрудников": int(df_export["Кол-во сотрудников"].sum()),
+                "Начислено, ₽": round(df_export["Начислено, ₽"].sum(), 2),
+                "Распределено, ₽": round(df_export["Распределено, ₽"].sum(), 2),
+                "Остаток, ₽": round(df_export["Остаток, ₽"].sum(), 2),
+                "Распределено, %": "",
+            }])
+            df_export = pd.concat([df_export, totals], ignore_index=True)
+
+            with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                df_export.to_excel(writer, index=False, sheet_name="По подразделениям")
+                self._autofit_columns(writer, "По подразделениям", df_export)
+
+            messagebox.showinfo("Экспорт", f"Файл сохранён:\n{path}")
+        except Exception as e:
+            logging.exception("Ошибка экспорта по подразделениям")
+            messagebox.showerror("Ошибка", f"Не удалось сохранить файл:\n{e}")
+
+    def _export_unmatched(self, upload_id: int):
+        df = PayrollDataManager.get_undistributed_rows(upload_id)
+        if df.empty:
+            messagebox.showinfo("Экспорт", "Нет нераспределённых сотрудников.")
+            return
+
+        path = self._ask_save_path(f"ФОТ_нераспределено_{upload_id}.xlsx")
+        if not path:
+            return
+
+        try:
+            df_export = df.copy()
+            df_export = df_export.rename(columns={
+                "tbn": "Таб. номер",
+                "fio": "ФИО",
+                "department_raw": "Подразделение",
+                "position_raw": "Должность",
+                "total_accrued": "Начислено, ₽",
+            })
+
+            total_lost = df_export["Начислено, ₽"].fillna(0).astype(float).sum()
+            totals = pd.DataFrame([{
+                "Таб. номер": "",
+                "ФИО": "ИТОГО",
+                "Подразделение": "",
+                "Должность": "",
+                "Начислено, ₽": round(total_lost, 2),
+            }])
+            df_export = pd.concat([df_export, totals], ignore_index=True)
+
+            with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                df_export.to_excel(writer, index=False, sheet_name="Не распределено")
+                self._autofit_columns(writer, "Не распределено", df_export)
+
+            messagebox.showinfo("Экспорт", f"Файл сохранён:\n{path}")
+        except Exception as e:
+            logging.exception("Ошибка экспорта нераспределённых")
+            messagebox.showerror("Ошибка", f"Не удалось сохранить файл:\n{e}")
+
+    def _autofit_columns(self, writer, sheet_name: str, df: pd.DataFrame):
+        """Автоподбор ширины колонок в Excel."""
+        try:
+            ws = writer.sheets[sheet_name]
+            for i, col in enumerate(df.columns):
+                max_len = max(
+                    len(str(col)),
+                    df[col].astype(str).str.len().max() if len(df) > 0 else 0
+                )
+                ws.column_dimensions[chr(65 + i) if i < 26
+                                     else chr(64 + i // 26) + chr(65 + i % 26)
+                                     ].width = min(max_len + 3, 50)
+        except Exception:
+            pass  # не критично если автоширина не сработает
 
 # ============================================================
 #  Функция-фабрика для main_app
