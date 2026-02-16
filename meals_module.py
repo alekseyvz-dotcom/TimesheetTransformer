@@ -2161,6 +2161,7 @@ class MyMealsOrdersPage(tk.Frame):
         return None
 
     def _build_ui(self):
+        # ── Верхняя панель ──
         top = tk.Frame(self, bg="#f7f7f7")
         top.pack(fill="x", padx=8, pady=(8, 4))
 
@@ -2177,6 +2178,7 @@ class MyMealsOrdersPage(tk.Frame):
             command=self._load_data,
         ).pack(side="right", padx=4)
 
+        # ── Таблица ──
         frame = tk.Frame(self, bg="#f7f7f7")
         frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
@@ -2208,19 +2210,42 @@ class MyMealsOrdersPage(tk.Frame):
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
-        self.tree.bind("<Double-1>", self._on_open)
-        self.tree.bind("<Return>", self._on_open)
+        # ══════════════════════════════════════════════════════════════
+        # УБРАН двойной клик и Enter — вместо них кнопки ниже
+        # self.tree.bind("<Double-1>", self._on_open)   # УДАЛЕНО
+        # self.tree.bind("<Return>", self._on_open)      # УДАЛЕНО
+        # ══════════════════════════════════════════════════════════════
 
+        # ── Панель кнопок действий ──
+        btn_frame = tk.Frame(self, bg="#f7f7f7")
+        btn_frame.pack(fill="x", padx=8, pady=(0, 4))
+
+        self.btn_edit = ttk.Button(
+            btn_frame,
+            text="✏️  Редактировать выбранную заявку",
+            command=self._on_edit_order,
+        )
+        self.btn_edit.pack(side="left", padx=(0, 12), ipady=4)
+
+        self.btn_copy = ttk.Button(
+            btn_frame,
+            text="📋  Создать копию на следующий день",
+            command=self._on_copy_order,
+        )
+        self.btn_copy.pack(side="left", padx=(0, 12), ipady=4)
+
+        # ── Подсказка внизу ──
         bottom = tk.Frame(self, bg="#f7f7f7")
         bottom.pack(fill="x", padx=8, pady=(0, 8))
         tk.Label(
             bottom,
-            text="Двойной щелчок или Enter по строке — открыть заявку для редактирования или дублирования.",
+            text="Выберите заявку в таблице, затем нажмите нужную кнопку.",
             font=("Segoe UI", 9),
             fg="#555",
             bg="#f7f7f7",
         ).pack(side="left")
 
+    # ── Загрузка данных (без изменений) ──
     def _load_data(self):
         self.tree.delete(*self.tree.get_children())
         self._orders.clear()
@@ -2287,10 +2312,19 @@ class MyMealsOrdersPage(tk.Frame):
                 return o
         return None
 
-    def _on_open(self, event=None):
+    # ══════════════════════════════════════════════════════════════════
+    #  Загрузка данных заявки из БД (общий хелпер)
+    # ══════════════════════════════════════════════════════════════════
+    def _load_order_data(self) -> Optional[tuple]:
+        """Возвращает (order_id, order_data) или None, если ничего не выбрано."""
         info = self._get_selected_order()
         if not info:
-            return
+            messagebox.showinfo(
+                "Мои заявки",
+                "Сначала выберите заявку в таблице.",
+                parent=self,
+            )
+            return None
 
         order_id = int(info["id"])
         try:
@@ -2301,31 +2335,63 @@ class MyMealsOrdersPage(tk.Frame):
                 f"Не удалось загрузить заявку id={order_id}:\n{e}",
                 parent=self,
             )
-            return
+            return None
 
-        choice = messagebox.askyesnocancel(
-            "Открыть заявку",
-            "Нажмите «Да», чтобы ОТКРЫТЬ заявку для РЕДАКТИРОВАНИЯ.\n"
-            "Нажмите «Нет», чтобы СОЗДАТЬ КОПИЮ заявки (на другой день).\n"
-            "Отмена — закрыть.",
+        return order_id, order_data
+
+    # ══════════════════════════════════════════════════════════════════
+    #  Кнопка «Редактировать»
+    # ══════════════════════════════════════════════════════════════════
+    def _on_edit_order(self):
+        result = self._load_order_data()
+        if result is None:
+            return
+        order_id, order_data = result
+
+        # Подтверждение, чтобы исключить случайное нажатие
+        ok = messagebox.askokcancel(
+            "Редактирование заявки",
+            f"Вы собираетесь РЕДАКТИРОВАТЬ заявку #{order_id} "
+            f"на дату {order_data.get('date', '?')}.\n\n"
+            "Все изменения перезапишут текущую заявку.\n"
+            "Продолжить?",
             parent=self,
         )
-        if choice is None:
+        if not ok:
             return
 
-        if choice is False:
-            try:
-                old_date = datetime.strptime(order_data["date"], "%Y-%m-%d").date()
-                new_date = old_date + timedelta(days=1)
-                order_data["date"] = new_date.strftime("%Y-%m-%d")
-            except Exception:
-                pass
-            edit_id = None
-            title = f"Новая заявка (копия #{order_id})"
-        else:
-            edit_id = order_id
-            title = f"Редактирование заявки #{order_id}"
+        self._open_order_window(
+            order_data=order_data,
+            edit_id=order_id,
+            title=f"Редактирование заявки #{order_id}",
+        )
 
+    # ══════════════════════════════════════════════════════════════════
+    #  Кнопка «Создать копию на следующий день»
+    # ══════════════════════════════════════════════════════════════════
+    def _on_copy_order(self):
+        result = self._load_order_data()
+        if result is None:
+            return
+        order_id, order_data = result
+
+        try:
+            old_date = datetime.strptime(order_data["date"], "%Y-%m-%d").date()
+            new_date = old_date + timedelta(days=1)
+            order_data["date"] = new_date.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+        self._open_order_window(
+            order_data=order_data,
+            edit_id=None,                          # ← None = новая заявка
+            title=f"Новая заявка (копия #{order_id}) на {order_data.get('date', '?')}",
+        )
+
+    # ══════════════════════════════════════════════════════════════════
+    #  Общий метод открытия окна заявки
+    # ══════════════════════════════════════════════════════════════════
+    def _open_order_window(self, order_data: dict, edit_id: Optional[int], title: str):
         win = tk.Toplevel(self)
         win.title(title)
         win.geometry("1300x720")
@@ -2344,6 +2410,7 @@ class MyMealsOrdersPage(tk.Frame):
         )
         page.app_ref = self.app_ref
         page.pack(fill="both", expand=True)
+
 
 class AllMealsOrdersPage(tk.Frame):
     def __init__(self, master, app_ref=None):
