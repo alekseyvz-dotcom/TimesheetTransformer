@@ -129,13 +129,14 @@ employees_module = None
 timesheet_compare = None
 meals_reports_module = None
 employee_card_module = None
+payroll_module = None
 
 def perform_heavy_imports():
     global BudgetAnalyzer, _assets_logo, _LOGO_BASE64, SpecialOrders, \
            meals_module, objects, Settings, timesheet_module, \
            analytics_module, timesheet_transformer, employees_module, \
            timesheet_compare, meals_employees_module, lodging_module, \
-           meals_reports_module, employee_card_module
+           meals_reports_module, employee_card_module, payroll_module
            
     import BudgetAnalyzer
     import assets_logo as _assets_logo
@@ -151,6 +152,7 @@ def perform_heavy_imports():
     import timesheet_compare
     import meals_employees as meals_employees_module
     import lodging_module as lodging_module
+    import payroll_module as payroll_module
     import employee_card as employee_card_module
     try:
         import timesheet_transformer
@@ -1082,9 +1084,23 @@ class MainApp(tk.Tk):
 
         # === Аналитика ===
         m_analytics = tk.Menu(self._menubar, tearoff=0)
-        m_analytics.add_command(label="Операционная аналитика", command=lambda: self._show_page("analytics_dashboard", lambda p: analytics_module.AnalyticsPage(p, self)))
+        m_analytics.add_command(
+            label="Операционная аналитика",
+            command=lambda: self._show_page(
+                "analytics_dashboard",
+                lambda p: analytics_module.AnalyticsPage(p, self),
+            ),
+        )
+        m_analytics.add_command(
+            label="Затраты (ФОТ)",
+            command=lambda: self._show_page(
+                "payroll",
+                lambda p: payroll_module.create_payroll_page(p, self),
+            ),
+        )
         self._menubar.add_cascade(label="Аналитика", menu=m_analytics)
         self._menu_analytics = m_analytics
+
 
         m_emp = tk.Menu(self._menubar, tearoff=0)
         m_emp.add_command(label="Карточка сотрудника",
@@ -1182,6 +1198,7 @@ class MainApp(tk.Tk):
             "lodging_dorms": ("Проживание", "Общежития и комнаты"),
             "lodging_rates": ("Проживание", "Тарифы (цена за сутки)"),
             "object_create": ("Объекты: Создание/Редактирование", ""),
+            "payroll": ("Затраты (ФОТ)", "Загрузка начислений и распределение по объектам"),
             "objects_registry": ("Реестр объектов", ""),
             "employee_card": ("Сотрудники", "Карточка сотрудника (работа/питание/проживание)"),
             "budget": ("Анализ смет", ""),
@@ -1298,6 +1315,7 @@ if __name__ == "__main__":
                 meals_employees_module,
                 lodging_module,
                 employee_card_module,
+                payroll_module,
             ]
             for module in modules_to_init:
                 if module and hasattr(module, "set_db_pool"):
