@@ -998,6 +998,13 @@ class MainApp(tk.Tk):
                 lambda p: timesheet_module.create_my_timesheets_page(p, self),
             ),
         )
+         m_ts.add_command(
+             label="Бригады",
+             command=lambda: self._show_page(
+                 "brigades",
+                 lambda p: brigades_module.create_brigades_page(p, self),
+             ),
+         )
         self._menu_timesheets_registry_index = m_ts.index("end")
         m_ts.add_command(
             label="Реестр табелей",
@@ -1020,13 +1027,7 @@ class MainApp(tk.Tk):
                 lambda p: timesheet_compare.create_timesheet_compare_page(p, self),
             ),
         )
-         m_ts.add_command(
-             label="Бригады",
-             command=lambda: self._show_page(
-                 "brigades",
-                 lambda p: brigades_module.create_brigades_page(p, self),
-             ),
-         )
+
         self._menubar.add_cascade(label="Объектный табель", menu=m_ts)
         self._menu_timesheets = m_ts
 
