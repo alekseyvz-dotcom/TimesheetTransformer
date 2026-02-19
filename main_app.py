@@ -137,7 +137,8 @@ def perform_heavy_imports():
            meals_module, objects, Settings, timesheet_module, \
            analytics_module, timesheet_transformer, employees_module, \
            timesheet_compare, meals_employees_module, lodging_module, \
-           meals_reports_module, employee_card_module, payroll_module
+           meals_reports_module, employee_card_module, payroll_module, \
+           brigades_module
            
     import BudgetAnalyzer
     import assets_logo as _assets_logo
