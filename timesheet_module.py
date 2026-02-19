@@ -1858,8 +1858,6 @@ class TimesheetPage(tk.Frame):
         self._fit_job = None
         self._build_ui()
 
-        self._load_existing_rows()
-
         self.bind("<Configure>", self._on_window_configure)
         self.after(120, self._auto_fit_columns)
 
@@ -2076,7 +2074,7 @@ class TimesheetPage(tk.Frame):
             if self._init_object_id in ids:
                 self.cmb_object_id.set(self._init_object_id)
 
-        self.()
+        self._on_department_select()
 
         if self.read_only:
             try:
