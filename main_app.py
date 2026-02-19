@@ -130,6 +130,7 @@ timesheet_compare = None
 meals_reports_module = None
 employee_card_module = None
 payroll_module = None
+brigades_module = None
 
 def perform_heavy_imports():
     global BudgetAnalyzer, _assets_logo, _LOGO_BASE64, SpecialOrders, \
@@ -152,6 +153,7 @@ def perform_heavy_imports():
     import timesheet_compare
     import meals_employees as meals_employees_module
     import lodging_module as lodging_module
+    import brigades_module as brigades_module
     import payroll_module as payroll_module
     import employee_card as employee_card_module
     try:
@@ -378,11 +380,6 @@ def embedded_logo_image(parent, max_w=360, max_h=160):
     except Exception as e:
         logging.error(f"Критическая ошибка загрузки логотипа через tkinter: {e}")
         return None
-
-
-# ================================================================== #
-#  HomePage — улучшенная главная с карточками-виджетами
-# ================================================================== #
 
 # ================================================================== #
 #  HomePage — профессиональный дашборд v3
@@ -1023,6 +1020,13 @@ class MainApp(tk.Tk):
                 lambda p: timesheet_compare.create_timesheet_compare_page(p, self),
             ),
         )
+         m_ts.add_command(
+             label="Бригады",
+             command=lambda: self._show_page(
+                 "brigades",
+                 lambda p: brigades_module.create_brigades_page(p, self),
+             ),
+         )
         self._menubar.add_cascade(label="Объектный табель", menu=m_ts)
         self._menu_timesheets = m_ts
 
@@ -1181,6 +1185,7 @@ class MainApp(tk.Tk):
             "timesheet": ("Объектный табель", ""),
             "my_timesheets": ("Мои табели", ""),
             "timesheet_registry": ("Реестр табелей", ""),
+            "brigades": ("Бригады", "Назначение бригадиров по подразделениям"),
             "workers": ("Работники", "Поиск по сотруднику и его объектам"),
             "timesheet_compare": ("Сравнение табелей", "Объектный vs Кадровый (1С)"),
             "transport": ("Заявка на спецтехнику", ""),
@@ -1316,6 +1321,7 @@ if __name__ == "__main__":
                 lodging_module,
                 employee_card_module,
                 payroll_module,
+                brigades_module,
             ]
             for module in modules_to_init:
                 if module and hasattr(module, "set_db_pool"):
