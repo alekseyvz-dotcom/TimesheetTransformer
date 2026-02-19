@@ -494,6 +494,62 @@ def load_objects_short_for_timesheet() -> List[Tuple[str, str, str]]:
         if conn:
             release_db_connection(conn)
 
+def load_brigadier_assignments_for_department(department_name: str) -> dict[str, str | None]:
+    """
+    Возвращает назначения из employee_brigadiers для подразделения:
+      {employee_tbn: brigadier_tbn_or_None}
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT employee_tbn, brigadier_tbn
+                FROM public.employee_brigadiers
+                WHERE department = %s
+                """,
+                (department_name,),
+            )
+            return {emp_tbn: br_tbn for (emp_tbn, br_tbn) in cur.fetchall()}
+    finally:
+        release_db_connection(conn)
+
+
+def load_brigadier_names_for_department(department_name: str) -> dict[str, str]:
+    """
+    Справочник таб.№ -> ФИО только для тех TBN, которые встречаются как brigadier_tbn в данном подразделении.
+    Возвращает: {brigadier_tbn: fio}
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT eb.brigadier_tbn
+                FROM public.employee_brigadiers eb
+                WHERE eb.department = %s
+                  AND eb.brigadier_tbn IS NOT NULL
+                  AND eb.brigadier_tbn <> ''
+                """,
+                (department_name,),
+            )
+            brig_tbn_list = [r[0] for r in cur.fetchall()]
+
+            if not brig_tbn_list:
+                return {}
+
+            cur.execute(
+                """
+                SELECT tbn, fio
+                FROM public.employees
+                WHERE tbn = ANY(%s)
+                """,
+                (brig_tbn_list,),
+            )
+            return {tbn: fio for (tbn, fio) in cur.fetchall()}
+    finally:
+        release_db_connection(conn)
+
 # ------------------------- Утилиты (перенесены из main_app.py) -------------------------
 
 def month_days(year: int, month: int) -> int: return calendar.monthrange(year, month)[1]
@@ -537,9 +593,6 @@ def parse_overtime(v: Any) -> Tuple[Optional[float], Optional[float]]:
 
 def parse_hours_and_night(v: Any) -> Tuple[Optional[float], Optional[float]]:
     """
-    Парсит отработанные часы в ячейке (НЕ в скобках).
-    Возвращает (total_hours, night_hours).
-
     Правила:
       - '8' или '8,25' или '8:30' -> (8, 0) / (8.25, 0) / (8.5, 0)
       - '8/2' (вне скобок) -> (10, 2)  (т.е. 8 всего + 2 ночных; ночные входят в общее)
@@ -600,12 +653,7 @@ def parse_hours_and_night(v: Any) -> Tuple[Optional[float], Optional[float]]:
     return total, 0.0
 
 def calc_row_totals(hours_list: List[Optional[str]], year: int, month: int) -> Dict[str, Any]:
-    """
-    Возвращает totals для одной строки табеля.
-    days: количество дней с ненулевыми часами
-    hours: сумма часов (включая ночные, как в parse_hours_and_night)
-    ot_day / ot_night: переработка из скобок
-    """
+
     days_in_m = month_days(year, month)
 
     total_hours = 0.0
@@ -636,7 +684,6 @@ def calc_row_totals(hours_list: List[Optional[str]], year: int, month: int) -> D
         if isinstance(n_ot, (int, float)):
             total_ot_night += float(n_ot)
 
-    # Форматирование лучше оставлять числом, а вывод решит грид
     return {
         "days": total_days,
         "hours": float(f"{total_hours:.2f}"),
@@ -656,10 +703,6 @@ def _norm_fio(s: str) -> str:
     return s
 
 def _best_fio_match_with_score(skud_fio: str, candidates: List[str]) -> Tuple[Optional[str], float]:
-    """
-    Возвращает (best_candidate, score).
-    Score 0..1, где 1 — полное совпадение.
-    """
     nf = _norm_fio(skud_fio)
     if not nf:
         return None, 0.0
@@ -696,7 +739,6 @@ def _read_skud_events_from_xlsx(path: str) -> List[Dict[str, Any]]:
     wb = load_workbook(path, data_only=True)
     ws = wb.active  # обычно нужный лист первый
 
-    # Ищем строку заголовков (где есть "Время", "ФИО сотрудника", "Событие")
     header_row = None
     header_map: Dict[str, int] = {}
 
@@ -759,11 +801,6 @@ def _compute_day_summary_from_events(
     events: List[Dict[str, Any]],
     target_date: date,
 ) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Вариант А:
-      - если нет входа или нет выхода -> НЕ применять, только в problems.
-      - если есть и вход и выход -> считаем first_in..last_out и округляем до часа.
-    """
     by_fio: Dict[str, List[Dict[str, Any]]] = {}
     for e in events:
         dt = e.get("dt")
@@ -801,12 +838,9 @@ def _compute_day_summary_from_events(
         minutes = int((last_out - first_in).total_seconds() // 60)
         if minutes < 0:
             minutes = 0
-        
-        # --- НОВОЕ: вычитаем обед ---
-        # условие: если отработано строго больше 4 часов (240 минут) -> минус 60 минут
+
         if minutes > 4 * 60:
             minutes = max(0, minutes - 60)
-        # --- /НОВОЕ ---
         
         summary[fio] = {
             "first_in": first_in,
@@ -901,11 +935,7 @@ class CopyFromDialog(simpledialog.Dialog):
         }
 
 class SelectObjectIdDialog(tk.Toplevel):
-    """
-    Диалог выбора ID объекта (excel_id) для заданного адреса.
-    Показывает excel_id, address, short_name.
-    result: выбранный excel_id (str) или None (Отмена/закрытие).
-    """
+
     def __init__(self, parent, objects_for_addr: List[Tuple[str, str, str]], addr: str):
         super().__init__(parent)
         self.title("Выбор ID объекта")
@@ -922,7 +952,6 @@ class SelectObjectIdDialog(tk.Toplevel):
             justify="left",
         ).pack(anchor="w")
 
-        # Таблица
         cols = ("excel_id", "address", "short_name")
         self.tree = ttk.Treeview(
             main, columns=cols, show="headings", height=8, selectmode="browse"
@@ -941,21 +970,17 @@ class SelectObjectIdDialog(tk.Toplevel):
         self.tree.pack(side="left", fill="both", expand=True, pady=(8, 4))
         vsb.pack(side="right", fill="y")
 
-        # Заполнение
         for code, a, short_name in objects_for_addr:
             self.tree.insert("", "end", values=(code, a, short_name))
 
-        # Кнопки
         btns = tk.Frame(main)
         btns.pack(fill="x", pady=(6, 0))
         ttk.Button(btns, text="OK", command=self._on_ok).pack(side="right", padx=(4, 0))
         ttk.Button(btns, text="Отмена", command=self._on_cancel).pack(side="right")
 
-        # Двойной клик — тоже OK
         self.tree.bind("<Double-1>", self._on_ok)
         self.tree.bind("<Return>",  self._on_ok)
 
-        # Центрировать
         try:
             self.update_idletasks()
             px = parent.winfo_rootx()
@@ -984,11 +1009,6 @@ class SelectObjectIdDialog(tk.Toplevel):
         self.destroy()
 
 class SkudMappingReviewDialog(tk.Toplevel):
-    """
-    Таблица сопоставления СКУД -> справочник с чекбоксами и score,
-    + список проблем (нет входа/выхода).
-    Вариант А: проблемные строки не применяются (их нет в таблице применения).
-    """
     def __init__(self, parent, rows: List[Dict[str, Any]], problems: List[Dict[str, Any]]):
         super().__init__(parent)
         self.parent = parent
@@ -1232,7 +1252,6 @@ class SkudMappingReviewDialog(tk.Toplevel):
         except Exception as e:
             messagebox.showerror("СКУД", f"Ошибка выгрузки проблем в Excel:\n{e}", parent=self)
 
-
     def _on_apply(self):
         selected_rows = []
         for i, r in enumerate(self._rows):
@@ -1248,11 +1267,7 @@ class SkudMappingReviewDialog(tk.Toplevel):
         self.destroy()
 
 class SelectEmployeesDialog(tk.Toplevel):
-    """
-    Диалог выбора сотрудников в виде таблицы с чекбоксами.
-    employees: список кортежей (fio, tbn, position, dep)
-    result: список выбранных кортежей (fio, tbn, position, dep) или None (Отмена)
-    """
+
     def __init__(self, parent, employees, current_dep: str):
         super().__init__(parent)
         self.parent = parent
@@ -1296,7 +1311,6 @@ class SelectEmployeesDialog(tk.Toplevel):
         ent_search.grid(row=2, column=1, sticky="w", pady=(4, 2))
         ent_search.bind("<KeyRelease>", lambda e: self._refilter())
 
-        # --- Таблица сотрудников ---
         tbl_frame = tk.Frame(main)
         tbl_frame.pack(fill="both", expand=True, pady=(8, 4))
 
@@ -1309,7 +1323,6 @@ class SelectEmployeesDialog(tk.Toplevel):
             selectmode="none",  # выбор только через чекбокс
         )
 
-        # "Чекбокс" будет отображаться в колонке fio, а сама галка хранится в tags
         self.tree.heading("fio", text="ФИО")
         self.tree.heading("tbn", text="Таб.№")
         self.tree.heading("pos", text="Должность")
@@ -1331,12 +1344,10 @@ class SelectEmployeesDialog(tk.Toplevel):
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
-        # Обработчик клика для имитации чекбокса
         self.tree.bind("<Button-1>", self._on_tree_click)
 
-        # Массив индексов self.employees, попавших в текущий фильтр
         self._filtered_indices = []
-        # Множество индексов выбранных в исходном списке employees
+
         self._selected_indices = set()
 
         self._refilter()
@@ -1352,7 +1363,6 @@ class SelectEmployeesDialog(tk.Toplevel):
             side="left", padx=4
         )
 
-        # Счётчик выбранных сотрудников
         self.lbl_selected = tk.Label(
             sel_frame,
             text="Выбрано: 0",
@@ -1370,7 +1380,6 @@ class SelectEmployeesDialog(tk.Toplevel):
             side="right"
         )
 
-        # Позволим окну растягиваться
         main.rowconfigure(2, weight=1)
         main.columnconfigure(0, weight=1)
 
@@ -1387,8 +1396,6 @@ class SelectEmployeesDialog(tk.Toplevel):
         except Exception:
             pass
 
-    # ---------- Вспомогательные методы ----------
-
     def _update_selected_count(self):
         """Обновляет текст 'Выбрано: N'."""
         try:
@@ -1401,9 +1408,6 @@ class SelectEmployeesDialog(tk.Toplevel):
         search = self.var_search.get().strip().lower()
         only_dep = self.var_only_dep.get()
         dep_sel = self.current_dep
-
-        # Запоминаем, какие уже были выбраны, чтобы после фильтрации не потерять
-        # (выбор хранится по глобальным индексам employees в self._selected_indices)
 
         self.tree.delete(*self.tree.get_children())
         self._filtered_indices.clear()
@@ -1795,17 +1799,8 @@ class TimeForSelectedDialog(simpledialog.Dialog):
             "to": self._to,
             "value": self._value,  # None => очистка
         }
-        
-# ================= СТРАНИЦА ТАБЕЛЕЙ (ПОЛНАЯ ОПТИМИЗИРОВАННАЯ ВЕРСИЯ) =================
 
 class TimesheetPage(tk.Frame):
-    """
-    TimesheetPage (версия для VirtualTimesheetGrid).
-    ВАЖНО:
-      - Удалена пагинация/RowWidget/старые Canvas-таблицы.
-      - Все операции работают через self.model_rows и self.grid (виртуальная таблица).
-      - Выделение строк хранится в гриде.
-    """
 
     COLPX = {"fio": 200, "tbn": 100, "day": 36, "days": 46, "hours": 56, "del": 66}
     MIN_FIO_PX = 140
@@ -1856,18 +1851,17 @@ class TimesheetPage(tk.Frame):
         self.model_rows_all: List[Dict[str, Any]] = []
         self.var_filter = tk.StringVar()
 
-        # UI
+        self.var_brigadier = tk.StringVar(value="Все")
+        self._brig_assign: dict[str, str | None] = {}   # employee_tbn -> brigadier_tbn
+        self._brig_names: dict[str, str] = {}           # brigadier_tbn -> brigadier fio
+
         self._fit_job = None
         self._build_ui()
 
-        # initial load
         self._load_existing_rows()
 
-        # авто-подгон ширины ФИО (только виртуальная таблица)
         self.bind("<Configure>", self._on_window_configure)
         self.after(120, self._auto_fit_columns)
-
-    # ---------------------- helpers: grid / selection ----------------------
 
     def _grid_selected(self) -> set[int]:
         if hasattr(self, "grid"):
@@ -1881,8 +1875,6 @@ class TimesheetPage(tk.Frame):
             self.grid.set_rows(self.model_rows)
         else:
             self.grid.refresh()
-
-    # ---------------------- AUTO SAVE ----------------------
 
     def _schedule_auto_save(self):
         if self.read_only:
@@ -1920,8 +1912,6 @@ class TimesheetPage(tk.Frame):
                 self.addr_to_ids[addr].append(oid)
 
         self.address_options = sorted({addr for _, addr, _ in self.objects_full if addr})
-
-    # ------------------------ UI ------------------------
 
     def _build_ui(self):
         # --- Top panel ---
@@ -2003,6 +1993,18 @@ class TimesheetPage(tk.Frame):
         ent_filter = ttk.Entry(filter_frame, textvariable=self.var_filter, width=40)
         ent_filter.pack(side="left", padx=(6, 6))
         ttk.Button(filter_frame, text="Очистить", command=self._clear_filter).pack(side="left")
+
+        tk.Label(filter_frame, text="   Бригадир:").pack(side="left", padx=(14, 0))
+        
+        self.cmb_brigadier = ttk.Combobox(
+            filter_frame,
+            state="readonly",
+            width=34,
+            values=["Все"],
+            textvariable=self.var_brigadier,
+        )
+        self.cmb_brigadier.pack(side="left", padx=(6, 0))
+        self.cmb_brigadier.bind("<<ComboboxSelected>>", lambda e: self._apply_filter())
         
         # debounce на ввод, чтобы не дергать фильтр на каждый символ мгновенно
         self._filter_job = None
@@ -2074,7 +2076,7 @@ class TimesheetPage(tk.Frame):
             if self._init_object_id in ids:
                 self.cmb_object_id.set(self._init_object_id)
 
-        self._on_department_select()
+        self.()
 
         if self.read_only:
             try:
@@ -2090,10 +2092,6 @@ class TimesheetPage(tk.Frame):
                 pass
 
     def _sync_object_id_values_silent(self):
-        """
-        Обновляет values для cmb_object_id по текущему адресу,
-        НЕ показывает диалог и НЕ очищает выбранный oid, если он валидный.
-        """
         addr = self.cmb_address.get().strip()
         objects_for_addr = [
             (code, a, short_name)
@@ -2108,12 +2106,8 @@ class TimesheetPage(tk.Frame):
         cur = (self.cmb_object_id.get() or "").strip()
     
         self.cmb_object_id.config(state="readonly", values=ids)
-    
-        # если текущий выбранный id валиден — оставляем
         if cur and cur in ids:
             return
-    
-        # если ровно один id — подставим
         if len(ids) == 1:
             self.cmb_object_id.set(ids[0])
 
@@ -2145,7 +2139,7 @@ class TimesheetPage(tk.Frame):
             self.fio_var.set("")
             self.ent_tbn.delete(0, "end")
             self.pos_var.set("")
-
+        
         self._load_existing_rows()
 
     def _on_address_select(self, *_):
@@ -2168,26 +2162,17 @@ class TimesheetPage(tk.Frame):
     
         ids = sorted({code for (code, a, short_name) in objects_for_addr if code})
         current_oid = (self.cmb_object_id.get() or "").strip()
-    
-        # Всегда обновляем список values
         self.cmb_object_id.config(state="readonly", values=ids)
-    
-        # Если текущий oid валиден — НИЧЕГО не спрашиваем
         if current_oid and current_oid in ids:
             return
-    
-        # Если один вариант — ставим автоматически
         if len(ids) == 1:
             self.cmb_object_id.set(ids[0])
             return
-    
-        # Если мы в режиме подавления диалога при инициализации — не показываем окно
+
         if getattr(self, "_suppress_object_id_dialog", False):
-            # оставим пустым, пользователь выберет сам
             self.cmb_object_id.set("")
             return
-    
-        # Только здесь показываем диалог
+
         dlg = SelectObjectIdDialog(self, objects_for_addr, addr)
         self.wait_window(dlg)
     
@@ -2209,38 +2194,60 @@ class TimesheetPage(tk.Frame):
             self.var_filter.set("")
         except Exception:
             pass
+        try:
+            self.var_brigadier.set("Все")
+        except Exception:
+            pass
         self._apply_filter()
     
+    def _parse_selected_brigadier_tbn(self) -> str | None:
+        s = (self.var_brigadier.get() or "Все").strip()
+        if s == "Все":
+            return None
+        if s == "Без бригадира":
+            return ""
+        # формат "ФИО (TBN)"
+        if s.endswith(")") and "(" in s:
+            tbn = s[s.rfind("(") + 1 : -1].strip()
+            return tbn or None
+        return None  
+    
     def _apply_filter(self):
-        """
-        Фильтруем только отображение (self.model_rows),
-        но данные/сохранение идут из self.model_rows_all.
-        Итог внизу — ПО ВСЕМ строкам (как ты попросил).
-        """
         self._filter_job = None
         q = (self.var_filter.get() or "").strip().lower()
+        brig_tbn_sel = self._parse_selected_brigadier_tbn()
     
-        if not q:
-            self.model_rows = self.model_rows_all
-        else:
-            res: List[Dict[str, Any]] = []
-            for rec in self.model_rows_all:
-                fio = (rec.get("fio") or "").lower()
-                tbn = (rec.get("tbn") or "").lower()
-                if q in fio or q in tbn:
-                    res.append(rec)
-            self.model_rows = res
+        res: List[Dict[str, Any]] = []
+        for rec in self.model_rows_all:
+            fio = (rec.get("fio") or "")
+            tbn = (rec.get("tbn") or "")
+            fio_l = fio.lower()
+            tbn_l = tbn.lower()
     
-        # сбрасываем выделение, чтобы индексы не путались при фильтре
+            # --- фильтр по бригадиру ---
+            if brig_tbn_sel is not None:
+                assigned_brig_tbn = self._brig_assign.get((tbn or "").strip())
+                if brig_tbn_sel == "":
+                    if assigned_brig_tbn:
+                        continue
+                else:
+                    if (assigned_brig_tbn or "").strip() != brig_tbn_sel:
+                        continue
+            if q:
+                if q not in fio_l and q not in tbn_l:
+                    continue
+    
+            res.append(rec)
+    
+        self.model_rows = res
+
         try:
             self.grid.set_selected_indices(set())
         except Exception:
             pass
     
-        # обновить грид
         self.grid.set_rows(self.model_rows)
-    
-        # общий итог — по всем
+
         self._recalc_object_total()
 
     def _recalc_row_totals_for_rec(self, rec: Dict[str, Any]):
@@ -2249,11 +2256,6 @@ class TimesheetPage(tk.Frame):
         rec["_totals"] = calc_row_totals(hours_list, y, m)
     
     def _on_cell_changed(self, row_index: int, day_index: int):
-        """
-        Вызывается VirtualTimesheetGrid после commit ячейки.
-        row_index относится к ТЕКУЩЕМУ self.model_rows (отфильтрованному отображению).
-        """
-        # пересчитать totals только у этой строки
         if 0 <= row_index < len(self.model_rows):
             rec = self.model_rows[row_index]
             self._recalc_row_totals_for_rec(rec)
@@ -2330,6 +2332,47 @@ class TimesheetPage(tk.Frame):
         self._schedule_auto_save()
 
     # ---------------- operations buttons ----------------
+
+    def _reload_brigadier_filter_data(self):
+        dep = (self.cmb_department.get() or "").strip()
+        if not dep or dep == "Все":
+            self._brig_assign = {}
+            self._brig_names = {}
+            try:
+                self.cmb_brigadier.configure(values=["Все"])
+                self.var_brigadier.set("Все")
+            except Exception:
+                pass
+            return
+    
+        try:
+            self._brig_assign = load_brigadier_assignments_for_department(dep)
+            self._brig_names = load_brigadier_names_for_department(dep)
+        except Exception:
+            # не ломаем табель из-за фильтра
+            self._brig_assign = {}
+            self._brig_names = {}
+            try:
+                self.cmb_brigadier.configure(values=["Все"])
+                self.var_brigadier.set("Все")
+            except Exception:
+                pass
+            return
+
+        options = ["Все", "Без бригадира"]
+
+        pairs = []
+        for tbn, fio in self._brig_names.items():
+            fio = (fio or "").strip()
+            pairs.append((fio.lower(), f"{fio} ({tbn})"))
+    
+        for _k, label in sorted(pairs):
+            options.append(label)
+    
+        cur = (self.var_brigadier.get() or "Все").strip()
+        self.cmb_brigadier.configure(values=options)
+        if cur not in options:
+            self.var_brigadier.set("Все")
 
     def add_row(self):
         if self.read_only:
@@ -2564,11 +2607,6 @@ class TimesheetPage(tk.Frame):
         messagebox.showinfo("Очистка", "Все часы были стерты.")
 
     def import_from_skud(self):
-        """
-        Импорт часов из Excel-отчёта СКУД за выбранный день.
-        Вариант А: если у сотрудника нет входа или выхода — НЕ применять, только показать в проблемах.
-        Перед применением показываем таблицу сопоставления с score и чекбоксами.
-        """
         if self.read_only:
             return
     
@@ -2604,7 +2642,6 @@ class TimesheetPage(tk.Frame):
                 messagebox.showinfo("СКУД", "В отчёте нет событий с ФИО на выбранную дату.")
                 return
     
-            # кандидаты для сопоставления: ограничиваем текущим подразделением
             candidates = list(self.allowed_fio_names) if getattr(self, "allowed_fio_names", None) else self.emp_names
     
             mapping_rows: List[Dict[str, Any]] = []
@@ -2612,10 +2649,7 @@ class TimesheetPage(tk.Frame):
                 best, score = _best_fio_match_with_score(skud_fio, candidates)
     
                 hours_val = info.get("hours_rounded")
-                # политика по умолчанию:
-                # - если score < 0.90 -> НЕ применять (пусть человек решит)
-                # - если нет best -> НЕ применять
-                # - если hours<=0 -> НЕ применять
+
                 apply_default = bool(best) and (score >= 0.90) and isinstance(hours_val, int) and hours_val > 0
     
                 mapping_rows.append({
@@ -2703,7 +2737,6 @@ class TimesheetPage(tk.Frame):
             except Exception:
                 pass
             messagebox.showerror("СКУД", f"Ошибка при загрузке СКУД:\n{e}")
-
 
     def import_from_excel(self):
         if self.read_only:
@@ -2834,8 +2867,7 @@ class TimesheetPage(tk.Frame):
                     "Проверьте, что в прошлом месяце табель был сохранён в БД.",
                 )
                 return
-    
-            # уникализация источника
+
             uniq = {}
             for rec in found_rows:
                 fio = (rec.get("fio") or "").strip()
@@ -2970,6 +3002,7 @@ class TimesheetPage(tk.Frame):
             return
     
         try:
+            self._reload_brigadier_filter_data()
             db_rows = load_timesheet_rows_from_db(oid or None, addr, current_dep, y, m, user_id)
             self.model_rows_all.extend(db_rows)
     
@@ -2989,7 +3022,6 @@ class TimesheetPage(tk.Frame):
             self.grid.set_rows(self.model_rows)
             self._recalc_object_total()
 
-    # ---------------- save ----------------
 
     def _save_all_internal(self, show_messages: bool, is_auto: bool = False):
         if self.read_only:
@@ -3261,8 +3293,6 @@ class TimesheetPage(tk.Frame):
     def save_all(self):
         self._save_all_internal(show_messages=True, is_auto=False)
 
-    # ---------------- auto-fit columns (virtual grid) ----------------
-
     def _content_total_width(self, fio_px: Optional[int] = None) -> int:
         px = self.COLPX.copy()
         if fio_px is not None:
@@ -3277,7 +3307,6 @@ class TimesheetPage(tk.Frame):
         )
 
     def _auto_fit_columns(self):
-        # In virtual grid, use body canvas width
         try:
             viewport = self.grid.body.winfo_width() if hasattr(self, "grid") else 0
         except Exception:
@@ -3310,7 +3339,6 @@ class TimesheetPage(tk.Frame):
         except Exception:
             pass
         self._fit_job = self.after(150, self._auto_fit_columns)
-
 
 class MyTimesheetsPage(tk.Frame):
     """
@@ -3575,9 +3603,6 @@ class TimesheetRegistryPage(tk.Frame):
         self._load_departments()
         self._load_data()
 
-    # ------------------------------------------------------------------ #
-    #  Загрузка подразделений ИЗ РЕАЛЬНЫХ ТАБЕЛЕЙ
-    # ------------------------------------------------------------------ #
     def _load_departments(self):
         """Загружает уникальные подразделения из timesheet_headers."""
         self._all_departments = []
@@ -3614,7 +3639,6 @@ class TimesheetRegistryPage(tk.Frame):
             row=0, column=0, columnspan=6, sticky="w", pady=(0, 4)
         )
 
-        # ---- Фильтры (строка 1) ----
         row_f = 1
 
         tk.Label(top, text="Год:").grid(row=row_f, column=0, sticky="e", padx=(0, 4))
@@ -3637,7 +3661,6 @@ class TimesheetRegistryPage(tk.Frame):
         self._cmb_dep.grid(row=row_f, column=5, sticky="w")
         self.var_dep.set("Все")
 
-        # ---- Фильтры (строка 2) ----
         row_f += 1
 
         tk.Label(top, text="Объект (адрес):").grid(row=row_f, column=0, sticky="e", padx=(0, 4), pady=(4, 0))
@@ -3655,9 +3678,6 @@ class TimesheetRegistryPage(tk.Frame):
         ttk.Button(btns, text="Выгрузить в Excel", command=self._export_to_excel).pack(side="left", padx=2)
         ttk.Button(btns, text="Отчёт по заполненности", command=self._export_fill_report).pack(side="left", padx=2)
 
-        # ============================================================== #
-        #  ПРИВЯЗКА АВТОФИЛЬТРАЦИИ — ПОСЛЕ установки начальных значений!
-        # ============================================================== #
         self.var_obj_addr.trace_add("write", self._on_text_filter_changed)
         self.var_obj_id.trace_add("write", self._on_text_filter_changed)
         cmb_month.bind("<<ComboboxSelected>>", lambda e: self._load_data())
@@ -3716,9 +3736,6 @@ class TimesheetRegistryPage(tk.Frame):
             fg="#888",
         ).pack(side="right")
 
-    # ------------------------------------------------------------------ #
-    #  Автофильтрация
-    # ------------------------------------------------------------------ #
     def _on_text_filter_changed(self, *_args):
         """Debounce для текстовых полей (адрес, ID объекта) — 400 мс."""
         if self._filter_job is not None:
@@ -3731,9 +3748,6 @@ class TimesheetRegistryPage(tk.Frame):
             self.after_cancel(self._filter_job)
         self._filter_job = self.after(600, self._load_data)
 
-    # ------------------------------------------------------------------ #
-    #  Сброс фильтров
-    # ------------------------------------------------------------------ #
     def _reset_filters(self):
         # Временно отключаем автофильтрацию чтобы не дёргать _load_data многократно
         if self._filter_job is not None:
@@ -3747,9 +3761,6 @@ class TimesheetRegistryPage(tk.Frame):
         self.var_obj_id.set("")
         self._load_data()
 
-    # ------------------------------------------------------------------ #
-    #  Загрузка данных
-    # ------------------------------------------------------------------ #
     def _load_data(self):
         # Сбрасываем pending-задачу
         if self._filter_job is not None:
@@ -3827,19 +3838,8 @@ class TimesheetRegistryPage(tk.Frame):
 
         self._lbl_count.config(text=f"Найдено табелей: {len(headers)}")
 
-    # ------------------------------------------------------------------ #
-    #  Выгрузка отчёта по заполненности
-    # ------------------------------------------------------------------ #
     def _export_fill_report(self):
-        """
-        Выгружает отчёт по заполненности табелей в Excel.
 
-        Для каждого табеля, отображённого в реестре:
-        - Объект (адрес), Подразделение, Пользователь, Дата обновления
-        - Процент заполненности = (кол-во дней с 1-го числа месяца по
-          сегодняшний день, в которых есть хотя бы одна непустая запись
-          у хотя бы одного сотрудника) / (кол-во дней с 1-го по сегодня) × 100%
-        """
         if not self._headers:
             messagebox.showinfo("Отчёт по заполненности", "Нет данных для выгрузки.")
             return
@@ -3927,10 +3927,8 @@ class TimesheetRegistryPage(tk.Frame):
                 else:
                     days_in_period = (period_end_date - period_start_date).days + 1  # включительно
 
-                    # --- Загружаем строки табеля и считаем заполненность ---
                     rows = load_timesheet_rows_by_header_id(header_id)
-                    # Для каждого дня (1-based индекс) проверяем,
-                    # есть ли хотя бы одна непустая ячейка у любого сотрудника
+
                     days_filled = 0
                     for day_idx in range(days_in_period):  # 0-based
                         day_num = day_idx + 1  # 1..N
@@ -3995,9 +3993,6 @@ class TimesheetRegistryPage(tk.Frame):
             logging.exception("Ошибка выгрузки отчёта по заполненности")
             messagebox.showerror("Отчёт по заполненности", f"Ошибка:\n{e}", parent=self)
 
-    # ------------------------------------------------------------------ #
-    #  Выгрузка в Excel (без изменений)
-    # ------------------------------------------------------------------ #
     def _export_to_excel(self):
         """
         Выгружает все табели, показанные в реестре (с учётом фильтров),
@@ -4105,9 +4100,6 @@ class TimesheetRegistryPage(tk.Frame):
             logging.exception("Ошибка экспорта реестра табелей в Excel")
             messagebox.showerror("Экспорт в Excel", f"Ошибка при выгрузке:\n{e}", parent=self)
 
-    # ------------------------------------------------------------------ #
-    #  Вспомогательные методы
-    # ------------------------------------------------------------------ #
     def _get_selected_header(self) -> Optional[Dict[str, Any]]:
         sel = self.tree.selection()
         if not sel:
