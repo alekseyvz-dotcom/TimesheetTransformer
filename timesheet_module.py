@@ -1684,17 +1684,32 @@ class AutoCompleteCombobox(ttk.Combobox):
 
 class TimeForSelectedDialog(simpledialog.Dialog):
     """
-    Диалог: ввести значение часов и диапазон дней,
+    Диалог: ввести значение (часы или буквенный код) и диапазон дней,
     которые будут проставлены у выделенных сотрудников.
+
+    Поддерживаемые коды:
+      НН, НВ, МО, ВМ, ОТ, РВ 8, РВ 11
     """
+    CODE_HINTS = {
+        "НН": "Неявки по невыясненным причинам",
+        "НВ": "Дополнительные выходные дни (неоплачиваемые)",
+        "МО": "Междувахтовый отдых",
+        "ВМ": "Вахта",
+        "ОТ": "Отпуск",
+        "РВ 8": "Работа в выходные и праздники 8 часов",
+        "РВ 11": "Работа в выходные и праздники 11 часов",
+    }
+
     def __init__(self, parent, max_day: int):
         self.max_day = max_day
         self.result = None
         super().__init__(parent, title="Время для выделенных сотрудников")
 
     def body(self, master):
-        tk.Label(master, text=f"В текущем месяце дней: {self.max_day}")\
-            .grid(row=0, column=0, columnspan=4, sticky="w", pady=(4, 4))
+        tk.Label(
+            master,
+            text=f"В текущем месяце дней: {self.max_day}",
+        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(4, 4))
 
         # Режим: один день или диапазон
         self.var_mode = tk.StringVar(value="single")
@@ -1723,17 +1738,80 @@ class TimeForSelectedDialog(simpledialog.Dialog):
         self.spn_to.delete(0, "end")
         self.spn_to.insert(0, str(self.max_day))
 
-        # Значение
-        tk.Label(master, text="Часы:").grid(row=4, column=0, sticky="e", pady=(6, 0))
+        # Значение (ввод + список кодов)
+        tk.Label(master, text="Значение:").grid(row=4, column=0, sticky="e", pady=(6, 0))
+
         self.ent_value = ttk.Entry(master, width=20)
-        self.ent_value.grid(row=4, column=1, columnspan=3, sticky="w", pady=(6, 0))
+        self.ent_value.grid(row=4, column=1, sticky="w", pady=(6, 0))
         self.ent_value.insert(0, "8,25")  # типовое значение
 
-        tk.Label(master, text="Примеры: 8 | 8,25 | 8:30 | 1/7 | 8/2(1/1)\n"
-                              "Пусто — очистить выбранные дни")\
-            .grid(row=5, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        tk.Label(master, text="или код:").grid(row=4, column=2, sticky="e", pady=(6, 0))
+        self.var_code = tk.StringVar(value="(не выбран)")
+        self.cmb_code = ttk.Combobox(
+            master,
+            state="readonly",
+            width=18,
+            textvariable=self.var_code,
+            values=["(не выбран)"] + list(self.CODE_HINTS.keys()),
+        )
+        self.cmb_code.grid(row=4, column=3, sticky="w", pady=(6, 0))
+
+        def _on_code_selected(_e=None):
+            code = (self.var_code.get() or "").strip()
+            if code and code != "(не выбран)":
+                # при выборе кода — подставляем его в поле ввода
+                self.ent_value.delete(0, "end")
+                self.ent_value.insert(0, code)
+
+        self.cmb_code.bind("<<ComboboxSelected>>", _on_code_selected)
+
+        tk.Label(
+            master,
+            text="Часы: 8 | 8,25 | 8:30 | 1/7 | 8/2(1/1)\n"
+                 "Коды: НН, НВ, МО, ВМ, ОТ, РВ 8, РВ 11\n"
+                 "Пусто — очистить выбранные дни",
+        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+        # подсказка по коду
+        self.lbl_code_help = tk.Label(master, text="", fg="#555")
+        self.lbl_code_help.grid(row=6, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+        def _update_help(*_):
+            v = (self.ent_value.get() or "").strip().upper()
+            # нормализуем пробелы (для "РВ  11")
+            v_norm = " ".join(v.split())
+            hint = self.CODE_HINTS.get(v_norm, "")
+            self.lbl_code_help.config(text=(f"Код: {hint}" if hint else ""))
+
+        self.ent_value.bind("<KeyRelease>", _update_help)
+        self.cmb_code.bind("<<ComboboxSelected>>", lambda e: _update_help())
+        _update_help()
 
         return self.ent_value
+
+    def _is_allowed_code(self, val: str) -> bool:
+        """
+        True если val — один из поддерживаемых кодов.
+        Допускаем:
+          - точные: НН, НВ, МО, ВМ, ОТ, РВ 8, РВ 11
+          - и вариант "РВ <число>" (если хочешь строго только 8/11 — см. ниже)
+        """
+        v = (val or "").strip().upper()
+        v = " ".join(v.split())  # нормализация пробелов
+
+        if v in self.CODE_HINTS:
+            return True
+
+        # Если хочешь разрешать только "РВ 8" и "РВ 11" — удали этот блок целиком.
+        if v.startswith("РВ "):
+            tail = v[3:].strip()
+            try:
+                n = float(tail.replace(",", "."))
+                return n > 0
+            except Exception:
+                return False
+
+        return False
 
     def validate(self):
         mode = self.var_mode.get()
@@ -1748,24 +1826,15 @@ class TimeForSelectedDialog(simpledialog.Dialog):
             return False
 
         if not (1 <= d_single <= self.max_day):
-            messagebox.showwarning(
-                "Время для выделенных",
-                f"Один день должен быть от 1 до {self.max_day}.",
-            )
+            messagebox.showwarning("Время для выделенных", f"Один день должен быть от 1 до {self.max_day}.")
             return False
 
         if not (1 <= d_from <= self.max_day) or not (1 <= d_to <= self.max_day):
-            messagebox.showwarning(
-                "Время для выделенных",
-                f"Диапазон дней должен быть в пределах 1–{self.max_day}.",
-            )
+            messagebox.showwarning("Время для выделенных", f"Диапазон дней должен быть в пределах 1–{self.max_day}.")
             return False
 
         if mode == "range" and d_from > d_to:
-            messagebox.showwarning(
-                "Время для выделенных",
-                "Начальный день диапазона не может быть больше конечного.",
-            )
+            messagebox.showwarning("Время для выделенных", "Начальный день диапазона не может быть больше конечного.")
             return False
 
         self._mode = mode
@@ -1774,18 +1843,28 @@ class TimeForSelectedDialog(simpledialog.Dialog):
         else:
             self._from, self._to = d_from, d_to
 
-        # Проверяем значение часов
-        val = self.ent_value.get().strip()
+        # Проверяем значение
+        val = (self.ent_value.get() or "").strip()
         if not val:
             # Пустое — разрешаем (значит очистить)
             self._value = None
             return True
 
+        # 1) если это код — принимаем
+        if self._is_allowed_code(val):
+            # нормализуем (верхний регистр + один пробел)
+            v = " ".join(val.strip().upper().split())
+            self._value = v
+            return True
+
+        # 2) иначе — как раньше: часы
         hv = parse_hours_value(val)
         if hv is None or hv < 0:
             messagebox.showwarning(
                 "Время для выделенных",
-                "Введите корректное значение часов (например, 8, 8:30, 1/7, 8/2(1/1)).",
+                "Введите корректное значение часов или код.\n"
+                "Примеры часов: 8, 8:30, 1/7, 8/2(1/1)\n"
+                "Коды: НН, НВ, МО, ВМ, ОТ, РВ 8, РВ 11",
             )
             return False
 
@@ -1793,7 +1872,6 @@ class TimeForSelectedDialog(simpledialog.Dialog):
         return True
 
     def apply(self):
-        # result: словарь с диапазоном и строковым значением (или None)
         self.result = {
             "from": self._from,
             "to": self._to,
