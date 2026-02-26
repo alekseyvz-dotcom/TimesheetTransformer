@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import calendar
 import tkinter as tk
-from datetime import datetime
+import platform
+from datetime import date
 from tkinter import ttk
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+# Определяем ОС для правильной обработки колеса мыши
+OS_NAME = platform.system()
 
 def month_days(year: int, month: int) -> int:
     return calendar.monthrange(year, month)[1]
@@ -14,16 +17,11 @@ def month_days(year: int, month: int) -> int:
 
 class VirtualTimesheetGrid(tk.Frame):
     """
-    Виртуализированный грид табеля на Canvas:
-    - рисует только видимые строки
-    - не создаёт тысячи Entry/Label
-    - редактирование одной ячейки через один Entry поверх Canvas
-    - клик по ячейке дня -> редактирование
-    - Enter/Tab/стрелки: commit + переход
-    - Esc: отмена
-    - "Удалить" обрабатывается через on_delete_row
-    - on_change вызывается как on_change(row_index, day_index)
-      (для инкрементальных totals)
+    Оптимизированный виртуальный грид табеля.
+    - Отрисовывает только видимые строки (Virtualization).
+    - Использует Canvas Tags для быстрого управления объектами.
+    - Кэширует выходные дни.
+    - Поддерживает любой ввод в ячейках.
     """
 
     def __init__(
@@ -46,30 +44,31 @@ class VirtualTimesheetGrid(tk.Frame):
 
         self.read_only = bool(read_only)
         self.allow_row_select = bool(allow_row_select)
-
         self.row_height = int(row_height)
 
-        # NOTE: btn52 removed
         self.COLPX = colpx or {
-            "fio": 200,
-            "tbn": 100,
-            "day": 36,
-            "days": 46,
-            "hours": 56,
-            "del": 66,
+            "fio": 200, "tbn": 100, "day": 36,
+            "days": 46, "hours": 56, "del": 66,
         }
 
         self.model_rows: List[Dict[str, Any]] = []
         self.selected_indices: Set[int] = set()
 
-        # editor state
+        # --- Кэширование ---
+        # Храним (год, месяц) -> карта {день_индекс: цвет_фона}
+        self._cached_ym: Tuple[int, int] = (0, 0)
+        self._weekend_map: Dict[int, str] = {} 
+        # Множество индексов строк, которые сейчас отрисованы на канвасе
+        self._rendered_rows: Set[int] = set()
+
+        # --- Редактор ---
         self._editor: Optional[tk.Entry] = None
         self._editor_window_id: Optional[int] = None
         self._editor_var: Optional[tk.StringVar] = None
         self._edit_row: Optional[int] = None
         self._edit_day: Optional[int] = None
 
-        # colors
+        # --- Цвета ---
         self.HEADER_BG = "#d0d0d0"
         self.ZEBRA_EVEN = "#ffffff"
         self.ZEBRA_ODD = "#f6f8fa"
@@ -78,12 +77,14 @@ class VirtualTimesheetGrid(tk.Frame):
         self.WEEK_BG_SAT = "#fff8e1"
         self.WEEK_BG_SUN = "#ffebee"
 
-        # --- UI: header canvas + body canvas + scrollbars ---
-        self.header = tk.Canvas(self, height=26, highlightthickness=0)
-        self.body = tk.Canvas(self, highlightthickness=0)
+        # --- UI Components ---
+        self.header = tk.Canvas(self, height=26, highlightthickness=0, bg=self.HEADER_BG)
+        self.body = tk.Canvas(self, highlightthickness=0, bg="white")
+        
         self.vsb = ttk.Scrollbar(self, orient="vertical", command=self._yview)
         self.hsb = ttk.Scrollbar(self, orient="horizontal", command=self._xview)
 
+        # Layout
         self.header.grid(row=0, column=0, sticky="ew")
         self.body.grid(row=1, column=0, sticky="nsew")
         self.vsb.grid(row=1, column=1, sticky="ns")
@@ -92,21 +93,24 @@ class VirtualTimesheetGrid(tk.Frame):
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        self.body.configure(yscrollcommand=self.vsb.set, xscrollcommand=self.hsb.set)
+        # Linking Scrollbars
+        self.body.configure(yscrollcommand=self.vsb.set)
+        # Для горизонтального скролла используем кастомный метод для синхронизации заголовка
+        self.body.configure(xscrollcommand=self._on_body_xscroll)
 
-        # events
+        # Events
         self.body.bind("<Configure>", lambda e: self._refresh())
         self.body.bind("<Button-1>", self._on_click)
 
-        # wheel (Windows)
-        self.body.bind("<MouseWheel>", self._on_wheel)
-        self.body.bind("<Shift-MouseWheel>", self._on_shift_wheel)
-
-        # sync header horizontal scroll with body
-        self.body.bind("<Expose>", lambda e: self._sync_header_x())
-
-        self._header_items: List[int] = []
-        self._row_items: Dict[int, List[int]] = {}  # row_index -> canvas item ids
+        # MouseWheel (Cross-platform)
+        if OS_NAME == "Linux":
+            self.body.bind("<Button-4>", lambda e: self._scroll_generic(e, -1, "y"))
+            self.body.bind("<Button-5>", lambda e: self._scroll_generic(e, 1, "y"))
+            self.body.bind("<Shift-Button-4>", lambda e: self._scroll_generic(e, -1, "x"))
+            self.body.bind("<Shift-Button-5>", lambda e: self._scroll_generic(e, 1, "x"))
+        else:
+            self.body.bind("<MouseWheel>", self._on_wheel)
+            self.body.bind("<Shift-MouseWheel>", self._on_shift_wheel)
 
         self._cols: List[Tuple[str, int, int, Optional[int]]] = []
         self._total_width: int = 1
@@ -114,119 +118,108 @@ class VirtualTimesheetGrid(tk.Frame):
         self._build_columns()
         self._draw_header()
 
-    # -------- public API --------
+    # -------- Public API --------
 
     def set_rows(self, rows: List[Dict[str, Any]]):
-        # close editor to avoid committing to wrong indices
+        """Загружает новые данные и полностью обновляет вид."""
         self._end_edit(commit=True)
-
         self.model_rows = rows or []
         self.selected_indices.clear()
-
-        # clear rendered rows to avoid "ghost" artifacts
-        for r, items in list(self._row_items.items()):
-            for item in items:
-                try:
-                    self.body.delete(item)
-                except Exception:
-                    pass
-        self._row_items.clear()
-
+        
+        # Полная очистка канваса (быстрее, чем удалять по одной)
+        self.body.delete("all")
+        self._rendered_rows.clear()
+        
+        self._update_weekends_cache()
         self._update_scrollregion()
         self._refresh()
 
     def set_selected_indices(self, indices: Set[int]):
+        """Устанавливает выделенные строки."""
         self.selected_indices = set(indices or set())
-        self._refresh()
+        # Принудительно перерисовываем всё видимое, чтобы обновить цвета выделения
+        self._refresh(force_redraw=True)
 
     def get_selected_indices(self) -> Set[int]:
         return set(self.selected_indices)
 
     def refresh(self):
-        self._refresh()
+        """Принудительное обновление (например, при смене месяца извне)."""
+        self._update_weekends_cache()
+        self._refresh(force_redraw=True)
 
     def close_editor(self, commit: bool = True):
         self._end_edit(commit=commit)
 
-    # -------- internals --------
+    # -------- Internals --------
+
+    def _update_weekends_cache(self):
+        """Создает карту цветов для выходных дней текущего месяца."""
+        y, m = self.get_year_month()
+        # Если год/месяц не менялись, ничего не делаем
+        if (y, m) == self._cached_ym:
+            return
+        
+        self._cached_ym = (y, m)
+        self._weekend_map.clear()
+        
+        dim = month_days(y, m)
+        for d in range(1, dim + 1):
+            wd = date(y, m, d).weekday()
+            # 5 - Суббота, 6 - Воскресенье
+            if wd == 5:
+                self._weekend_map[d-1] = self.WEEK_BG_SAT
+            elif wd == 6:
+                self._weekend_map[d-1] = self.WEEK_BG_SUN
 
     def _build_columns(self):
-        # columns: (kind, x0, x1, extra)
-        cols: List[Tuple[str, int, int, Optional[int]]] = []
+        cols = []
         x = 0
+        
+        def add(kind, width, extra=None):
+            nonlocal x
+            cols.append((kind, x, x + width, extra))
+            x += width
 
-        cols.append(("fio", x, x + self.COLPX["fio"], None))
-        x += self.COLPX["fio"]
-
-        cols.append(("tbn", x, x + self.COLPX["tbn"], None))
-        x += self.COLPX["tbn"]
-
+        add("fio", self.COLPX["fio"])
+        add("tbn", self.COLPX["tbn"])
+        
         for di in range(31):
-            cols.append(("day", x, x + self.COLPX["day"], di))
-            x += self.COLPX["day"]
-
-        cols.append(("days", x, x + self.COLPX["days"], None))
-        x += self.COLPX["days"]
-
-        cols.append(("hours", x, x + self.COLPX["hours"], None))
-        x += self.COLPX["hours"]
-
-        cols.append(("ot_day", x, x + self.COLPX["hours"], None))
-        x += self.COLPX["hours"]
-
-        cols.append(("ot_night", x, x + self.COLPX["hours"], None))
-        x += self.COLPX["hours"]
-
-        cols.append(("del", x, x + self.COLPX["del"], None))
-        x += self.COLPX["del"]
+            add("day", self.COLPX["day"], di)
+            
+        for k in ["days", "hours", "ot_day", "ot_night"]:
+             add(k, self.COLPX.get(k, 50))
+             
+        add("del", self.COLPX["del"])
 
         self._cols = cols
         self._total_width = x
-
         self.header.configure(scrollregion=(0, 0, self._total_width, 0))
         self.body.configure(scrollregion=(0, 0, self._total_width, 0))
 
     def _draw_header(self):
-        for item in self._header_items:
-            try:
-                self.header.delete(item)
-            except Exception:
-                pass
-        self._header_items.clear()
-
+        self.header.delete("all")
         y0, y1 = 0, 26
-        for kind, x0, x1, extra in self._cols:
-            if kind == "fio":
-                text = "ФИО"
-            elif kind == "tbn":
-                text = "Таб.№"
-            elif kind == "day":
-                text = str(int(extra) + 1)
-            elif kind == "days":
-                text = "Дней"
-            elif kind == "hours":
-                text = "Часы"
-            elif kind == "ot_day":
-                text = "Пер.день"
-            elif kind == "ot_night":
-                text = "Пер.ночь"
-            elif kind == "del":
-                text = "Удалить"
-            else:
-                text = ""
+        
+        labels = {
+            "fio": "ФИО", "tbn": "Таб.№", "days": "Дней", 
+            "hours": "Часы", "ot_day": "Пер.день", 
+            "ot_night": "Пер.ночь", "del": "Удалить"
+        }
 
-            r = self.header.create_rectangle(
-                x0, y0, x1, y1, fill=self.HEADER_BG, outline="#b0b0b0"
-            )
-            t = self.header.create_text(
-                (x0 + x1) / 2, (y0 + y1) / 2, text=text, anchor="center"
-            )
-            self._header_items.extend([r, t])
+        for kind, x0, x1, extra in self._cols:
+            text = labels.get(kind, "")
+            if kind == "day":
+                text = str(int(extra) + 1)
+
+            self.header.create_rectangle(x0, y0, x1, y1, fill=self.HEADER_BG, outline="#b0b0b0")
+            self.header.create_text((x0 + x1) / 2, (y0 + y1) / 2, text=text, anchor="center")
 
     def _update_scrollregion(self):
         h = max(1, len(self.model_rows)) * self.row_height
         self.body.configure(scrollregion=(0, 0, self._total_width, h))
-        self.header.configure(scrollregion=(0, 0, self._total_width, 0))
+
+    # --- Scrolling ---
 
     def _yview(self, *args):
         self._end_edit(commit=True)
@@ -236,94 +229,101 @@ class VirtualTimesheetGrid(tk.Frame):
     def _xview(self, *args):
         self._end_edit(commit=True)
         self.body.xview(*args)
-        self._sync_header_x()
+        # Header синхронизируется автоматически через callback _on_body_xscroll
 
-    def _sync_header_x(self):
-        try:
-            first, _last = self.body.xview()
-            self.header.xview_moveto(first)
-        except Exception:
-            pass
+    def _on_body_xscroll(self, f1, f2):
+        """Вызывается канвасом при прокрутке по X. Синхронизируем Scrollbar и Header."""
+        self.hsb.set(f1, f2)
+        self.header.xview_moveto(f1)
+
+    def _scroll_generic(self, event, units, orient):
+        self._end_edit(commit=True)
+        if orient == "y":
+            self.body.yview_scroll(units, "units")
+            self._refresh()
+        else:
+            self.body.xview_scroll(units, "units")
+        return "break"
 
     def _on_wheel(self, event):
-        self._end_edit(commit=True)
-        self.body.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        self._refresh()
-        return "break"
+        delta = -1 * (event.delta // 120) if event.delta else 0
+        if delta == 0 and event.delta: 
+            delta = -1 if event.delta > 0 else 1 # Fix for MacOS small delta
+        return self._scroll_generic(event, delta, "y")
 
     def _on_shift_wheel(self, event):
-        self._end_edit(commit=True)
-        self.body.xview_scroll(int(-1 * (event.delta / 120)), "units")
-        self._sync_header_x()
-        return "break"
+        delta = -1 * (event.delta // 120) if event.delta else 0
+        if delta == 0 and event.delta: 
+            delta = -1 if event.delta > 0 else 1
+        return self._scroll_generic(event, delta, "x")
+
+    # --- Interaction ---
 
     def _hit_test(self, x: int, y: int) -> Tuple[Optional[int], Optional[Tuple[str, Optional[int]]]]:
-        cy = int(self.body.canvasy(y))
         cx = int(self.body.canvasx(x))
+        cy = int(self.body.canvasy(y))
         row = cy // self.row_height
+        
         if row < 0 or row >= len(self.model_rows):
             return None, None
-
+        
+        # Простой перебор колонок (их немного, это быстро)
         for kind, x0, x1, extra in self._cols:
             if x0 <= cx < x1:
-                if kind == "day":
-                    return row, ("day", int(extra))
-                return row, (kind, None)
-
+                return row, (kind, extra)
         return row, None
 
     def _on_click(self, event):
-        row, col = self._hit_test(event.x, event.y)
-        if row is None:
+        # 1. Возвращаем фокус на канвас (чтобы работали клавиатурные события после закрытия редактора)
+        self.body.focus_set()
+
+        row_index, col_data = self._hit_test(event.x, event.y)
+        
+        # Если клик вне данных - просто коммитим редактор
+        if row_index is None:
             self._end_edit(commit=True)
             return
 
-        if not col:
-            self._end_edit(commit=True)
+        # Если клик в ту же ячейку, что и редактируется - игнорируем
+        kind, extra = col_data or (None, None)
+        if self._editor and kind == "day":
+            if row_index == self._edit_row and int(extra) == self._edit_day:
+                return
+
+        self._end_edit(commit=True)
+
+        if not col_data:
             return
 
-        kind, extra = col
-
-        # commit current editor before acting on click
-        if self._editor:
-            self._end_edit(commit=True)
-
-        # delete cell
         if kind == "del":
             if callable(self.on_delete_row) and not self.read_only:
-                self.on_delete_row(row)
+                self.on_delete_row(row_index)
             return
 
-        # edit on 1 click
         if kind == "day" and not self.read_only:
             day_index = int(extra)
             y, m = self.get_year_month()
             if (day_index + 1) <= month_days(y, m):
-                self._begin_edit_day(row, day_index)
+                self._begin_edit_day(row_index, day_index)
             return
 
-        # row selection by clicking FIO/TBN
         if self.allow_row_select and kind in ("fio", "tbn"):
-            if row in self.selected_indices:
-                self.selected_indices.remove(row)
+            if row_index in self.selected_indices:
+                self.selected_indices.remove(row_index)
             else:
-                self.selected_indices.add(row)
-            self._refresh()
+                self.selected_indices.add(row_index)
+            # Перерисовываем только одну строку
+            self._draw_row(row_index)
+
+    # --- Editing ---
 
     def _cell_bbox(self, row_index: int, kind: str, extra: Optional[int]) -> Optional[Tuple[int, int, int, int]]:
-        x0 = x1 = None
-        for k, cx0, cx1, ex in self._cols:
+        for k, x0, x1, ex in self._cols:
             if k == kind and (extra is None or ex == extra):
-                x0, x1 = cx0, cx1
-                break
-        if x0 is None:
-            return None
-        y0 = row_index * self.row_height
-        y1 = y0 + self.row_height
-        return (x0, y0, x1, y1)
+                return (x0, row_index * self.row_height, x1, (row_index + 1) * self.row_height)
+        return None
 
     def _begin_edit_day(self, row_index: int, day_index: int):
-        # close previous editor
         self._end_edit(commit=True)
 
         bbox = self._cell_bbox(row_index, "day", day_index)
@@ -332,40 +332,37 @@ class VirtualTimesheetGrid(tk.Frame):
         x0, y0, x1, y1 = bbox
 
         rec = self.model_rows[row_index]
-
-        hours = rec.get("hours") or [None] * 31
-        if len(hours) < 31:
-            hours = (hours + [None] * 31)[:31]
-            rec["hours"] = hours
-
-        cur_val = hours[day_index] or ""
+        hours = rec.get("hours") or []
+        
+        # Безопасно получаем текущее значение
+        cur_val = ""
+        if day_index < len(hours):
+            v = hours[day_index]
+            cur_val = str(v) if v is not None else ""
 
         self._edit_row = row_index
         self._edit_day = day_index
 
-        self._editor_var = tk.StringVar(value=str(cur_val))
+        self._editor_var = tk.StringVar(value=cur_val)
+        # Валидация убрана по запросу
         self._editor = tk.Entry(self.body, textvariable=self._editor_var, justify="center")
 
         def _cancel(_ev):
             self._end_edit(commit=False)
             return "break"
 
-        # commit+move
+        # Навигация и коммит
         self._editor.bind("<Return>", lambda e: self._commit_and_move(dr=1, dc=0))
         self._editor.bind("<Tab>", lambda e: self._commit_and_move(dr=0, dc=1))
-        self._editor.bind("<Shift-Tab>", lambda e: self._commit_and_move(dr=0, dc=-1))
-
-        self._editor.bind("<Left>", lambda e: self._commit_and_move(dr=0, dc=-1))
-        self._editor.bind("<Right>", lambda e: self._commit_and_move(dr=0, dc=1))
+        # Можно добавить Shift+Tab, Up, Down, но аккуратно, чтобы не ломать навигацию курсора
         self._editor.bind("<Up>", lambda e: self._commit_and_move(dr=-1, dc=0))
         self._editor.bind("<Down>", lambda e: self._commit_and_move(dr=1, dc=0))
-
+        
         self._editor.bind("<Escape>", _cancel)
         self._editor.bind("<FocusOut>", lambda e: self._end_edit(commit=True))
 
         self._editor_window_id = self.body.create_window(
-            x0 + 1,
-            y0 + 1,
+            x0 + 1, y0 + 1,
             width=max(4, x1 - x0 - 2),
             height=max(4, y1 - y0 - 2),
             anchor="nw",
@@ -373,10 +370,7 @@ class VirtualTimesheetGrid(tk.Frame):
         )
 
         self._editor.focus_set()
-        try:
-            self._editor.selection_range(0, "end")
-        except Exception:
-            pass
+        self._editor.selection_range(0, "end")
 
     def _end_edit(self, commit: bool):
         if not self._editor:
@@ -384,220 +378,198 @@ class VirtualTimesheetGrid(tk.Frame):
 
         row_index = self._edit_row
         day_index = self._edit_day
-
-        # read value before destroying
-        new_val = ""
+        
+        # Получаем значение перед уничтожением виджета
+        val = ""
         try:
-            if self._editor_var is not None:
-                new_val = (self._editor_var.get() or "").strip()
-        except Exception:
-            new_val = ""
-
-        # destroy editor UI
-        try:
-            if self._editor_window_id is not None:
-                self.body.delete(self._editor_window_id)
+            if self._editor_var:
+                val = self._editor_var.get().strip()
         except Exception:
             pass
-        try:
+
+        # Cleanup UI
+        if self._editor_window_id:
+            self.body.delete(self._editor_window_id)
+        if self._editor:
             self._editor.destroy()
-        except Exception:
-            pass
 
         self._editor = None
         self._editor_window_id = None
         self._editor_var = None
         self._edit_row = None
         self._edit_day = None
+        
+        # Возврат фокуса, чтобы скролл клавиатурой работал
+        self.body.focus_set()
 
-        if not commit:
+        if not commit or row_index is None or day_index is None:
             return
-        if row_index is None or day_index is None:
-            return
+
         if not (0 <= row_index < len(self.model_rows)):
             return
-        if not (0 <= day_index < 31):
-            return
 
+        # Сохранение в модель
         rec = self.model_rows[row_index]
-        hours = rec.get("hours") or [None] * 31
-        if len(hours) < 31:
-            hours = (hours + [None] * 31)[:31]
+        hours = rec.get("hours") or []
+        
+        # Расширяем список, если он короче индекса дня
+        if len(hours) <= day_index:
+            hours.extend([None] * (day_index - len(hours) + 1))
+        
+        new_val = val if val else None
+        
+        # Обновляем только если изменилось
+        if hours[day_index] != new_val:
+            hours[day_index] = new_val
+            rec["hours"] = hours
+            
+            # Перерисовка одной строки
+            self._draw_row(row_index)
 
-        hours[day_index] = (new_val if new_val else None)
-        rec["hours"] = hours
-
-        # re-draw row
-        self._draw_row(row_index)
-
-        # notify (for incremental totals)
-        if callable(self.on_change):
-            self.on_change(row_index, day_index)
-
-    def _refresh(self):
-        # visible area
-        try:
-            y0 = int(self.body.canvasy(0))
-            h = int(self.body.winfo_height())
-        except Exception:
-            return
-
-        first_row = max(0, y0 // self.row_height)
-        visible = max(1, h // self.row_height + 2)
-        last_row = min(len(self.model_rows), first_row + visible)
-
-        # delete rendered rows out of range
-        for r in list(self._row_items.keys()):
-            if r < first_row or r >= last_row:
-                for item in self._row_items[r]:
-                    try:
-                        self.body.delete(item)
-                    except Exception:
-                        pass
-                del self._row_items[r]
-
-        # draw rows in range
-        for r in range(first_row, last_row):
-            self._draw_row(r)
-
-        self._sync_header_x()
+            if callable(self.on_change):
+                self.on_change(row_index, day_index)
 
     def _commit_and_move(self, dr: int, dc: int):
-        """
-        Commit текущей ячейки и открыть редактор в соседней (dr/dc).
-        dc двигает по дням, dr по строкам.
-        """
+        """Сохраняет текущее значение и перемещает редактор."""
         row = self._edit_row
         day = self._edit_day
+        self._end_edit(commit=True)
+
         if row is None or day is None:
             return "break"
-
-        # commit current
-        self._end_edit(commit=True)
 
         new_row = row + dr
         new_day = day + dc
 
-        if new_row < 0:
-            new_row = 0
-        if new_row >= len(self.model_rows):
-            new_row = len(self.model_rows) - 1 if self.model_rows else 0
+        # Ограничения строк
+        if new_row < 0: new_row = 0
+        if new_row >= len(self.model_rows): 
+            new_row = len(self.model_rows) - 1
 
-        if new_day < 0:
-            new_day = 0
-        if new_day > 30:
-            new_day = 30
-
-        # avoid disabled day after end-of-month
+        # Ограничения дней
         y, m = self.get_year_month()
         dim = month_days(y, m)
-        while new_day + 1 > dim and new_day > 0:
-            new_day -= 1
+        
+        if new_day < 0: new_day = 0
+        if new_day >= dim: new_day = dim - 1
 
+        # Если данные есть, открываем редактор
         if self.model_rows:
             self._begin_edit_day(new_row, new_day)
 
         return "break"
 
-    def _bg_for_day(self, year: int, month: int, day: int) -> str:
-        wd = datetime(year, month, day).weekday()
-        if wd == 5:
-            return self.WEEK_BG_SAT
-        if wd == 6:
-            return self.WEEK_BG_SUN
-        return "white"
+    # --- Virtual Rendering ---
+
+    def _refresh(self, force_redraw: bool = False):
+        """
+        Умная перерисовка: рисует только то, чего нет на экране, 
+        и удаляет то, что ушло за экран.
+        """
+        try:
+            y_top = self.body.canvasy(0)
+            view_h = self.body.winfo_height()
+            if view_h <= 1: 
+                return
+        except Exception:
+            return
+
+        first_row = max(0, int(y_top // self.row_height))
+        visible_count = int(view_h // self.row_height) + 2
+        last_row = min(len(self.model_rows), first_row + visible_count)
+        
+        rows_to_display = set(range(first_row, last_row))
+
+        if force_redraw:
+            # Если принудительно, удаляем всё видимое и рисуем заново
+            for r in rows_to_display:
+                self._draw_row(r)
+            # И чистим мусор за пределами видимости
+            garbage = self._rendered_rows - rows_to_display
+            for r in garbage:
+                self.body.delete(f"row_{r}")
+            self._rendered_rows = rows_to_display
+            return
+
+        # 1. Удаляем строки, которые ушли за пределы видимости
+        garbage = self._rendered_rows - rows_to_display
+        for r in garbage:
+            self.body.delete(f"row_{r}")
+        
+        # 2. Рисуем строки, которые появились в области видимости
+        missing = rows_to_display - self._rendered_rows
+        for r in missing:
+            self._draw_row(r)
+            
+        self._rendered_rows = rows_to_display
 
     def _draw_row(self, row_index: int):
-        # redraw whole row (ok for visible-only virtualization)
-        if row_index in self._row_items:
-            for item in self._row_items[row_index]:
-                try:
-                    self.body.delete(item)
-                except Exception:
-                    pass
+        # Удаляем старую версию строки по тегу (если она была)
+        tag = f"row_{row_index}"
+        self.body.delete(tag)
 
         if not (0 <= row_index < len(self.model_rows)):
             return
 
         rec = self.model_rows[row_index]
-
         y0 = row_index * self.row_height
         y1 = y0 + self.row_height
 
-        zebra = self.ZEBRA_EVEN if (row_index % 2 == 0) else self.ZEBRA_ODD
         selected = (row_index in self.selected_indices)
-
-        y, m = self.get_year_month()
+        # Базовый цвет (зебра)
+        base_bg = self.ZEBRA_EVEN if (row_index % 2 == 0) else self.ZEBRA_ODD
+        
+        hours = rec.get("hours") or []
+        totals = rec.get("_totals") or {}
+        
+        y, m = self._cached_ym
         dim = month_days(y, m)
 
-        items: List[int] = []
-
-        fio = (rec.get("fio") or "")
-        tbn = (rec.get("tbn") or "")
-
-        hours = rec.get("hours") or [None] * 31
-        if len(hours) < 31:
-            hours = (hours + [None] * 31)[:31]
-            rec["hours"] = hours
-
-        totals = rec.get("_totals") if isinstance(rec.get("_totals"), dict) else {}
-        totals_days = totals.get("days")
-        totals_hours = totals.get("hours")
-        totals_ot_day = totals.get("ot_day")
-        totals_ot_night = totals.get("ot_night")
-
+        # Рисуем ячейки
         for kind, x0, x1, extra in self._cols:
-            fill = self.SELECT_BG if selected else zebra
-
+            bg = self.SELECT_BG if selected else base_bg
             text = ""
             anchor = "w"
-            tx: float = x0 + 4
+            tx = x0 + 4
 
             if kind == "fio":
-                text = fio
+                text = str(rec.get("fio") or "")
             elif kind == "tbn":
-                text = tbn
-                anchor = "center"
-                tx = (x0 + x1) / 2
+                text = str(rec.get("tbn") or "")
+                anchor = "center"; tx = (x0 + x1)/2
             elif kind == "day":
                 di = int(extra)
                 day_num = di + 1
                 if day_num > dim:
-                    fill = self.DISABLED_BG
-                    text = ""
+                    bg = self.DISABLED_BG
                 else:
-                    fill = self.SELECT_BG if selected else self._bg_for_day(y, m, day_num)
-                    v = hours[di]
-                    text = "" if v is None else str(v)
-                    anchor = "center"
-                    tx = (x0 + x1) / 2
-            elif kind == "days":
-                text = "" if totals_days is None else str(totals_days)
-                anchor = "e"
-                tx = x1 - 4
-            elif kind == "hours":
-                text = "" if totals_hours is None else str(totals_hours)
-                anchor = "e"
-                tx = x1 - 4
-            elif kind == "ot_day":
-                text = "" if totals_ot_day is None else str(totals_ot_day)
-                anchor = "e"
-                tx = x1 - 4
-            elif kind == "ot_night":
-                text = "" if totals_ot_night is None else str(totals_ot_night)
-                anchor = "e"
-                tx = x1 - 4
+                    # Берем цвет выходного из кэша O(1)
+                    if not selected:
+                        bg = self._weekend_map.get(di, base_bg)
+                    
+                    val = hours[di] if di < len(hours) else None
+                    text = str(val) if val is not None else ""
+                    anchor = "center"; tx = (x0 + x1)/2
+            
             elif kind == "del":
-                text = "Удалить"
-                anchor = "center"
-                tx = (x0 + x1) / 2
+                text = "Удалить" # Можно заменить на иконку
+                anchor = "center"; tx = (x0 + x1)/2
+            
+            else:
+                # Totals (days, hours, etc)
+                val = totals.get(kind)
+                text = str(val) if val is not None else ""
+                anchor = "e"; tx = x1 - 4
 
-            r_id = self.body.create_rectangle(
-                x0, y0, x1, y1, fill=fill, outline="#e0e0e0"
+            # Создаем элементы с тегом row_N
+            self.body.create_rectangle(
+                x0, y0, x1, y1, 
+                fill=bg, outline="#e0e0e0", 
+                tags=(tag, "bg")
             )
-            t_id = self.body.create_text(
-                tx, (y0 + y1) / 2, text=text, anchor=anchor, fill="#111"
-            )
-            items.extend([r_id, t_id])
-
-        self._row_items[row_index] = items
+            if text:
+                self.body.create_text(
+                    tx, (y0 + y1)/2, 
+                    text=text, anchor=anchor, fill="#111", 
+                    tags=(tag, "txt")
+                )
