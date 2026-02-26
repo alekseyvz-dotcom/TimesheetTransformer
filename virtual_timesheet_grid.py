@@ -334,7 +334,6 @@ class VirtualTimesheetGrid(tk.Frame):
         rec = self.model_rows[row_index]
         hours = rec.get("hours") or []
         
-        # Безопасно получаем текущее значение
         cur_val = ""
         if day_index < len(hours):
             v = hours[day_index]
@@ -344,19 +343,23 @@ class VirtualTimesheetGrid(tk.Frame):
         self._edit_day = day_index
 
         self._editor_var = tk.StringVar(value=cur_val)
-        # Валидация убрана по запросу
         self._editor = tk.Entry(self.body, textvariable=self._editor_var, justify="center")
 
         def _cancel(_ev):
             self._end_edit(commit=False)
             return "break"
 
-        # Навигация и коммит
-        self._editor.bind("<Return>", lambda e: self._commit_and_move(dr=1, dc=0))
+        # --- НАВИГАЦИЯ ---
+        # Enter / Tab / Up / Down - стандартное поведение
+        self._editor.bind("<Return>", lambda e: self._commit_and_move(dr=1, dc=0)) # Enter вниз (или вправо, как удобнее)
+        self._editor.bind("<KP_Enter>", lambda e: self._commit_and_move(dr=1, dc=0)) # Numpad Enter
         self._editor.bind("<Tab>", lambda e: self._commit_and_move(dr=0, dc=1))
-        # Можно добавить Shift+Tab, Up, Down, но аккуратно, чтобы не ломать навигацию курсора
         self._editor.bind("<Up>", lambda e: self._commit_and_move(dr=-1, dc=0))
         self._editor.bind("<Down>", lambda e: self._commit_and_move(dr=1, dc=0))
+        
+        # --- НОВАЯ ЛОГИКА ДЛЯ ВЛЕВО / ВПРАВО ---
+        self._editor.bind("<Left>", self._on_arrow_left)
+        self._editor.bind("<Right>", self._on_arrow_right)
         
         self._editor.bind("<Escape>", _cancel)
         self._editor.bind("<FocusOut>", lambda e: self._end_edit(commit=True))
@@ -370,7 +373,35 @@ class VirtualTimesheetGrid(tk.Frame):
         )
 
         self._editor.focus_set()
+        # Выделяем весь текст при входе, чтобы сразу можно было перезаписать
         self._editor.selection_range(0, "end")
+
+    def _on_arrow_left(self, event):
+        """Переход влево, только если курсор в начале строки."""
+        # tk.INSERT - текущая позиция курсора
+        cursor_pos = self._editor.index(tk.INSERT)
+        
+        # Если курсор в самом начале (или текст выделен целиком и курсор в начале)
+        if cursor_pos == 0:
+            # Сохраняем и идем в предыдущий день
+            self._commit_and_move(dr=0, dc=-1)
+            return "break" # Предотвращаем стандартное движение курсора
+        
+        # Иначе просто двигаем курсор внутри текста
+        return
+
+    def _on_arrow_right(self, event):
+        """Переход вправо, только если курсор в конце строки."""
+        cursor_pos = self._editor.index(tk.INSERT)
+        text_len = len(self._editor.get())
+        
+        # Если курсор в самом конце
+        if cursor_pos == text_len:
+            # Сохраняем и идем в следующий день
+            self._commit_and_move(dr=0, dc=1)
+            return "break"
+            
+        return
 
     def _end_edit(self, commit: bool):
         if not self._editor:
