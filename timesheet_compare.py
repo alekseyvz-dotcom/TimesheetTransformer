@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 import tempfile
 import logging
+import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import tkinter as tk
@@ -38,7 +40,6 @@ def normalize_tbn(val: Any) -> str:
 def normalize_val(val: Any) -> str:
     """
     Нормализация значения для сравнения.
-    Возвращает пустую строку, если val is None.
     """
     if val is None:
         return ""
@@ -69,7 +70,11 @@ class TimesheetComparePage(tk.Frame):
     # ---------- UI ----------
 
     def _build_ui(self):
-        top = tk.Frame(self)
+        # Основной контейнер
+        main_layout = tk.Frame(self)
+        main_layout.pack(fill="both", expand=True)
+
+        top = tk.Frame(main_layout)
         top.pack(fill="x", padx=8, pady=(8, 4))
 
         tk.Label(top, text="Сравнение табелей (Объект vs 1С)", font=("Segoe UI", 12, "bold"))\
@@ -105,7 +110,7 @@ class TimesheetComparePage(tk.Frame):
         ttk.Button(btns, text="Загрузить 1С (xlsx)...", command=self._load_hr_from_1c).pack(side="left", padx=12)
 
         # --- Headers ---
-        headers_frame = tk.LabelFrame(self, text="Объектные табели")
+        headers_frame = tk.LabelFrame(main_layout, text="Объектные табели")
         headers_frame.pack(fill="x", padx=8, pady=4)
 
         cols = ("year", "month", "department")
@@ -125,10 +130,12 @@ class TimesheetComparePage(tk.Frame):
         act_frame = tk.Frame(headers_frame)
         act_frame.pack(side="bottom", fill="x", padx=4, pady=4)
         ttk.Button(act_frame, text="Сравнить выбранное", command=self._on_select_header).pack(side="left", fill="x", expand=True, padx=(0,2))
-        ttk.Button(act_frame, text="Экспорт в Excel", command=self._export_to_excel).pack(side="left", fill="x", expand=True, padx=(2,0))
+        
+        self.btn_export = ttk.Button(act_frame, text="Экспорт в Excel (Свод)", command=self._start_export_thread)
+        self.btn_export.pack(side="left", fill="x", expand=True, padx=(2,0))
 
         # --- Compare Grid ---
-        compare_frame = tk.LabelFrame(self, text="Результат сравнения")
+        compare_frame = tk.LabelFrame(main_layout, text="Результат сравнения")
         compare_frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
 
         tree_cont = tk.Frame(compare_frame)
@@ -149,10 +156,20 @@ class TimesheetComparePage(tk.Frame):
 
         self._configure_compare_columns(31)
 
-        # Теги для визуализации
         self.tree_compare.tag_configure("group_start", background="#ffffff") 
         self.tree_compare.tag_configure("group_item", background="#ffffff")
-        self.tree_compare.tag_configure("hr_row", background="#f2f2f2") # Серый фон для 1С
+        self.tree_compare.tag_configure("hr_row", background="#f2f2f2") 
+
+        # --- СТАТУС БАР ---
+        self.status_frame = tk.Frame(self, relief="sunken", bd=1)
+        self.status_frame.pack(side="bottom", fill="x")
+
+        self.var_status = tk.StringVar(value="Готов к работе")
+        self.lbl_status = tk.Label(self.status_frame, textvariable=self.var_status, anchor="w", font=("Segoe UI", 9))
+        self.lbl_status.pack(side="left", padx=5)
+
+        self.progress_bar = ttk.Progressbar(self.status_frame, orient="horizontal", mode="determinate", length=200)
+        self.progress_bar.pack(side="right", padx=5, pady=2)
 
     # ---------- Логика ----------
 
@@ -171,14 +188,12 @@ class TimesheetComparePage(tk.Frame):
         
         try: y = int(self.var_year.get().strip())
         except: y = None
-        
         m_name = self.var_month.get().strip()
         m = None
         if m_name and m_name != "Все":
             for i in range(1, 13):
                 if month_name_ru(i) == m_name:
                     m = i; break
-        
         d = self.var_dep.get().strip()
         dep = d if d and d != "Все" else None
 
@@ -214,43 +229,47 @@ class TimesheetComparePage(tk.Frame):
         try:
             fd, temp_path = tempfile.mkstemp(suffix=".xlsx", prefix="1c_converted_")
             os.close(fd)
+            
+            self.var_status.set("Конвертация файла 1С...")
+            self.update_idletasks()
 
             timesheet_transformer.transform_file(path, temp_path, parent=self)
 
             wb = load_workbook(temp_path, data_only=True)
             ws = wb.active
-            
             rows = []
             for r in range(2, ws.max_row + 1):
                 fio = str(ws.cell(r, 2).value or "").strip()
                 if not fio: continue
                 tbn = str(ws.cell(r, 4).value or "").strip()
-                
                 days = []
                 for c in range(6, 6 + 31):
                     v = ws.cell(r, c).value
                     days.append(v)
-                
                 rows.append({"fio": fio, "tbn": tbn, "days": days})
 
             self._hr_rows = rows
             try: os.remove(temp_path)
             except: pass
-
+            
+            self.var_status.set(f"Загружен табель 1С: {len(rows)} строк.")
             messagebox.showinfo("Успех", f"Загружен табель 1С: {len(rows)} сотр.", parent=self)
             self._rebuild_comparison()
 
         except Exception as e:
             logging.exception("1C Load Error")
             messagebox.showerror("Ошибка", f"Сбой загрузки 1С:\n{e}", parent=self)
+            self.var_status.set("Ошибка загрузки")
 
     def _on_select_header(self):
         sel = self.tree_headers.selection()
         if not sel: return
-        
         iid = sel[0]
         agg = next((a for a in self._agg_headers if f"{a['year']}:{a['month']}:{a['department']}" == iid), None)
         if not agg: return
+
+        self.var_status.set("Загрузка данных из БД...")
+        self.update_idletasks()
 
         obj_rows = []
         try:
@@ -266,7 +285,6 @@ class TimesheetComparePage(tk.Frame):
                     raw = r.get("hours_raw") or []
                     for val in raw[:31]:
                         days.append(val)
-                    
                     obj_rows.append({
                         "fio": (r["fio"] or "").strip(),
                         "tbn": (r["tbn"] or "").strip(),
@@ -281,35 +299,27 @@ class TimesheetComparePage(tk.Frame):
         dim = month_days(agg["year"], agg["month"])
         self._configure_compare_columns(dim)
         self._rebuild_comparison()
+        self.var_status.set(f"Готов к сравнению. Загружено объектов: {len(obj_rows)}")
 
     def _configure_compare_columns(self, days_in_month: int):
         cols = ["fio", "tbn", "object", "kind"] + [f"d{i}" for i in range(1, days_in_month + 1)]
         self.tree_compare["columns"] = cols
-        
         self.tree_compare.heading("fio", text="ФИО"); self.tree_compare.column("fio", width=200, minwidth=150)
         self.tree_compare.heading("tbn", text="Т.№"); self.tree_compare.column("tbn", width=60, anchor="center")
         self.tree_compare.heading("object", text="Объект"); self.tree_compare.column("object", width=250)
         self.tree_compare.heading("kind", text="Источник"); self.tree_compare.column("kind", width=120, anchor="center")
-        
         for i in range(1, days_in_month + 1):
             col = f"d{i}"
             self.tree_compare.heading(col, text=str(i))
             self.tree_compare.column(col, width=45, anchor="center", stretch=False)
 
     def _rebuild_comparison(self):
-        """
-        Перестройка данных. Группируем по TBN.
-        ПРИОРИТЕТ ФИО: Сначала из объектного табеля (программы), затем 1С.
-        """
         self.tree_compare.delete(*self.tree_compare.get_children())
         self._merged_groups.clear()
         
         if not self._obj_rows and not self._hr_rows: return
 
-        # 1. Индексируем HR
         hr_map = {normalize_tbn(r["tbn"]): r for r in self._hr_rows}
-        
-        # 2. Группируем OBJ
         obj_map: Dict[str, List[Dict]] = {}
         for r in self._obj_rows:
             key = normalize_tbn(r["tbn"])
@@ -322,7 +332,6 @@ class TimesheetComparePage(tk.Frame):
             hr_row = hr_map.get(tbn)
             obj_rows_list = sorted(obj_map.get(tbn, []), key=lambda x: x.get("object_display", ""))
             
-            # --- ПРИОРИТЕТ ФИО ИЗ ПРОГРАММЫ ---
             if obj_rows_list:
                 main_fio = obj_rows_list[0]["fio"]
                 main_tbn = obj_rows_list[0]["tbn"]
@@ -342,16 +351,12 @@ class TimesheetComparePage(tk.Frame):
             }
             self._merged_groups.append(group)
             
-            # --- РЕНДЕРИНГ В ГРИД ---
-            
-            # А. Объекты
             first_row = True
             for o_row in obj_rows_list:
                 fio_cell = main_fio if first_row else ""
                 tbn_cell = main_tbn if first_row else ""
                 
                 vals = [fio_cell, tbn_cell, o_row["object_display"], "Объект"]
-                
                 display_days = []
                 raw_days = o_row["days"]
                 hr_days = hr_row["days"] if hr_row else []
@@ -376,18 +381,11 @@ class TimesheetComparePage(tk.Frame):
                 self.tree_compare.insert("", "end", values=vals + display_days, tags=(tag,))
                 first_row = False
 
-            # Б. 1С (Выводим ФИО снова, чтобы было понятно, чья строка)
             if hr_row:
-                # ВНИМАНИЕ: Здесь теперь всегда пишем ФИО и ТБН для ясности
-                fio_cell = main_fio
-                tbn_cell = main_tbn
-                
-                vals = [fio_cell, tbn_cell, "", "1С Кадры"]
-                
+                vals = [main_fio, main_tbn, "", "1С Кадры"]
                 d_vals = []
                 for v in hr_row["days"][:days_count]:
                     d_vals.append(str(v) if v is not None else "")
-                
                 self.tree_compare.insert("", "end", values=vals + d_vals, tags=("hr_row",))
 
 
@@ -398,12 +396,9 @@ class TimesheetComparePage(tk.Frame):
         if self.var_dep.get() not in vals:
             self.var_dep.set("Все")
 
-    def _export_to_excel(self):
-        """
-        Экспорт в Excel. 
-        - Приоритет ФИО из Программы.
-        - В строке 1С ФИО дублируется.
-        """
+    # ---------- THREADED EXPORT ----------
+
+    def _start_export_thread(self):
         if not self._merged_groups:
             messagebox.showwarning("Экспорт", "Нет данных для экспорта", parent=self)
             return
@@ -416,6 +411,16 @@ class TimesheetComparePage(tk.Frame):
         )
         if not fpath: return
 
+        # Блокируем кнопку
+        self.btn_export.configure(state="disabled")
+        self.var_status.set("Подготовка к экспорту...")
+        self.progress_bar["value"] = 0
+        
+        # Запуск потока
+        t = threading.Thread(target=self._export_process, args=(fpath,))
+        t.start()
+
+    def _export_process(self, fpath):
         try:
             wb = Workbook()
             ws = wb.active
@@ -425,45 +430,60 @@ class TimesheetComparePage(tk.Frame):
             headers = ["ФИО", "Таб.№", "Объект", "Источник"] + [str(i) for i in range(1, days_cnt+1)]
             ws.append(headers)
 
+            # Стили
             fill_error = PatternFill("solid", fgColor="FF9999")
             fill_hr = PatternFill("solid", fgColor="EFEFEF") 
             fill_miss = PatternFill("solid", fgColor="FFCC99")
             
-            border_bottom = Border(bottom=Side(style='thin', color='B0B0B0'))
+            # Жирные рамки
+            border_group_top = Border(top=Side(style='medium'))
+            border_group_bottom = Border(bottom=Side(style='medium'))
+            border_inside = Border(bottom=Side(style='thin', color="CCCCCC"))
+            
             font_bold = Font(bold=True)
+            center_align = Alignment(horizontal="center", vertical="center")
+            left_align = Alignment(horizontal="left", vertical="center")
 
-            for grp in self._merged_groups:
+            total_groups = len(self._merged_groups)
+            
+            # Перебираем группы
+            for idx, grp in enumerate(self._merged_groups):
+                
+                # Обновление прогресса
+                progress_val = int((idx / total_groups) * 100)
+                # Используем after для обновления GUI из потока
+                self.after(0, lambda v=progress_val: self.progress_bar.configure(value=v))
+                self.after(0, lambda i=idx, t=total_groups: self.var_status.set(f"Обработка: {i+1} из {t}"))
+
                 hr_row = grp.get("hr_row")
                 obj_rows = grp.get("obj_rows", [])
                 
                 main_fio = grp["display_fio"]
                 main_tbn = grp["display_tbn"]
 
-                first_in_group = True
+                start_row = ws.max_row + 1
                 
-                # 1. Объекты
+                # 1. Запись объектов
                 for o_row in obj_rows:
-                    fio_val = main_fio if first_in_group else ""
-                    tbn_val = main_tbn if first_in_group else ""
-                    
-                    row_data = [fio_val, tbn_val, o_row["object_display"], "Объект"]
+                    row_data = [main_fio, main_tbn, o_row["object_display"], "Объект"]
                     
                     days_raw = o_row["days"][:days_cnt]
                     days_raw += [None]*(days_cnt - len(days_raw))
+                    # Чистим данные для Excel (None -> "")
                     days_clean = [ (v if v is not None else "") for v in days_raw ]
                     row_data.extend(days_clean)
                     
                     ws.append(row_data)
                     cur_idx = ws.max_row
                     
+                    # Раскраска
                     if hr_row:
                         hr_days = hr_row["days"]
                         for i in range(days_cnt):
-                            val_o = days_raw[i] 
+                            val_o = days_raw[i]
                             norm_o = normalize_val(val_o)
+                            if not norm_o: continue # Пусто - не ошибка
                             
-                            if not norm_o: continue
-                                
                             val_h = hr_days[i] if i < len(hr_days) else None
                             norm_h = normalize_val(val_h)
                             
@@ -472,15 +492,13 @@ class TimesheetComparePage(tk.Frame):
                                 cell.fill = fill_error
                                 cell.font = font_bold
                     
-                    first_in_group = False
+                    # Тонкая линия внутри группы
+                    for c in range(1, len(row_data)+1):
+                        ws.cell(cur_idx, c).border = border_inside
 
-                # 2. 1С (Теперь всегда пишем ФИО)
+                # 2. Запись 1С
                 if hr_row:
-                    fio_val = main_fio # Дублируем имя для ясности
-                    tbn_val = main_tbn
-                    
-                    row_data = [fio_val, tbn_val, "", "1С Кадры"]
-                    
+                    row_data = [main_fio, main_tbn, "", "1С Кадры"]
                     days_raw = hr_row["days"][:days_cnt]
                     days_raw += [None]*(days_cnt - len(days_raw))
                     days_clean = [ (v if v is not None else "") for v in days_raw ]
@@ -489,47 +507,79 @@ class TimesheetComparePage(tk.Frame):
                     ws.append(row_data)
                     cur_idx = ws.max_row
                     
-                    # Стиль 1С строки
+                    # Стиль 1С
                     for c in range(1, len(row_data)+1):
                         cell = ws.cell(cur_idx, c)
                         cell.fill = fill_hr
-                        cell.border = border_bottom
                     
-                    # Проверка "Потеряшек"
+                    # Потеряшки (в 1С есть, в объектах нет)
                     for i in range(days_cnt):
                         val_h = days_raw[i]
                         norm_h = normalize_val(val_h)
                         if not norm_h: continue
                         
-                        found_in_objects = False
+                        found = False
                         for o_row in obj_rows:
                             d_list = o_row["days"]
                             v_o = d_list[i] if i < len(d_list) else None
                             if normalize_val(v_o):
-                                found_in_objects = True
-                                break
+                                found = True; break
                         
-                        if not found_in_objects:
+                        if not found:
                             ws.cell(cur_idx, 5 + i).fill = fill_miss
-                
-                else:
-                    if obj_rows:
-                        for c in range(1, len(headers)+1):
-                            ws.cell(ws.max_row, c).border = border_bottom
 
-            # Ширина
-            ws.column_dimensions["A"].width = 30
-            ws.column_dimensions["C"].width = 40
+                # --- ОФОРМЛЕНИЕ ГРУППЫ (Merge + Borders) ---
+                end_row = ws.max_row
+                
+                if end_row >= start_row:
+                    # Объединяем ячейки ФИО и ТБН для всей группы
+                    ws.merge_cells(start_row=start_row, start_column=1, end_row=end_row, end_column=1)
+                    ws.merge_cells(start_row=start_row, start_column=2, end_row=end_row, end_column=2)
+                    
+                    # Выравнивание объединенных ячеек (нужно применять к левой верхней)
+                    cell_fio = ws.cell(start_row, 1)
+                    cell_fio.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+                    cell_tbn = ws.cell(start_row, 2)
+                    cell_tbn.alignment = Alignment(horizontal="center", vertical="top")
+
+                    # Рисуем толстую границу вокруг группы
+                    # Верхняя линия
+                    for c in range(1, len(headers)+1):
+                        existing = ws.cell(start_row, c).border
+                        new_border = Border(top=Side(style='medium'), bottom=existing.bottom, left=existing.left, right=existing.right)
+                        ws.cell(start_row, c).border = new_border
+                    
+                    # Нижняя линия
+                    for c in range(1, len(headers)+1):
+                        existing = ws.cell(end_row, c).border
+                        new_border = Border(top=existing.top, bottom=Side(style='medium'), left=existing.left, right=existing.right)
+                        ws.cell(end_row, c).border = new_border
+
+            # Финал оформления
+            ws.column_dimensions["A"].width = 35
+            ws.column_dimensions["C"].width = 45
             for i in range(days_cnt):
                 col_letter = get_column_letter(5 + i)
-                ws.column_dimensions[col_letter].width = 6
+                ws.column_dimensions[col_letter].width = 5
             
             wb.save(fpath)
-            messagebox.showinfo("Готово", f"Файл сохранен:\n{fpath}", parent=self)
+            
+            # Уведомление в GUI (через after)
+            self.after(0, lambda: self._export_finished(True, fpath))
 
         except Exception as e:
             logging.exception("Export Error")
-            messagebox.showerror("Ошибка", f"Не удалось сохранить Excel:\n{e}", parent=self)
+            self.after(0, lambda: self._export_finished(False, str(e)))
+
+    def _export_finished(self, success, msg):
+        self.btn_export.configure(state="normal")
+        self.progress_bar["value"] = 100
+        if success:
+            self.var_status.set("Экспорт завершен успешно")
+            messagebox.showinfo("Готово", f"Файл сохранен:\n{msg}", parent=self)
+        else:
+            self.var_status.set("Ошибка экспорта")
+            messagebox.showerror("Ошибка", f"Не удалось сохранить Excel:\n{msg}", parent=self)
 
 
 # ---- API ----
