@@ -45,7 +45,7 @@ def normalize_val(val: Any) -> str:
     if val is None:
         return ""
     
-    # 1. В строку
+    # 1. В строку и нижний регистр
     s = str(val).strip().lower()
     
     # 2. Замена запятой (8,5 -> 8.5)
@@ -55,9 +55,6 @@ def normalize_val(val: Any) -> str:
     if s.endswith(".0"):
         s = s[:-2]
         
-    # 4. Если это '0', можно считать как пустую, если в вашей логике пустая == 0
-    # Но обычно '0' и '' (пусто) в табелях это разные вещи, оставим как есть.
-    
     return s
 
 
@@ -200,7 +197,14 @@ class TimesheetComparePage(tk.Frame):
         dep = d if d and d != "Все" else None
 
         try:
-            headers = load_all_timesheet_headers(year=y, month=m, department=dep)
+            # ИСПРАВЛЕНО: Добавлены обязательные аргументы object_addr_substr и object_id_substr
+            headers = load_all_timesheet_headers(
+                year=y, 
+                month=m, 
+                department=dep,
+                object_addr_substr=None,
+                object_id_substr=None
+            )
         except Exception as e:
             logging.exception("Load headers error")
             messagebox.showerror("Ошибка", f"Не удалось загрузить список:\n{e}", parent=self)
