@@ -70,17 +70,16 @@ class TimesheetComparePage(tk.Frame):
     # ---------- UI ----------
 
     def _build_ui(self):
-        # Основной контейнер
         main_layout = tk.Frame(self)
         main_layout.pack(fill="both", expand=True)
 
+        # --- Верхняя панель фильтров ---
         top = tk.Frame(main_layout)
         top.pack(fill="x", padx=8, pady=(8, 4))
 
         tk.Label(top, text="Сравнение табелей (Объект vs 1С)", font=("Segoe UI", 12, "bold"))\
             .grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 8))
 
-        # Год / Месяц
         row_f = 1
         from datetime import datetime
         
@@ -109,12 +108,12 @@ class TimesheetComparePage(tk.Frame):
         ttk.Button(btns, text="Сбросить", command=self._reset_filters).pack(side="left", padx=4)
         ttk.Button(btns, text="Загрузить 1С (xlsx)...", command=self._load_hr_from_1c).pack(side="left", padx=12)
 
-        # --- Headers ---
-        headers_frame = tk.LabelFrame(main_layout, text="Объектные табели")
+        # --- Список объектных табелей ---
+        headers_frame = tk.LabelFrame(main_layout, text="1. Выбор объектных табелей")
         headers_frame.pack(fill="x", padx=8, pady=4)
 
         cols = ("year", "month", "department")
-        self.tree_headers = ttk.Treeview(headers_frame, columns=cols, show="headings", height=5, selectmode="browse")
+        self.tree_headers = ttk.Treeview(headers_frame, columns=cols, show="headings", height=4, selectmode="browse")
         self.tree_headers.heading("year", text="Год"); self.tree_headers.column("year", width=60, anchor="center")
         self.tree_headers.heading("month", text="Месяц"); self.tree_headers.column("month", width=100, anchor="center")
         self.tree_headers.heading("department", text="Подразделение"); self.tree_headers.column("department", width=300, anchor="w")
@@ -129,15 +128,32 @@ class TimesheetComparePage(tk.Frame):
         # Кнопки действий
         act_frame = tk.Frame(headers_frame)
         act_frame.pack(side="bottom", fill="x", padx=4, pady=4)
-        ttk.Button(act_frame, text="Сравнить выбранное", command=self._on_select_header).pack(side="left", fill="x", expand=True, padx=(0,2))
         
+        ttk.Button(act_frame, text="Сравнить выбранное", command=self._on_select_header).pack(side="left", fill="x", expand=True, padx=(0,2))
         self.btn_export = ttk.Button(act_frame, text="Экспорт в Excel (Свод)", command=self._start_export_thread)
         self.btn_export.pack(side="left", fill="x", expand=True, padx=(2,0))
 
-        # --- Compare Grid ---
-        compare_frame = tk.LabelFrame(main_layout, text="Результат сравнения")
+        # --- Результат сравнения ---
+        compare_frame = tk.LabelFrame(main_layout, text="2. Результат сравнения")
         compare_frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+        
+        # Панель управления таблицей
+        toolbar = tk.Frame(compare_frame)
+        toolbar.pack(fill="x", padx=4, pady=2)
+        
+        # === ГЛАВНЫЙ ФИЛЬТР ===
+        self.var_only_diff = tk.BooleanVar(value=False)
+        chk_diff = ttk.Checkbutton(
+            toolbar, 
+            text="Показывать только расхождения", 
+            variable=self.var_only_diff,
+            command=self._rebuild_comparison
+        )
+        chk_diff.pack(side="left")
+        
+        tk.Label(toolbar, text="(Скрывает сотрудников, у которых данные полностью совпадают)", fg="gray").pack(side="left", padx=5)
 
+        # Грид
         tree_cont = tk.Frame(compare_frame)
         tree_cont.pack(fill="both", expand=True)
 
@@ -156,11 +172,12 @@ class TimesheetComparePage(tk.Frame):
 
         self._configure_compare_columns(31)
 
-        self.tree_compare.tag_configure("group_start", background="#ffffff") 
-        self.tree_compare.tag_configure("group_item", background="#ffffff")
-        self.tree_compare.tag_configure("hr_row", background="#f2f2f2") 
+        # Стили строк
+        self.tree_compare.tag_configure("group_ok", background="#ffffff")   # Совпадает
+        self.tree_compare.tag_configure("group_diff", background="#ffcccc") # ОШИБКА (Розовый)
+        self.tree_compare.tag_configure("hr_row", background="#f2f2f2")     # 1С (Серый)
 
-        # --- СТАТУС БАР ---
+        # --- Статус бар ---
         self.status_frame = tk.Frame(self, relief="sunken", bd=1)
         self.status_frame.pack(side="bottom", fill="x")
 
@@ -299,7 +316,7 @@ class TimesheetComparePage(tk.Frame):
         dim = month_days(agg["year"], agg["month"])
         self._configure_compare_columns(dim)
         self._rebuild_comparison()
-        self.var_status.set(f"Готов к сравнению. Загружено объектов: {len(obj_rows)}")
+        self.var_status.set(f"Сравнение выполнено. Объектов: {len(obj_rows)}")
 
     def _configure_compare_columns(self, days_in_month: int):
         cols = ["fio", "tbn", "object", "kind"] + [f"d{i}" for i in range(1, days_in_month + 1)]
@@ -311,13 +328,20 @@ class TimesheetComparePage(tk.Frame):
         for i in range(1, days_in_month + 1):
             col = f"d{i}"
             self.tree_compare.heading(col, text=str(i))
-            self.tree_compare.column(col, width=45, anchor="center", stretch=False)
+            # Уменьшили ширину, так как текст теперь короткий
+            self.tree_compare.column(col, width=35, anchor="center", stretch=False)
 
     def _rebuild_comparison(self):
+        """
+        Главная логика отображения.
+        """
         self.tree_compare.delete(*self.tree_compare.get_children())
         self._merged_groups.clear()
         
         if not self._obj_rows and not self._hr_rows: return
+
+        # Читаем состояние фильтра
+        only_diff = self.var_only_diff.get()
 
         hr_map = {normalize_tbn(r["tbn"]): r for r in self._hr_rows}
         obj_map: Dict[str, List[Dict]] = {}
@@ -327,6 +351,8 @@ class TimesheetComparePage(tk.Frame):
 
         all_tbns = sorted(set(hr_map.keys()) | set(obj_map.keys()))
         days_count = len(self.tree_compare["columns"]) - 4
+
+        count_shown = 0
 
         for tbn in all_tbns:
             hr_row = hr_map.get(tbn)
@@ -342,6 +368,51 @@ class TimesheetComparePage(tk.Frame):
                 main_fio = "???"
                 main_tbn = tbn
 
+            # --- АНАЛИЗ НА РАСХОЖДЕНИЯ ---
+            group_has_diff = False
+            
+            # Проверяем строки объектов
+            if hr_row:
+                hr_days = hr_row["days"]
+                for o_row in obj_rows_list:
+                    raw_days = o_row["days"]
+                    for i in range(days_count):
+                        val_o = raw_days[i] if i < len(raw_days) else None
+                        norm_o = normalize_val(val_o)
+                        
+                        if not norm_o: continue # Пустота - не ошибка
+                        
+                        val_h = hr_days[i] if i < len(hr_days) else None
+                        norm_h = normalize_val(val_h)
+                        
+                        if norm_o != norm_h:
+                            group_has_diff = True
+                            break
+                    if group_has_diff: break
+            
+            # Проверяем "потеряшек" (есть в 1С, нет в объектах)
+            if hr_row and not group_has_diff:
+                hr_days = hr_row["days"]
+                for i in range(days_count):
+                    norm_h = normalize_val(hr_days[i] if i < len(hr_days) else None)
+                    if not norm_h: continue
+                    
+                    found = False
+                    for o_row in obj_rows_list:
+                        raw_days = o_row["days"]
+                        norm_o = normalize_val(raw_days[i] if i < len(raw_days) else None)
+                        if norm_o:
+                            found = True; break
+                    
+                    if not found:
+                        group_has_diff = True; break
+
+            # --- ФИЛЬТРАЦИЯ ---
+            if only_diff and not group_has_diff:
+                continue # Пропускаем, если все сходится
+
+            count_shown += 1
+            
             group = {
                 "tbn_key": tbn,
                 "display_fio": main_fio,
@@ -351,34 +422,23 @@ class TimesheetComparePage(tk.Frame):
             }
             self._merged_groups.append(group)
             
+            # --- РЕНДЕРИНГ ---
+            # Если есть ошибка - строка объекта будет красной. Если нет - белой.
+            tag_obj = "group_diff" if group_has_diff else "group_ok"
+
             first_row = True
             for o_row in obj_rows_list:
                 fio_cell = main_fio if first_row else ""
                 tbn_cell = main_tbn if first_row else ""
                 
                 vals = [fio_cell, tbn_cell, o_row["object_display"], "Объект"]
-                display_days = []
-                raw_days = o_row["days"]
-                hr_days = hr_row["days"] if hr_row else []
                 
-                for i in range(days_count):
-                    val_o = raw_days[i] if i < len(raw_days) else None
-                    val_h = hr_days[i] if i < len(hr_days) else None
-                    
-                    norm_o = normalize_val(val_o)
-                    norm_h = normalize_val(val_h)
-                    
-                    if not norm_o:
-                        display_days.append("") 
-                    else:
-                        if norm_o == norm_h:
-                            display_days.append(str(val_o))
-                        else:
-                            h_str = str(val_h) if val_h is not None else ""
-                            display_days.append(f"{val_o} (≠{h_str})")
+                # ЧИСТЫЙ ВЫВОД: Только значение. Никаких (≠).
+                display_days = []
+                for val in o_row["days"][:days_count]:
+                    display_days.append(str(val) if val is not None else "")
 
-                tag = "group_start" if first_row else "group_item"
-                self.tree_compare.insert("", "end", values=vals + display_days, tags=(tag,))
+                self.tree_compare.insert("", "end", values=vals + display_days, tags=(tag_obj,))
                 first_row = False
 
             if hr_row:
@@ -386,8 +446,10 @@ class TimesheetComparePage(tk.Frame):
                 d_vals = []
                 for v in hr_row["days"][:days_count]:
                     d_vals.append(str(v) if v is not None else "")
+                
                 self.tree_compare.insert("", "end", values=vals + d_vals, tags=("hr_row",))
 
+        self.var_status.set(f"Отображено: {count_shown} сотрудников.")
 
     def _fill_departments_combo(self, headers):
         deps = sorted({(h.get("department") or "").strip() for h in headers if h.get("department")})
@@ -411,12 +473,10 @@ class TimesheetComparePage(tk.Frame):
         )
         if not fpath: return
 
-        # Блокируем кнопку
         self.btn_export.configure(state="disabled")
         self.var_status.set("Подготовка к экспорту...")
         self.progress_bar["value"] = 0
         
-        # Запуск потока
         t = threading.Thread(target=self._export_process, args=(fpath,))
         t.start()
 
@@ -430,30 +490,21 @@ class TimesheetComparePage(tk.Frame):
             headers = ["ФИО", "Таб.№", "Объект", "Источник"] + [str(i) for i in range(1, days_cnt+1)]
             ws.append(headers)
 
-            # Стили
             fill_error = PatternFill("solid", fgColor="FF9999")
             fill_hr = PatternFill("solid", fgColor="EFEFEF") 
             fill_miss = PatternFill("solid", fgColor="FFCC99")
             
-            # Жирные рамки
             border_group_top = Border(top=Side(style='medium'))
             border_group_bottom = Border(bottom=Side(style='medium'))
             border_inside = Border(bottom=Side(style='thin', color="CCCCCC"))
             
             font_bold = Font(bold=True)
-            center_align = Alignment(horizontal="center", vertical="center")
-            left_align = Alignment(horizontal="left", vertical="center")
-
             total_groups = len(self._merged_groups)
             
-            # Перебираем группы
             for idx, grp in enumerate(self._merged_groups):
-                
-                # Обновление прогресса
                 progress_val = int((idx / total_groups) * 100)
-                # Используем after для обновления GUI из потока
                 self.after(0, lambda v=progress_val: self.progress_bar.configure(value=v))
-                self.after(0, lambda i=idx, t=total_groups: self.var_status.set(f"Обработка: {i+1} из {t}"))
+                self.after(0, lambda i=idx, t=total_groups: self.var_status.set(f"Экспорт: {i+1} из {t}"))
 
                 hr_row = grp.get("hr_row")
                 obj_rows = grp.get("obj_rows", [])
@@ -466,23 +517,21 @@ class TimesheetComparePage(tk.Frame):
                 # 1. Запись объектов
                 for o_row in obj_rows:
                     row_data = [main_fio, main_tbn, o_row["object_display"], "Объект"]
-                    
                     days_raw = o_row["days"][:days_cnt]
                     days_raw += [None]*(days_cnt - len(days_raw))
-                    # Чистим данные для Excel (None -> "")
                     days_clean = [ (v if v is not None else "") for v in days_raw ]
                     row_data.extend(days_clean)
                     
                     ws.append(row_data)
                     cur_idx = ws.max_row
                     
-                    # Раскраска
+                    # Раскраска (здесь можно оставить окраску конкретных ячеек для удобства)
                     if hr_row:
                         hr_days = hr_row["days"]
                         for i in range(days_cnt):
                             val_o = days_raw[i]
                             norm_o = normalize_val(val_o)
-                            if not norm_o: continue # Пусто - не ошибка
+                            if not norm_o: continue 
                             
                             val_h = hr_days[i] if i < len(hr_days) else None
                             norm_h = normalize_val(val_h)
@@ -492,7 +541,6 @@ class TimesheetComparePage(tk.Frame):
                                 cell.fill = fill_error
                                 cell.font = font_bold
                     
-                    # Тонкая линия внутри группы
                     for c in range(1, len(row_data)+1):
                         ws.cell(cur_idx, c).border = border_inside
 
@@ -507,12 +555,10 @@ class TimesheetComparePage(tk.Frame):
                     ws.append(row_data)
                     cur_idx = ws.max_row
                     
-                    # Стиль 1С
                     for c in range(1, len(row_data)+1):
                         cell = ws.cell(cur_idx, c)
                         cell.fill = fill_hr
                     
-                    # Потеряшки (в 1С есть, в объектах нет)
                     for i in range(days_cnt):
                         val_h = days_raw[i]
                         norm_h = normalize_val(val_h)
@@ -528,34 +574,27 @@ class TimesheetComparePage(tk.Frame):
                         if not found:
                             ws.cell(cur_idx, 5 + i).fill = fill_miss
 
-                # --- ОФОРМЛЕНИЕ ГРУППЫ (Merge + Borders) ---
+                # Оформление блока
                 end_row = ws.max_row
-                
                 if end_row >= start_row:
-                    # Объединяем ячейки ФИО и ТБН для всей группы
                     ws.merge_cells(start_row=start_row, start_column=1, end_row=end_row, end_column=1)
                     ws.merge_cells(start_row=start_row, start_column=2, end_row=end_row, end_column=2)
                     
-                    # Выравнивание объединенных ячеек (нужно применять к левой верхней)
                     cell_fio = ws.cell(start_row, 1)
                     cell_fio.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
                     cell_tbn = ws.cell(start_row, 2)
                     cell_tbn.alignment = Alignment(horizontal="center", vertical="top")
 
-                    # Рисуем толстую границу вокруг группы
-                    # Верхняя линия
                     for c in range(1, len(headers)+1):
                         existing = ws.cell(start_row, c).border
                         new_border = Border(top=Side(style='medium'), bottom=existing.bottom, left=existing.left, right=existing.right)
                         ws.cell(start_row, c).border = new_border
                     
-                    # Нижняя линия
                     for c in range(1, len(headers)+1):
                         existing = ws.cell(end_row, c).border
                         new_border = Border(top=existing.top, bottom=Side(style='medium'), left=existing.left, right=existing.right)
                         ws.cell(end_row, c).border = new_border
 
-            # Финал оформления
             ws.column_dimensions["A"].width = 35
             ws.column_dimensions["C"].width = 45
             for i in range(days_cnt):
@@ -563,8 +602,6 @@ class TimesheetComparePage(tk.Frame):
                 ws.column_dimensions[col_letter].width = 5
             
             wb.save(fpath)
-            
-            # Уведомление в GUI (через after)
             self.after(0, lambda: self._export_finished(True, fpath))
 
         except Exception as e:
