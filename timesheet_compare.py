@@ -37,7 +37,7 @@ def normalize_tbn(val: Any) -> str:
 
 def normalize_val(val: Any) -> str:
     """
-    Нормализация значения для сравнения (регистр, пробелы, запятые).
+    Нормализация значения для сравнения.
     Возвращает пустую строку, если val is None.
     """
     if val is None:
@@ -46,7 +46,6 @@ def normalize_val(val: Any) -> str:
     s = s.replace(",", ".")
     if s.endswith(".0"):
         s = s[:-2]
-    # Защита от строк "None" или "none", если они вдруг попали в данные
     if s == "none":
         return ""
     return s
@@ -184,7 +183,6 @@ class TimesheetComparePage(tk.Frame):
         dep = d if d and d != "Все" else None
 
         try:
-            # Важно: передаем None для фильтров по объекту
             headers = load_all_timesheet_headers(year=y, month=m, department=dep, object_addr_substr=None, object_id_substr=None)
         except Exception as e:
             logging.exception("Load headers error")
@@ -231,7 +229,6 @@ class TimesheetComparePage(tk.Frame):
                 days = []
                 for c in range(6, 6 + 31):
                     v = ws.cell(r, c).value
-                    # Преобразуем None сразу в None (строковые преобразования позже)
                     days.append(v)
                 
                 rows.append({"fio": fio, "tbn": tbn, "days": days})
@@ -268,7 +265,7 @@ class TimesheetComparePage(tk.Frame):
                     days = []
                     raw = r.get("hours_raw") or []
                     for val in raw[:31]:
-                        days.append(val) # Сохраняем как есть (None или значение)
+                        days.append(val)
                     
                     obj_rows.append({
                         "fio": (r["fio"] or "").strip(),
@@ -297,12 +294,12 @@ class TimesheetComparePage(tk.Frame):
         for i in range(1, days_in_month + 1):
             col = f"d{i}"
             self.tree_compare.heading(col, text=str(i))
-            # Колонка чуть шире для отображения "8(≠7)"
             self.tree_compare.column(col, width=45, anchor="center", stretch=False)
 
     def _rebuild_comparison(self):
         """
-        Главная логика отображения в гриде.
+        Перестройка данных. Группируем по TBN.
+        ПРИОРИТЕТ ФИО: Сначала из объектного табеля (программы), затем 1С.
         """
         self.tree_compare.delete(*self.tree_compare.get_children())
         self._merged_groups.clear()
@@ -325,8 +322,16 @@ class TimesheetComparePage(tk.Frame):
             hr_row = hr_map.get(tbn)
             obj_rows_list = sorted(obj_map.get(tbn, []), key=lambda x: x.get("object_display", ""))
             
-            main_fio = hr_row["fio"] if hr_row else (obj_rows_list[0]["fio"] if obj_rows_list else "???")
-            main_tbn = hr_row["tbn"] if hr_row else (obj_rows_list[0]["tbn"] if obj_rows_list else tbn)
+            # --- ПРИОРИТЕТ ФИО ИЗ ПРОГРАММЫ ---
+            if obj_rows_list:
+                main_fio = obj_rows_list[0]["fio"]
+                main_tbn = obj_rows_list[0]["tbn"]
+            elif hr_row:
+                main_fio = hr_row["fio"]
+                main_tbn = hr_row["tbn"]
+            else:
+                main_fio = "???"
+                main_tbn = tbn
 
             group = {
                 "tbn_key": tbn,
@@ -337,9 +342,9 @@ class TimesheetComparePage(tk.Frame):
             }
             self._merged_groups.append(group)
             
-            # --- РЕНДЕРИНГ ---
+            # --- РЕНДЕРИНГ В ГРИД ---
             
-            # А. Строки объектов
+            # А. Объекты
             first_row = True
             for o_row in obj_rows_list:
                 fio_cell = main_fio if first_row else ""
@@ -347,9 +352,7 @@ class TimesheetComparePage(tk.Frame):
                 
                 vals = [fio_cell, tbn_cell, o_row["object_display"], "Объект"]
                 
-                # Формируем дни с проверкой на отличия
                 display_days = []
-                
                 raw_days = o_row["days"]
                 hr_days = hr_row["days"] if hr_row else []
                 
@@ -360,21 +363,12 @@ class TimesheetComparePage(tk.Frame):
                     norm_o = normalize_val(val_o)
                     norm_h = normalize_val(val_h)
                     
-                    # Логика:
-                    # 1. Если на объекте пусто -> Выводим пустоту (не ошибка, даже если в 1С есть)
-                    # 2. Если на объекте есть значение -> Сравниваем с 1С
-                    
                     if not norm_o:
-                        # Пусто на объекте
                         display_days.append("") 
                     else:
-                        # Есть значение
                         if norm_o == norm_h:
-                            # Совпадает
                             display_days.append(str(val_o))
                         else:
-                            # Не совпадает -> выводим "8 (≠7)"
-                            # Если в 1С пусто, будет "8 (≠)"
                             h_str = str(val_h) if val_h is not None else ""
                             display_days.append(f"{val_o} (≠{h_str})")
 
@@ -382,14 +376,14 @@ class TimesheetComparePage(tk.Frame):
                 self.tree_compare.insert("", "end", values=vals + display_days, tags=(tag,))
                 first_row = False
 
-            # Б. Строка 1С
+            # Б. 1С (Выводим ФИО снова, чтобы было понятно, чья строка)
             if hr_row:
-                fio_cell = main_fio if first_row else ""
-                tbn_cell = main_tbn if first_row else ""
+                # ВНИМАНИЕ: Здесь теперь всегда пишем ФИО и ТБН для ясности
+                fio_cell = main_fio
+                tbn_cell = main_tbn
                 
                 vals = [fio_cell, tbn_cell, "", "1С Кадры"]
                 
-                # Дни 1С просто выводим, убирая None
                 d_vals = []
                 for v in hr_row["days"][:days_count]:
                     d_vals.append(str(v) if v is not None else "")
@@ -407,10 +401,8 @@ class TimesheetComparePage(tk.Frame):
     def _export_to_excel(self):
         """
         Экспорт в Excel. 
-        Логика:
-        - None не выводим.
-        - Красим ячейку ОБЪЕКТА, только если она НЕ пустая И отличается от 1С.
-        - Красим ячейку 1С в оранжевый, если в 1С есть данные, а на ВСЕХ объектах пусто.
+        - Приоритет ФИО из Программы.
+        - В строке 1С ФИО дублируется.
         """
         if not self._merged_groups:
             messagebox.showwarning("Экспорт", "Нет данных для экспорта", parent=self)
@@ -433,9 +425,9 @@ class TimesheetComparePage(tk.Frame):
             headers = ["ФИО", "Таб.№", "Объект", "Источник"] + [str(i) for i in range(1, days_cnt+1)]
             ws.append(headers)
 
-            fill_error = PatternFill("solid", fgColor="FF9999") # Красный
-            fill_hr = PatternFill("solid", fgColor="EFEFEF")    # Серый (фон строки 1С)
-            fill_miss = PatternFill("solid", fgColor="FFCC99")  # Оранжевый (есть в 1С, нет в объектах)
+            fill_error = PatternFill("solid", fgColor="FF9999")
+            fill_hr = PatternFill("solid", fgColor="EFEFEF") 
+            fill_miss = PatternFill("solid", fgColor="FFCC99")
             
             border_bottom = Border(bottom=Side(style='thin', color='B0B0B0'))
             font_bold = Font(bold=True)
@@ -454,46 +446,38 @@ class TimesheetComparePage(tk.Frame):
                     fio_val = main_fio if first_in_group else ""
                     tbn_val = main_tbn if first_in_group else ""
                     
-                    # Подготовка данных (None -> "")
                     row_data = [fio_val, tbn_val, o_row["object_display"], "Объект"]
                     
                     days_raw = o_row["days"][:days_cnt]
-                    # Безопасно дополняем, если массив короткий
                     days_raw += [None]*(days_cnt - len(days_raw))
-                    
-                    # Преобразуем None в "" для Excel
                     days_clean = [ (v if v is not None else "") for v in days_raw ]
                     row_data.extend(days_clean)
                     
                     ws.append(row_data)
                     cur_idx = ws.max_row
                     
-                    # Раскраска ошибки
                     if hr_row:
                         hr_days = hr_row["days"]
                         for i in range(days_cnt):
-                            val_o = days_raw[i] # берем raw, чтобы проверить на None
+                            val_o = days_raw[i] 
                             norm_o = normalize_val(val_o)
                             
-                            # Если пусто - пропускаем (не ошибка)
-                            if not norm_o:
-                                continue
+                            if not norm_o: continue
                                 
                             val_h = hr_days[i] if i < len(hr_days) else None
                             norm_h = normalize_val(val_h)
                             
                             if norm_o != norm_h:
-                                # Ошибка
                                 cell = ws.cell(cur_idx, 5 + i)
                                 cell.fill = fill_error
                                 cell.font = font_bold
                     
                     first_in_group = False
 
-                # 2. 1С
+                # 2. 1С (Теперь всегда пишем ФИО)
                 if hr_row:
-                    fio_val = main_fio if first_in_group else ""
-                    tbn_val = main_tbn if first_in_group else ""
+                    fio_val = main_fio # Дублируем имя для ясности
+                    tbn_val = main_tbn
                     
                     row_data = [fio_val, tbn_val, "", "1С Кадры"]
                     
@@ -505,21 +489,18 @@ class TimesheetComparePage(tk.Frame):
                     ws.append(row_data)
                     cur_idx = ws.max_row
                     
-                    # Серый фон всей строки 1С + граница
+                    # Стиль 1С строки
                     for c in range(1, len(row_data)+1):
                         cell = ws.cell(cur_idx, c)
                         cell.fill = fill_hr
                         cell.border = border_bottom
                     
-                    # Проверка "Потеряшек" (Есть в 1С, нет нигде в объектах)
+                    # Проверка "Потеряшек"
                     for i in range(days_cnt):
                         val_h = days_raw[i]
                         norm_h = normalize_val(val_h)
+                        if not norm_h: continue
                         
-                        if not norm_h:
-                            continue
-                        
-                        # Проверяем все объекты
                         found_in_objects = False
                         for o_row in obj_rows:
                             d_list = o_row["days"]
@@ -529,16 +510,14 @@ class TimesheetComparePage(tk.Frame):
                                 break
                         
                         if not found_in_objects:
-                            # Красим ячейку 1С в оранжевый
                             ws.cell(cur_idx, 5 + i).fill = fill_miss
                 
                 else:
-                    # Если строки 1С нет, просто черта под последним объектом
                     if obj_rows:
                         for c in range(1, len(headers)+1):
                             ws.cell(ws.max_row, c).border = border_bottom
 
-            # Ширина колонок
+            # Ширина
             ws.column_dimensions["A"].width = 30
             ws.column_dimensions["C"].width = 40
             for i in range(days_cnt):
