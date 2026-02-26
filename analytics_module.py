@@ -1246,29 +1246,78 @@ class AnalyticsData:
             df["employee_count"] = df["employee_count"].astype(int)
         return df
 
-    def get_payroll_top_employees(self, limit: int = 15) -> pd.DataFrame:
+    def get_payroll_by_position(self) -> pd.DataFrame:
+        """
+        ФОТ по должностям — без персональных данных.
+        Показывает среднее/мин/макс начисление по должности.
+        """
         start_p = self.start_date.year * 100 + self.start_date.month
         end_p   = self.end_date.year * 100 + self.end_date.month
-        rows = self._execute_query(f"""
-            SELECT COALESCE(pr.fio, '—')                      AS fio,
-                   COALESCE(pr.tbn, '')                        AS tbn,
-                   COALESCE(pr.department_raw,'—')             AS department,
-                   COALESCE(SUM(pr.total_accrued),0)::float   AS total_accrued,
-                   COALESCE(SUM(pr.worked_hours),0)::float    AS worked_hours,
-                   COALESCE(SUM(pr.rwv_hours),0)::float       AS rwv_hours
+        rows = self._execute_query("""
+            SELECT
+                COALESCE(NULLIF(pr.position_raw,''), '—')  AS position_name,
+                COUNT(DISTINCT pr.employee_id)::int          AS employee_count,
+                COALESCE(SUM(pr.total_accrued),0)::float    AS total_accrued,
+                COALESCE(AVG(pr.total_accrued),0)::float    AS avg_accrued,
+                COALESCE(MIN(pr.total_accrued),0)::float    AS min_accrued,
+                COALESCE(MAX(pr.total_accrued),0)::float    AS max_accrued,
+                COALESCE(SUM(pr.worked_hours),0)::float     AS worked_hours,
+                COALESCE(SUM(pr.rwv_hours),0)::float        AS rwv_hours
             FROM payroll_uploads pu
             JOIN payroll_rows pr ON pr.upload_id = pu.id
             WHERE (pu.year * 100 + pu.month) BETWEEN %s AND %s
-            GROUP BY pr.fio, pr.tbn, pr.department_raw
-            ORDER BY total_accrued DESC
-            LIMIT {limit};
+            GROUP BY COALESCE(NULLIF(pr.position_raw,''), '—')
+            ORDER BY total_accrued DESC;
         """, (start_p, end_p))
         df = pd.DataFrame(rows)
         if not df.empty:
-            for c in ("total_accrued", "worked_hours", "rwv_hours"):
+            for c in ("total_accrued", "avg_accrued",
+                      "min_accrued", "max_accrued",
+                      "worked_hours", "rwv_hours"):
                 df[c] = df[c].astype(float)
+            df["employee_count"] = df["employee_count"].astype(int)
         return df
 
+    def get_payroll_stats_summary(self) -> pd.DataFrame:
+        """
+        Сводная статистика ФОТ БЕЗ персональных данных:
+        только агрегаты по подразделению — кол-во людей,
+        общий ФОТ, среднее, медиана, кол-во с RWV.
+        """
+        start_p = self.start_date.year * 100 + self.start_date.month
+        end_p   = self.end_date.year * 100 + self.end_date.month
+        rows = self._execute_query("""
+            SELECT
+                COALESCE(NULLIF(pr.department_raw,''), '—')  AS department_name,
+                COUNT(DISTINCT pr.employee_id)::int            AS employee_count,
+                COALESCE(SUM(pr.total_accrued),0)::float      AS total_accrued,
+                COALESCE(AVG(pr.total_accrued),0)::float      AS avg_accrued,
+                COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP
+                    (ORDER BY pr.total_accrued),0)::float      AS median_accrued,
+                COALESCE(SUM(pr.worked_hours),0)::float        AS worked_hours,
+                COALESCE(SUM(pr.rwv_hours),0)::float           AS rwv_hours,
+                SUM(CASE WHEN COALESCE(pr.rwv_hours,0) > 0
+                         THEN 1 ELSE 0 END)::int               AS rwv_employees_cnt,
+                COALESCE(SUM(pr.worked_days),0)::int           AS worked_days
+            FROM payroll_uploads pu
+            JOIN payroll_rows pr ON pr.upload_id = pu.id
+            WHERE (pu.year * 100 + pu.month) BETWEEN %s AND %s
+            GROUP BY COALESCE(NULLIF(pr.department_raw,''), '—')
+            ORDER BY total_accrued DESC;
+        """, (start_p, end_p))
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            for c in ("total_accrued", "avg_accrued",
+                      "median_accrued", "worked_hours", "rwv_hours"):
+                df[c] = df[c].astype(float)
+            for c in ("employee_count", "rwv_employees_cnt", "worked_days"):
+                df[c] = df[c].astype(int)
+            # Стоимость часа по подразделению
+            df["cost_per_hour"] = df.apply(
+                lambda r: r["total_accrued"] / r["worked_hours"]
+                if r["worked_hours"] > 0 else 0.0, axis=1
+            )
+        return df
 
 # ============================================================
 #  UI HELPERS
@@ -2530,6 +2579,7 @@ class AnalyticsPage(ttk.Frame):
         self._clear_tab(self.tab_payroll)
         dp = self.data_provider
 
+        # ── KPI-карточки ──────────────────────────────────────
         kpi_frame = tk.Frame(self.tab_payroll, bg="#F0F2F5")
         kpi_frame.pack(fill="x", padx=10, pady=10)
 
@@ -2547,7 +2597,7 @@ class AnalyticsPage(ttk.Frame):
              "₽", PALETTE["payroll"]),
             ("Сотрудников в ФОТ",
              unique_emp, "чел.", PALETTE["neutral"]),
-            ("Среднее начисление",
+            ("Среднее начисление\n(по подразделению)",
              f"{avg_acc:,.0f}".replace(",", " "),
              "₽/чел.", PALETTE["neutral"]),
             ("Стоимость часа",
@@ -2575,13 +2625,19 @@ class AnalyticsPage(ttk.Frame):
             ).pack(expand=True)
             return
 
+        # ── Основная область: два столбца ─────────────────────
         main = ttk.Frame(self.tab_payroll)
         main.pack(fill="both", expand=True, padx=10, pady=4)
 
         left = ttk.Frame(main)
         left.pack(side="left", fill="both", expand=True, padx=(0, 5))
 
-        # Тренд ФОТ
+        right = ttk.Frame(main)
+        right.pack(side="left", fill="both", expand=True, padx=(5, 0))
+
+        # ── ЛЕВАЯ КОЛОНКА ─────────────────────────────────────
+
+        # Тренд ФОТ по месяцам
         trend_f = ttk.LabelFrame(left, text="Динамика ФОТ по месяцам (₽)")
         trend_f.pack(fill="both", expand=True, pady=(0, 5))
 
@@ -2590,16 +2646,18 @@ class AnalyticsPage(ttk.Frame):
             x = list(range(len(df_trend)))
             fig, ax = self._make_figure(figsize=(5.5, 2.8))
             ax2 = ax.twinx()
+
             ax.bar(x, df_trend["total_accrued"].tolist(),
                    color=PALETTE["payroll"], alpha=0.75, label="ФОТ, ₽")
-            ax2.plot(x, df_trend["avg_accrued"].tolist(),
-                     marker="o", color=PALETTE["warning"],
-                     linewidth=2, label="Среднее/чел., ₽")
+            ax2.plot(x, df_trend["employee_count"].tolist(),
+                     marker="o", color=PALETTE["primary"],
+                     linewidth=2, markersize=5, label="Сотрудников")
 
-            # Подписи на столбцах
+            # Подписи сумм над столбцами
             for xi, v in zip(x, df_trend["total_accrued"].tolist()):
-                ax.text(xi, v, f"{v/1_000_000:.1f}М" if v >= 1_000_000
-                        else f"{v/1000:.0f}к",
+                label_txt = (f"{v/1_000_000:.1f}М"
+                             if v >= 1_000_000 else f"{v/1000:.0f}к")
+                ax.text(xi, v, label_txt,
                         ha="center", va="bottom", fontsize=7,
                         color=PALETTE["payroll"], fontweight="bold")
 
@@ -2608,65 +2666,28 @@ class AnalyticsPage(ttk.Frame):
                                rotation=45, ha="right", fontsize=7)
             ax.yaxis.set_major_formatter(
                 mticker.FuncFormatter(
-                    lambda v, _: f"{v/1_000_000:.1f}М" if v >= 1_000_000
-                    else f"{v/1000:.0f}к"
+                    lambda v, _: f"{v/1_000_000:.1f}М"
+                    if v >= 1_000_000 else f"{v/1000:.0f}к"
                 )
             )
             apply_chart_style(ax, ylabel="Начислено, ₽")
-            ax2.set_ylabel("Среднее, ₽", fontsize=8, color=PALETTE["warning"])
-            ax2.tick_params(colors=PALETTE["warning"], labelsize=8)
-            ax2.spines["right"].set_color(PALETTE["warning"])
+            ax2.set_ylabel("Сотрудников", fontsize=8, color=PALETTE["primary"])
+            ax2.tick_params(colors=PALETTE["primary"], labelsize=8)
+            ax2.spines["right"].set_color(PALETTE["primary"])
             ax2.spines["top"].set_visible(False)
+
             handles = [
                 mpatches.Patch(color=PALETTE["payroll"], label="ФОТ итого, ₽"),
-                mpatches.Patch(color=PALETTE["warning"], label="Среднее/чел., ₽"),
+                mpatches.Patch(color=PALETTE["primary"], label="Кол-во сотрудников"),
             ]
             ax.legend(handles=handles, fontsize=7, loc="upper left")
             self._embed_figure(fig, trend_f)
         else:
             ttk.Label(trend_f, text="Нет данных.").pack(pady=10)
 
-        # ТОП сотрудников
-        top_f = ttk.LabelFrame(left, text="ТОП-15 сотрудников по начислениям")
-        top_f.pack(fill="both", expand=True, pady=(5, 0))
-
-        df_top = dp.get_payroll_top_employees(limit=15)
-        if not df_top.empty:
-            tree = self._create_treeview(
-                top_f,
-                columns=[
-                    ("fio",        "ФИО"),
-                    ("department", "Подразделение"),
-                    ("accrued",    "Начислено, ₽"),
-                    ("hours",      "Часов"),
-                    ("rwv",        "Часов RWV"),
-                ],
-                height=8,
-            )
-            tree.column("fio",        width=200)
-            tree.column("department", width=160)
-            tree.column("accrued",    width=130, anchor="e")
-            tree.column("hours",      width=90,  anchor="e")
-            tree.column("rwv",        width=90,  anchor="e")
-            self._insert_rows(tree, [
-                (
-                    r["fio"],
-                    r["department"],
-                    f"{r['total_accrued']:,.0f}".replace(",", " "),
-                    f"{r['worked_hours']:,.1f}".replace(",", " "),
-                    f"{r['rwv_hours']:,.1f}".replace(",", " "),
-                )
-                for _, r in df_top.iterrows()
-            ])
-        else:
-            ttk.Label(top_f, text="Нет данных.").pack(pady=10)
-
-        right = ttk.Frame(main)
-        right.pack(side="left", fill="both", expand=True, padx=(5, 0))
-
         # ФОТ по объектам — горизонтальный бар
-        obj_f = ttk.LabelFrame(right, text="ФОТ по объектам (₽)")
-        obj_f.pack(fill="both", expand=True, pady=(0, 5))
+        obj_f = ttk.LabelFrame(left, text="ФОТ по объектам (₽)")
+        obj_f.pack(fill="both", expand=True, pady=(5, 0))
 
         df_obj = dp.get_payroll_by_object(limit=12)
         if not df_obj.empty:
@@ -2680,16 +2701,16 @@ class AnalyticsPage(ttk.Frame):
             max_v = float(df_plot["payroll_amount"].max() or 1)
             for bar in bars:
                 w = float(bar.get_width() or 0)
-                label = f"{w/1_000_000:.1f}М" if w >= 1_000_000 \
-                    else f"{w/1000:.0f}к"
+                label_txt = (f"{w/1_000_000:.1f}М"
+                             if w >= 1_000_000 else f"{w/1000:.0f}к")
                 ax.text(w + max_v * 0.01,
                         bar.get_y() + bar.get_height() / 2,
-                        label, va="center", fontsize=7,
+                        label_txt, va="center", fontsize=7,
                         color=PALETTE["neutral"])
             ax.xaxis.set_major_formatter(
                 mticker.FuncFormatter(
-                    lambda v, _: f"{v/1_000_000:.1f}М" if v >= 1_000_000
-                    else f"{v/1000:.0f}к"
+                    lambda v, _: f"{v/1_000_000:.1f}М"
+                    if v >= 1_000_000 else f"{v/1000:.0f}к"
                 )
             )
             apply_chart_style(ax, xlabel="₽")
@@ -2699,42 +2720,93 @@ class AnalyticsPage(ttk.Frame):
                       text="Нет данных.\nЗагрузите payroll_distribution.",
                       justify="center").pack(pady=20)
 
-        # ФОТ по подразделениям
-        dept_f = ttk.LabelFrame(right, text="ФОТ по подразделениям")
-        dept_f.pack(fill="both", expand=True, pady=(5, 0))
+        # ── ПРАВАЯ КОЛОНКА ────────────────────────────────────
 
-        df_dept = dp.get_payroll_by_department()
-        if not df_dept.empty:
-            tree2 = self._create_treeview(
+        # Таблица по подразделениям — АГРЕГИРОВАННАЯ (без персональных данных)
+        dept_f = ttk.LabelFrame(
+            right,
+            text="ФОТ по подразделениям (агрегировано)"
+        )
+        dept_f.pack(fill="both", expand=True, pady=(0, 5))
+
+        df_dept_stats = dp.get_payroll_stats_summary()
+        if not df_dept_stats.empty:
+            tree_dept = self._create_treeview(
                 dept_f,
                 columns=[
-                    ("dept",    "Подразделение"),
-                    ("emp",     "Сотр."),
-                    ("accrued", "Начислено, ₽"),
-                    ("avg",     "Среднее, ₽"),
-                    ("cph",     "₽/час"),
+                    ("dept",     "Подразделение"),
+                    ("emp",      "Сотр."),
+                    ("total",    "Итого, ₽"),
+                    ("avg",      "Среднее, ₽"),
+                    ("median",   "Медиана, ₽"),
+                    ("cph",      "₽/час"),
+                    ("rwv_emp",  "С RWV, чел."),
+                ],
+                height=10,
+            )
+            tree_dept.column("dept",    width=200)
+            tree_dept.column("emp",     width=60,  anchor="e")
+            tree_dept.column("total",   width=130, anchor="e")
+            tree_dept.column("avg",     width=110, anchor="e")
+            tree_dept.column("median",  width=110, anchor="e")
+            tree_dept.column("cph",     width=80,  anchor="e")
+            tree_dept.column("rwv_emp", width=90,  anchor="e")
+
+            self._insert_rows(tree_dept, [
+                (
+                    r["department_name"],
+                    int(r["employee_count"]),
+                    f"{r['total_accrued']:,.0f}".replace(",", " "),
+                    f"{r['avg_accrued']:,.0f}".replace(",", " "),
+                    f"{r['median_accrued']:,.0f}".replace(",", " "),
+                    f"{r['cost_per_hour']:.1f}"
+                    if r["cost_per_hour"] > 0 else "—",
+                    int(r["rwv_employees_cnt"]),
+                )
+                for _, r in df_dept_stats.iterrows()
+            ])
+        else:
+            ttk.Label(dept_f, text="Нет данных.").pack(pady=10)
+
+        # Таблица по должностям — без персональных данных
+        pos_f = ttk.LabelFrame(
+            right,
+            text="ФОТ по должностям (агрегировано)"
+        )
+        pos_f.pack(fill="both", expand=True, pady=(5, 0))
+
+        df_pos = dp.get_payroll_by_position()
+        if not df_pos.empty:
+            tree_pos = self._create_treeview(
+                pos_f,
+                columns=[
+                    ("position", "Должность"),
+                    ("emp",      "Сотр."),
+                    ("total",    "Итого, ₽"),
+                    ("avg",      "Среднее, ₽"),
+                    ("cph",      "₽/час"),
                 ],
                 height=8,
             )
-            tree2.column("dept",    width=200)
-            tree2.column("emp",     width=60,  anchor="e")
-            tree2.column("accrued", width=130, anchor="e")
-            tree2.column("avg",     width=120, anchor="e")
-            tree2.column("cph",     width=90,  anchor="e")
-            self._insert_rows(tree2, [
+            tree_pos.column("position", width=220)
+            tree_pos.column("emp",      width=60,  anchor="e")
+            tree_pos.column("total",    width=130, anchor="e")
+            tree_pos.column("avg",      width=110, anchor="e")
+            tree_pos.column("cph",      width=80,  anchor="e")
+
+            self._insert_rows(tree_pos, [
                 (
-                    r["department_name"],
+                    r["position_name"],
                     int(r["employee_count"]),
                     f"{r['total_accrued']:,.0f}".replace(",", " "),
                     f"{r['avg_accrued']:,.0f}".replace(",", " "),
                     f"{r['total_accrued']/r['worked_hours']:.1f}"
                     if r["worked_hours"] > 0 else "—",
                 )
-                for _, r in df_dept.iterrows()
+                for _, r in df_pos.iterrows()
             ])
         else:
-            ttk.Label(dept_f, text="Нет данных.").pack(pady=10)
-
+            ttk.Label(pos_f, text="Нет данных.").pack(pady=10)
     # ----------------------------------------------------------
     #  ЭКСПОРТ В EXCEL
     # ----------------------------------------------------------
@@ -2839,10 +2911,11 @@ class AnalyticsPage(ttk.Frame):
                     writer, sheet_name="ФОТ_KPI", index=False
                 )
                 for df_ex, sheet in [
-                    (dp.get_payroll_trend(),             "ФОТ_Тренд"),
-                    (dp.get_payroll_by_object(50),       "ФОТ_Объекты"),
-                    (dp.get_payroll_by_department(),     "ФОТ_Подразделения"),
-                    (dp.get_payroll_top_employees(50),   "ФОТ_ТОП_сотрудников"),
+                    (dp.get_payroll_trend(),           "ФОТ_Тренд"),
+                    (dp.get_payroll_by_object(50),     "ФОТ_Объекты"),
+                    (dp.get_payroll_by_department(),   "ФОТ_Подразделения"),
+                    (dp.get_payroll_stats_summary(),   "ФОТ_Статистика_Подразд"),
+                    (dp.get_payroll_by_position(),     "ФОТ_По_Должностям"),
                 ]:
                     if not df_ex.empty:
                         df_ex.to_excel(writer, sheet_name=sheet, index=False)
