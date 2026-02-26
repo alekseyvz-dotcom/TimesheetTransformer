@@ -35,10 +35,6 @@ def _db_put_conn(conn):
 # ----------------------- DB API -----------------------
 
 def db_load_allowed_departments_for_user(user_id: int) -> List[str]:
-    """
-    Подразделения, доступные пользователю в "Бригады":
-    только те, где у него есть timesheet_headers.
-    """
     conn = None
     try:
         conn = _db_get_conn()
@@ -59,10 +55,6 @@ def db_load_allowed_departments_for_user(user_id: int) -> List[str]:
 
 
 def db_load_employees_for_department(department_name: str) -> List[Dict[str, str]]:
-    """
-    Сотрудники выбранного подразделения (из справочника employees).
-    Сопоставление подразделения: departments.name == department_name (как в timesheet_headers.department).
-    """
     conn = None
     try:
         conn = _db_get_conn()
@@ -85,9 +77,6 @@ def db_load_employees_for_department(department_name: str) -> List[Dict[str, str
 
 
 def db_load_brigadier_map(department_name: str) -> Dict[str, Optional[str]]:
-    """
-    Возвращает map: employee_tbn -> brigadier_tbn|None
-    """
     conn = None
     try:
         conn = _db_get_conn()
@@ -107,7 +96,7 @@ def db_load_brigadier_map(department_name: str) -> Dict[str, Optional[str]]:
 
 def db_upsert_assignments(
     department_name: str,
-    assignments: List[Tuple[str, Optional[str]]],  # [(employee_tbn, brigadier_tbn_or_None)]
+    assignments: List[Tuple[str, Optional[str]]],
     created_by: Optional[int] = None,
 ) -> None:
     conn = None
@@ -137,9 +126,9 @@ def db_upsert_assignments(
 class BrigadesPage(tk.Frame):
     """
     Страница "Бригады":
-      - выбор подразделения (только где есть табели у пользователя)
-      - список сотрудников подразделения
-      - назначение бригадира (выбор из сотрудников этого же подразделения)
+      - выбор подразделения
+      - поиск по ФИО
+      - назначение бригадира (можно назначить самого себя)
       - сохранение в БД
     """
 
@@ -162,21 +151,34 @@ class BrigadesPage(tk.Frame):
             return None
 
     def _build_ui(self):
+        # --- Верхняя панель (Подразделение + Кнопки) ---
         top = tk.Frame(self, bg="#f7f7f7")
         top.pack(fill="x", padx=10, pady=10)
 
         tk.Label(top, text="Подразделение:", bg="#f7f7f7").pack(side="left")
-        self.cmb_dep = ttk.Combobox(top, state="readonly", width=60, values=[])
+        self.cmb_dep = ttk.Combobox(top, state="readonly", width=40, values=[])
         self.cmb_dep.pack(side="left", padx=(8, 12))
         self.cmb_dep.bind("<<ComboboxSelected>>", lambda e: self._load_department_data())
 
         ttk.Button(top, text="Сохранить", command=self._save).pack(side="left")
         ttk.Button(top, text="Обновить", command=self._load_department_data).pack(side="left", padx=(8, 0))
 
+        # --- Панель поиска ---
+        search_frame = tk.Frame(self, bg="#f7f7f7")
+        search_frame.pack(fill="x", padx=10, pady=(0, 5))
+        
+        tk.Label(search_frame, text="Поиск сотрудника:", bg="#f7f7f7").pack(side="left")
+        
+        self.search_var = tk.StringVar()
+        self.entry_search = ttk.Entry(search_frame, textvariable=self.search_var)
+        self.entry_search.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        # При каждом отпускании клавиши фильтруем список
+        self.entry_search.bind("<KeyRelease>", self._on_search)
+
+        # --- Таблица ---
         mid = tk.Frame(self, bg="#f7f7f7")
         mid.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        # Treeview + scroll
         columns = ("fio", "tbn", "brigadier")
         self.tree = ttk.Treeview(mid, columns=columns, show="headings", height=18)
         self.tree.heading("fio", text="Сотрудник")
@@ -195,6 +197,7 @@ class BrigadesPage(tk.Frame):
         mid.grid_rowconfigure(0, weight=1)
         mid.grid_columnconfigure(0, weight=1)
 
+        # --- Нижняя панель ---
         bottom = tk.Frame(self, bg="#f7f7f7")
         bottom.pack(fill="x", padx=10, pady=(0, 10))
 
@@ -251,13 +254,29 @@ class BrigadesPage(tk.Frame):
             messagebox.showerror("Бригады", f"Ошибка загрузки данных:\n{e}")
             return
 
+        # Сброс поиска при смене подразделения или обновлении
+        self.search_var.set("")
         self._refresh_tree()
 
-    def _refresh_tree(self):
+    def _on_search(self, event):
+        """Обработчик ввода в поле поиска"""
+        filter_text = self.search_var.get()
+        self._refresh_tree(filter_text)
+
+    def _refresh_tree(self, filter_text: str = ""):
         self._clear_tree()
+        
+        ft = filter_text.strip().lower()
+        
         for e in self.employees:
             fio = e["fio"]
             tbn = e["tbn"]
+            
+            # Логика фильтрации: если введен текст, ищем совпадение в ФИО или ТБН
+            if ft:
+                if (ft not in fio.lower()) and (ft not in tbn.lower()):
+                    continue
+
             br = self.brig_map.get(tbn)
             self.tree.insert("", "end", iid=tbn, values=(fio, tbn, br or ""))
 
@@ -267,14 +286,16 @@ class BrigadesPage(tk.Frame):
             return None
         return sel[0]
 
-    def _pick_brigadier_dialog(self, exclude_tbn: str) -> Optional[str]:
+    def _pick_brigadier_dialog(self) -> Optional[str]:
         """
         Выбор бригадира из сотрудников подразделения.
         Возвращает brigadier_tbn или None (отмена).
+        Убрано исключение exclude_tbn, чтобы можно было выбрать самого себя.
         """
-        items = [e for e in self.employees if e["tbn"] != exclude_tbn]
+        items = self.employees[:] # Берем всех сотрудников
+        
         if not items:
-            messagebox.showinfo("Бригады", "В подразделении нет других сотрудников для назначения бригадиром.")
+            messagebox.showinfo("Бригады", "В подразделении нет сотрудников.")
             return None
 
         dlg = tk.Toplevel(self)
@@ -339,12 +360,14 @@ class BrigadesPage(tk.Frame):
             messagebox.showinfo("Бригады", "Выберите сотрудника.")
             return
 
-        brig_tbn = self._pick_brigadier_dialog(exclude_tbn=emp_tbn)
+        # Больше не передаем exclude_tbn
+        brig_tbn = self._pick_brigadier_dialog()
         if brig_tbn is None:
             return
 
-        if brig_tbn == emp_tbn:
-            brig_tbn = None
+        # Убрана проверка, которая сбрасывала значение, если сотрудник выбирал себя
+        # if brig_tbn == emp_tbn:
+        #    brig_tbn = None
 
         self.brig_map[emp_tbn] = brig_tbn
         self.tree.set(emp_tbn, "brigadier", brig_tbn or "")
@@ -363,13 +386,15 @@ class BrigadesPage(tk.Frame):
 
         uid = self._user_id()
 
-        # сохраняем по всем сотрудникам подразделения
         assignments: List[Tuple[str, Optional[str]]] = []
         for e in self.employees:
             tbn = e["tbn"]
             br = self.brig_map.get(tbn)
-            if br == tbn:
-                br = None
+            
+            # Убрана проверка, запрещающая сохранять себя как бригадира
+            # if br == tbn:
+            #     br = None
+                
             assignments.append((tbn, br))
 
         try:
