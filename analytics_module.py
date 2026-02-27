@@ -12,6 +12,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.patches as mpatches
 import matplotlib.ticker as mticker
+import matplotlib.pyplot as plt
 
 db_connection_pool: Optional[pool.SimpleConnectionPool] = None
 
