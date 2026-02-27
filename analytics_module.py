@@ -1645,153 +1645,396 @@ class AnalyticsPage(ttk.Frame):
             card.grid(row=0, column=i, padx=5, pady=4, sticky="nsew")
             kpi_frame.grid_columnconfigure(i, weight=1)
 
-        # ── Нижняя часть ──────────────────────────────────────
-        bottom = ttk.Frame(self.tab_summary)
-        bottom.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        # ── Основная область: 2×2 сетка ───────────────────────
+        grid = ttk.Frame(self.tab_summary)
+        grid.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        grid.columnconfigure(0, weight=3)   # левая колонка шире
+        grid.columnconfigure(1, weight=2)   # правая уже
+        grid.rowconfigure(0, weight=1)
+        grid.rowconfigure(1, weight=1)
 
-        # Тренд — ИСПРАВЛЕННЫЙ: 3 отдельных subplot вместо двойнойси
-        trend_frame = ttk.LabelFrame(bottom, text="Динамика по месяцам (все модули)")
-        trend_frame.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        # ── [0,0] ТОП-7 объектов по чел.-часам ───────────────
+        top_obj_f = ttk.LabelFrame(grid, text="ТОП объектов по чел.-часам")
+        top_obj_f.grid(row=0, column=0, padx=(0, 5), pady=(0, 5), sticky="nsew")
 
-        df_trend = dp.get_monthly_trend_all()
-        if not df_trend.empty and len(df_trend) > 0:
-            # Определяем какие серии реально не нулевые
-            has_labor    = df_trend["labor_hours"].sum() > 0
-            has_machine  = df_trend["machine_hours"].sum() > 0
-            has_portions = df_trend["meal_portions"].sum() > 0
+        df_obj = dp.get_labor_by_object()
+        if not df_obj.empty:
+            df_obj["total_hours"] = df_obj["total_hours"].fillna(0).astype(float)
+            df_obj["object_name"] = df_obj["object_name"].fillna("—")
+            df_plot = df_obj.head(7).sort_values("total_hours", ascending=True).copy()
+            df_plot["short"] = df_plot["object_name"].str[:35].apply(
+                lambda s: s + "…" if len(s) >= 35 else s
+            )
+            total_sum = df_obj["total_hours"].sum()
 
-            active_series = []
-            if has_labor:
-                active_series.append(("labor_hours",   "Чел.-часы",  PALETTE["primary"]))
-            if has_machine:
-                active_series.append(("machine_hours", "Маш.-часы",  PALETTE["success"]))
-            if has_portions:
-                active_series.append(("meal_portions", "Порции",     PALETTE["warning"]))
-
-            n_series = len(active_series)
-
-            if n_series == 0:
-                ttk.Label(trend_frame, text="Нет данных за период.").pack(pady=20)
-            else:
-                # Если одна точка — добавляем фиктивную для отображения
-                periods = df_trend["period"].tolist()
-                x       = list(range(len(periods)))
-
-                if n_series == 1:
-                    # Один график на всю ширину
-                    fig = Figure(figsize=(7, 3.5), dpi=100, facecolor="#FAFAFA")
-                    col, label, color = active_series[0]
-                    ax = fig.add_subplot(111)
-                    vals = df_trend[col].tolist()
-                    ax.fill_between(x, vals, alpha=0.18, color=color)
-                    ax.plot(x, vals, marker="o", color=color,
-                            linewidth=2, markersize=6)
-                    ax.set_xticks(x)
-                    ax.set_xticklabels(periods, rotation=45, ha="right", fontsize=8)
-                    # Подписи значений над точками
-                    for xi, v in zip(x, vals):
-                        ax.annotate(f"{v:,.0f}".replace(",", " "),
-                                    (xi, v), textcoords="offset points",
-                                    xytext=(0, 6), ha="center", fontsize=7,
-                                    color=color)
-                    apply_chart_style(ax, title=label)
-                    fig.tight_layout(pad=1.5)
-                else:
-                    # Несколько серий — subplot для каждой (нет проблемы масштаба!)
-                    fig = Figure(figsize=(7, 3.5), dpi=100, facecolor="#FAFAFA")
-                    fig.subplots_adjust(hspace=0.45, left=0.08,
-                                        right=0.97, top=0.92, bottom=0.18)
-
-                    for idx_s, (col, label, color) in enumerate(active_series):
-                        ax = fig.add_subplot(n_series, 1, idx_s + 1)
-                        vals = df_trend[col].tolist()
-
-                        if len(vals) == 1:
-                            # Один столбец — barh чтобы было видно
-                            ax.bar(x, vals, color=color, alpha=0.75, width=0.5)
-                        else:
-                            ax.fill_between(x, vals, alpha=0.15, color=color)
-                            ax.plot(x, vals, marker="o", color=color,
-                                    linewidth=2, markersize=5)
-
-                        # Подписи значений
-                        for xi, v in zip(x, vals):
-                            ax.annotate(f"{v:,.0f}".replace(",", " "),
-                                        (xi, v), textcoords="offset points",
-                                        xytext=(0, 5), ha="center", fontsize=7,
-                                        color=color, fontweight="bold")
-
-                        ax.set_xlim(-0.5, max(len(x) - 0.5, 0.5))
-                        ax.set_xticks(x)
-
-                        # Подписи оси X только у последнего subplot
-                        if idx_s == n_series - 1:
-                            ax.set_xticklabels(periods, rotation=45,
-                                               ha="right", fontsize=7)
-                        else:
-                            ax.set_xticklabels([""] * len(x))
-
-                        # Форматирование оси Y — сокращённые числа
-                        ax.yaxis.set_major_formatter(
-                            mticker.FuncFormatter(
-                                lambda v, _: f"{v/1000:.0f}к" if v >= 1000 else f"{v:.0f}"
-                            )
-                        )
-
-                        apply_chart_style(ax)
-                        ax.set_facecolor("#FAFAFA")
-
-                        # Цветная метка серии слева
-                        ax.set_ylabel(label, fontsize=8, color=color, labelpad=4)
-                        ax.spines["left"].set_color(color)
-                        ax.tick_params(axis="y", colors=color, labelsize=7)
-                        ax.tick_params(axis="x", colors="#546E7A", labelsize=7)
-                        ax.grid(axis="y", linestyle="--", alpha=0.3, color="#CFD8DC")
-
-                canvas = FigureCanvasTkAgg(fig, master=trend_frame)
-                canvas.draw()
-                canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+            fig, ax = self._make_figure(figsize=(5.5, 3.2))
+            colors_bar = [
+                PALETTE["primary"] if i == len(df_plot) - 1
+                else "#90CAF9"
+                for i in range(len(df_plot))
+            ]
+            bars = ax.barh(
+                df_plot["short"].tolist(),
+                df_plot["total_hours"].tolist(),
+                color=colors_bar, edgecolor="white", linewidth=0.5,
+            )
+            max_v = float(df_plot["total_hours"].max() or 1)
+            for bar, (_, row) in zip(bars, df_plot.iterrows()):
+                w = float(bar.get_width() or 0)
+                pct = w / total_sum * 100 if total_sum > 0 else 0
+                ax.text(
+                    w + max_v * 0.01,
+                    bar.get_y() + bar.get_height() / 2,
+                    f"{w:,.0f}".replace(",", " ") + f"  ({pct:.1f}%)",
+                    va="center", fontsize=7, color=PALETTE["neutral"],
+                )
+            ax.xaxis.set_major_formatter(
+                mticker.FuncFormatter(
+                    lambda v, _: f"{v/1000:.0f}к" if v >= 1000 else f"{v:.0f}"
+                )
+            )
+            apply_chart_style(ax, xlabel="Чел.-часы")
+            self._embed_figure(fig, top_obj_f)
         else:
-            ttk.Label(trend_frame, text="Нет данных за период.").pack(pady=20)
+            ttk.Label(top_obj_f, text="Нет данных.").pack(pady=20)
 
-        # Структура затрат (pie)
-        cost_frame = ttk.LabelFrame(bottom, text="Структура затрат (оценка, ₽)")
-        cost_frame.pack(side="left", fill="both", expand=False,
-                        padx=(6, 0), ipadx=10)
+        # ── [0,1] СТРУКТУРА ЗАТРАТ — исправленная ─────────────
+        cost_f = ttk.LabelFrame(grid, text="Структура затрат (оценка, ₽)")
+        cost_f.grid(row=0, column=1, padx=(5, 0), pady=(0, 5), sticky="nsew")
 
         breakdown = dp.get_cost_breakdown()
         breakdown_nonzero = {k: v for k, v in breakdown.items() if v > 0}
+        total_cost = sum(breakdown_nonzero.values())
 
         if breakdown_nonzero:
-            fig2, ax2 = self._make_figure(figsize=(3.5, 3.5))
-            colors_pie = [PALETTE["warning"], PALETTE["accent"],
-                          PALETTE["success"], PALETTE["primary"]]
-            wedges, texts, autotexts = ax2.pie(
-                list(breakdown_nonzero.values()),
-                labels=list(breakdown_nonzero.keys()),
-                autopct="%1.1f%%",
-                colors=colors_pie[:len(breakdown_nonzero)],
-                startangle=90,
-                wedgeprops=dict(width=0.55, edgecolor="white"),
-                pctdistance=0.78,
+            fig2 = Figure(figsize=(3.8, 3.2), dpi=100, facecolor="#FAFAFA")
+
+            if len(breakdown_nonzero) == 1:
+                # Одна категория — не рисуем пончик, показываем текст
+                ax2 = fig2.add_subplot(111)
+                ax2.set_facecolor("#FAFAFA")
+                ax2.axis("off")
+                name, val = list(breakdown_nonzero.items())[0]
+                ax2.text(0.5, 0.6, name, ha="center", va="center",
+                         fontsize=14, fontweight="bold",
+                         color=PALETTE["warning"], transform=ax2.transAxes)
+                ax2.text(0.5, 0.4,
+                         f"{val:,.0f} ₽".replace(",", " "),
+                         ha="center", va="center", fontsize=12,
+                         color=PALETTE["neutral"], transform=ax2.transAxes)
+            else:
+                # Горизонтальный stacked bar — читается при любых пропорциях
+                ax2 = fig2.add_subplot(111)
+                ax2.set_facecolor("#FAFAFA")
+
+                colors_cost = {
+                    "ФОТ":        PALETTE["primary"],
+                    "Питание":    PALETTE["warning"],
+                    "Проживание": PALETTE["accent"],
+                }
+                left_val = 0.0
+                items = sorted(breakdown_nonzero.items(),
+                               key=lambda x: x[1], reverse=True)
+
+                for name, val in items:
+                    color = colors_cost.get(name, PALETTE["neutral"])
+                    pct   = val / total_cost * 100
+                    ax2.barh(
+                        [""],
+                        [val],
+                        left=left_val,
+                        color=color,
+                        edgecolor="white",
+                        linewidth=2,
+                        height=0.55,
+                    )
+                    # Подпись внутри сегмента если > 5%
+                    if pct >= 5:
+                        ax2.text(
+                            left_val + val / 2, 0,
+                            f"{pct:.1f}%",
+                            ha="center", va="center",
+                            fontsize=9, fontweight="bold",
+                            color="white",
+                        )
+                    left_val += val
+
+                ax2.set_xlim(0, total_cost)
+                ax2.axis("off")
+
+                # Легенда в виде цветных плашек под баром
+                legend_y = -0.35
+                n = len(items)
+                for idx, (name, val) in enumerate(items):
+                    color = colors_cost.get(name, PALETTE["neutral"])
+                    pct   = val / total_cost * 100
+                    x_pos = (idx + 0.5) / n
+                    # Цветной квадрат
+                    ax2.add_patch(
+                        plt.Rectangle(
+                            (x_pos * total_cost - total_cost / n * 0.45,
+                             legend_y - 0.08),
+                            total_cost / n * 0.12, 0.12,
+                            transform=ax2.transData,
+                            color=color, clip_on=False,
+                        )
+                    )
+                    val_str = (f"{val/1_000_000:.1f}М ₽"
+                               if val >= 1_000_000
+                               else f"{val/1000:.0f}к ₽")
+                    ax2.text(
+                        x_pos * total_cost,
+                        legend_y,
+                        f"{name}\n{val_str}\n{pct:.1f}%",
+                        ha="center", va="top",
+                        fontsize=7.5, color=PALETTE["neutral"],
+                        transform=ax2.transData,
+                    )
+
+            # Итоговая сумма сверху
+            total_str = (f"{total_cost/1_000_000:.1f} млн ₽"
+                         if total_cost >= 1_000_000
+                         else f"{total_cost:,.0f} ₽".replace(",", " "))
+            fig2.text(
+                0.5, 0.97, f"Итого: {total_str}",
+                ha="center", va="top",
+                fontsize=10, fontweight="bold",
+                color=PALETTE["neutral"],
             )
-            for t in texts:
-                t.set_fontsize(9)
-            for at in autotexts:
-                at.set_fontsize(8)
-                at.set_color("white")
-                at.set_fontweight("bold")
-            ax2.axis("equal")
-            total_cost = sum(breakdown_nonzero.values())
-            ax2.set_title(
-                f"Итого: {total_cost:,.0f} ₽".replace(",", " "),
-                fontsize=9, fontweight="bold", pad=10,
-            )
-            self._embed_figure(fig2, cost_frame)
+            fig2.tight_layout(rect=(0, 0.05, 1, 0.93))
+            canvas2 = FigureCanvasTkAgg(fig2, master=cost_f)
+            canvas2.draw()
+            canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         else:
-            ttk.Label(cost_frame,
-                      text="Нет данных\nо стоимости.",
+            ttk.Label(cost_f,
+                      text="Нет данных о затратах.",
                       justify="center").pack(pady=30, padx=20)
+
+        # ── [1,0] ЗАНЯТОСТЬ ОБЩЕЖИТИЙ — sparkline + цифры ────
+        dorm_f = ttk.LabelFrame(grid, text="Занятость общежитий")
+        dorm_f.grid(row=1, column=0, padx=(0, 5), pady=(5, 0), sticky="nsew")
+
+        df_occ = dp.get_lodging_daily_occupancy()
+        if not df_occ.empty:
+            df_occ["occupied_beds"] = df_occ["occupied_beds"].astype(int)
+            avg_occ = df_occ["occupied_beds"].mean()
+            max_occ = df_occ["occupied_beds"].max()
+            min_occ = df_occ["occupied_beds"].min()
+            last_occ = int(df_occ["occupied_beds"].iloc[-1])
+
+            # Мини-метрики сверху
+            metrics_f = tk.Frame(dorm_f, bg="white")
+            metrics_f.pack(fill="x", padx=8, pady=(6, 0))
+
+            for col_idx, (lbl, val, color) in enumerate([
+                ("Сейчас занято",  f"{last_occ}",        PALETTE["accent"]),
+                ("Среднее за период", f"{avg_occ:.0f}",  PALETTE["neutral"]),
+                ("Максимум",       f"{max_occ}",          PALETTE["primary"]),
+                ("Минимум",        f"{min_occ}",          PALETTE["success"]),
+            ]):
+                cell = tk.Frame(metrics_f, bg="white")
+                cell.grid(row=0, column=col_idx, padx=8, sticky="ew")
+                metrics_f.columnconfigure(col_idx, weight=1)
+                tk.Label(cell, text=lbl, font=("Segoe UI", 7),
+                         fg=PALETTE["text_muted"], bg="white").pack()
+                tk.Label(cell, text=f"{val} чел.",
+                         font=("Segoe UI", 12, "bold"),
+                         fg=color, bg="white").pack()
+
+            # Sparkline
+            df_occ["d"]     = pd.to_datetime(df_occ["d"])
+            df_occ["label"] = df_occ["d"].dt.strftime("%d.%m")
+            x_occ = list(range(len(df_occ)))
+
+            fig3 = Figure(figsize=(5.5, 1.6), dpi=100, facecolor="white")
+            ax3  = fig3.add_subplot(111)
+            ax3.set_facecolor("white")
+
+            ax3.fill_between(x_occ, df_occ["occupied_beds"].tolist(),
+                             alpha=0.2, color=PALETTE["accent"])
+            ax3.plot(x_occ, df_occ["occupied_beds"].tolist(),
+                     color=PALETTE["accent"], linewidth=1.8)
+
+            # Линия среднего
+            ax3.axhline(avg_occ, color=PALETTE["neutral"],
+                        linestyle="--", linewidth=1, alpha=0.6)
+
+            # Выделяем последнюю точку
+            ax3.scatter([x_occ[-1]], [last_occ],
+                        color=PALETTE["accent"], s=40, zorder=5)
+
+            step = max(1, len(df_occ) // 10)
+            ax3.set_xticks(x_occ[::step])
+            ax3.set_xticklabels(
+                df_occ["label"].iloc[::step].tolist(),
+                rotation=0, ha="center", fontsize=7,
+            )
+            ax3.spines["top"].set_visible(False)
+            ax3.spines["right"].set_visible(False)
+            ax3.spines["left"].set_color("#E0E0E0")
+            ax3.spines["bottom"].set_color("#E0E0E0")
+            ax3.tick_params(colors="#78909C", labelsize=7)
+            ax3.set_ylabel("мест", fontsize=7, color=PALETTE["text_muted"])
+            fig3.tight_layout(pad=0.8)
+
+            canvas3 = FigureCanvasTkAgg(fig3, master=dorm_f)
+            canvas3.draw()
+            canvas3.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        else:
+            ttk.Label(dorm_f, text="Нет данных по проживанию.").pack(pady=20)
+
+        # ── [1,1] АЛЕРТЫ И СТАТУСЫ ────────────────────────────
+        alerts_f = ttk.LabelFrame(grid, text="⚡ Требует внимания")
+        alerts_f.grid(row=1, column=1, padx=(5, 0), pady=(5, 0), sticky="nsew")
+
+        self._build_alerts_panel(alerts_f, summary, dp)
+
+    # ----------------------------------------------------------
+    #  Панель алертов — отдельный метод для читаемости
+    # ----------------------------------------------------------
+
+    def _build_alerts_panel(self, parent, summary: dict, dp: "AnalyticsData"):
+        """
+        Показывает список проблем/наблюдений которые требуют внимания.
+        Каждый алерт — цветная строка с иконкой и пояснением.
+        """
+        canvas = tk.Canvas(parent, bg="white", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical",
+                                  command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        inner = tk.Frame(canvas, bg="white")
+        canvas_window = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_configure(e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfig(canvas_window, width=canvas.winfo_width())
+
+        inner.bind("<Configure>", _on_configure)
+        canvas.bind("<Configure>", _on_configure)
+
+        alerts = []  # список (уровень, иконка, заголовок, текст)
+
+        # 1. Переработки
+        ot_pct = float(summary.get("overtime_pct", 0))
+        if ot_pct > 25:
+            alerts.append(("error", "🔴",
+                           "Высокая доля переработок",
+                           f"{ot_pct:.1f}% рабочих часов — переработки. "
+                           f"Норма: до 20%."))
+        elif ot_pct > 15:
+            alerts.append(("warn", "🟡",
+                           "Переработки выше нормы",
+                           f"{ot_pct:.1f}% часов — переработки."))
+
+        # 2. Машино-часы = 0
+        if float(summary.get("machine_hours", 0)) == 0:
+            alerts.append(("warn", "🟡",
+                           "Нет данных по транспорту",
+                           "За период не зафиксировано ни одного "
+                           "машино-часа. Проверьте заявки на транспорт."))
+
+        # 3. Проживание без тарифа
+        try:
+            kpi_ld = dp.get_lodging_kpi()
+            missing = int(kpi_ld.get("missing_rate_bed_days", 0))
+            if missing > 0:
+                alerts.append(("error", "🔴",
+                               "Койко-дни без тарифа",
+                               f"{missing:,} койко-дн. без тарифа RUB. "
+                               f"Стоимость проживания занижена."))
+        except Exception:
+            pass
+
+        # 4. Дельта чел.-часов
+        delta_labor = summary.get("delta_labor_hours")
+        if delta_labor is not None:
+            if delta_labor < -20:
+                alerts.append(("error", "🔴",
+                               "Резкое падение трудозатрат",
+                               f"Чел.-часов стало меньше на "
+                               f"{abs(delta_labor):.1f}% к пред. периоду."))
+            elif delta_labor > 30:
+                alerts.append(("info", "🔵",
+                               "Рост трудозатрат",
+                               f"+{delta_labor:.1f}% чел.-часов "
+                               f"к пред. периоду."))
+
+        # 5. Дельта питания
+        delta_meal = summary.get("delta_meal_portions")
+        if delta_meal is not None and delta_meal < -15:
+            alerts.append(("warn", "🟡",
+                           "Снижение порций питания",
+                           f"−{abs(delta_meal):.1f}% порций "
+                           f"к пред. периоду."))
+
+        # 6. ФОТ — проверяем наличие данных
+        try:
+            kpi_pay = dp.get_payroll_kpi()
+            if float(kpi_pay.get("total_accrued", 0)) == 0:
+                alerts.append(("warn", "🟡",
+                               "Нет данных ФОТ",
+                               "Не загружены данные по зарплатной ведомости "
+                               "за период."))
+        except Exception:
+            pass
+
+        # Если алертов нет
+        if not alerts:
+            ok_f = tk.Frame(inner, bg="white")
+            ok_f.pack(fill="x", padx=10, pady=20)
+            tk.Label(ok_f, text="✅", font=("Segoe UI", 24),
+                     bg="white").pack()
+            tk.Label(ok_f,
+                     text="Критичных отклонений\nне обнаружено",
+                     font=("Segoe UI", 10),
+                     fg=PALETTE["success"], bg="white",
+                     justify="center").pack(pady=4)
+            return
+
+        # Цвета уровней
+        level_colors = {
+            "error": ("#FFEBEE", PALETTE["negative"]),
+            "warn":  ("#FFF8E1", "#E65100"),
+            "info":  ("#E3F2FD", PALETTE["primary"]),
+        }
+
+        for level, icon, title, text in alerts:
+            bg_color, accent_color = level_colors.get(
+                level, ("#F5F5F5", PALETTE["neutral"])
+            )
+
+            row_f = tk.Frame(inner, bg=bg_color,
+                             highlightbackground=accent_color,
+                             highlightthickness=1)
+            row_f.pack(fill="x", padx=6, pady=4, ipady=4)
+
+            # Цветная полоска слева
+            stripe = tk.Frame(row_f, bg=accent_color, width=4)
+            stripe.pack(side="left", fill="y")
+
+            content = tk.Frame(row_f, bg=bg_color)
+            content.pack(side="left", fill="both",
+                         expand=True, padx=(8, 6))
+
+            # Заголовок с иконкой
+            hdr_f = tk.Frame(content, bg=bg_color)
+            hdr_f.pack(fill="x")
+            tk.Label(hdr_f, text=icon,
+                     font=("Segoe UI", 11),
+                     bg=bg_color).pack(side="left")
+            tk.Label(hdr_f, text=title,
+                     font=("Segoe UI", 9, "bold"),
+                     fg=accent_color, bg=bg_color).pack(side="left", padx=4)
+
+            # Текст
+            tk.Label(content, text=text,
+                     font=("Segoe UI", 8),
+                     fg="#424242", bg=bg_color,
+                     wraplength=200, justify="left",
+                     anchor="w").pack(fill="x", pady=(2, 0))
 
     # ----------------------------------------------------------
     #  TAB 1: ТРУДОЗАТРАТЫ
@@ -2807,9 +3050,29 @@ class AnalyticsPage(ttk.Frame):
             ])
         else:
             ttk.Label(pos_f, text="Нет данных.").pack(pady=10)
-    # ----------------------------------------------------------
-    #  ЭКСПОРТ В EXCEL
-    # ----------------------------------------------------------
+
+    @staticmethod
+    def _strip_tz(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Excel (openpyxl) не поддерживает timezone-aware datetimes.
+        Конвертируем все такие колонки в naive UTC.
+        """
+        if df is None or df.empty:
+            return df
+        df = df.copy()
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                if hasattr(df[col].dt, "tz") and df[col].dt.tz is not None:
+                    df[col] = df[col].dt.tz_convert("UTC").dt.tz_localize(None)
+            # Обрабатываем и object-колонки где могут быть Timestamp с tz
+            elif df[col].dtype == object:
+                try:
+                    sample = df[col].dropna().iloc[0] if not df[col].dropna().empty else None
+                    if sample is not None and hasattr(sample, "tzinfo") and sample.tzinfo is not None:
+                        df[col] = pd.to_datetime(df[col], utc=True).dt.tz_localize(None)
+                except Exception:
+                    pass
+        return df
 
     def _export_to_excel(self):
         if not self.data_provider:
@@ -2825,118 +3088,126 @@ class AnalyticsPage(ttk.Frame):
         if not path:
             return
 
-        dp = self.data_provider
+        dp  = self.data_provider
+        stz = self._strip_tz   # короткий псевдоним
+
         try:
             with pd.ExcelWriter(path, engine="openpyxl") as writer:
 
-                # Сводка
+                def safe_write(df, sheet):
+                    """Записывает df в лист, предварительно убирая tz."""
+                    if df is not None and not df.empty:
+                        stz(df).to_excel(writer, sheet_name=sheet, index=False)
+
+                # ── Сводка ────────────────────────────────────
                 summary = dp.get_executive_summary()
-                pd.DataFrame([{
-                    "Показатель": k, "Значение": v
-                } for k, v in summary.items()]).to_excel(
-                    writer, sheet_name="Сводка", index=False
+                safe_write(
+                    pd.DataFrame([{"Показатель": k, "Значение": v}
+                                  for k, v in summary.items()]),
+                    "Сводка"
                 )
 
-                # Трудозатраты
-                pd.DataFrame([dp.get_labor_kpi()]).to_excel(
-                    writer, sheet_name="Труд_KPI", index=False
-                )
-                for df_ex, sheet in [
-                    (dp.get_labor_by_department(),       "Труд_Подразделения"),
-                    (dp.get_labor_by_object(),           "Труд_Объекты"),
-                    (dp.get_top_employees_by_hours(50),  "Труд_ТОП_сотрудников"),
-                    (dp.get_labor_trend_by_month(),      "Труд_Тренд"),
-                ]:
-                    if not df_ex.empty:
-                        df_ex.to_excel(writer, sheet_name=sheet, index=False)
+                # ── Трудозатраты ──────────────────────────────
+                safe_write(pd.DataFrame([dp.get_labor_kpi()]),
+                           "Труд_KPI")
+                safe_write(dp.get_labor_by_department(),
+                           "Труд_Подразделения")
+                safe_write(dp.get_labor_by_object(),
+                           "Труд_Объекты")
+                safe_write(dp.get_top_employees_by_hours(50),
+                           "Труд_ТОП_сотрудников")
+                safe_write(dp.get_labor_trend_by_month(),
+                           "Труд_Тренд")
 
-                # Транспорт
-                pd.DataFrame([dp.get_transport_kpi()]).to_excel(
-                    writer, sheet_name="Транспорт_KPI", index=False
+                # ── Транспорт ─────────────────────────────────
+                safe_write(pd.DataFrame([dp.get_transport_kpi()]),
+                           "Транспорт_KPI")
+                safe_write(
+                    pd.DataFrame([dp.get_transport_fulfillment_summary()]),
+                    "Транспорт_Исполнение"
                 )
-                pd.DataFrame([dp.get_transport_fulfillment_summary()]).to_excel(
-                    writer, sheet_name="Транспорт_Исполнение", index=False
-                )
-                for df_ex, sheet in [
-                    (dp.get_transport_by_tech(),         "Транспорт_Техника"),
-                    (dp.get_transport_by_object(50),     "Транспорт_Объекты"),
-                    (dp.get_transport_trend(),           "Транспорт_Тренд"),
-                ]:
-                    if not df_ex.empty:
-                        df_ex.to_excel(writer, sheet_name=sheet, index=False)
+                safe_write(dp.get_transport_by_tech(),
+                           "Транспорт_Техника")
+                safe_write(dp.get_transport_by_object(50),
+                           "Транспорт_Объекты")
+                safe_write(dp.get_transport_trend(),
+                           "Транспорт_Тренд")
 
-                # Питание
+                # ── Питание ───────────────────────────────────
                 kpi_m = dp.get_meals_kpi()
                 kpi_m.update(dp.get_meals_cost_kpi())
-                pd.DataFrame([kpi_m]).to_excel(
-                    writer, sheet_name="Питание_KPI", index=False
+                safe_write(pd.DataFrame([kpi_m]), "Питание_KPI")
+                safe_write(dp.get_meals_by_type(),       "Питание_Типы")
+                safe_write(dp.get_meals_by_object(50),   "Питание_Объекты")
+                safe_write(dp.get_meals_by_department(), "Питание_Подразделения")
+                safe_write(dp.get_meals_trend_by_month(),"Питание_Тренд")
+
+                # ── Объекты ───────────────────────────────────
+                safe_write(dp.get_objects_rating(50), "Объекты_Рейтинг")
+
+                # ── Пользователи ──────────────────────────────
+                safe_write(dp.get_users_activity(), "Пользователи")
+
+                # ── Проживание ────────────────────────────────
+                safe_write(pd.DataFrame([dp.get_lodging_kpi()]),
+                           "Проживание_KPI")
+                safe_write(dp.get_lodging_by_dorm(50),
+                           "Проживание_Общежития")
+                safe_write(dp.get_lodging_by_department(),
+                           "Проживание_Подразделения")
+                safe_write(dp.get_lodging_daily_occupancy(),
+                           "Проживание_Занятость")
+
+                pv = dp.get_dorm_to_objects_people_pivot(
+                    top_objects=15, top_dorms=50
                 )
-                for df_ex, sheet in [
-                    (dp.get_meals_by_type(),             "Питание_Типы"),
-                    (dp.get_meals_by_object(50),         "Питание_Объекты"),
-                    (dp.get_meals_by_department(),       "Питание_Подразделения"),
-                    (dp.get_meals_trend_by_month(),      "Питание_Тренд"),
-                ]:
-                    if not df_ex.empty:
-                        df_ex.to_excel(writer, sheet_name=sheet, index=False)
-
-                # Объекты
-                df_obj = dp.get_objects_rating(limit=50)
-                if not df_obj.empty:
-                    df_obj.to_excel(writer, sheet_name="Объекты_Рейтинг", index=False)
-
-                # Пользователи
-                df_users = dp.get_users_activity()
-                if not df_users.empty:
-                    df_users.to_excel(writer, sheet_name="Пользователи", index=False)
-
-                # Проживание
-                pd.DataFrame([dp.get_lodging_kpi()]).to_excel(
-                    writer, sheet_name="Проживание_KPI", index=False
-                )
-                for df_ex, sheet in [
-                    (dp.get_lodging_by_dorm(50),         "Проживание_Общежития"),
-                    (dp.get_lodging_by_department(),     "Проживание_Подразделения"),
-                    (dp.get_lodging_daily_occupancy(),   "Проживание_Занятость"),
-                ]:
-                    if not df_ex.empty:
-                        df_ex.to_excel(writer, sheet_name=sheet, index=False)
-
-                pv = dp.get_dorm_to_objects_people_pivot(top_objects=15, top_dorms=50)
                 if pv is not None and not pv.empty:
-                    pv.to_excel(writer, sheet_name="Проживание_Pivot")
+                    # pivot может иметь MultiIndex — сбрасываем
+                    pv_export = pv.reset_index()
+                    stz(pv_export).to_excel(
+                        writer, sheet_name="Проживание_Pivot", index=False
+                    )
 
-                # ФОТ
-                pd.DataFrame([dp.get_payroll_kpi()]).to_excel(
-                    writer, sheet_name="ФОТ_KPI", index=False
-                )
-                for df_ex, sheet in [
-                    (dp.get_payroll_trend(),           "ФОТ_Тренд"),
-                    (dp.get_payroll_by_object(50),     "ФОТ_Объекты"),
-                    (dp.get_payroll_by_department(),   "ФОТ_Подразделения"),
-                    (dp.get_payroll_stats_summary(),   "ФОТ_Статистика_Подразд"),
-                    (dp.get_payroll_by_position(),     "ФОТ_По_Должностям"),
-                ]:
-                    if not df_ex.empty:
-                        df_ex.to_excel(writer, sheet_name=sheet, index=False)
+                # ── ФОТ (без персональных данных) ─────────────
+                safe_write(pd.DataFrame([dp.get_payroll_kpi()]),
+                           "ФОТ_KPI")
+                safe_write(dp.get_payroll_trend(),
+                           "ФОТ_Тренд")
+                safe_write(dp.get_payroll_by_object(50),
+                           "ФОТ_Объекты")
+                safe_write(dp.get_payroll_by_department(),
+                           "ФОТ_Подразделения")
+                safe_write(dp.get_payroll_stats_summary(),
+                           "ФОТ_Статистика_Подразд")
+                safe_write(dp.get_payroll_by_position(),
+                           "ФОТ_По_Должностям")
 
-                # Авто-ширина колонок
+                # ── Авто-ширина колонок ───────────────────────
                 try:
                     from openpyxl.utils import get_column_letter
                     for sheet_name in writer.sheets:
                         ws = writer.sheets[sheet_name]
                         for col_cells in ws.columns:
                             max_len    = 0
-                            col_letter = get_column_letter(col_cells[0].column)
+                            col_letter = get_column_letter(
+                                col_cells[0].column
+                            )
                             for cell in col_cells:
                                 try:
-                                    cell_len = len(str(cell.value)) if cell.value else 0
-                                    max_len  = max(max_len, cell_len)
+                                    cell_len = (
+                                        len(str(cell.value))
+                                        if cell.value is not None else 0
+                                    )
+                                    max_len = max(max_len, cell_len)
                                 except Exception:
                                     pass
-                            ws.column_dimensions[col_letter].width = min(max_len + 4, 60)
+                            ws.column_dimensions[col_letter].width = min(
+                                max_len + 4, 60
+                            )
                 except Exception as fmt_err:
-                    logging.warning(f"Не удалось настроить ширину колонок: {fmt_err}")
+                    logging.warning(
+                        f"Не удалось настроить ширину колонок: {fmt_err}"
+                    )
 
             messagebox.showinfo(
                 "Экспорт завершён",
@@ -2945,5 +3216,7 @@ class AnalyticsPage(ttk.Frame):
 
         except Exception as e:
             logging.exception("Ошибка экспорта в Excel")
-            messagebox.showerror("Ошибка экспорта",
-                                 f"Не удалось сохранить файл:\n{e}")
+            messagebox.showerror(
+                "Ошибка экспорта",
+                f"Не удалось сохранить файл:\n{e}"
+            )
