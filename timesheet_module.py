@@ -3797,11 +3797,10 @@ class TimesheetPage(tk.Frame):
         self._fit_job = self.after(150, self._auto_fit_columns)
 
 class MyTimesheetsPage(tk.Frame):
-    """
-    Реестр табелей текущего пользователя с фильтрацией и экспортом.
-    """
-    def __init__(self, master, app_ref: "MainApp"):
-        super().__init__(master)
+    """Реестр табелей текущего пользователя."""
+
+    def __init__(self, master, app_ref):
+        super().__init__(master, bg=TS_COLORS["bg"])
         self.app_ref = app_ref
         if get_output_dir_from_config:
             self.out_dir = get_output_dir_from_config()
@@ -3812,92 +3811,167 @@ class MyTimesheetsPage(tk.Frame):
         self.tree = None
         self._headers: List[Dict[str, Any]] = []
 
-        # Переменные для хранения значений фильтров
-        self.var_year = tk.StringVar()
-        self.var_month = tk.StringVar()
-        self.var_dep = tk.StringVar()
+        self.var_year  = tk.StringVar(value=str(datetime.now().year))
+        self.var_month = tk.StringVar(value="Все")
+        self.var_dep   = tk.StringVar()
         self.var_obj_addr = tk.StringVar()
 
         self._build_ui()
         self._load_data()
 
     def _build_ui(self):
-        # --- Верхняя панель с фильтрами ---
-        top = tk.Frame(self)
-        top.pack(fill="x", padx=8, pady=(8, 4))
+        # ── Заголовок ─────────────────────────────────────────
+        hdr = tk.Frame(self, bg=TS_COLORS["accent"], pady=6)
+        hdr.pack(fill="x")
+        tk.Label(
+            hdr, text="📂  Мои табели",
+            font=("Segoe UI", 12, "bold"),
+            bg=TS_COLORS["accent"], fg="white", padx=12
+        ).pack(side="left")
 
-        tk.Label(top, text="Мои табели", font=("Segoe UI", 12, "bold")).grid(
-            row=0, column=0, columnspan=6, sticky="w", pady=(0, 8)
+        # ── Панель фильтров ───────────────────────────────────
+        filter_pnl = tk.LabelFrame(
+            self, text=" 🔍 Фильтры ",
+            font=("Segoe UI", 9, "bold"),
+            bg=TS_COLORS["panel"], fg=TS_COLORS["accent"],
+            relief="groove", bd=1, padx=10, pady=8
         )
+        filter_pnl.pack(fill="x", padx=10, pady=(8, 4))
 
-        row_f = 1
-        tk.Label(top, text="Год:").grid(row=row_f, column=0, sticky="e", padx=(0, 4))
-        spn_year = tk.Spinbox(top, from_=2000, to=2100, width=6, textvariable=self.var_year)
-        spn_year.grid(row=row_f, column=1, sticky="w")
-        self.var_year.set(str(datetime.now().year))
+        # Строка 1: год, месяц
+        tk.Label(
+            filter_pnl, text="Год:",
+            font=("Segoe UI", 9),
+            bg=TS_COLORS["panel"]
+        ).grid(row=0, column=0, sticky="e", padx=(0, 6), pady=3)
 
-        tk.Label(top, text="Месяц:").grid(row=row_f, column=2, sticky="e", padx=(12, 4))
+        spn_year = tk.Spinbox(
+            filter_pnl, from_=2000, to=2100, width=7,
+            textvariable=self.var_year,
+            font=("Segoe UI", 9)
+        )
+        spn_year.grid(row=0, column=1, sticky="w", pady=3)
+
+        tk.Label(
+            filter_pnl, text="Месяц:",
+            font=("Segoe UI", 9),
+            bg=TS_COLORS["panel"]
+        ).grid(row=0, column=2, sticky="e", padx=(16, 6), pady=3)
+
         cmb_month = ttk.Combobox(
-            top, state="readonly", width=12, textvariable=self.var_month,
-            values=["Все"] + [month_name_ru(i) for i in range(1, 13)],
+            filter_pnl, state="readonly", width=14,
+            textvariable=self.var_month,
+            values=["Все"] + [month_name_ru(i) for i in range(1, 13)]
         )
-        cmb_month.grid(row=row_f, column=3, sticky="w")
-        self.var_month.set("Все")
+        cmb_month.grid(row=0, column=3, sticky="w", pady=3)
 
-        row_f += 1
-        tk.Label(top, text="Подразделение:").grid(row=row_f, column=0, sticky="e", padx=(0, 4), pady=(4, 0))
-        ent_dep = ttk.Entry(top, width=24, textvariable=self.var_dep)
-        ent_dep.grid(row=row_f, column=1, sticky="w", pady=(4, 0))
+        # Строка 2: подразделение, адрес
+        tk.Label(
+            filter_pnl, text="Подразделение:",
+            font=("Segoe UI", 9),
+            bg=TS_COLORS["panel"]
+        ).grid(row=1, column=0, sticky="e", padx=(0, 6), pady=3)
 
-        tk.Label(top, text="Объект (адрес):").grid(row=row_f, column=2, sticky="e", padx=(12, 4), pady=(4, 0))
-        ent_addr = ttk.Entry(top, width=34, textvariable=self.var_obj_addr)
-        ent_addr.grid(row=row_f, column=3, sticky="w", pady=(4, 0))
+        ttk.Entry(
+            filter_pnl, width=26, textvariable=self.var_dep,
+            font=("Segoe UI", 9)
+        ).grid(row=1, column=1, sticky="w", pady=3)
 
-        # Панель с кнопками
-        btns_frame = tk.Frame(top)
-        btns_frame.grid(row=row_f + 1, column=0, columnspan=6, sticky="w", pady=(8, 0))
-        ttk.Button(btns_frame, text="Применить фильтр", command=self._load_data).pack(side="left", padx=(0, 4))
-        ttk.Button(btns_frame, text="Сбросить", command=self._reset_filters).pack(side="left", padx=4)
-        ttk.Button(btns_frame, text="Выгрузить в Excel", command=self._export_to_excel).pack(side="left", padx=4)
+        tk.Label(
+            filter_pnl, text="Объект (адрес):",
+            font=("Segoe UI", 9),
+            bg=TS_COLORS["panel"]
+        ).grid(row=1, column=2, sticky="e", padx=(16, 6), pady=3)
 
-        # --- Таблица ---
-        frame = tk.Frame(self)
-        frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+        ttk.Entry(
+            filter_pnl, width=36, textvariable=self.var_obj_addr,
+            font=("Segoe UI", 9)
+        ).grid(row=1, column=3, sticky="w", pady=3)
+
+        # Кнопки фильтра
+        btn_frame = tk.Frame(filter_pnl, bg=TS_COLORS["panel"])
+        btn_frame.grid(row=0, column=4, rowspan=2,
+                       sticky="e", padx=(20, 0))
+
+        tk.Button(
+            btn_frame,
+            text="🔄  Применить",
+            font=("Segoe UI", 9, "bold"),
+            bg=TS_COLORS["btn_save_bg"], fg=TS_COLORS["btn_save_fg"],
+            activebackground="#0d47a1", activeforeground="white",
+            relief="flat", cursor="hand2", padx=10, pady=4,
+            command=self._load_data
+        ).pack(fill="x", pady=(0, 4))
+
+        ttk.Button(
+            btn_frame, text="Сбросить фильтры",
+            command=self._reset_filters
+        ).pack(fill="x", pady=(0, 4))
+
+        ttk.Button(
+            btn_frame, text="📊 Выгрузить в Excel",
+            command=self._export_to_excel
+        ).pack(fill="x")
+
+        filter_pnl.grid_columnconfigure(3, weight=1)
+
+        # ── Таблица ───────────────────────────────────────────
+        tbl_frame = tk.LabelFrame(
+            self, text=" 📋 Список табелей ",
+            font=("Segoe UI", 9, "bold"),
+            bg=TS_COLORS["panel"], fg=TS_COLORS["accent"],
+            relief="groove", bd=1
+        )
+        tbl_frame.pack(fill="both", expand=True, padx=10, pady=(4, 4))
 
         cols = ("year", "month", "object", "department", "updated_at")
-        self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(
+            tbl_frame, columns=cols,
+            show="headings", selectmode="browse"
+        )
 
-        self.tree.heading("year", text="Год")
-        self.tree.heading("month", text="Месяц")
-        self.tree.heading("object", text="Объект")
-        self.tree.heading("department", text="Подразделение")
-        self.tree.heading("updated_at", text="Обновлён")
+        heads = {
+            "year":        ("Год",          70,  "center"),
+            "month":       ("Месяц",        110, "center"),
+            "object":      ("Объект",       380, "w"),
+            "department":  ("Подразделение",210, "w"),
+            "updated_at":  ("Обновлён",     150, "center"),
+        }
+        for col, (text, width, anchor) in heads.items():
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=width, anchor=anchor,
+                             stretch=(col == "object"))
 
-        self.tree.column("year", width=80, anchor="center", stretch=False)
-        self.tree.column("month", width=100, anchor="center", stretch=False)
-        self.tree.column("object", width=350, anchor="w")
-        self.tree.column("department", width=200, anchor="w")
-        self.tree.column("updated_at", width=150, anchor="center", stretch=False)
-
-        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
+        vsb = ttk.Scrollbar(tbl_frame, orient="vertical",
+                            command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
-
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
         self.tree.bind("<Double-1>", self._on_open)
-        self.tree.bind("<Return>", self._on_open)
+        self.tree.bind("<Return>",   self._on_open)
 
-        # --- Нижняя панель ---
-        bottom = tk.Frame(self)
-        bottom.pack(fill="x", padx=8, pady=(0, 8))
+        # ── Нижняя панель ─────────────────────────────────────
+        bottom = tk.Frame(self, bg=TS_COLORS["accent_light"], pady=5)
+        bottom.pack(fill="x", padx=10, pady=(0, 8))
+
+        self.lbl_count = tk.Label(
+            bottom, text="Табелей: 0",
+            font=("Segoe UI", 9, "bold"),
+            fg=TS_COLORS["accent"],
+            bg=TS_COLORS["accent_light"]
+        )
+        self.lbl_count.pack(side="left", padx=10)
+
         tk.Label(
-            bottom, text="Двойной щелчок или Enter — открыть табель для редактирования.",
-            font=("Segoe UI", 9), fg="#555"
-        ).pack(side="left")
+            bottom,
+            text="Двойной щелчок или Enter — открыть табель для редактирования",
+            font=("Segoe UI", 9, "italic"), fg="#555",
+            bg=TS_COLORS["accent_light"]
+        ).pack(side="right", padx=10)
 
+    # ──────────────────────────────────────────────────────────
     def _reset_filters(self):
-        """Сбрасывает все фильтры и перезагружает данные."""
         self.var_year.set(str(datetime.now().year))
         self.var_month.set("Все")
         self.var_dep.set("")
@@ -3905,121 +3979,134 @@ class MyTimesheetsPage(tk.Frame):
         self._load_data()
 
     def _load_data(self):
-        """Загружает данные из БД с учетом фильтров."""
         self.tree.delete(*self.tree.get_children())
         self._headers.clear()
 
-        user = getattr(self.app_ref, "current_user", None)
+        user    = getattr(self.app_ref, "current_user", None)
         user_id = (user or {}).get("id")
         if not user_id:
-            messagebox.showwarning("Мои табели", "Не определён текущий пользователь.")
+            messagebox.showwarning("Мои табели",
+                                   "Не определён текущий пользователь.")
             return
 
-        # Считываем значения фильтров
         try:
-            year = int(self.var_year.get().strip()) if self.var_year.get().strip() else None
+            year = int(self.var_year.get().strip())
         except ValueError:
             year = None
 
         month_name = self.var_month.get().strip()
         month = None
         if month_name and month_name != "Все":
-            month = [month_name_ru(i) for i in range(1, 13)].index(month_name) + 1
+            try:
+                month = [month_name_ru(i) for i in range(1, 13)].index(month_name) + 1
+            except ValueError:
+                pass
 
         department = self.var_dep.get().strip() or None
         addr_substr = self.var_obj_addr.get().strip() or None
 
         try:
-            # Используем обновленную функцию
-            headers = load_user_timesheet_headers(user_id, year, month, department, addr_substr)
+            headers = load_user_timesheet_headers(
+                user_id, year, month, department, addr_substr
+            )
         except Exception as e:
-            # Используем logging, если он доступен
-            try: import logging; logging.exception("Ошибка загрузки 'Моих табелей'")
-            except ImportError: pass
-            messagebox.showerror("Мои табели", f"Ошибка загрузки списка табелей из БД:\n{e}")
+            messagebox.showerror("Мои табели",
+                                 f"Ошибка загрузки из БД:\n{e}")
             return
 
         self._headers = headers
 
         for h in headers:
-            month_ru = month_name_ru(h["month"]) if 1 <= h["month"] <= 12 else str(h["month"])
+            month_ru   = month_name_ru(h["month"]) if 1 <= h["month"] <= 12 else str(h["month"])
             obj_display = h["object_addr"] or ""
             if h.get("object_id"):
-                obj_display = f"[{h['object_id']}] {obj_display}"
+                obj_display = f"[{h['object_id']}]  {obj_display}"
+            upd_str = (
+                h["updated_at"].strftime("%d.%m.%Y %H:%M")
+                if isinstance(h.get("updated_at"), datetime) else ""
+            )
+            self.tree.insert(
+                "", "end", iid=str(h["id"]),
+                values=(h["year"], month_ru, obj_display,
+                        h.get("department") or "", upd_str)
+            )
 
-            upd_str = h["updated_at"].strftime("%d.%m.%Y %H:%M") if isinstance(h.get("updated_at"), datetime) else ""
-            
-            self.tree.insert("", "end", iid=str(h["id"]), values=(
-                h["year"], month_ru, obj_display, h.get("department") or "", upd_str
-            ))
+        try:
+            self.lbl_count.config(text=f"Табелей: {len(headers)}")
+        except Exception:
+            pass
 
     def _export_to_excel(self):
-        """Выгружает отфильтрованный список табелей в Excel."""
         if not self._headers:
-            messagebox.showinfo("Экспорт в Excel", "Нет данных для выгрузки.")
+            messagebox.showinfo("Экспорт", "Нет данных для выгрузки.")
             return
 
         from tkinter import filedialog
-        default_name = f"Мои_табели_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
         path = filedialog.asksaveasfilename(
-            parent=self, title="Сохранить мои табели в Excel", defaultextension=".xlsx",
-            initialfile=default_name, filetypes=[("Excel", "*.xlsx"), ("Все", "*.*")]
+            parent=self,
+            title="Сохранить мои табели в Excel",
+            defaultextension=".xlsx",
+            initialfile=f"Мои_табели_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            filetypes=[("Excel", "*.xlsx"), ("Все", "*.*")]
         )
         if not path:
             return
 
         try:
-            wb = Workbook()
-            ws = wb.active
+            wb  = Workbook()
+            ws  = wb.active
             ws.title = "Мои табели"
-            
-            # Заголовки как в TimesheetRegistryPage
-            header = ["Год", "Месяц", "Адрес", "ID объекта", "Подразделение", "ФИО сотрудника", "Табельный №"] + \
-                     [str(i) for i in range(1, 32)] + \
-                     ["Итого дней", "Итого часов", "В т.ч. ночных", "Переработка день", "Переработка ночь"]
+
+            header = (
+                ["Год", "Месяц", "Адрес", "ID объекта",
+                 "Подразделение", "ФИО", "Табельный №"]
+                + [str(i) for i in range(1, 32)]
+                + ["Итого дней", "Итого часов", "В т.ч. ночных",
+                   "Переработка день", "Переработка ночь"]
+            )
             ws.append(header)
-            
-            # Настраиваем ширину колонок
-            widths = [6, 10, 40, 14, 22, 28, 12] + [6]*31 + [10, 12, 16, 16]
-            for i, width in enumerate(widths, 1):
-                ws.column_dimensions[get_column_letter(i)].width = width
-            
+
+            widths = [6, 10, 40, 14, 22, 28, 12] + [6] * 31 + [10, 12, 16, 16, 16]
+            for i, w in enumerate(widths, 1):
+                ws.column_dimensions[get_column_letter(i)].width = w
+
             total_rows = 0
             for h in self._headers:
                 rows_data = load_timesheet_rows_by_header_id(h["id"])
                 for r in rows_data:
-                    excel_row = [
-                        h["year"], h["month"], h.get("object_addr", ""), h.get("object_id", ""),
-                        h.get("department", ""), r["fio"], r["tbn"]
-                    ] + (r.get("hours_raw") or [None]*31) + [
-                        r.get("total_days"), r.get("total_hours"), r.get("night_hours"), 
-                        r.get("overtime_day"), r.get("overtime_night")
-                    ]
-                    ws.append(excel_row)
+                    ws.append(
+                        [h["year"], h["month"],
+                         h.get("object_addr", ""), h.get("object_id", ""),
+                         h.get("department", ""), r["fio"], r["tbn"]]
+                        + (r.get("hours_raw") or [None] * 31)
+                        + [r.get("total_days"), r.get("total_hours"),
+                           r.get("night_hours"), r.get("overtime_day"),
+                           r.get("overtime_night")]
+                    )
                     total_rows += 1
-            
-            wb.save(path)
-            messagebox.showinfo("Экспорт в Excel", f"Выгрузка завершена.\nСохранено строк: {total_rows}\nФайл: {path}")
 
+            wb.save(path)
+            messagebox.showinfo(
+                "Экспорт",
+                f"Готово.\nСтрок: {total_rows}\nФайл: {path}"
+            )
         except Exception as e:
-            try: import logging; logging.exception("Ошибка экспорта 'Моих табелей'")
-            except ImportError: pass
-            messagebox.showerror("Экспорт в Excel", f"Ошибка при выгрузке:\n{e}")
+            messagebox.showerror("Экспорт", f"Ошибка:\n{e}")
 
     def _get_selected_header(self) -> Optional[Dict[str, Any]]:
         sel = self.tree.selection()
-        if not sel: return None
+        if not sel:
+            return None
         try:
             hid = int(sel[0])
             return next((h for h in self._headers if h["id"] == hid), None)
-        except (ValueError, IndexError):
+        except Exception:
             return None
 
     def _on_open(self, event=None):
         h = self._get_selected_header()
-        if not h: return
-
-        # Табель из "Моих табелей" всегда открывается для редактирования
+        if not h:
+            return
         self.app_ref._show_page(
             "timesheet",
             lambda parent: TimesheetPage(
@@ -4030,186 +4117,248 @@ class MyTimesheetsPage(tk.Frame):
                 init_department=h.get("department"),
                 init_year=h.get("year"),
                 init_month=h.get("month"),
-                read_only=False, # Всегда редактируемый
-                owner_user_id=None, # Не требуется, т.к. мы уже знаем, что это табель текущего юзера
+                read_only=False,
+                owner_user_id=None,
             ),
         )
 
+
+# ============================================================
+
 class TimesheetRegistryPage(tk.Frame):
-    """
-    Реестр табелей всех пользователей (для руководителей/админов).
-    """
-    def __init__(self, master, app_ref: "MainApp"):
-        super().__init__(master)
+    """Реестр табелей всех пользователей (для руководителей / админов)."""
+
+    def __init__(self, master, app_ref):
+        super().__init__(master, bg=TS_COLORS["bg"])
         self.app_ref = app_ref
 
         self.tree = None
         self._headers: List[Dict[str, Any]] = []
         self._all_departments: List[str] = []
 
-        self.var_year = tk.StringVar()
-        self.var_month = tk.StringVar()
-        self.var_dep = tk.StringVar()
+        self.var_year     = tk.StringVar(value=str(datetime.now().year))
+        self.var_month    = tk.StringVar(value="Все")
+        self.var_dep      = tk.StringVar(value="Все")
         self.var_obj_addr = tk.StringVar()
-        self.var_obj_id = tk.StringVar()
+        self.var_obj_id   = tk.StringVar()
 
-        self._filter_job = None  # общий debounce для текстовых полей
+        self._filter_job = None
 
         self._build_ui()
         self._load_departments()
         self._load_data()
 
+    # ──────────────────────────────────────────────────────────
+    def _build_ui(self):
+        # ── Заголовок ─────────────────────────────────────────
+        hdr = tk.Frame(self, bg=TS_COLORS["accent"], pady=6)
+        hdr.pack(fill="x")
+        tk.Label(
+            hdr, text="📊  Реестр табелей",
+            font=("Segoe UI", 12, "bold"),
+            bg=TS_COLORS["accent"], fg="white", padx=12
+        ).pack(side="left")
+
+        # ── Панель фильтров ───────────────────────────────────
+        filter_pnl = tk.LabelFrame(
+            self, text=" 🔍 Фильтры ",
+            font=("Segoe UI", 9, "bold"),
+            bg=TS_COLORS["panel"], fg=TS_COLORS["accent"],
+            relief="groove", bd=1, padx=10, pady=8
+        )
+        filter_pnl.pack(fill="x", padx=10, pady=(8, 4))
+        filter_pnl.grid_columnconfigure(1, weight=1)
+        filter_pnl.grid_columnconfigure(3, weight=2)
+
+        # Строка 0: год, месяц, подразделение
+        tk.Label(
+            filter_pnl, text="Год:",
+            font=("Segoe UI", 9), bg=TS_COLORS["panel"]
+        ).grid(row=0, column=0, sticky="e", padx=(0, 6), pady=3)
+
+        spn_year = tk.Spinbox(
+            filter_pnl, from_=2000, to=2100, width=7,
+            textvariable=self.var_year, font=("Segoe UI", 9)
+        )
+        spn_year.grid(row=0, column=1, sticky="w", pady=3)
+        self.var_year.trace_add("write", self._on_year_changed)
+
+        tk.Label(
+            filter_pnl, text="Месяц:",
+            font=("Segoe UI", 9), bg=TS_COLORS["panel"]
+        ).grid(row=0, column=2, sticky="e", padx=(16, 6), pady=3)
+
+        cmb_month = ttk.Combobox(
+            filter_pnl, state="readonly", width=14,
+            textvariable=self.var_month,
+            values=["Все"] + [month_name_ru(i) for i in range(1, 13)]
+        )
+        cmb_month.grid(row=0, column=3, sticky="w", pady=3)
+        cmb_month.bind("<<ComboboxSelected>>", lambda e: self._load_data())
+
+        tk.Label(
+            filter_pnl, text="Подразделение:",
+            font=("Segoe UI", 9), bg=TS_COLORS["panel"]
+        ).grid(row=0, column=4, sticky="e", padx=(16, 6), pady=3)
+
+        self._cmb_dep = ttk.Combobox(
+            filter_pnl, state="readonly", width=24,
+            textvariable=self.var_dep, values=["Все"]
+        )
+        self._cmb_dep.grid(row=0, column=5, sticky="w", pady=3)
+        self._cmb_dep.bind("<<ComboboxSelected>>", lambda e: self._load_data())
+
+        # Строка 1: адрес, ID объекта
+        tk.Label(
+            filter_pnl, text="Объект (адрес):",
+            font=("Segoe UI", 9), bg=TS_COLORS["panel"]
+        ).grid(row=1, column=0, sticky="e", padx=(0, 6), pady=3)
+
+        ent_addr = ttk.Entry(
+            filter_pnl, width=38,
+            textvariable=self.var_obj_addr, font=("Segoe UI", 9)
+        )
+        ent_addr.grid(row=1, column=1, columnspan=2, sticky="w", pady=3)
+        self.var_obj_addr.trace_add("write", self._on_text_filter_changed)
+
+        tk.Label(
+            filter_pnl, text="ID объекта:",
+            font=("Segoe UI", 9), bg=TS_COLORS["panel"]
+        ).grid(row=1, column=3, sticky="e", padx=(16, 6), pady=3)
+
+        ent_oid = ttk.Entry(
+            filter_pnl, width=18,
+            textvariable=self.var_obj_id, font=("Segoe UI", 9)
+        )
+        ent_oid.grid(row=1, column=4, sticky="w", pady=3)
+        self.var_obj_id.trace_add("write", self._on_text_filter_changed)
+
+        # Кнопки фильтра (правая колонка, 2 строки)
+        btn_frame = tk.Frame(filter_pnl, bg=TS_COLORS["panel"])
+        btn_frame.grid(row=0, column=6, rowspan=2,
+                       sticky="e", padx=(20, 0))
+
+        tk.Button(
+            btn_frame,
+            text="🔄  Применить",
+            font=("Segoe UI", 9, "bold"),
+            bg=TS_COLORS["btn_save_bg"], fg=TS_COLORS["btn_save_fg"],
+            activebackground="#0d47a1", activeforeground="white",
+            relief="flat", cursor="hand2", padx=10, pady=4,
+            command=self._load_data
+        ).pack(fill="x", pady=(0, 4))
+
+        ttk.Button(
+            btn_frame, text="Сбросить фильтры",
+            command=self._reset_filters
+        ).pack(fill="x", pady=(0, 4))
+
+        ttk.Button(
+            btn_frame, text="📊 Выгрузить в Excel",
+            command=self._export_to_excel
+        ).pack(fill="x", pady=(0, 4))
+
+        ttk.Button(
+            btn_frame, text="📈 Отчёт по заполненности",
+            command=self._export_fill_report
+        ).pack(fill="x")
+
+        # ── Таблица ───────────────────────────────────────────
+        tbl_frame = tk.LabelFrame(
+            self, text=" 📋 Список табелей ",
+            font=("Segoe UI", 9, "bold"),
+            bg=TS_COLORS["panel"], fg=TS_COLORS["accent"],
+            relief="groove", bd=1
+        )
+        tbl_frame.pack(fill="both", expand=True, padx=10, pady=(4, 4))
+
+        cols = ("year", "month", "object", "department", "user", "updated_at")
+        self.tree = ttk.Treeview(
+            tbl_frame, columns=cols,
+            show="headings", selectmode="browse"
+        )
+
+        heads = {
+            "year":       ("Год",           65,  "center"),
+            "month":      ("Месяц",         95,  "center"),
+            "object":     ("Объект",        310, "w"),
+            "department": ("Подразделение", 190, "w"),
+            "user":       ("Пользователь",  190, "w"),
+            "updated_at": ("Обновлён",      140, "center"),
+        }
+        for col, (text, width, anchor) in heads.items():
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=width, anchor=anchor,
+                             stretch=(col == "object"))
+
+        vsb = ttk.Scrollbar(tbl_frame, orient="vertical",
+                            command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        self.tree.bind("<Double-1>", self._on_open)
+        self.tree.bind("<Return>",   self._on_open)
+
+        # ── Нижняя панель ─────────────────────────────────────
+        bottom = tk.Frame(self, bg=TS_COLORS["accent_light"], pady=5)
+        bottom.pack(fill="x", padx=10, pady=(0, 8))
+
+        self.lbl_count = tk.Label(
+            bottom, text="Табелей: 0",
+            font=("Segoe UI", 9, "bold"),
+            fg=TS_COLORS["accent"],
+            bg=TS_COLORS["accent_light"]
+        )
+        self.lbl_count.pack(side="left", padx=10)
+
+        tk.Label(
+            bottom,
+            text="Двойной щелчок или Enter — открыть табель",
+            font=("Segoe UI", 9, "italic"), fg="#555",
+            bg=TS_COLORS["accent_light"]
+        ).pack(side="right", padx=10)
+
+    # ──────────────────────────────────────────────────────────
     def _load_departments(self):
-        """Загружает уникальные подразделения из timesheet_headers."""
         self._all_departments = []
         conn = None
         try:
             conn = get_db_connection()
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT DISTINCT department 
-                    FROM timesheet_headers 
-                    WHERE department IS NOT NULL 
+                    SELECT DISTINCT department
+                    FROM timesheet_headers
+                    WHERE department IS NOT NULL
                       AND TRIM(department) != ''
                     ORDER BY department
                 """)
-                self._all_departments = [row[0] for row in cur.fetchall()]
+                self._all_departments = [r[0] for r in cur.fetchall()]
         except Exception:
-            logging.exception("Не удалось загрузить подразделения из timesheet_headers")
-            self._all_departments = []
+            pass
         finally:
             if conn:
                 release_db_connection(conn)
-    
+
         values = ["Все"] + self._all_departments
         self._cmb_dep.configure(values=values)
         if not self.var_dep.get() or self.var_dep.get() == "Все":
             self.var_dep.set("Все")
 
-
-    def _build_ui(self):
-        top = tk.Frame(self)
-        top.pack(fill="x", padx=8, pady=(8, 4))
-
-        tk.Label(top, text="Реестр табелей", font=("Segoe UI", 12, "bold")).grid(
-            row=0, column=0, columnspan=6, sticky="w", pady=(0, 4)
-        )
-
-        row_f = 1
-
-        tk.Label(top, text="Год:").grid(row=row_f, column=0, sticky="e", padx=(0, 4))
-        spn_year = tk.Spinbox(top, from_=2000, to=2100, width=6, textvariable=self.var_year)
-        spn_year.grid(row=row_f, column=1, sticky="w")
-        self.var_year.set(str(datetime.now().year))  # ← установка ДО trace
-
-        tk.Label(top, text="Месяц:").grid(row=row_f, column=2, sticky="e", padx=(12, 4))
-        cmb_month = ttk.Combobox(
-            top, state="readonly", width=12, textvariable=self.var_month,
-            values=["Все"] + [month_name_ru(i) for i in range(1, 13)],
-        )
-        cmb_month.grid(row=row_f, column=3, sticky="w")
-        self.var_month.set("Все")
-
-        tk.Label(top, text="Подразделение:").grid(row=row_f, column=4, sticky="e", padx=(12, 4))
-        self._cmb_dep = ttk.Combobox(
-            top, state="readonly", width=24, textvariable=self.var_dep, values=["Все"],
-        )
-        self._cmb_dep.grid(row=row_f, column=5, sticky="w")
-        self.var_dep.set("Все")
-
-        row_f += 1
-
-        tk.Label(top, text="Объект (адрес):").grid(row=row_f, column=0, sticky="e", padx=(0, 4), pady=(4, 0))
-        ent_addr = ttk.Entry(top, width=34, textvariable=self.var_obj_addr)
-        ent_addr.grid(row=row_f, column=1, columnspan=2, sticky="w", pady=(4, 0))
-
-        tk.Label(top, text="ID объекта:").grid(row=row_f, column=3, sticky="e", padx=(12, 4), pady=(4, 0))
-        ent_oid = ttk.Entry(top, width=18, textvariable=self.var_obj_id)
-        ent_oid.grid(row=row_f, column=4, sticky="w", pady=(4, 0))
-
-        btns = tk.Frame(top)
-        btns.grid(row=row_f, column=5, sticky="e", padx=(8, 0), pady=(4, 0))
-        ttk.Button(btns, text="Применить фильтр", command=self._load_data).pack(side="left", padx=2)
-        ttk.Button(btns, text="Сброс", command=self._reset_filters).pack(side="left", padx=2)
-        ttk.Button(btns, text="Выгрузить в Excel", command=self._export_to_excel).pack(side="left", padx=2)
-        ttk.Button(btns, text="Отчёт по заполненности", command=self._export_fill_report).pack(side="left", padx=2)
-
-        self.var_obj_addr.trace_add("write", self._on_text_filter_changed)
-        self.var_obj_id.trace_add("write", self._on_text_filter_changed)
-        cmb_month.bind("<<ComboboxSelected>>", lambda e: self._load_data())
-        self._cmb_dep.bind("<<ComboboxSelected>>", lambda e: self._load_data())
-        self.var_year.trace_add("write", self._on_year_changed)
-
-        # ---- Таблица ----
-        frame = tk.Frame(self)
-        frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
-
-        cols = ("year", "month", "object", "department", "user", "updated_at")
-        self.tree = ttk.Treeview(
-            frame,
-            columns=cols,
-            show="headings",
-            selectmode="browse",
-        )
-
-        self.tree.heading("year", text="Год")
-        self.tree.heading("month", text="Месяц")
-        self.tree.heading("object", text="Объект")
-        self.tree.heading("department", text="Подразделение")
-        self.tree.heading("user", text="Пользователь")
-        self.tree.heading("updated_at", text="Обновлён")
-
-        self.tree.column("year", width=60, anchor="center")
-        self.tree.column("month", width=80, anchor="center")
-        self.tree.column("object", width=280, anchor="w")
-        self.tree.column("department", width=160, anchor="w")
-        self.tree.column("user", width=180, anchor="w")
-        self.tree.column("updated_at", width=140, anchor="center")
-
-        vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vsb.set)
-
-        self.tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
-
-        self.tree.bind("<Double-1>", self._on_open)
-        self.tree.bind("<Return>", self._on_open)
-
-        # Нижняя панель
-        bottom = tk.Frame(self)
-        bottom.pack(fill="x", padx=8, pady=(0, 8))
-        self._lbl_count = tk.Label(
-            bottom,
-            text="",
-            font=("Segoe UI", 9),
-            fg="#555",
-        )
-        self._lbl_count.pack(side="left")
-        tk.Label(
-            bottom,
-            text="Двойной щелчок или Enter — открыть табель.",
-            font=("Segoe UI", 9),
-            fg="#888",
-        ).pack(side="right")
-
-    def _on_text_filter_changed(self, *_args):
-        """Debounce для текстовых полей (адрес, ID объекта) — 400 мс."""
+    def _on_text_filter_changed(self, *_):
         if self._filter_job is not None:
             self.after_cancel(self._filter_job)
         self._filter_job = self.after(400, self._load_data)
 
-    def _on_year_changed(self, *_args):
-        """При изменении года — перезагрузка с небольшой задержкой."""
+    def _on_year_changed(self, *_):
         if self._filter_job is not None:
             self.after_cancel(self._filter_job)
         self._filter_job = self.after(600, self._load_data)
 
     def _reset_filters(self):
-        # Временно отключаем автофильтрацию чтобы не дёргать _load_data многократно
         if self._filter_job is not None:
             self.after_cancel(self._filter_job)
             self._filter_job = None
-
         self.var_year.set(str(datetime.now().year))
         self.var_month.set("Все")
         self.var_dep.set("Все")
@@ -4218,7 +4367,6 @@ class TimesheetRegistryPage(tk.Frame):
         self._load_data()
 
     def _load_data(self):
-        # Сбрасываем pending-задачу
         if self._filter_job is not None:
             self.after_cancel(self._filter_job)
         self._filter_job = None
@@ -4226,7 +4374,7 @@ class TimesheetRegistryPage(tk.Frame):
         self.tree.delete(*self.tree.get_children())
         self._headers.clear()
 
-        # --- Фильтры ---
+        # Год
         year = None
         try:
             y = int(self.var_year.get().strip())
@@ -4235,6 +4383,7 @@ class TimesheetRegistryPage(tk.Frame):
         except Exception:
             pass
 
+        # Месяц
         month = None
         m_name = (self.var_month.get() or "").strip()
         if m_name and m_name != "Все":
@@ -4248,225 +4397,64 @@ class TimesheetRegistryPage(tk.Frame):
             dep = None
 
         addr_sub = self.var_obj_addr.get().strip() or None
-        oid_sub = self.var_obj_id.get().strip() or None
+        oid_sub  = self.var_obj_id.get().strip() or None
 
         try:
             headers = load_all_timesheet_headers(
-                year=year,
-                month=month,
-                department=dep,
+                year=year, month=month, department=dep,
                 object_addr_substr=addr_sub,
                 object_id_substr=oid_sub,
             )
         except Exception as e:
-            logging.exception("Ошибка загрузки реестра табелей")
-            messagebox.showerror("Реестр табелей", f"Ошибка загрузки реестра из БД:\n{e}")
+            messagebox.showerror("Реестр табелей",
+                                 f"Ошибка загрузки из БД:\n{e}")
             return
 
         self._headers = headers
 
         for h in headers:
-            yr = h["year"]
-            mn = h["month"]
-            addr = h["object_addr"] or ""
-            obj_id = h.get("object_id") or ""
-            dep_val = h.get("department") or ""
-            upd = h.get("updated_at")
-            full_name = h.get("full_name") or h.get("username") or ""
+            yr   = h["year"]
+            mn   = h["month"]
+            addr = h.get("object_addr") or ""
+            oid  = h.get("object_id") or ""
+            dep_val   = h.get("department") or ""
+            user_name = h.get("full_name") or h.get("username") or ""
+            upd       = h.get("updated_at")
 
-            month_ru = month_name_ru(mn) if 1 <= mn <= 12 else str(mn)
-            obj_display = addr
-            if obj_id:
-                obj_display = f"[{obj_id}] {addr}"
-
-            if isinstance(upd, datetime):
-                upd_str = upd.strftime("%d.%m.%Y %H:%M")
-            else:
-                upd_str = str(upd or "")
-
-            iid = str(h["id"])
-            self.tree.insert(
-                "",
-                "end",
-                iid=iid,
-                values=(yr, month_ru, obj_display, dep_val, full_name, upd_str),
+            month_ru    = month_name_ru(mn) if 1 <= mn <= 12 else str(mn)
+            obj_display = f"[{oid}]  {addr}" if oid else addr
+            upd_str     = (
+                upd.strftime("%d.%m.%Y %H:%M")
+                if isinstance(upd, datetime) else str(upd or "")
             )
 
-        self._lbl_count.config(text=f"Найдено табелей: {len(headers)}")
-
-    def _export_fill_report(self):
-
-        if not self._headers:
-            messagebox.showinfo("Отчёт по заполненности", "Нет данных для выгрузки.")
-            return
-
-        from tkinter import filedialog
-        import calendar
-
-        today = datetime.now().date()
-
-        default_name = f"Заполненность_табелей_{today.strftime('%Y%m%d')}.xlsx"
-        path = filedialog.asksaveasfilename(
-            parent=self,
-            title="Сохранить отчёт по заполненности",
-            defaultextension=".xlsx",
-            initialfile=default_name,
-            filetypes=[("Excel файлы", "*.xlsx"), ("Все файлы", "*.*")],
-        )
-        if not path:
-            return
+            self.tree.insert(
+                "", "end", iid=str(h["id"]),
+                values=(yr, month_ru, obj_display,
+                        dep_val, user_name, upd_str)
+            )
 
         try:
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Заполненность"
+            self.lbl_count.config(text=f"Табелей: {len(headers)}")
+        except Exception:
+            pass
 
-            # Заголовки
-            ws.append([
-                "Объект (адрес)",
-                "ID объекта",
-                "Подразделение",
-                "Пользователь",
-                "Год",
-                "Месяц",
-                "Дата обновления",
-                "Дней в периоде",
-                "Дней заполнено",
-                "Заполненность, %",
-            ])
-
-            # Ширины столбцов
-            ws.column_dimensions["A"].width = 45
-            ws.column_dimensions["B"].width = 14
-            ws.column_dimensions["C"].width = 24
-            ws.column_dimensions["D"].width = 24
-            ws.column_dimensions["E"].width = 8
-            ws.column_dimensions["F"].width = 12
-            ws.column_dimensions["G"].width = 20
-            ws.column_dimensions["H"].width = 16
-            ws.column_dimensions["I"].width = 16
-            ws.column_dimensions["J"].width = 18
-
-            # Стиль процента
-            from openpyxl.styles import Font, Alignment, PatternFill
-            header_font = Font(bold=True)
-            for cell in ws[1]:
-                cell.font = header_font
-
-            row_num = 1
-            for h in self._headers:
-                header_id = int(h["id"])
-                yr = int(h["year"])
-                mn = int(h["month"])
-                addr = h.get("object_addr") or ""
-                obj_id = h.get("object_id") or ""
-                dep = h.get("department") or ""
-                user_display = h.get("full_name") or h.get("username") or ""
-                upd = h.get("updated_at")
-
-                if isinstance(upd, datetime):
-                    upd_str = upd.strftime("%d.%m.%Y %H:%M")
-                else:
-                    upd_str = str(upd or "")
-
-                month_ru = month_name_ru(mn) if 1 <= mn <= 12 else str(mn)
-
-                # --- Определяем период: с 1-го числа месяца по min(сегодня, последний день месяца) ---
-                last_day_of_month = calendar.monthrange(yr, mn)[1]
-                period_end_date = min(today, datetime(yr, mn, last_day_of_month).date())
-                period_start_date = datetime(yr, mn, 1).date()
-
-                if period_end_date < period_start_date:
-                    # Месяц ещё не начался (будущий) — 0%
-                    days_in_period = 0
-                    days_filled = 0
-                else:
-                    days_in_period = (period_end_date - period_start_date).days + 1  # включительно
-
-                    rows = load_timesheet_rows_by_header_id(header_id)
-
-                    days_filled = 0
-                    for day_idx in range(days_in_period):  # 0-based
-                        day_num = day_idx + 1  # 1..N
-                        arr_idx = day_num - 1  # индекс в hours_raw (0..30)
-                        has_data = False
-                        for row in rows:
-                            hours_raw = row.get("hours_raw") or []
-                            if arr_idx < len(hours_raw):
-                                val = hours_raw[arr_idx]
-                                if val is not None and str(val).strip() != "":
-                                    has_data = True
-                                    break
-                        if has_data:
-                            days_filled += 1
-
-                if days_in_period > 0:
-                    pct = round(days_filled / days_in_period * 100, 1)
-                else:
-                    pct = 0.0
-
-                ws.append([
-                    addr,
-                    obj_id,
-                    dep,
-                    user_display,
-                    yr,
-                    month_ru,
-                    upd_str,
-                    days_in_period,
-                    days_filled,
-                    pct,
-                ])
-                row_num += 1
-
-            # Условное форматирование (цветовая подсветка процента)
-            from openpyxl.styles import PatternFill
-            red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-            yellow_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
-            green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-
-            for row_idx in range(2, row_num + 2):
-                cell = ws.cell(row=row_idx, column=10)
-                if cell.value is not None:
-                    try:
-                        v = float(cell.value)
-                        if v < 50:
-                            cell.fill = red_fill
-                        elif v < 90:
-                            cell.fill = yellow_fill
-                        else:
-                            cell.fill = green_fill
-                    except (ValueError, TypeError):
-                        pass
-
-            wb.save(path)
-            messagebox.showinfo(
-                "Отчёт по заполненности",
-                f"Отчёт сохранён.\nФайл: {path}\nТабелей: {len(self._headers)}",
-                parent=self,
-            )
-        except Exception as e:
-            logging.exception("Ошибка выгрузки отчёта по заполненности")
-            messagebox.showerror("Отчёт по заполненности", f"Ошибка:\n{e}", parent=self)
+    # ──────────────────────────────────────────────────────────
+    #  Экспорты (логика не изменена, только перенесена)
+    # ──────────────────────────────────────────────────────────
 
     def _export_to_excel(self):
-        """
-        Выгружает все табели, показанные в реестре (с учётом фильтров),
-        в один Excel-файл.
-        """
         if not self._headers:
-            messagebox.showinfo("Экспорт в Excel", "Нет данных для выгрузки.")
+            messagebox.showinfo("Экспорт", "Нет данных для выгрузки.")
             return
 
         from tkinter import filedialog
-
-        default_name = f"Реестр_табелей_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         path = filedialog.asksaveasfilename(
             parent=self,
             title="Сохранить реестр табелей в Excel",
             defaultextension=".xlsx",
-            initialfile=default_name,
-            filetypes=[("Excel файлы", "*.xlsx"), ("Все файлы", "*.*")],
+            initialfile=f"Реестр_табелей_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            filetypes=[("Excel", "*.xlsx"), ("Все", "*.*")]
         )
         if not path:
             return
@@ -4476,114 +4464,170 @@ class TimesheetRegistryPage(tk.Frame):
             ws = wb.active
             ws.title = "Реестр табелей"
 
-            header_row = [
-                "Год",
-                "Месяц",
-                "Адрес",
-                "ID объекта",
-                "Подразделение",
-                "Пользователь",
-                "ФИО",
-                "Табельный №",
-            ] + [f"{i}" for i in range(1, 32)] + [
-                "Итого_дней",
-                "Итого_часов",
-                "В т.ч. ночных",
-                "Переработка_день",
-                "Переработка_ночь",
-            ]
+            header_row = (
+                ["Год", "Месяц", "Адрес", "ID объекта",
+                 "Подразделение", "Пользователь", "ФИО", "Табельный №"]
+                + [str(i) for i in range(1, 32)]
+                + ["Итого_дней", "Итого_часов", "В т.ч. ночных",
+                   "Переработка_день", "Переработка_ночь"]
+            )
             ws.append(header_row)
 
-            ws.column_dimensions["A"].width = 6
-            ws.column_dimensions["B"].width = 10
-            ws.column_dimensions["C"].width = 40
-            ws.column_dimensions["D"].width = 14
-            ws.column_dimensions["E"].width = 22
-            ws.column_dimensions["F"].width = 22
-            ws.column_dimensions["G"].width = 28
-            ws.column_dimensions["H"].width = 12
-            for col_idx in range(9, 9 + 31):
-                ws.column_dimensions[get_column_letter(col_idx)].width = 6
-            base = 9 + 31
-            ws.column_dimensions[get_column_letter(base)].width = 10
-            ws.column_dimensions[get_column_letter(base + 1)].width = 14
-            ws.column_dimensions[get_column_letter(base + 2)].width = 16
-            ws.column_dimensions[get_column_letter(base + 3)].width = 16
+            widths = [6, 10, 40, 14, 22, 22, 28, 12] + [6] * 31 + [10, 14, 16, 16, 16]
+            for i, w in enumerate(widths, 1):
+                ws.column_dimensions[get_column_letter(i)].width = w
 
             total_rows = 0
             for h in self._headers:
-                header_id = int(h["id"])
-                year = int(h["year"])
-                month = int(h["month"])
-                addr = h.get("object_addr") or ""
-                obj_id = h.get("object_id") or ""
-                dep = h.get("department") or ""
+                rows = load_timesheet_rows_by_header_id(int(h["id"]))
                 user_display = h.get("full_name") or h.get("username") or ""
-
-                rows = load_timesheet_rows_by_header_id(header_id)
-
-                for row in rows:
-                    fio = row["fio"]
-                    tbn = row["tbn"]
-                    hours_raw = row.get("hours_raw") or [None] * 31
-                    total_days = row.get("total_days")
-                    total_hours = row.get("total_hours")
-                    night_hours = row.get("night_hours")
-                    ot_day = row.get("overtime_day")
-                    ot_night = row.get("overtime_night")
-
-                    excel_row = [
-                        year, month, addr, obj_id, dep, user_display, fio, tbn,
-                    ]
-                    for v in hours_raw:
-                        excel_row.append(v if v is not None else None)
-                    excel_row.append(total_days if total_days is not None else None)
-                    excel_row.append(total_hours if total_hours is not None else None)
-                    excel_row.append(night_hours if night_hours is not None else None)
-                    excel_row.append(ot_day if ot_day is not None else None)
-                    excel_row.append(ot_night if ot_night is not None else None)
-
-                    ws.append(excel_row)
+                for r in rows:
+                    ws.append(
+                        [h["year"], h["month"],
+                         h.get("object_addr", ""), h.get("object_id", ""),
+                         h.get("department", ""), user_display,
+                         r["fio"], r["tbn"]]
+                        + (r.get("hours_raw") or [None] * 31)
+                        + [r.get("total_days"), r.get("total_hours"),
+                           r.get("night_hours"), r.get("overtime_day"),
+                           r.get("overtime_night")]
+                    )
                     total_rows += 1
 
             wb.save(path)
             messagebox.showinfo(
-                "Экспорт в Excel",
-                f"Выгрузка завершена.\nФайл: {path}\nСтрок табеля: {total_rows}",
-                parent=self,
+                "Экспорт",
+                f"Готово.\nСтрок: {total_rows}\nФайл: {path}"
             )
         except Exception as e:
-            logging.exception("Ошибка экспорта реестра табелей в Excel")
-            messagebox.showerror("Экспорт в Excel", f"Ошибка при выгрузке:\n{e}", parent=self)
+            messagebox.showerror("Экспорт", f"Ошибка:\n{e}")
 
+    def _export_fill_report(self):
+        if not self._headers:
+            messagebox.showinfo("Отчёт по заполненности",
+                                "Нет данных для выгрузки.")
+            return
+
+        from tkinter import filedialog
+        import calendar as _cal
+
+        today = datetime.now().date()
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Сохранить отчёт по заполненности",
+            defaultextension=".xlsx",
+            initialfile=f"Заполненность_табелей_{today.strftime('%Y%m%d')}.xlsx",
+            filetypes=[("Excel", "*.xlsx"), ("Все", "*.*")]
+        )
+        if not path:
+            return
+
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Заполненность"
+
+            ws.append([
+                "Объект (адрес)", "ID объекта", "Подразделение",
+                "Пользователь", "Год", "Месяц", "Дата обновления",
+                "Дней в периоде", "Дней заполнено", "Заполненность, %",
+            ])
+
+            col_widths = [45, 14, 24, 24, 8, 12, 20, 16, 16, 18]
+            for i, w in enumerate(col_widths, 1):
+                ws.column_dimensions[get_column_letter(i)].width = w
+
+            from openpyxl.styles import Font, PatternFill
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+
+            red_fill    = PatternFill("solid", fgColor="FFC7CE")
+            yellow_fill = PatternFill("solid", fgColor="FFEB9C")
+            green_fill  = PatternFill("solid", fgColor="C6EFCE")
+
+            row_num = 2
+            for h in self._headers:
+                yr  = int(h["year"])
+                mn  = int(h["month"])
+                addr      = h.get("object_addr") or ""
+                obj_id    = h.get("object_id") or ""
+                dep       = h.get("department") or ""
+                user_disp = h.get("full_name") or h.get("username") or ""
+                upd       = h.get("updated_at")
+                upd_str   = (
+                    upd.strftime("%d.%m.%Y %H:%M")
+                    if isinstance(upd, datetime) else ""
+                )
+                month_ru = month_name_ru(mn) if 1 <= mn <= 12 else str(mn)
+
+                last_day   = _cal.monthrange(yr, mn)[1]
+                period_end = min(today, datetime(yr, mn, last_day).date())
+                period_start = datetime(yr, mn, 1).date()
+
+                if period_end < period_start:
+                    days_in_period = days_filled = 0
+                else:
+                    days_in_period = (period_end - period_start).days + 1
+                    rows = load_timesheet_rows_by_header_id(int(h["id"]))
+                    days_filled = 0
+                    for d_idx in range(days_in_period):
+                        for row in rows:
+                            hrs = row.get("hours_raw") or []
+                            if (d_idx < len(hrs)
+                                    and hrs[d_idx] is not None
+                                    and str(hrs[d_idx]).strip()):
+                                days_filled += 1
+                                break
+
+                pct = (
+                    round(days_filled / days_in_period * 100, 1)
+                    if days_in_period > 0 else 0.0
+                )
+
+                ws.append([
+                    addr, obj_id, dep, user_disp,
+                    yr, month_ru, upd_str,
+                    days_in_period, days_filled, pct
+                ])
+
+                cell = ws.cell(row=row_num, column=10)
+                try:
+                    v = float(cell.value or 0)
+                    cell.fill = (
+                        red_fill if v < 50
+                        else yellow_fill if v < 90
+                        else green_fill
+                    )
+                except Exception:
+                    pass
+
+                row_num += 1
+
+            wb.save(path)
+            messagebox.showinfo(
+                "Отчёт по заполненности",
+                f"Готово.\nТабелей: {len(self._headers)}\nФайл: {path}"
+            )
+        except Exception as e:
+            messagebox.showerror("Отчёт по заполненности", f"Ошибка:\n{e}")
+
+    # ──────────────────────────────────────────────────────────
     def _get_selected_header(self) -> Optional[Dict[str, Any]]:
         sel = self.tree.selection()
         if not sel:
             return None
-        iid = sel[0]
         try:
-            hid = int(iid)
+            hid = int(sel[0])
+            return next((h for h in self._headers if int(h["id"]) == hid), None)
         except Exception:
             return None
-        for h in self._headers:
-            if int(h["id"]) == hid:
-                return h
-        return None
 
     def _on_open(self, event=None):
         h = self._get_selected_header()
         if not h:
             return
 
-        object_id = h.get("object_id") or None
-        object_addr = h.get("object_addr") or ""
-        department = h.get("department") or ""
-        year = int(h.get("year") or 0)
-        month = int(h.get("month") or 0)
-
-        owner_user_id = h.get("user_id")
-
-        role = (self.app_ref.current_user or {}).get("role") or "specialist"
+        role     = (self.app_ref.current_user or {}).get("role") or "specialist"
         read_only = (role != "admin")
 
         self.app_ref._show_page(
@@ -4591,13 +4635,13 @@ class TimesheetRegistryPage(tk.Frame):
             lambda parent: TimesheetPage(
                 parent,
                 app_ref=self.app_ref,
-                init_object_id=object_id,
-                init_object_addr=object_addr,
-                init_department=department,
-                init_year=year,
-                init_month=month,
+                init_object_id=h.get("object_id"),
+                init_object_addr=h.get("object_addr"),
+                init_department=h.get("department"),
+                init_year=int(h.get("year") or 0),
+                init_month=int(h.get("month") or 0),
                 read_only=read_only,
-                owner_user_id=owner_user_id,
+                owner_user_id=h.get("user_id"),
             ),
         )
 
