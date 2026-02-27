@@ -20,6 +20,18 @@ def exe_dir() -> Path:
     if getattr(sys, "frozen", False): return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
+TS_COLORS = {
+    "bg":           "#f0f2f5",
+    "panel":        "#ffffff",
+    "accent":       "#1565c0",
+    "accent_light": "#e3f2fd",
+    "success":      "#2e7d32",
+    "warning":      "#b00020",
+    "border":       "#dde1e7",
+    "btn_save_bg":  "#1565c0",
+    "btn_save_fg":  "#ffffff",
+}
+
 # ------------------------- Логика работы с пулом соединений -------------------------
 db_connection_pool = None
 USING_SHARED_POOL = False
@@ -1990,100 +2002,393 @@ class TimesheetPage(tk.Frame):
         self.address_options = sorted({addr for _, addr, _ in self.objects_full if addr})
 
     def _build_ui(self):
-        # --- Top panel ---
-        top = tk.Frame(self)
-        top.pack(fill="x", padx=8, pady=8)
+        self.configure(bg=TS_COLORS["bg"])
 
-        tk.Label(top, text="Подразделение:").grid(row=0, column=0, sticky="w")
-        deps = self.departments or ["Все"]
-        self.cmb_department = ttk.Combobox(top, state="readonly", values=deps, width=48)
-        self.cmb_department.grid(row=0, column=1, sticky="w", padx=(4, 12))
-        try:
-            saved_dep = get_selected_department_from_config() if get_selected_department_from_config else None
-            self.cmb_department.set(saved_dep if saved_dep in deps else deps[0])
-        except Exception:
-            self.cmb_department.set(deps[0])
-        self.cmb_department.bind("<<ComboboxSelected>>", lambda e: self._on_department_select())
+        # ── Заголовок ─────────────────────────────────────────
+        self._build_ts_header()
 
-        tk.Label(top, text="Месяц:").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(8, 0))
-        self.cmb_month = ttk.Combobox(
-            top, state="readonly", width=12, values=[month_name_ru(i) for i in range(1, 13)]
+        # ── Верхняя форма (2 панели рядом) ───────────────────
+        self._build_ts_top_form()
+
+        # ── Панель добавления одного сотрудника ───────────────
+        self._build_ts_add_employee_panel()
+
+        # ── Тулбар действий ──────────────────────────────────
+        self._build_ts_toolbar()
+
+        # ── Строка поиска / фильтра ───────────────────────────
+        self._build_ts_filter_bar()
+
+        # ── Грид (VirtualTimesheetGrid) ───────────────────────
+        self._build_ts_grid()
+
+        # ── Нижняя панель (итоги + авто-сохранение) ──────────
+        self._build_ts_bottom()
+
+        # ── Инициализация начальных значений ─────────────────
+        self._init_ts_values()
+
+    # ──────────────────────────────────────────────────────────
+    #  Вспомогательный метод: метка поля с необязательной *
+    # ──────────────────────────────────────────────────────────
+    def _ts_lbl(self, parent, text: str, row: int, col: int = 0,
+                required: bool = False, **grid_kw):
+        display = f"{text}{'  *' if required else ''}:"
+        fg = TS_COLORS["warning"] if required else "#333"
+        tk.Label(
+            parent, text=display,
+            font=("Segoe UI", 9),
+            bg=TS_COLORS["panel"], fg=fg,
+            anchor="e"
+        ).grid(row=row, column=col, sticky="e", padx=(0, 6), pady=3, **grid_kw)
+
+    # ──────────────────────────────────────────────────────────
+    #  Заголовок страницы
+    # ──────────────────────────────────────────────────────────
+    def _build_ts_header(self):
+        hdr = tk.Frame(self, bg=TS_COLORS["accent"], pady=6)
+        hdr.pack(fill="x")
+
+        title = "👁  Просмотр табеля" if self.read_only else "📋  Объектный табель"
+        tk.Label(
+            hdr, text=title,
+            font=("Segoe UI", 12, "bold"),
+            bg=TS_COLORS["accent"], fg="white",
+            padx=12
+        ).pack(side="left")
+
+        # Метка авто-сохранения — в правой части заголовка
+        self.lbl_auto_save = tk.Label(
+            hdr, text="Авто-сохранение: нет",
+            font=("Segoe UI", 8),
+            bg=TS_COLORS["accent"], fg="#bbdefb",
+            padx=10
         )
-        self.cmb_month.grid(row=1, column=1, sticky="w", pady=(8, 0))
+        self.lbl_auto_save.pack(side="right")
+
+    # ──────────────────────────────────────────────────────────
+    #  Верхняя форма: две панели рядом
+    # ──────────────────────────────────────────────────────────
+    def _build_ts_top_form(self):
+        outer = tk.Frame(self, bg=TS_COLORS["bg"])
+        outer.pack(fill="x", padx=10, pady=(8, 4))
+        outer.grid_columnconfigure(0, weight=1)
+        outer.grid_columnconfigure(1, weight=2)
+
+        self._build_ts_period_panel(outer)   # левая
+        self._build_ts_object_panel(outer)   # правая
+
+    def _build_ts_period_panel(self, parent):
+        """Левая панель: подразделение, период (месяц/год)."""
+        pnl = tk.LabelFrame(
+            parent, text=" 📅 Период и подразделение ",
+            font=("Segoe UI", 9, "bold"),
+            bg=TS_COLORS["panel"], fg=TS_COLORS["accent"],
+            relief="groove", bd=1, padx=10, pady=8
+        )
+        pnl.grid(row=0, column=0, sticky="nsew", padx=(0, 4), pady=2)
+        pnl.grid_columnconfigure(1, weight=1)
+
+        row = 0
+
+        # Подразделение
+        self._ts_lbl(pnl, "Подразделение", row, required=True)
+        deps = self.departments or ["Все"]
+        self.cmb_department = ttk.Combobox(
+            pnl, state="readonly", values=deps, width=36
+        )
+        self.cmb_department.grid(row=row, column=1, columnspan=3,
+                                  sticky="ew", pady=3)
+        self.cmb_department.bind(
+            "<<ComboboxSelected>>",
+            lambda e: self._on_department_select()
+        )
+        row += 1
+
+        # Месяц + Год в одну строку
+        self._ts_lbl(pnl, "Месяц", row, required=True)
+        self.cmb_month = ttk.Combobox(
+            pnl, state="readonly", width=13,
+            values=[month_name_ru(i) for i in range(1, 13)]
+        )
+        self.cmb_month.grid(row=row, column=1, sticky="w", pady=3)
         self.cmb_month.current(datetime.now().month - 1)
-        self.cmb_month.bind("<<ComboboxSelected>>", lambda e: self._on_period_change())
+        self.cmb_month.bind(
+            "<<ComboboxSelected>>",
+            lambda e: self._on_period_change()
+        )
 
-        tk.Label(top, text="Год:").grid(row=1, column=2, sticky="w", padx=(16, 4), pady=(8, 0))
-        self.spn_year = tk.Spinbox(top, from_=2000, to=2100, width=6, command=self._on_period_change)
-        self.spn_year.grid(row=1, column=3, sticky="w", pady=(8, 0))
-        self.spn_year.delete(0, "end")
-        self.spn_year.insert(0, datetime.now().year)
+        tk.Label(
+            pnl, text="Год  *:", font=("Segoe UI", 9),
+            bg=TS_COLORS["panel"], fg=TS_COLORS["warning"], anchor="e"
+        ).grid(row=row, column=2, sticky="e", padx=(12, 6), pady=3)
+
+        self.spn_year = tk.Spinbox(
+            pnl, from_=2000, to=2100, width=6,
+            command=self._on_period_change
+        )
+        self.spn_year.grid(row=row, column=3, sticky="w", pady=3)
         self.spn_year.bind("<FocusOut>", lambda e: self._on_period_change())
+        row += 1
 
-        tk.Label(top, text="Адрес:").grid(row=1, column=4, sticky="w", padx=(20, 4), pady=(8, 0))
-        self.cmb_address = AutoCompleteCombobox(top, width=46)
+    def _build_ts_object_panel(self, parent):
+        """Правая панель: адрес объекта и ID."""
+        pnl = tk.LabelFrame(
+            parent, text=" 📍 Объект ",
+            font=("Segoe UI", 9, "bold"),
+            bg=TS_COLORS["panel"], fg=TS_COLORS["accent"],
+            relief="groove", bd=1, padx=10, pady=8
+        )
+        pnl.grid(row=0, column=1, sticky="nsew", padx=(4, 0), pady=2)
+        pnl.grid_columnconfigure(1, weight=1)
+
+        row = 0
+
+        # Адрес
+        self._ts_lbl(pnl, "Адрес объекта", row, required=True)
+        self.cmb_address = AutoCompleteCombobox(
+            pnl, width=42, font=("Segoe UI", 9)
+        )
         self.cmb_address.set_completion_list(self.address_options)
-        self.cmb_address.grid(row=1, column=5, sticky="w", pady=(8, 0))
+        self.cmb_address.grid(row=row, column=1, columnspan=3,
+                               sticky="ew", pady=3)
         self.cmb_address.bind("<<ComboboxSelected>>", self._on_address_select)
-        self.cmb_address.bind("<Return>", lambda e: self._on_address_select())
+        self.cmb_address.bind(
+            "<Return>", lambda e: self._on_address_select()
+        )
+        row += 1
 
-        tk.Label(top, text="ID объекта:").grid(row=1, column=6, sticky="w", padx=(16, 4), pady=(8, 0))
-        self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=18)
-        self.cmb_object_id.grid(row=1, column=7, sticky="w", pady=(8, 0))
-        self.cmb_object_id.bind("<<ComboboxSelected>>", lambda e: self._load_existing_rows())
+        # ID объекта
+        self._ts_lbl(pnl, "ID объекта", row)
+        id_frame = tk.Frame(pnl, bg=TS_COLORS["panel"])
+        id_frame.grid(row=row, column=1, columnspan=3, sticky="ew", pady=3)
 
-        tk.Label(top, text="ФИО:").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.cmb_object_id = ttk.Combobox(
+            id_frame, state="readonly", values=[], width=22
+        )
+        self.cmb_object_id.pack(side="left")
+        self.cmb_object_id.bind(
+            "<<ComboboxSelected>>",
+            lambda e: self._load_existing_rows()
+        )
+
+        tk.Label(
+            id_frame,
+            text="← подставляется автоматически по адресу",
+            font=("Segoe UI", 7), fg="#888",
+            bg=TS_COLORS["panel"]
+        ).pack(side="left", padx=8)
+        row += 1
+
+    # ──────────────────────────────────────────────────────────
+    #  Панель добавления одного сотрудника
+    # ──────────────────────────────────────────────────────────
+    def _build_ts_add_employee_panel(self):
+        pnl = tk.LabelFrame(
+            self, text=" 👤 Добавить сотрудника вручную ",
+            font=("Segoe UI", 9, "bold"),
+            bg=TS_COLORS["panel"], fg=TS_COLORS["accent"],
+            relief="groove", bd=1, padx=10, pady=6
+        )
+        pnl.pack(fill="x", padx=10, pady=(4, 2))
+
+        # ФИО
+        tk.Label(
+            pnl, text="ФИО  *:", font=("Segoe UI", 9),
+            bg=TS_COLORS["panel"], fg=TS_COLORS["warning"]
+        ).grid(row=0, column=0, sticky="e", padx=(0, 6), pady=3)
+
         self.fio_var = tk.StringVar()
-        self.cmb_fio = AutoCompleteCombobox(top, textvariable=self.fio_var, width=30)
+        self.cmb_fio = AutoCompleteCombobox(
+            pnl, textvariable=self.fio_var, width=32,
+            font=("Segoe UI", 9)
+        )
         self.cmb_fio.set_completion_list(self.emp_names)
-        self.cmb_fio.grid(row=2, column=1, sticky="w", pady=(8, 0))
+        self.cmb_fio.grid(row=0, column=1, sticky="w", pady=3)
         self.cmb_fio.bind("<<ComboboxSelected>>", self._on_fio_select)
 
-        tk.Label(top, text="Табельный №:").grid(row=2, column=2, sticky="w", padx=(16, 4), pady=(8, 0))
-        self.ent_tbn = ttk.Entry(top, width=14)
-        self.ent_tbn.grid(row=2, column=3, sticky="w", pady=(8, 0))
+        # Таб. №
+        tk.Label(
+            pnl, text="Таб. №:", font=("Segoe UI", 9),
+            bg=TS_COLORS["panel"], fg="#333"
+        ).grid(row=0, column=2, sticky="e", padx=(16, 6), pady=3)
 
-        tk.Label(top, text="Должность:").grid(row=2, column=4, sticky="w", padx=(16, 4), pady=(8, 0))
+        self.ent_tbn = ttk.Entry(pnl, width=12, font=("Segoe UI", 9))
+        self.ent_tbn.grid(row=0, column=3, sticky="w", pady=3)
+
+        # Должность (только чтение)
+        tk.Label(
+            pnl, text="Должность:", font=("Segoe UI", 9),
+            bg=TS_COLORS["panel"], fg="#333"
+        ).grid(row=0, column=4, sticky="e", padx=(16, 6), pady=3)
+
         self.pos_var = tk.StringVar()
-        self.ent_pos = ttk.Entry(top, textvariable=self.pos_var, width=40, state="readonly")
-        self.ent_pos.grid(row=2, column=5, sticky="w", pady=(8, 0))
-
-        btns = tk.Frame(top)
-        btns.grid(row=3, column=0, columnspan=8, sticky="w", pady=(8, 0))
-        ttk.Button(btns, text="Добавить в табель", command=self.add_row).grid(row=0, column=0, padx=4)
-        ttk.Button(btns, text="Добавить подразделение", command=self.add_department_all).grid(row=0, column=1, padx=4)
-        ttk.Button(btns, text="Выбрать из подразделения…", command=self.add_department_partial).grid(row=0, column=2, padx=4)
-        ttk.Button(btns, text="Время (выбранные)", command=self.fill_time_selected).grid(row=0, column=3, padx=4)
-        ttk.Button(btns, text="Снять выделение", command=self.clear_selection).grid(row=0, column=4, padx=4)
-        ttk.Button(btns, text="Проставить часы", command=self.fill_hours_all).grid(row=0, column=5, padx=4)
-        ttk.Button(btns, text="Очистить все строки", command=self.clear_all_rows).grid(row=0, column=6, padx=4)
-        ttk.Button(btns, text="Загрузить из Excel", command=self.import_from_excel).grid(row=0, column=7, padx=4)
-        ttk.Button(btns, text="Копировать из месяца…", command=self.copy_from_month).grid(row=0, column=8, padx=4)
-        ttk.Button(btns, text="Загрузить СКУД…", command=self.import_from_skud).grid(row=0, column=9, padx=4)
-        ttk.Button(btns, text="Сохранить", command=self.save_all).grid(row=0, column=10, padx=4)
-
-        filter_frame = tk.Frame(self)
-        filter_frame.pack(fill="x", padx=8, pady=(0, 4))
-        
-        tk.Label(filter_frame, text="Поиск:").pack(side="left")
-        ent_filter = ttk.Entry(filter_frame, textvariable=self.var_filter, width=40)
-        ent_filter.pack(side="left", padx=(6, 6))
-        ttk.Button(filter_frame, text="Очистить", command=self._clear_filter).pack(side="left")
-
-        tk.Label(filter_frame, text="   Бригадир:").pack(side="left", padx=(14, 0))
-        
-        self.cmb_brigadier = ttk.Combobox(
-            filter_frame,
-            state="readonly",
-            width=34,
-            values=["Все"],
-            textvariable=self.var_brigadier,
+        self.ent_pos = ttk.Entry(
+            pnl, textvariable=self.pos_var,
+            width=30, state="readonly", font=("Segoe UI", 9)
         )
-        self.cmb_brigadier.pack(side="left", padx=(6, 0))
-        self.cmb_brigadier.bind("<<ComboboxSelected>>", lambda e: self._apply_filter())
-        
-        # debounce на ввод, чтобы не дергать фильтр на каждый символ мгновенно
+        self.ent_pos.grid(row=0, column=5, sticky="w", pady=3)
+
+        # Кнопка добавить
+        btn_add = tk.Button(
+            pnl, text="➕  Добавить",
+            font=("Segoe UI", 9, "bold"),
+            bg=TS_COLORS["btn_save_bg"],
+            fg=TS_COLORS["btn_save_fg"],
+            activebackground="#0d47a1",
+            activeforeground="white",
+            relief="flat", cursor="hand2",
+            padx=10, pady=3,
+            command=self.add_row
+        )
+        btn_add.grid(row=0, column=6, padx=(16, 0), pady=3)
+        btn_add.bind("<Enter>",
+                     lambda e: btn_add.config(bg="#0d47a1"))
+        btn_add.bind("<Leave>",
+                     lambda e: btn_add.config(bg=TS_COLORS["btn_save_bg"]))
+
+        if self.read_only:
+            try:
+                btn_add.configure(state="disabled")
+            except Exception:
+                pass
+
+    # ──────────────────────────────────────────────────────────
+    #  Тулбар действий (кнопки операций с табелем)
+    # ──────────────────────────────────────────────────────────
+    def _build_ts_toolbar(self):
+        bar = tk.Frame(
+            self, bg=TS_COLORS["accent_light"],
+            pady=5, relief="flat"
+        )
+        bar.pack(fill="x", padx=10, pady=(2, 0))
+
+        # Группа 1: добавление нескольких сотрудников
+        self._ts_btn(bar, "👥 Добавить подразделение",
+                     self.add_department_all, side="left", padx=(8, 4))
+        self._ts_btn(bar, "☑ Выбрать из подразделения…",
+                     self.add_department_partial, side="left", padx=4)
+
+        # Разделитель
+        tk.Frame(bar, bg=TS_COLORS["border"], width=1).pack(
+            side="left", fill="y", padx=8
+        )
+
+        # Группа 2: работа с часами
+        self._ts_btn(bar, "⏱ Время (выбранные)",
+                     self.fill_time_selected, side="left", padx=4)
+        self._ts_btn(bar, "🕐 Проставить часы всем",
+                     self.fill_hours_all, side="left", padx=4)
+        self._ts_btn(bar, "🗑 Очистить часы всем",
+                     self.clear_all_rows, side="left", padx=4)
+
+        # Разделитель
+        tk.Frame(bar, bg=TS_COLORS["border"], width=1).pack(
+            side="left", fill="y", padx=8
+        )
+
+        # Группа 3: импорт / копирование
+        self._ts_btn(bar, "📥 Из Excel",
+                     self.import_from_excel, side="left", padx=4)
+        self._ts_btn(bar, "📋 Копировать из месяца…",
+                     self.copy_from_month, side="left", padx=4)
+        self._ts_btn(bar, "🔒 Загрузить СКУД…",
+                     self.import_from_skud, side="left", padx=4)
+
+        # Разделитель
+        tk.Frame(bar, bg=TS_COLORS["border"], width=1).pack(
+            side="left", fill="y", padx=8
+        )
+
+        # Снять выделение
+        self._ts_btn(bar, "✖ Снять выделение",
+                     self.clear_selection, side="left", padx=4)
+
+        # Кнопка Сохранить — справа, акцентная
+        btn_save = tk.Button(
+            bar,
+            text="💾  СОХРАНИТЬ",
+            font=("Segoe UI", 9, "bold"),
+            bg=TS_COLORS["btn_save_bg"],
+            fg=TS_COLORS["btn_save_fg"],
+            activebackground="#0d47a1",
+            activeforeground="white",
+            relief="flat", cursor="hand2",
+            padx=14, pady=4,
+            command=self.save_all
+        )
+        btn_save.pack(side="right", padx=(4, 8))
+        btn_save.bind("<Enter>",
+                      lambda e: btn_save.config(bg="#0d47a1"))
+        btn_save.bind("<Leave>",
+                      lambda e: btn_save.config(bg=TS_COLORS["btn_save_bg"]))
+
+        # Сохраняем ссылку для блокировки в read_only
+        self._toolbar_frame = bar
+        self._btn_save_ref  = btn_save
+
+        if self.read_only:
+            for child in bar.winfo_children():
+                try:
+                    child.configure(state="disabled")
+                except Exception:
+                    pass
+
+    def _ts_btn(self, parent, text: str, cmd, side="left",
+                padx=4, pady=0):
+        """Вспомогательный метод — создаёт ttk.Button в тулбаре."""
+        b = ttk.Button(parent, text=text, command=cmd)
+        b.pack(side=side, padx=padx, pady=pady)
+        return b
+
+    # ──────────────────────────────────────────────────────────
+    #  Строка поиска / фильтра бригадира
+    # ──────────────────────────────────────────────────────────
+    def _build_ts_filter_bar(self):
+        bar = tk.Frame(self, bg=TS_COLORS["bg"], pady=4)
+        bar.pack(fill="x", padx=10, pady=(4, 0))
+
+        tk.Label(
+            bar, text="🔍 Поиск (ФИО / таб. №):",
+            font=("Segoe UI", 9),
+            bg=TS_COLORS["bg"]
+        ).pack(side="left")
+
+        ent_filter = ttk.Entry(
+            bar, textvariable=self.var_filter, width=36
+        )
+        ent_filter.pack(side="left", padx=(4, 8))
+
+        ttk.Button(
+            bar, text="Очистить",
+            command=self._clear_filter
+        ).pack(side="left")
+
+        # Разделитель
+        tk.Frame(bar, bg=TS_COLORS["border"], width=1).pack(
+            side="left", fill="y", padx=12
+        )
+
+        tk.Label(
+            bar, text="Бригадир:",
+            font=("Segoe UI", 9),
+            bg=TS_COLORS["bg"]
+        ).pack(side="left")
+
+        self.cmb_brigadier = ttk.Combobox(
+            bar, state="readonly", width=30,
+            values=["Все"],
+            textvariable=self.var_brigadier
+        )
+        self.cmb_brigadier.pack(side="left", padx=(4, 0))
+        self.cmb_brigadier.bind(
+            "<<ComboboxSelected>>",
+            lambda e: self._apply_filter()
+        )
+
+        # debounce поиска
         self._filter_job = None
+
         def _on_filter_key(_e=None):
             try:
                 if self._filter_job is not None:
@@ -2091,19 +2396,22 @@ class TimesheetPage(tk.Frame):
             except Exception:
                 pass
             self._filter_job = self.after(120, self._apply_filter)
-        
+
         ent_filter.bind("<KeyRelease>", _on_filter_key)
 
-        # --- Main table: VirtualTimesheetGrid ---
-        main_frame = tk.Frame(self)
-        main_frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
+    # ──────────────────────────────────────────────────────────
+    #  VirtualTimesheetGrid
+    # ──────────────────────────────────────────────────────────
+    def _build_ts_grid(self):
+        main_frame = tk.Frame(self, bg=TS_COLORS["bg"])
+        main_frame.pack(fill="both", expand=True, padx=10, pady=(4, 4))
         main_frame.grid_rowconfigure(0, weight=1)
         main_frame.grid_columnconfigure(0, weight=1)
 
         self.grid = VirtualTimesheetGrid(
             main_frame,
             get_year_month=self.get_year_month,
-            on_change=self._on_cell_changed,      # <- НОВОЕ имя/сигнатура
+            on_change=self._on_cell_changed,
             on_delete_row=self._grid_delete_row,
             row_height=22,
             colpx=self.COLPX,
@@ -2111,37 +2419,67 @@ class TimesheetPage(tk.Frame):
         )
         self.grid.grid(row=0, column=0, sticky="nsew")
 
-        # --- Bottom panel (totals + autosave label) ---
-        bottom = tk.Frame(self)
-        bottom.pack(fill="x", padx=8, pady=(0, 8))
+    # ──────────────────────────────────────────────────────────
+    #  Нижняя панель (итоги)
+    # ──────────────────────────────────────────────────────────
+    def _build_ts_bottom(self):
+        bottom = tk.Frame(self, bg=TS_COLORS["accent_light"], pady=5)
+        bottom.pack(fill="x", padx=10, pady=(0, 8))
 
         self.lbl_object_total = tk.Label(
             bottom,
-            text="Сумма: сотрудников 0 | дней 0 | часов 0",
-            font=("Segoe UI", 10, "bold"),
+            text="Сотрудников: 0  |  Дней: 0  |  Часов: 0",
+            font=("Segoe UI", 9, "bold"),
+            fg=TS_COLORS["accent"],
+            bg=TS_COLORS["accent_light"]
         )
-        self.lbl_object_total.pack(side="left")
+        self.lbl_object_total.pack(side="left", padx=10)
 
-        self.lbl_auto_save = tk.Label(
-            self,
-            text="Последнее авто‑сохранение: нет",
-            font=("Segoe UI", 9),
-            fg="#555",
-            anchor="w",
-        )
-        self.lbl_auto_save.pack(fill="x", padx=8, pady=(0, 6))
+        if self.read_only:
+            tk.Label(
+                bottom, text="👁  Режим просмотра — изменения недоступны",
+                font=("Segoe UI", 9, "italic"),
+                fg=TS_COLORS["warning"],
+                bg=TS_COLORS["accent_light"]
+            ).pack(side="right", padx=10)
 
-        # --- Initialize inputs ---
+    # ──────────────────────────────────────────────────────────
+    #  Инициализация начальных значений
+    # ──────────────────────────────────────────────────────────
+    def _init_ts_values(self):
+        deps = self.departments or ["Все"]
+
+        # Подразделение
+        try:
+            saved_dep = (
+                get_selected_department_from_config()
+                if get_selected_department_from_config else None
+            )
+            self.cmb_department.set(
+                saved_dep if saved_dep in deps else deps[0]
+            )
+        except Exception:
+            self.cmb_department.set(deps[0])
+
         if self._init_department and self._init_department in deps:
             self.cmb_department.set(self._init_department)
-        if self._init_year:
-            self.spn_year.delete(0, "end")
-            self.spn_year.insert(0, str(self._init_year))
+
+        # Год
+        self.spn_year.delete(0, "end")
+        self.spn_year.insert(
+            0, str(self._init_year or datetime.now().year)
+        )
+
+        # Месяц
         if self._init_month and 1 <= self._init_month <= 12:
             self.cmb_month.current(self._init_month - 1)
-        if self._init_object_addr and self._init_object_addr in self.address_options:
+
+        # Адрес
+        if (self._init_object_addr
+                and self._init_object_addr in self.address_options):
             self.cmb_address.set(self._init_object_addr)
 
+        # ID объекта
         if self._init_object_id:
             try:
                 self._suppress_object_id_dialog = True
@@ -2154,18 +2492,60 @@ class TimesheetPage(tk.Frame):
 
         self._on_department_select()
 
-        if self.read_only:
-            try:
-                for child in btns.winfo_children():
-                    child.configure(state="disabled")
-            except Exception:
-                pass
-            try:
-                self.lbl_object_total.config(
-                    text=self.lbl_object_total.cget("text") + " (режим просмотра)"
+    # ──────────────────────────────────────────────────────────
+    #  Переопределяем _update_auto_save_label
+    #  (метка теперь в заголовке, а не внизу)
+    # ──────────────────────────────────────────────────────────
+    def _update_auto_save_label(self):
+        try:
+            now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+            self.lbl_auto_save.config(
+                text=f"Авто-сохранение: {now}"
+            )
+        except Exception:
+            pass
+
+    # ──────────────────────────────────────────────────────────
+    #  Переопределяем _recalc_object_total
+    #  (обновлённый формат строки итогов)
+    # ──────────────────────────────────────────────────────────
+    def _recalc_object_total(self):
+        tot_h = tot_d = tot_night = tot_ot_day = tot_ot_night = 0.0
+        y, m  = self.get_year_month()
+        days_in_m = month_days(y, m)
+
+        for rec in self.model_rows_all:
+            for i, raw in enumerate(rec.get("hours") or []):
+                if i >= days_in_m or not raw:
+                    continue
+                hv, night = parse_hours_and_night(raw)
+                d_ot, n_ot = parse_overtime(raw)
+                if isinstance(hv, (int, float)) and hv > 1e-12:
+                    tot_h += float(hv); tot_d += 1
+                if isinstance(night, (int, float)):
+                    tot_night  += float(night)
+                if isinstance(d_ot, (int, float)):
+                    tot_ot_day += float(d_ot)
+                if isinstance(n_ot, (int, float)):
+                    tot_ot_night += float(n_ot)
+
+        def _fmt(v):
+            return f"{v:.2f}".rstrip("0").rstrip(".")
+
+        cnt = len(self.model_rows_all)
+        try:
+            self.lbl_object_total.config(
+                text=(
+                    f"Сотрудников: {cnt}  |  "
+                    f"Дней: {tot_d}  |  "
+                    f"Часов: {_fmt(tot_h)}  |  "
+                    f"Ночных: {_fmt(tot_night)}  |  "
+                    f"Пер. день: {_fmt(tot_ot_day)}  |  "
+                    f"Пер. ночь: {_fmt(tot_ot_night)}"
                 )
-            except Exception:
-                pass
+            )
+        except Exception:
+            pass
 
     def _sync_object_id_values_silent(self):
         addr = self.cmb_address.get().strip()
