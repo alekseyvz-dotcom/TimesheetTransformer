@@ -1623,7 +1623,21 @@ class MealOrderPage(tk.Frame):
         row += 1
 
         # ID объекта (автоматически по адресу)
-        self._lbl(pnl, "ID объекта",
+        self._lbl(pnl, "ID объекта", row)
+        id_frame = tk.Frame(pnl, bg=COLORS["panel"])
+        id_frame.grid(row=row, column=1, sticky="ew", pady=3)
+    
+        self.cmb_object_id = ttk.Combobox(
+            id_frame, state="readonly", values=[], width=20
+        )
+        self.cmb_object_id.pack(side="left")
+        disable_mousewheel(self.cmb_object_id)
+    
+        tk.Label(
+            id_frame,
+            text="← выбирается автоматически по адресу",
+            font=("Segoe UI", 7), fg="#888", bg=COLORS["panel"]
+        ).pack(side="left", padx=6)
         row += 1
 
         # Фактический адрес
