@@ -404,6 +404,43 @@ def load_timesheet_rows_by_header_id(header_id: int) -> List[Dict[str, Any]]:
         if conn:
             release_db_connection(conn)
 
+def load_brigadiers_map_for_header(header_id: int) -> dict[str, str]:
+    """
+    employee_tbn -> brigadier_fio (или '' если нет)
+    Берём department из timesheet_headers, сопоставляем через employee_brigadiers,
+    и получаем ФИО бригадира из employees по tbn.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    r.tbn AS employee_tbn,
+                    COALESCE(bfio.fio, '') AS brigadier_fio
+                FROM timesheet_rows r
+                JOIN timesheet_headers h ON h.id = r.header_id
+                LEFT JOIN employee_brigadiers eb
+                    ON eb.department = COALESCE(h.department, '')
+                   AND eb.employee_tbn = COALESCE(r.tbn, '')
+                LEFT JOIN employees bfio
+                    ON bfio.tbn = eb.brigadier_tbn
+                WHERE r.header_id = %s
+                """,
+                (header_id,),
+            )
+            out: dict[str, str] = {}
+            for row in cur.fetchall():
+                tbn = (row.get("employee_tbn") or "").strip()
+                if not tbn:
+                    continue
+                out[tbn] = (row.get("brigadier_fio") or "").strip()
+            return out
+    finally:
+        if conn:
+            release_db_connection(conn)
+
 def load_user_timesheet_headers(user_id: int, year: Optional[int], month: Optional[int],
                                 department: Optional[str], object_addr_substr: Optional[str]) -> List[Dict[str, Any]]:
     """Возвращает список заголовков табелей, созданных пользователем, с фильтрами."""
@@ -4040,7 +4077,7 @@ class MyTimesheetsPage(tk.Frame):
         if not self._headers:
             messagebox.showinfo("Экспорт", "Нет данных для выгрузки.")
             return
-
+    
         from tkinter import filedialog
         path = filedialog.asksaveasfilename(
             parent=self,
@@ -4051,40 +4088,52 @@ class MyTimesheetsPage(tk.Frame):
         )
         if not path:
             return
-
+    
         try:
-            wb  = Workbook()
-            ws  = wb.active
+            wb = Workbook()
+            ws = wb.active
             ws.title = "Мои табели"
-
+    
             header = (
                 ["Год", "Месяц", "Адрес", "ID объекта",
-                 "Подразделение", "ФИО", "Табельный №"]
+                 "Подразделение", "ФИО", "Табельный №", "ФИО бригадира"]
                 + [str(i) for i in range(1, 32)]
                 + ["Итого дней", "Итого часов", "В т.ч. ночных",
                    "Переработка день", "Переработка ночь"]
             )
             ws.append(header)
-
-            widths = [6, 10, 40, 14, 22, 28, 12] + [6] * 31 + [10, 12, 16, 16, 16]
+    
+            widths = (
+                [6, 10, 40, 14, 22, 28, 12, 28]  # + колонка бригадира
+                + [6] * 31
+                + [10, 12, 16, 16, 16]
+            )
             for i, w in enumerate(widths, 1):
                 ws.column_dimensions[get_column_letter(i)].width = w
-
+    
             total_rows = 0
             for h in self._headers:
                 rows_data = load_timesheet_rows_by_header_id(h["id"])
+    
+                # Один раз на табель получаем соответствия tbn -> ФИО бригадира
+                brig_map = load_brigadiers_map_for_header(int(h["id"]))
+    
                 for r in rows_data:
+                    tbn = (r.get("tbn") or "").strip()
+                    brig_fio = brig_map.get(tbn, "") if tbn else ""
+    
                     ws.append(
                         [h["year"], h["month"],
                          h.get("object_addr", ""), h.get("object_id", ""),
-                         h.get("department", ""), r["fio"], r["tbn"]]
+                         h.get("department", ""), r.get("fio", ""), r.get("tbn", ""),
+                         brig_fio]
                         + (r.get("hours_raw") or [None] * 31)
                         + [r.get("total_days"), r.get("total_hours"),
                            r.get("night_hours"), r.get("overtime_day"),
                            r.get("overtime_night")]
                     )
                     total_rows += 1
-
+    
             wb.save(path)
             messagebox.showinfo(
                 "Экспорт",
