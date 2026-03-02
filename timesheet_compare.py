@@ -640,11 +640,104 @@ class TimesheetComparePage(tk.Frame):
                 pass
         return total
 
-    def _rebuild_comparison(self):
+    def _render_compare_from_groups(self):
         self.tree_compare.delete(*self.tree_compare.get_children())
+    
+        # Колонок дней (без status/fio/tbn/object/kind/total_obj/total_1c)
+        all_cols   = list(self.tree_compare["columns"])
+        days_count = len(all_cols) - 7
+    
+        def _fmt(v: float) -> str:
+            return f"{v:.1f}".rstrip("0").rstrip(".") if v else ""
+    
+        for grp in self._merged_groups:
+            situation = grp.get("situation", "both")
+            has_diff  = grp.get("has_diff", False)
+            hr_row    = grp.get("hr_row")
+            obj_rows  = grp.get("obj_rows", [])
+            main_fio  = grp["display_fio"]
+            main_tbn  = grp["display_tbn"]
+    
+            # ── Тег и иконка ───────────────────────────────
+            if situation == "only_obj":
+                tag_obj = "only_obj"
+                icon    = "⚪"
+            elif situation == "only_1c":
+                tag_obj = "only_1c"
+                icon    = "🟠"
+            elif has_diff:
+                tag_obj = "obj_diff"
+                icon    = "🔴"
+            else:
+                tag_obj = "obj_ok"
+                icon    = "🟢"
+    
+            # ── Суммы ──────────────────────────────────────
+            sum_obj = sum(self._sum_days(o["days"], days_count) for o in obj_rows)
+            sum_1c  = self._sum_days(hr_row["days"], days_count) if hr_row else 0.0
+    
+            # ── Строки объектов ────────────────────────────
+            first = True
+            for o_row in obj_rows:
+                fio_cell = main_fio if first else ""
+                tbn_cell = main_tbn if first else ""
+                s_cell   = icon     if first else ""
+    
+                vals = [s_cell, fio_cell, tbn_cell, o_row["object_display"], "Объект"]
+    
+                day_vals = []
+                for i in range(days_count):
+                    raw_v   = o_row["days"][i] if i < len(o_row["days"]) else None
+                    norm_o  = normalize_val(raw_v)
+                    display = str(raw_v) if raw_v is not None else ""
+    
+                    if situation == "both" and hr_row and norm_o:
+                        norm_h = normalize_val(
+                            hr_row["days"][i] if i < len(hr_row["days"]) else None
+                        )
+                        if norm_o != norm_h:
+                            display = f"≠{display}"
+    
+                    day_vals.append(display)
+    
+                vals += day_vals + [
+                    _fmt(sum_obj) if first else "",
+                    _fmt(sum_1c)  if first else ""
+                ]
+    
+                self.tree_compare.insert("", "end", values=vals, tags=(tag_obj,))
+                first = False
+    
+            # ── Строка 1С ──────────────────────────────────
+            if hr_row:
+                hr_days_disp = []
+                for i in range(days_count):
+                    raw_h   = hr_row["days"][i] if i < len(hr_row["days"]) else None
+                    norm_h  = normalize_val(raw_h)
+                    display = str(raw_h) if raw_h is not None else ""
+    
+                    if norm_h and situation == "both":
+                        found_in_obj = any(
+                            normalize_val(o["days"][i] if i < len(o["days"]) else None)
+                            for o in obj_rows
+                        )
+                        if not found_in_obj:
+                            display = f"!{display}"
+    
+                    hr_days_disp.append(display)
+    
+                tag_1c = "only_1c" if situation == "only_1c" else "hr_row"
+                self.tree_compare.insert(
+                    "", "end",
+                    values=(["", main_fio, main_tbn, "", "1С Кадры"] + hr_days_disp + ["", _fmt(sum_1c)]),
+                    tags=(tag_1c,)
+                )
+
+    def _rebuild_comparison(self):
         self._merged_groups.clear()
 
         if not self._obj_rows and not self._hr_rows:
+            self.tree_compare.delete(*self.tree_compare.get_children())
             return
 
         only_diff  = self.var_only_diff.get()
@@ -727,7 +820,7 @@ class TimesheetComparePage(tk.Frame):
                         if not found:
                             group_has_diff = True
                             break
-
+                            
             # ── Фильтр ──────────────────────────────────────
             is_problem = (
                 situation in ("only_obj", "only_1c") or group_has_diff
@@ -754,109 +847,14 @@ class TimesheetComparePage(tk.Frame):
                 "has_diff":    group_has_diff,
             })
 
-            # ── Выбор тегов и иконки ────────────────────────
-            if situation == "only_obj":
-                tag_obj = "only_obj"
-                icon    = "⚪"
-            elif situation == "only_1c":
-                tag_obj = "only_1c"
-                icon    = "🟠"
-            elif group_has_diff:
-                tag_obj = "obj_diff"
-                icon    = "🔴"
-            else:
-                tag_obj = "obj_ok"
-                icon    = "🟢"
-
-            # Итоговые суммы
-            sum_obj = sum(
-                self._sum_days(o["days"], days_count)
-                for o in obj_rows_lst
-            )
-            sum_1c  = (
-                self._sum_days(hr_row["days"], days_count)
-                if hr_row else 0.0
-            )
-
-            def _fmt(v: float) -> str:
-                return f"{v:.1f}".rstrip("0").rstrip(".") if v else ""
-
-            # ── Строки объектов ─────────────────────────────
-            first = True
-            for o_row in obj_rows_lst:
-                fio_cell = main_fio if first else ""
-                tbn_cell = main_tbn if first else ""
-                s_cell   = icon     if first else ""
-
-                vals = [s_cell, fio_cell, tbn_cell,
-                        o_row["object_display"], "Объект"]
-
-                # Дни: помечаем конкретные расхождения символом
-                day_vals = []
-                for i in range(days_count):
-                    raw_v = (o_row["days"][i]
-                             if i < len(o_row["days"]) else None)
-                    norm_o = normalize_val(raw_v)
-                    display = str(raw_v) if raw_v is not None else ""
-
-                    if situation == "both" and norm_o:
-                        norm_h = normalize_val(
-                            hr_row["days"][i]
-                            if i < len(hr_row["days"]) else None
-                        )
-                        if norm_o != norm_h:
-                            display = f"≠{display}"   # маркер расхождения
-
-                    day_vals.append(display)
-
-                sum_cell = _fmt(sum_obj) if first else ""
-                vals += day_vals + [sum_cell, _fmt(sum_1c) if first else ""]
-
-                self.tree_compare.insert(
-                    "", "end", values=vals, tags=(tag_obj,)
-                )
-                first = False
-
-            # ── Строка 1С ───────────────────────────────────
-            if hr_row:
-                hr_days_disp = []
-                for i in range(days_count):
-                    raw_h = (hr_row["days"][i]
-                             if i < len(hr_row["days"]) else None)
-                    norm_h = normalize_val(raw_h)
-                    display = str(raw_h) if raw_h is not None else ""
-
-                    # Оранжевый маркер: в 1С есть, в объектах нет
-                    if norm_h and situation == "both":
-                        found_in_obj = any(
-                            normalize_val(
-                                o["days"][i] if i < len(o["days"]) else None
-                            )
-                            for o in obj_rows_lst
-                        )
-                        if not found_in_obj:
-                            display = f"!{display}"
-
-                    hr_days_disp.append(display)
-
-                tag_1c = ("only_1c" if situation == "only_1c"
-                          else "hr_row")
-                self.tree_compare.insert(
-                    "", "end",
-                    values=(
-                        ["", main_fio, main_tbn, "", "1С Кадры"]
-                        + hr_days_disp
-                        + ["", _fmt(sum_1c)]
-                    ),
-                    tags=(tag_1c,)
-                )
-
+        # Сортировка по ФИО и отрисовка (ОДИН раз после формирования групп)
         self._merged_groups.sort(
             key=lambda g: (
                 fio_sort_key(g.get("display_fio")),
                 normalize_tbn(g.get("display_tbn")),
             )
         )
+        self._render_compare_from_groups()        
         # ── Итог ────────────────────────────────────────────
         self._stat_total    = stat_total
         self._stat_diff     = stat_diff
