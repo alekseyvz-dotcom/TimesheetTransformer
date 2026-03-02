@@ -61,6 +61,11 @@ def normalize_tbn(val: Any) -> str:
     s = str(val or "").strip()
     return s.lstrip("0") if s else ""
 
+def fio_sort_key(fio: Any) -> str:
+    s = str(fio or "").strip().lower()
+    s = " ".join(s.split())
+    s = s.replace("ё", "е")
+    return s
 
 def normalize_val(val: Any) -> str:
     if val is None:
@@ -846,6 +851,12 @@ class TimesheetComparePage(tk.Frame):
                     tags=(tag_1c,)
                 )
 
+        self._merged_groups.sort(
+            key=lambda g: (
+                fio_sort_key(g.get("display_fio")),
+                normalize_tbn(g.get("display_tbn")),
+            )
+        )
         # ── Итог ────────────────────────────────────────────
         self._stat_total    = stat_total
         self._stat_diff     = stat_diff
