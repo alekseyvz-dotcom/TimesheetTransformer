@@ -182,7 +182,7 @@ class WorkersPage(tk.Frame):
         self._selected_tbn: str = ""
 
         # Переменные фильтра
-        self.var_year  = tk.StringVar(value="")
+        self.var_year  = tk.StringVar(value=str(datetime.now().year))
         self.var_month = tk.StringVar(value="Все")
         self.var_dep   = tk.StringVar(value="Все")
 
@@ -445,15 +445,6 @@ class WorkersPage(tk.Frame):
         btn_f = tk.Frame(flt_pnl, bg=WK_COLORS["panel"])
         btn_f.grid(row=0, column=6, sticky="e", padx=(14, 0))
 
-        tk.Button(
-            btn_f, text="🔍  Показать",
-            font=("Segoe UI", 9, "bold"),
-            bg=WK_COLORS["btn_save_bg"], fg=WK_COLORS["btn_save_fg"],
-            activebackground="#0d47a1", activeforeground="white",
-            relief="flat", cursor="hand2", padx=10, pady=3,
-            command=self._search
-        ).pack(side="left", padx=(0, 6))
-
         ttk.Button(
             btn_f, text="Сбросить",
             command=self._reset_filters
@@ -581,6 +572,7 @@ class WorkersPage(tk.Frame):
             return
         emp = self._lb_data[sel[0]]
         self._select_employee(emp)
+        self._search()
 
     def _on_emp_double(self, _event=None):
         """Двойной клик / Enter — выбор + автозапуск поиска."""
@@ -621,9 +613,8 @@ class WorkersPage(tk.Frame):
         self._rows = []
         try:
             self.lbl_total.config(
-                text=f"Выбран: {self._selected_fio}  —  "
-                     "нажмите «Показать» или двойной клик в списке"
-            )
+                text=f"Выбран: {self._selected_fio}"
+                )
         except Exception:
             pass
 
