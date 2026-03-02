@@ -16,6 +16,9 @@ from virtual_timesheet_grid import VirtualTimesheetGrid
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 
+# ★ НОВОЕ: порог подозрительных значений
+MAX_HOURS_PER_DAY = 24
+
 def exe_dir() -> Path:
     if getattr(sys, "frozen", False): return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
@@ -30,6 +33,8 @@ TS_COLORS = {
     "border":       "#dde1e7",
     "btn_save_bg":  "#1565c0",
     "btn_save_fg":  "#ffffff",
+    "suspicious":   "#FF6B6B",       # ★ НОВОЕ: цвет подозрительных ячеек
+    "suspicious_fg":"#FFFFFF",       # ★ НОВОЕ: цвет текста
 }
 
 # ------------------------- Логика работы с пулом соединений -------------------------
@@ -37,23 +42,19 @@ db_connection_pool = None
 USING_SHARED_POOL = False
 
 def set_db_pool(pool):
-    """Функция для установки пула соединений извне."""
     global db_connection_pool, USING_SHARED_POOL
     db_connection_pool = pool
     USING_SHARED_POOL = True
 
 def get_db_connection():
-    """Получает соединение из пула."""
     if db_connection_pool:
         return db_connection_pool.getconn()
     raise RuntimeError("Пул соединений не был установлен из главного приложения.")
 
 def release_db_connection(conn):
-    """Возвращает соединение обратно в пул."""
     if db_connection_pool:
         db_connection_pool.putconn(conn)
 
-# ------------------------- Загрузка зависимостей (если нужны для standalone) -------------------------
 try:
     import settings_manager as Settings
     from settings_manager import (
@@ -67,7 +68,7 @@ except Exception:
     get_selected_department_from_config = None
     set_selected_department_in_config = None
 
-# ------------------------- Функции для работы с БД (перенесены из main_app.py) -------------------------
+# ------------------------- Функции для работы с БД -------------------------
 
 def find_duplicate_employees_for_timesheet(
     object_id: Optional[str],
@@ -78,13 +79,6 @@ def find_duplicate_employees_for_timesheet(
     user_id: int,
     employees: List[Tuple[str, str]],
 ) -> List[Dict[str, Any]]:
-    """
-    Ищет сотрудников, которые уже есть в табелях других пользователей
-    по тому же объекту/подразделению/периоду.
-
-    employees: список (fio, tbn) из текущего табеля.
-    Возвращает список словарей с информацией о найденных дублях.
-    """
     if not employees:
         return []
 
@@ -92,8 +86,6 @@ def find_duplicate_employees_for_timesheet(
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # подготовим набор ФИО/таб№ для поиска
-            # используем только тех, у кого есть либо fio, либо tbn
             fio_tbn_pairs = [(fio.strip(), (tbn or "").strip())
                              for fio, tbn in employees
                              if fio.strip() or (tbn or "").strip()]
@@ -101,14 +93,11 @@ def find_duplicate_employees_for_timesheet(
             if not fio_tbn_pairs:
                 return []
 
-            # будем искать по (fio,tbn). Если tbn пустой, ищем только по fio.
-            # Для простоты разобьём на две группы.
             with_tbn = [(fio, tbn) for fio, tbn in fio_tbn_pairs if tbn]
             without_tbn = [fio for fio, tbn in fio_tbn_pairs if not tbn]
 
             results: List[Dict[str, Any]] = []
 
-            # Общие условия по объекту/подразделению/периоду и не наш user_id
             base_where = """
                 COALESCE(h.object_id, '') = COALESCE(%s, '')
                 AND h.object_addr = %s
@@ -119,41 +108,27 @@ def find_duplicate_employees_for_timesheet(
             """
             base_params = [object_id or None, object_addr, department or None, year, month, user_id]
 
-            # 1) Ищем совпадения по (fio, tbn)
             if with_tbn:
                 cur.execute(
                     f"""
-                    SELECT h.id AS header_id,
-                           h.user_id,
-                           u.username,
-                           u.full_name,
-                           r.fio,
-                           r.tbn
+                    SELECT h.id AS header_id, h.user_id, u.username, u.full_name, r.fio, r.tbn
                     FROM timesheet_headers h
-                    JOIN app_users u      ON u.id = h.user_id
+                    JOIN app_users u ON u.id = h.user_id
                     JOIN timesheet_rows r ON r.header_id = h.id
-                    WHERE {base_where}
-                      AND (r.fio, COALESCE(r.tbn, '')) IN %s
+                    WHERE {base_where} AND (r.fio, COALESCE(r.tbn, '')) IN %s
                     """,
                     base_params + [tuple(with_tbn)],
                 )
                 results.extend(cur.fetchall())
 
-            # 2) Ищем совпадения по одному ФИО (где в нашем списке tbn пустой)
             if without_tbn:
                 cur.execute(
                     f"""
-                    SELECT h.id AS header_id,
-                           h.user_id,
-                           u.username,
-                           u.full_name,
-                           r.fio,
-                           r.tbn
+                    SELECT h.id AS header_id, h.user_id, u.username, u.full_name, r.fio, r.tbn
                     FROM timesheet_headers h
-                    JOIN app_users u      ON u.id = h.user_id
+                    JOIN app_users u ON u.id = h.user_id
                     JOIN timesheet_rows r ON r.header_id = h.id
-                    WHERE {base_where}
-                      AND r.fio = ANY(%s)
+                    WHERE {base_where} AND r.fio = ANY(%s)
                     """,
                     base_params + [without_tbn],
                 )
@@ -165,15 +140,7 @@ def find_duplicate_employees_for_timesheet(
         if conn:
             release_db_connection(conn)
 
-def find_object_db_id_by_excel_or_address(
-    cur,  # теперь курсор передается явно
-    excel_id: Optional[str],
-    address: str,
-) -> Optional[int]:
-    """
-    Ищет объект в таблице objects.
-    Возвращает id объекта или None.
-    """
+def find_object_db_id_by_excel_or_address(cur, excel_id: Optional[str], address: str) -> Optional[int]:
     if excel_id:
         cur.execute("SELECT id FROM objects WHERE COALESCE(NULLIF(excel_id, ''), '') = %s", (excel_id,))
         row = cur.fetchone()
@@ -183,16 +150,7 @@ def find_object_db_id_by_excel_or_address(
     row = cur.fetchone()
     return row[0] if row else None
 
-
-def upsert_timesheet_header(
-    object_id: str,
-    object_addr: str,
-    department: str,
-    year: int,
-    month: int,
-    user_id: int,
-) -> int:
-    """Находит или создаёт заголовок табеля и возвращает его id."""
+def upsert_timesheet_header(object_id: str, object_addr: str, department: str, year: int, month: int, user_id: int) -> int:
     conn = None
     try:
         conn = get_db_connection()
@@ -203,7 +161,6 @@ def upsert_timesheet_header(
                     f"В БД не найден объект (excel_id={object_id!r}, address={object_addr!r}).\n"
                     f"Сначала создайте объект в разделе «Объекты»."
                 )
-            
             cur.execute(
                 """
                 INSERT INTO timesheet_headers (object_id, object_addr, department, year, month, user_id, object_db_id)
@@ -220,18 +177,14 @@ def upsert_timesheet_header(
             release_db_connection(conn)
 
 def replace_timesheet_rows(header_id: int, rows: List[Dict[str, Any]]):
-    """Полностью заменяет строки табеля одним запросом (Batch Insert)."""
     conn = None
     try:
         conn = get_db_connection()
         with conn, conn.cursor() as cur:
-            # Сначала удаляем старые (тут всё ок)
             cur.execute("DELETE FROM timesheet_rows WHERE header_id = %s", (header_id,))
-            
             if not rows:
                 return
 
-            # Подготовка данных для массовой вставки
             values = []
             for rec in rows:
                 hours_list = rec.get("hours") or [None] * 31
@@ -247,7 +200,6 @@ def replace_timesheet_rows(header_id: int, rows: List[Dict[str, Any]]):
                 for raw in hours_list:
                     if not raw:
                         continue
-                    # Новая логика: обычные часы + ночные
                     hrs, night = parse_hours_and_night(raw)
                     d_ot, n_ot = parse_overtime(raw)
 
@@ -262,31 +214,22 @@ def replace_timesheet_rows(header_id: int, rows: List[Dict[str, Any]]):
                         total_ot_night += float(n_ot)
 
                 values.append((
-                    header_id,
-                    rec["fio"],
-                    rec.get("tbn") or None,
-                    hours_list,
-                    total_days or None,
-                    total_hours or None,
-                    total_night_hours or None,
-                    total_ot_day or None,
-                    total_ot_night or None,
+                    header_id, rec["fio"], rec.get("tbn") or None, hours_list,
+                    total_days or None, total_hours or None, total_night_hours or None,
+                    total_ot_day or None, total_ot_night or None,
                 ))
 
             insert_query = """
                 INSERT INTO timesheet_rows 
-                (header_id, fio, tbn, hours_raw,
-                 total_days, total_hours, night_hours, overtime_day, overtime_night)
+                (header_id, fio, tbn, hours_raw, total_days, total_hours, night_hours, overtime_day, overtime_night)
                 VALUES %s
             """
             execute_values(cur, insert_query, values)
-            
     finally:
         if conn:
             release_db_connection(conn)
 
 def load_timesheet_rows_from_db(object_id: str, object_addr: str, department: str, year: int, month: int, user_id: int) -> List[Dict[str, Any]]:
-    """Загружает строки табеля для конкретного пользователя и контекста."""
     conn = None
     try:
         conn = get_db_connection()
@@ -302,7 +245,6 @@ def load_timesheet_rows_from_db(object_id: str, object_addr: str, department: st
             row = cur.fetchone()
             if not row: return []
             header_id = row[0]
-
             cur.execute("SELECT fio, tbn, hours_raw FROM timesheet_rows WHERE header_id = %s ORDER BY fio, tbn", (header_id,))
             result = []
             for fio, tbn, hours_raw in cur.fetchall():
@@ -314,32 +256,19 @@ def load_timesheet_rows_from_db(object_id: str, object_addr: str, department: st
             release_db_connection(conn)
 
 def load_timesheet_rows_for_copy_from_db(
-    object_id: Optional[str],
-    object_addr: str,
-    department: str,
-    year: int,
-    month: int,
-    user_id: int,
-    with_hours: bool,
+    object_id: Optional[str], object_addr: str, department: str,
+    year: int, month: int, user_id: int, with_hours: bool,
 ) -> List[Dict[str, Any]]:
-    """
-    Возвращает строки табеля-источника из БД для копирования.
-    Если with_hours=False — часы очищаются.
-    """
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT h.id
-                FROM timesheet_headers h
+                SELECT h.id FROM timesheet_headers h
                 WHERE COALESCE(h.object_id, '') = COALESCE(%s, '')
-                  AND h.object_addr = %s
-                  AND COALESCE(h.department, '') = COALESCE(%s, '')
-                  AND h.year = %s
-                  AND h.month = %s
-                  AND h.user_id = %s
+                  AND h.object_addr = %s AND COALESCE(h.department, '') = COALESCE(%s, '')
+                  AND h.year = %s AND h.month = %s AND h.user_id = %s
                 """,
                 (object_id or None, object_addr, department or None, year, month, user_id),
             )
@@ -347,17 +276,10 @@ def load_timesheet_rows_for_copy_from_db(
             if not row:
                 return []
             header_id = row[0]
-
             cur.execute(
-                """
-                SELECT fio, tbn, hours_raw
-                FROM timesheet_rows
-                WHERE header_id = %s
-                ORDER BY fio, tbn
-                """,
+                "SELECT fio, tbn, hours_raw FROM timesheet_rows WHERE header_id = %s ORDER BY fio, tbn",
                 (header_id,),
             )
-
             result: List[Dict[str, Any]] = []
             for fio, tbn, hours_raw in cur.fetchall():
                 if with_hours:
@@ -365,19 +287,13 @@ def load_timesheet_rows_for_copy_from_db(
                     hrs = (hrs + [None] * 31)[:31]
                 else:
                     hrs = [None] * 31
-
-                result.append({
-                    "fio": fio or "",
-                    "tbn": tbn or "",
-                    "hours": hrs,
-                })
+                result.append({"fio": fio or "", "tbn": tbn or "", "hours": hrs})
             return result
     finally:
         if conn:
             release_db_connection(conn)
 
 def load_timesheet_rows_by_header_id(header_id: int) -> List[Dict[str, Any]]:
-    """Загружает строки табеля по ID заголовка."""
     conn = None
     try:
         conn = get_db_connection()
@@ -390,8 +306,7 @@ def load_timesheet_rows_by_header_id(header_id: int) -> List[Dict[str, Any]]:
             for fio, tbn, hours_raw, total_days, total_hours, night_hours, ot_day, ot_night in cur.fetchall():
                 hrs = list(hours_raw) if hours_raw else [None] * 31
                 result.append({
-                    "fio": fio or "",
-                    "tbn": tbn or "",
+                    "fio": fio or "", "tbn": tbn or "",
                     "hours_raw": [h for h in hrs],
                     "total_days": total_days,
                     "total_hours": float(total_hours) if total_hours is not None else None,
@@ -405,27 +320,17 @@ def load_timesheet_rows_by_header_id(header_id: int) -> List[Dict[str, Any]]:
             release_db_connection(conn)
 
 def load_brigadiers_map_for_header(header_id: int) -> dict[str, str]:
-    """
-    employee_tbn -> brigadier_fio (или '' если нет)
-    Берём department из timesheet_headers, сопоставляем через employee_brigadiers,
-    и получаем ФИО бригадира из employees по tbn.
-    """
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT
-                    r.tbn AS employee_tbn,
-                    COALESCE(bfio.fio, '') AS brigadier_fio
+                SELECT r.tbn AS employee_tbn, COALESCE(bfio.fio, '') AS brigadier_fio
                 FROM timesheet_rows r
                 JOIN timesheet_headers h ON h.id = r.header_id
-                LEFT JOIN employee_brigadiers eb
-                    ON eb.department = COALESCE(h.department, '')
-                   AND eb.employee_tbn = COALESCE(r.tbn, '')
-                LEFT JOIN employees bfio
-                    ON bfio.tbn = eb.brigadier_tbn
+                LEFT JOIN employee_brigadiers eb ON eb.department = COALESCE(h.department, '') AND eb.employee_tbn = COALESCE(r.tbn, '')
+                LEFT JOIN employees bfio ON bfio.tbn = eb.brigadier_tbn
                 WHERE r.header_id = %s
                 """,
                 (header_id,),
@@ -443,27 +348,20 @@ def load_brigadiers_map_for_header(header_id: int) -> dict[str, str]:
 
 def load_user_timesheet_headers(user_id: int, year: Optional[int], month: Optional[int],
                                 department: Optional[str], object_addr_substr: Optional[str]) -> List[Dict[str, Any]]:
-    """Возвращает список заголовков табелей, созданных пользователем, с фильтрами."""
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # ### ИЗМЕНЕНО: Добавляем блок WHERE с фильтрами ###
             where, params = ["user_id = %s"], [user_id]
             if year is not None: where.append("year = %s"); params.append(year)
             if month is not None: where.append("month = %s"); params.append(month)
             if department: where.append("COALESCE(department, '') = %s"); params.append(department)
             if object_addr_substr: where.append("object_addr ILIKE %s"); params.append(f"%{object_addr_substr}%")
-
             where_sql = " AND ".join(where)
-
             cur.execute(
-                # ### ИЗМЕНЕНО: Используем where_sql в запросе ###
                 f"""SELECT id, object_id, object_addr, department, year, month, created_at, updated_at 
-                   FROM timesheet_headers 
-                   WHERE {where_sql} 
-                   ORDER BY year DESC, month DESC, object_addr, COALESCE(department, '')
-                """,
+                   FROM timesheet_headers WHERE {where_sql} 
+                   ORDER BY year DESC, month DESC, object_addr, COALESCE(department, '')""",
                 params,
             )
             return [dict(r) for r in cur.fetchall()]
@@ -473,7 +371,6 @@ def load_user_timesheet_headers(user_id: int, year: Optional[int], month: Option
 
 def load_all_timesheet_headers(year: Optional[int], month: Optional[int], department: Optional[str],
                                object_addr_substr: Optional[str], object_id_substr: Optional[str]) -> List[Dict[str, Any]]:
-    """Возвращает список заголовков табелей всех пользователей с фильтрами."""
     conn = None
     try:
         conn = get_db_connection()
@@ -484,7 +381,6 @@ def load_all_timesheet_headers(year: Optional[int], month: Optional[int], depart
             if department: where.append("COALESCE(h.department, '') = %s"); params.append(department)
             if object_addr_substr: where.append("h.object_addr ILIKE %s"); params.append(f"%{object_addr_substr}%")
             if object_id_substr: where.append("COALESCE(h.object_id, '') ILIKE %s"); params.append(f"%{object_id_substr}%")
-            
             where_sql = " AND ".join(where)
             cur.execute(
                 f"""
@@ -523,20 +419,13 @@ def load_objects_from_db() -> List[Tuple[str, str]]:
         if conn: release_db_connection(conn)
 
 def load_objects_short_for_timesheet() -> List[Tuple[str, str, str]]:
-    """
-    Возвращает список объектов (excel_id, address, short_name).
-    """
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT
-                    COALESCE(NULLIF(excel_id, ''), '') AS code,
-                    address,
-                    COALESCE(short_name, '') AS short_name
-                FROM objects
-                ORDER BY address, code
+                SELECT COALESCE(NULLIF(excel_id, ''), '') AS code, address, COALESCE(short_name, '') AS short_name
+                FROM objects ORDER BY address, code
             """)
             return [(r[0] or "", r[1] or "", r[2] or "") for r in cur.fetchall()]
     finally:
@@ -544,62 +433,37 @@ def load_objects_short_for_timesheet() -> List[Tuple[str, str, str]]:
             release_db_connection(conn)
 
 def load_brigadier_assignments_for_department(department_name: str) -> dict[str, str | None]:
-    """
-    Возвращает назначения из employee_brigadiers для подразделения:
-      {employee_tbn: brigadier_tbn_or_None}
-    """
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT employee_tbn, brigadier_tbn
-                FROM public.employee_brigadiers
-                WHERE department = %s
-                """,
+                "SELECT employee_tbn, brigadier_tbn FROM public.employee_brigadiers WHERE department = %s",
                 (department_name,),
             )
             return {emp_tbn: br_tbn for (emp_tbn, br_tbn) in cur.fetchall()}
     finally:
         release_db_connection(conn)
 
-
 def load_brigadier_names_for_department(department_name: str) -> dict[str, str]:
-    """
-    Справочник таб.№ -> ФИО только для тех TBN, которые встречаются как brigadier_tbn в данном подразделении.
-    Возвращает: {brigadier_tbn: fio}
-    """
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT eb.brigadier_tbn
-                FROM public.employee_brigadiers eb
-                WHERE eb.department = %s
-                  AND eb.brigadier_tbn IS NOT NULL
-                  AND eb.brigadier_tbn <> ''
+                SELECT DISTINCT eb.brigadier_tbn FROM public.employee_brigadiers eb
+                WHERE eb.department = %s AND eb.brigadier_tbn IS NOT NULL AND eb.brigadier_tbn <> ''
                 """,
                 (department_name,),
             )
             brig_tbn_list = [r[0] for r in cur.fetchall()]
-
             if not brig_tbn_list:
                 return {}
-
-            cur.execute(
-                """
-                SELECT tbn, fio
-                FROM public.employees
-                WHERE tbn = ANY(%s)
-                """,
-                (brig_tbn_list,),
-            )
+            cur.execute("SELECT tbn, fio FROM public.employees WHERE tbn = ANY(%s)", (brig_tbn_list,))
             return {tbn: fio for (tbn, fio) in cur.fetchall()}
     finally:
         release_db_connection(conn)
 
-# ------------------------- Утилиты (перенесены из main_app.py) -------------------------
+# ------------------------- Утилиты -------------------------
 
 def month_days(year: int, month: int) -> int: return calendar.monthrange(year, month)[1]
 
@@ -641,70 +505,102 @@ def parse_overtime(v: Any) -> Tuple[Optional[float], Optional[float]]:
     except: return None, None
 
 def parse_hours_and_night(v: Any) -> Tuple[Optional[float], Optional[float]]:
-    """
-    Правила:
-      - '8' или '8,25' или '8:30' -> (8, 0) / (8.25, 0) / (8.5, 0)
-      - '8/2' (вне скобок) -> (10, 2)  (т.е. 8 всего + 2 ночных; ночные входят в общее)
-      - '8/2/1' -> (11, 3) (2+1 ночных)
-      - если строка содержит скобки, берём только часть ДО "(".
-    """
     s = str(v or "").strip()
     if not s:
         return None, None
-
-    # Отбрасываем переработку в скобках: "8/2(1/1)" -> "8/2"
     if "(" in s:
         s = s.split("(", 1)[0].strip()
     if not s:
         return None, None
-
-    # Если есть /, то первая часть — "обычные", остальные — "ночные"
     if "/" in s:
         parts = [p.strip() for p in s.split("/") if p.strip()]
         if not parts:
             return None, None
-
-        # Перевод строки в число (поддержка "," и ":" как в parse_hours_value)
         def _to_hours(x: str) -> Optional[float]:
-            if not x:
-                return None
+            if not x: return None
             if ":" in x:
                 p = x.split(":")
                 try:
                     hh = float(p[0].replace(",", "."))
                     mm = float((p[1] if len(p) > 1 else "0").replace(",", "."))
                     return hh + mm / 60.0
-                except:
-                    return None
-            try:
-                return float(x.replace(",", "."))
-            except:
-                return None
-
+                except: return None
+            try: return float(x.replace(",", "."))
+            except: return None
         base = _to_hours(parts[0])
         if base is None:
             return None, None
-
         night_sum = 0.0
         for p in parts[1:]:
             v = _to_hours(p)
             if isinstance(v, (int, float)):
                 night_sum += float(v)
-
         total = base + night_sum
-        return (total if total > 0 else None,
-                night_sum if night_sum > 0 else 0.0)
-
-    # Без дроби: используем старую логику parse_hours_value
+        return (total if total > 0 else None, night_sum if night_sum > 0 else 0.0)
     total = parse_hours_value(s)
     if total is None:
         return None, None
     return total, 0.0
 
-def calc_row_totals(hours_list: List[Optional[str]], year: int, month: int) -> Dict[str, Any]:
 
+# ★ НОВОЕ: функция проверки подозрительных значений
+def is_suspicious_hours(raw_value: Any) -> bool:
+    """
+    Возвращает True, если значение ячейки распознаётся как число часов > MAX_HOURS_PER_DAY.
+    Буквенные коды (НН, НВ, МО и т.д.) не считаются подозрительными.
+    """
+    if not raw_value:
+        return False
+    s = str(raw_value).strip()
+    if not s:
+        return False
+    # Пропускаем буквенные коды
+    s_upper = s.upper().replace(" ", "")
+    known_codes = {"НН", "НВ", "МО", "ВМ", "ОТ", "РВ8", "РВ11", "Б", "О", "П", "В", "К"}
+    if s_upper in known_codes:
+        return False
+    if s_upper.startswith("РВ"):
+        return False
+    # Пытаемся распарсить как часы
+    hrs = parse_hours_value(s)
+    if hrs is None:
+        return False
+    return hrs > MAX_HOURS_PER_DAY
+
+
+# ★ НОВОЕ: сканирование всех строк, возвращает список подозрительных
+def find_suspicious_cells(
+    rows: List[Dict[str, Any]],
+    year: int,
+    month: int,
+) -> List[Dict[str, Any]]:
+    """
+    Возвращает список словарей:
+      {"row_idx": int, "day": int, "fio": str, "tbn": str, "raw": str, "parsed": float}
+    """
     days_in_m = month_days(year, month)
+    suspicious: List[Dict[str, Any]] = []
+    for row_idx, rec in enumerate(rows):
+        fio = rec.get("fio") or ""
+        tbn = rec.get("tbn") or ""
+        hours_list = rec.get("hours") or []
+        for day_idx in range(min(days_in_m, len(hours_list))):
+            raw = hours_list[day_idx]
+            if is_suspicious_hours(raw):
+                parsed = parse_hours_value(str(raw))
+                suspicious.append({
+                    "row_idx": row_idx,
+                    "day": day_idx + 1,
+                    "fio": fio,
+                    "tbn": tbn,
+                    "raw": str(raw),
+                    "parsed": parsed,
+                })
+    return suspicious
 
+
+def calc_row_totals(hours_list: List[Optional[str]], year: int, month: int) -> Dict[str, Any]:
+    days_in_m = month_days(year, month)
     total_hours = 0.0
     total_days = 0
     total_ot_day = 0.0
@@ -721,10 +617,8 @@ def calc_row_totals(hours_list: List[Optional[str]], year: int, month: int) -> D
         raw = hours_list[i]
         if not raw:
             continue
-
         hrs, _night = parse_hours_and_night(raw)
         d_ot, n_ot = parse_overtime(raw)
-
         if isinstance(hrs, (int, float)) and hrs > 1e-12:
             total_hours += float(hrs)
             total_days += 1
@@ -755,7 +649,6 @@ def _best_fio_match_with_score(skud_fio: str, candidates: List[str]) -> Tuple[Op
     nf = _norm_fio(skud_fio)
     if not nf:
         return None, 0.0
-
     best_name = None
     best_score = 0.0
     for cand in candidates:
@@ -766,31 +659,18 @@ def _best_fio_match_with_score(skud_fio: str, candidates: List[str]) -> Tuple[Op
         if score > best_score:
             best_score = score
             best_name = cand
-
     return best_name, float(best_score)
 
 def _round_hours_nearest(duration_minutes: int) -> int:
-    """
-    Округление до ближайшего часа с порогом 30 минут:
-      7:29 -> 7
-      7:30 -> 8
-    """
     if duration_minutes <= 0:
         return 0
     return int((duration_minutes + 30) // 60)
 
 def _read_skud_events_from_xlsx(path: str) -> List[Dict[str, Any]]:
-    """
-    Читает Excel-отчёт СКУД.
-    Возвращает события:
-      {"dt": datetime, "fio": str, "event": "in"|"out"}
-    """
     wb = load_workbook(path, data_only=True)
-    ws = wb.active  # обычно нужный лист первый
-
+    ws = wb.active
     header_row = None
     header_map: Dict[str, int] = {}
-
     max_scan = min(ws.max_row or 0, 60)
     max_cols = ws.max_column or 0
 
@@ -817,12 +697,10 @@ def _read_skud_events_from_xlsx(path: str) -> List[Dict[str, Any]]:
         tval = ws.cell(r, c_time).value
         fio = str(ws.cell(r, c_fio).value or "").strip()
         ev = str(ws.cell(r, c_event).value or "").strip()
-
         if not fio:
             continue
         if ev not in ("Вход", "Выход"):
             continue
-
         dt = None
         if isinstance(tval, datetime):
             dt = tval
@@ -837,18 +715,12 @@ def _read_skud_events_from_xlsx(path: str) -> List[Dict[str, Any]]:
                     dt = datetime.strptime(s, "%d.%m.%Y %H:%M")
                 except Exception:
                     continue
-
-        events.append({
-            "dt": dt,
-            "fio": fio,
-            "event": ("in" if ev == "Вход" else "out"),
-        })
+        events.append({"dt": dt, "fio": fio, "event": ("in" if ev == "Вход" else "out")})
 
     return events
 
 def _compute_day_summary_from_events(
-    events: List[Dict[str, Any]],
-    target_date: date,
+    events: List[Dict[str, Any]], target_date: date,
 ) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
     by_fio: Dict[str, List[Dict[str, Any]]] = {}
     for e in events:
@@ -869,39 +741,136 @@ def _compute_day_summary_from_events(
         lst.sort(key=lambda x: x["dt"])
         ins = [x["dt"] for x in lst if x.get("event") == "in"]
         outs = [x["dt"] for x in lst if x.get("event") == "out"]
-
         if not ins or not outs:
             problems.append({
-                "skud_fio": fio,
-                "has_in": bool(ins),
-                "has_out": bool(outs),
-                "first_in": ins[0] if ins else None,
-                "last_out": outs[-1] if outs else None,
-                "count_in": len(ins),
-                "count_out": len(outs),
+                "skud_fio": fio, "has_in": bool(ins), "has_out": bool(outs),
+                "first_in": ins[0] if ins else None, "last_out": outs[-1] if outs else None,
+                "count_in": len(ins), "count_out": len(outs),
             })
             continue
-
         first_in = ins[0]
         last_out = outs[-1]
         minutes = int((last_out - first_in).total_seconds() // 60)
         if minutes < 0:
             minutes = 0
-
         if minutes > 4 * 60:
             minutes = max(0, minutes - 60)
-        
         summary[fio] = {
-            "first_in": first_in,
-            "last_out": last_out,
-            "minutes": minutes,
+            "first_in": first_in, "last_out": last_out, "minutes": minutes,
             "hours_rounded": _round_hours_nearest(minutes),
-            "count_in": len(ins),
-            "count_out": len(outs),
+            "count_in": len(ins), "count_out": len(outs),
         }
 
-
     return summary, problems
+
+
+# ★ НОВОЕ: Диалог предупреждения о подозрительных значениях
+class SuspiciousHoursWarningDialog(tk.Toplevel):
+    """
+    Показывает список подозрительных значений (> 24 ч.) и спрашивает,
+    продолжить ли сохранение.
+    """
+
+    def __init__(self, parent, suspicious: List[Dict[str, Any]], context: str = "сохранении"):
+        super().__init__(parent)
+        self.title(f"⚠️ Подозрительные значения часов (>{MAX_HOURS_PER_DAY} ч.)")
+        self.resizable(True, True)
+        self.grab_set()
+        self.result: Optional[bool] = None  # True = продолжить, False = отмена
+
+        main = tk.Frame(self, padx=12, pady=12)
+        main.pack(fill="both", expand=True)
+
+        tk.Label(
+            main,
+            text=f"⚠️  Обнаружено {len(suspicious)} подозрительных значений\n"
+                 f"(более {MAX_HOURS_PER_DAY} часов в сутки).\n\n"
+                 f"Возможно, пропущена точка/запятая (например, 825 вместо 8.25).\n"
+                 f"Проверьте значения перед {context}:",
+            justify="left",
+            font=("Segoe UI", 10),
+            fg=TS_COLORS["warning"],
+        ).pack(anchor="w", pady=(0, 8))
+
+        # Таблица подозрительных
+        cols = ("fio", "tbn", "day", "raw", "parsed")
+        tree = ttk.Treeview(main, columns=cols, show="headings", height=min(15, max(5, len(suspicious))))
+        tree.heading("fio", text="ФИО")
+        tree.heading("tbn", text="Таб.№")
+        tree.heading("day", text="День")
+        tree.heading("raw", text="Значение в ячейке")
+        tree.heading("parsed", text="Распознано (ч.)")
+
+        tree.column("fio", width=250, anchor="w")
+        tree.column("tbn", width=100, anchor="center")
+        tree.column("day", width=60, anchor="center")
+        tree.column("raw", width=150, anchor="center")
+        tree.column("parsed", width=130, anchor="center")
+
+        vsb = ttk.Scrollbar(main, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True, pady=(0, 8))
+        vsb.pack(side="right", fill="y", pady=(0, 8))
+
+        for item in suspicious[:100]:  # ограничиваем 100 строками
+            parsed = item.get("parsed")
+            parsed_str = f"{parsed:.2f}" if isinstance(parsed, (int, float)) else "?"
+            tree.insert("", "end", values=(
+                item.get("fio", ""),
+                item.get("tbn", ""),
+                item.get("day", ""),
+                item.get("raw", ""),
+                parsed_str,
+            ))
+
+        if len(suspicious) > 100:
+            tree.insert("", "end", values=("", "", "", f"... и ещё {len(suspicious) - 100}", ""))
+
+        # Кнопки
+        btn_frame = tk.Frame(main)
+        btn_frame.pack(fill="x", pady=(8, 0))
+
+        tk.Button(
+            btn_frame,
+            text="❌  Отмена (исправить значения)",
+            font=("Segoe UI", 10, "bold"),
+            bg=TS_COLORS["warning"], fg="white",
+            activebackground="#880000", activeforeground="white",
+            relief="flat", cursor="hand2", padx=14, pady=6,
+            command=self._on_cancel,
+        ).pack(side="left", padx=(0, 8))
+
+        tk.Button(
+            btn_frame,
+            text="⚠️  Всё равно сохранить",
+            font=("Segoe UI", 10),
+            bg="#FF9800", fg="white",
+            activebackground="#E65100", activeforeground="white",
+            relief="flat", cursor="hand2", padx=14, pady=6,
+            command=self._on_continue,
+        ).pack(side="right")
+
+        # Центрируем
+        try:
+            self.update_idletasks()
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            sw = self.winfo_width()
+            sh = self.winfo_height()
+            self.geometry(f"+{px + (pw - sw)//2}+{py + (ph - sh)//2}")
+        except Exception:
+            pass
+
+    def _on_cancel(self):
+        self.result = False
+        self.destroy()
+
+    def _on_continue(self):
+        self.result = True
+        self.destroy()
+
 
 class SelectDateDialog(simpledialog.Dialog):
     def __init__(self, parent, init_date: date):
@@ -938,31 +907,25 @@ class CopyFromDialog(simpledialog.Dialog):
 
     def body(self, master):
         tk.Label(master, text="Источник").grid(row=0, column=0, sticky="w", pady=(2, 6), columnspan=4)
-
         tk.Label(master, text="Месяц:").grid(row=1, column=0, sticky="e")
         self.cmb_month = ttk.Combobox(master, state="readonly", width=18,
                                       values=[month_name_ru(i) for i in range(1, 13)])
         self.cmb_month.grid(row=1, column=1, sticky="w")
         self.cmb_month.current(max(0, min(11, self.init_month - 1)))
-
         tk.Label(master, text="Год:").grid(row=1, column=2, sticky="e", padx=(10, 4))
         self.spn_year = tk.Spinbox(master, from_=2000, to=2100, width=6)
         self.spn_year.grid(row=1, column=3, sticky="w")
         self.spn_year.delete(0, "end")
         self.spn_year.insert(0, str(self.init_year))
-
         self.var_copy_hours = tk.BooleanVar(value=False)
         ttk.Checkbutton(master, text="Копировать часы", variable=self.var_copy_hours)\
             .grid(row=2, column=1, sticky="w", pady=(8, 2))
-
         tk.Label(master, text="Режим:").grid(row=3, column=0, sticky="e", pady=(6, 2))
         self.var_mode = tk.StringVar(value="replace")
         frame_mode = tk.Frame(master)
         frame_mode.grid(row=3, column=1, columnspan=3, sticky="w", pady=(6, 2))
-        ttk.Radiobutton(frame_mode, text="Заменить текущий список",
-                        value="replace", variable=self.var_mode).pack(anchor="w")
-        ttk.Radiobutton(frame_mode, text="Объединить (добавить недостающих)",
-                        value="merge", variable=self.var_mode).pack(anchor="w")
+        ttk.Radiobutton(frame_mode, text="Заменить текущий список", value="replace", variable=self.var_mode).pack(anchor="w")
+        ttk.Radiobutton(frame_mode, text="Объединить (добавить недостающих)", value="merge", variable=self.var_mode).pack(anchor="w")
         return self.cmb_month
 
     def validate(self):
@@ -984,63 +947,42 @@ class CopyFromDialog(simpledialog.Dialog):
         }
 
 class SelectObjectIdDialog(tk.Toplevel):
-
     def __init__(self, parent, objects_for_addr: List[Tuple[str, str, str]], addr: str):
         super().__init__(parent)
         self.title("Выбор ID объекта")
         self.resizable(True, True)
         self.grab_set()
         self.result: Optional[str] = None
-
         main = tk.Frame(self, padx=10, pady=10)
         main.pack(fill="both", expand=True)
-
-        tk.Label(
-            main,
-            text=f"По адресу:\n{addr}\nнайдено несколько объектов.\nВыберите нужный ID:",
-            justify="left",
-        ).pack(anchor="w")
-
+        tk.Label(main, text=f"По адресу:\n{addr}\nнайдено несколько объектов.\nВыберите нужный ID:", justify="left").pack(anchor="w")
         cols = ("excel_id", "address", "short_name")
-        self.tree = ttk.Treeview(
-            main, columns=cols, show="headings", height=8, selectmode="browse"
-        )
+        self.tree = ttk.Treeview(main, columns=cols, show="headings", height=8, selectmode="browse")
         self.tree.heading("excel_id", text="ID (excel_id)")
         self.tree.heading("address", text="Адрес")
         self.tree.heading("short_name", text="Краткое имя")
-
         self.tree.column("excel_id", width=120, anchor="center", stretch=False)
         self.tree.column("address", width=260, anchor="w")
         self.tree.column("short_name", width=200, anchor="w")
-
         vsb = ttk.Scrollbar(main, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
-
         self.tree.pack(side="left", fill="both", expand=True, pady=(8, 4))
         vsb.pack(side="right", fill="y")
-
         for code, a, short_name in objects_for_addr:
             self.tree.insert("", "end", values=(code, a, short_name))
-
         btns = tk.Frame(main)
         btns.pack(fill="x", pady=(6, 0))
         ttk.Button(btns, text="OK", command=self._on_ok).pack(side="right", padx=(4, 0))
         ttk.Button(btns, text="Отмена", command=self._on_cancel).pack(side="right")
-
         self.tree.bind("<Double-1>", self._on_ok)
-        self.tree.bind("<Return>",  self._on_ok)
-
+        self.tree.bind("<Return>", self._on_ok)
         try:
             self.update_idletasks()
-            px = parent.winfo_rootx()
-            py = parent.winfo_rooty()
-            pw = parent.winfo_width()
-            ph = parent.winfo_height()
-            sw = self.winfo_width()
-            sh = self.winfo_height()
+            px = parent.winfo_rootx(); py = parent.winfo_rooty()
+            pw = parent.winfo_width(); ph = parent.winfo_height()
+            sw = self.winfo_width(); sh = self.winfo_height()
             self.geometry(f"+{px + (pw - sw)//2}+{py + (ph - sh)//2}")
-        except Exception:
-            pass
+        except Exception: pass
 
     def _on_ok(self, event=None):
         sel = self.tree.selection()
@@ -1048,9 +990,8 @@ class SelectObjectIdDialog(tk.Toplevel):
             messagebox.showwarning("Выбор ID объекта", "Сначала выберите строку.", parent=self)
             return
         vals = self.tree.item(sel[0], "values")
-        if not vals:
-            return
-        self.result = vals[0]  # excel_id
+        if not vals: return
+        self.result = vals[0]
         self.destroy()
 
     def _on_cancel(self, event=None):
@@ -2639,6 +2580,29 @@ class TimesheetPage(tk.Frame):
         self._on_address_change()
         self._load_existing_rows()
 
+    def _show_suspicious_warning_on_load(self, suspicious: List[Dict[str, Any]]):
+        """Показывает предупреждение после загрузки табеля из БД."""
+        lines = []
+        for item in suspicious[:10]:
+            fio = item.get("fio", "")
+            day = item.get("day", "?")
+            raw = item.get("raw", "")
+            parsed = item.get("parsed")
+            parsed_str = f"{parsed:.2f}" if isinstance(parsed, (int, float)) else "?"
+            lines.append(f"  • {fio}, день {day}: '{raw}' → {parsed_str} ч.")
+
+        msg = (
+            f"⚠️ Обнаружено {len(suspicious)} подозрительных значений\n"
+            f"(более {MAX_HOURS_PER_DAY} часов в сутки).\n\n"
+            f"Возможно, пропущена точка/запятая (825 → 8.25).\n\n"
+        )
+        if lines:
+            msg += "Примеры:\n" + "\n".join(lines)
+            if len(suspicious) > 10:
+                msg += f"\n  ... и ещё {len(suspicious) - 10}"
+
+        messagebox.showwarning("⚠️ Подозрительные значения", msg)
+
     def _on_address_change(self, *_):
         addr = self.cmb_address.get().strip()
     
@@ -2753,15 +2717,30 @@ class TimesheetPage(tk.Frame):
             rec = self.model_rows[row_index]
             self._recalc_row_totals_for_rec(rec)
     
-        # перерисовать (видимые строки)
+            hours_list = rec.get("hours") or []
+            if 0 <= day_index < len(hours_list):
+                raw_value = hours_list[day_index]
+                if is_suspicious_hours(raw_value):
+                    parsed = parse_hours_value(str(raw_value))
+                    parsed_str = f"{parsed:.2f}" if isinstance(parsed, (int, float)) else "?"
+                    fio = rec.get("fio", "")
+                    messagebox.showwarning(
+                        "⚠️ Подозрительное значение",
+                        f"Сотрудник: {fio}\n"
+                        f"День: {day_index + 1}\n"
+                        f"Значение: '{raw_value}' → {parsed_str} часов\n\n"
+                        f"В сутках максимум {MAX_HOURS_PER_DAY} часов.\n"
+                        f"Возможно, пропущена точка/запятая?\n"
+                        f"(например: 825 → 8.25)",
+                    )
+
         try:
             self.grid.refresh()
         except Exception:
             pass
-    
-        # общий итог — по всем строкам
+
         self._recalc_object_total()
-        self._schedule_auto_save()    
+        self._schedule_auto_save()
 
     # ---------------- totals / change ----------------
     def _recalc_all_row_totals(self):
@@ -3504,6 +3483,10 @@ class TimesheetPage(tk.Frame):
     
             # применяем фильтр (он сам вызовет grid.set_rows)
             self._apply_filter()
+
+            suspicious = find_suspicious_cells(self.model_rows_all, y, m)
+            if suspicious:
+                self.after(300, lambda: self._show_suspicious_warning_on_load(suspicious))
     
         except Exception as e:
             try:
@@ -3624,7 +3607,24 @@ class TimesheetPage(tk.Frame):
                 return
             finally:
                 release_db_connection(conn_check)
-
+                
+        suspicious = find_suspicious_cells(self.model_rows_all, y, m)
+        if suspicious:
+            if is_auto:
+                # При авто-сохранении — просто логируем, не блокируем
+                try:
+                    logging.warning(
+                        f"Авто-сохранение: обнаружено {len(suspicious)} подозрительных значений (>{MAX_HOURS_PER_DAY} ч.)"
+                    )
+                except Exception:
+                    pass
+            elif show_messages:
+                # При ручном сохранении — показываем диалог
+                dlg = SuspiciousHoursWarningDialog(self, suspicious, context="сохранении")
+                self.wait_window(dlg)
+                if not dlg.result:
+                    return  # Пользователь отменил сохранение
+                    
         # duplicate employees check
         employees_for_check = []
         for rec in self.model_rows_all:
