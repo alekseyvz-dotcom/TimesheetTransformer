@@ -128,35 +128,10 @@ def find_employee_work_summary(
         if conn:
             release_db_connection(conn)
 
-
-# ============================================================
-#  Переиспользуем из timesheet_module
-# ============================================================
 month_name_ru          = timesheet_module.month_name_ru
 load_employees_from_db = timesheet_module.load_employees_from_db
 
-
-# ============================================================
-#  Страница «Работники»
-# ============================================================
-
 class WorkersPage(tk.Frame):
-    """
-    Компоновка: левая панель (список сотрудников + поиск)
-                правая панель (карточка + фильтры + таблица истории)
-
-    ┌──────────────┬────────────────────────────────────────────┐
-    │ 🔍 Поиск     │  👷 Иванов Иван Иванович                   │
-    │ [__________] │  Таб.№: 00123  |  Должность: Монтажник    │
-    │              ├────────────────────────────────────────────┤
-    │ Иванов И.И.  │  📅 Фильтр периода                         │
-    │ Петров П.П.  │  [Год] [Месяц] [Подразделение]  [Найти]   │
-    │ Сидоров С.С. ├────────────────────────────────────────────┤
-    │  ...         │  📋 История работы                          │
-    │              │  Период | Объект | Дни | Часы | ...        │
-    │              │  ...                                        │
-    └──────────────┴────────────────────────────────────────────┘
-    """
 
     def __init__(self, master, app_ref):
         super().__init__(master, bg=WK_COLORS["bg"])
@@ -190,10 +165,6 @@ class WorkersPage(tk.Frame):
         self._rows: List[Dict[str, Any]] = []
 
         self._build_ui()
-
-    # ──────────────────────────────────────────────────────────
-    #  Построение UI
-    # ──────────────────────────────────────────────────────────
 
     def _build_ui(self):
         # ── Заголовок ─────────────────────────────────────────
@@ -232,8 +203,6 @@ class WorkersPage(tk.Frame):
             font=("Segoe UI", 8), fg="#555",
             bg=WK_COLORS["accent_light"]
         ).pack(side="right", padx=10)
-
-    # ── Левая панель — список сотрудников ─────────────────────
 
     def _build_sidebar(self, parent):
         sidebar = tk.Frame(
@@ -337,8 +306,6 @@ class WorkersPage(tk.Frame):
         # Заполняем список
         self._rebuild_sidebar_list()
 
-    # ── Правая панель — карточка + фильтры + таблица ──────────
-
     def _build_content(self, parent):
         content = tk.Frame(parent, bg=WK_COLORS["bg"])
         content.grid(row=0, column=1, sticky="nsew",
@@ -346,7 +313,6 @@ class WorkersPage(tk.Frame):
         content.grid_rowconfigure(2, weight=1)
         content.grid_columnconfigure(0, weight=1)
 
-        # ── Карточка сотрудника ───────────────────────────────
         card_pnl = tk.LabelFrame(
             content, text=" 👤 Выбранный сотрудник ",
             font=("Segoe UI", 9, "bold"),
@@ -509,10 +475,6 @@ class WorkersPage(tk.Frame):
         self.tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
 
-    # ──────────────────────────────────────────────────────────
-    #  Левый список: заполнение и поиск
-    # ──────────────────────────────────────────────────────────
-
     def _rebuild_sidebar_list(self, filter_text: str = ""):
         """Перестраивает Listbox с учётом строки поиска и фильтра подразделения."""
         dep_filter = self.var_sidebar_dep.get().strip()
@@ -549,7 +511,6 @@ class WorkersPage(tk.Frame):
         except Exception:
             pass
 
-        # Если ранее был выбран сотрудник — пытаемся восстановить выделение
         if self._selected_fio:
             for i, d in enumerate(self._lb_data):
                 if d["fio"] == self._selected_fio:
@@ -560,10 +521,6 @@ class WorkersPage(tk.Frame):
 
     def _on_search_key(self, _event=None):
         self._rebuild_sidebar_list(self.var_search.get())
-
-    # ──────────────────────────────────────────────────────────
-    #  Выбор сотрудника
-    # ──────────────────────────────────────────────────────────
 
     def _on_emp_select(self, _event=None):
         """Выбор сотрудника — обновляем карточку."""
@@ -596,16 +553,10 @@ class WorkersPage(tk.Frame):
         except Exception:
             pass
 
-        # Авто-подставляем подразделение в фильтр
         if emp["dep"] and emp["dep"] in self.departments:
             self.var_dep.set(emp["dep"])
 
-        # Очищаем таблицу (новые данные загрузятся по кнопке или double-click)
         self._clear_table()
-
-    # ──────────────────────────────────────────────────────────
-    #  Поиск и таблица
-    # ──────────────────────────────────────────────────────────
 
     def _clear_table(self):
         if self.tree:
@@ -641,7 +592,6 @@ class WorkersPage(tk.Frame):
             )
             return
 
-        # Год
         year  = None
         y_str = self.var_year.get().strip()
         if y_str:
@@ -657,7 +607,6 @@ class WorkersPage(tk.Frame):
                 )
                 return
 
-        # Месяц
         month  = None
         m_name = self.var_month.get().strip()
         if m_name and m_name != "Все":
@@ -668,7 +617,6 @@ class WorkersPage(tk.Frame):
             except ValueError:
                 pass
 
-        # Подразделение
         dep_val = self.var_dep.get().strip()
         dep = dep_val if (dep_val and dep_val != "Все") else None
 
@@ -694,10 +642,6 @@ class WorkersPage(tk.Frame):
                 "Работники",
                 f"Для «{fio}» нет записей по заданным условиям."
             )
-
-    # ──────────────────────────────────────────────────────────
-    #  Заполнение таблицы истории
-    # ──────────────────────────────────────────────────────────
 
     def _fmt(self, v) -> str:
         if v is None:
@@ -795,10 +739,6 @@ class WorkersPage(tk.Frame):
             self.lbl_total.config(text="  |  ".join(parts))
         except Exception:
             pass
-
-    # ──────────────────────────────────────────────────────────
-    #  Экспорт в Excel
-    # ──────────────────────────────────────────────────────────
 
     def _export_excel(self):
         if not self._rows:
@@ -921,11 +861,6 @@ class WorkersPage(tk.Frame):
         except Exception as e:
             logging.exception("Ошибка экспорта")
             messagebox.showerror("Экспорт", f"Ошибка:\n{e}")
-
-
-# ============================================================
-#  API
-# ============================================================
 
 def create_workers_page(parent, app_ref) -> WorkersPage:
     return WorkersPage(parent, app_ref=app_ref)
