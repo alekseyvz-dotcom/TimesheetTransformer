@@ -15,23 +15,25 @@ from psycopg2.extras import RealDictCursor
 import timesheet_module
 
 # ============================================================
-#  Цветовая схема (единая с остальными модулями)
+#  Цветовая схема
 # ============================================================
 WK_COLORS = {
-    "bg":           "#f0f2f5",
-    "panel":        "#ffffff",
-    "accent":       "#1565c0",
-    "accent_light": "#e3f2fd",
-    "success":      "#2e7d32",
-    "warning":      "#b00020",
-    "border":       "#dde1e7",
-    "btn_save_bg":  "#1565c0",
-    "btn_save_fg":  "#ffffff",
-    # строки таблицы
-    "row_even":     "#ffffff",
-    "row_odd":      "#f8f9fb",
-    "row_ot":       "#fff9c4",   # переработка
-    "row_night":    "#e8f5e9",   # ночные
+    "bg":            "#f0f2f5",
+    "panel":         "#ffffff",
+    "accent":        "#1565c0",
+    "accent_light":  "#e3f2fd",
+    "success":       "#2e7d32",
+    "warning":       "#b00020",
+    "border":        "#dde1e7",
+    "btn_save_bg":   "#1565c0",
+    "btn_save_fg":   "#ffffff",
+    "row_even":      "#ffffff",
+    "row_odd":       "#f8f9fb",
+    "row_ot":        "#fff9c4",
+    "row_night":     "#e8f5e9",
+    "row_selected":  "#bbdefb",   # выбранный сотрудник в левом списке
+    "sidebar_bg":    "#f5f7fa",
+    "sidebar_hdr":   "#e3f2fd",
 }
 
 # ============================================================
@@ -75,7 +77,7 @@ def find_employee_work_summary(
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            where  = ["1=1"]
+            where: List[str] = ["1=1"]
             params: List[Any] = []
 
             if fio:
@@ -101,12 +103,12 @@ def find_employee_work_summary(
                     h.object_addr,
                     h.year,
                     h.month,
-                    COALESCE(h.department, '')         AS department,
-                    SUM(COALESCE(r.total_days,    0))  AS total_days,
-                    SUM(COALESCE(r.total_hours,   0))  AS total_hours,
-                    SUM(COALESCE(r.night_hours,   0))  AS night_hours,
-                    SUM(COALESCE(r.overtime_day,  0))  AS overtime_day,
-                    SUM(COALESCE(r.overtime_night,0))  AS overtime_night
+                    COALESCE(h.department, '')          AS department,
+                    SUM(COALESCE(r.total_days,    0))   AS total_days,
+                    SUM(COALESCE(r.total_hours,   0))   AS total_hours,
+                    SUM(COALESCE(r.night_hours,   0))   AS night_hours,
+                    SUM(COALESCE(r.overtime_day,  0))   AS overtime_day,
+                    SUM(COALESCE(r.overtime_night,0))   AS overtime_night
                 FROM timesheet_headers h
                 JOIN timesheet_rows r ON r.header_id = h.id
                 WHERE {" AND ".join(where)}
@@ -130,8 +132,7 @@ def find_employee_work_summary(
 # ============================================================
 #  Переиспользуем из timesheet_module
 # ============================================================
-AutoCompleteCombobox = timesheet_module.AutoCompleteCombobox
-month_name_ru        = timesheet_module.month_name_ru
+month_name_ru          = timesheet_module.month_name_ru
 load_employees_from_db = timesheet_module.load_employees_from_db
 
 
@@ -141,25 +142,33 @@ load_employees_from_db = timesheet_module.load_employees_from_db
 
 class WorkersPage(tk.Frame):
     """
-    Раздел «Работники» в едином стиле.
-    Новое:
-      - карточка сотрудника (должность, подразделение)
-      - итоговая строка по результатам
-      - зебра + цветовые теги строк
-      - экспорт в Excel
-      - статус-бар с количеством найденных записей
+    Компоновка: левая панель (список сотрудников + поиск)
+                правая панель (карточка + фильтры + таблица истории)
+
+    ┌──────────────┬────────────────────────────────────────────┐
+    │ 🔍 Поиск     │  👷 Иванов Иван Иванович                   │
+    │ [__________] │  Таб.№: 00123  |  Должность: Монтажник    │
+    │              ├────────────────────────────────────────────┤
+    │ Иванов И.И.  │  📅 Фильтр периода                         │
+    │ Петров П.П.  │  [Год] [Месяц] [Подразделение]  [Найти]   │
+    │ Сидоров С.С. ├────────────────────────────────────────────┤
+    │  ...         │  📋 История работы                          │
+    │              │  Период | Объект | Дни | Часы | ...        │
+    │              │  ...                                        │
+    └──────────────┴────────────────────────────────────────────┘
     """
 
     def __init__(self, master, app_ref):
         super().__init__(master, bg=WK_COLORS["bg"])
         self.app_ref = app_ref
 
-        # Справочник
-        self.employees     = load_employees_from_db()
-        self.emp_names     = [e[0] for e in self.employees]
+        # Справочник сотрудников
+        self.employees = load_employees_from_db()
         self.emp_info: Dict[str, Dict[str, str]] = {}
         for fio, tbn, pos, dep in self.employees:
-            self.emp_info[fio] = {"tbn": tbn, "pos": pos or "", "dep": dep or ""}
+            self.emp_info[fio] = {
+                "tbn": tbn or "", "pos": pos or "", "dep": dep or ""
+            }
 
         deps_set = {
             (dep or "").strip()
@@ -168,20 +177,22 @@ class WorkersPage(tk.Frame):
         }
         self.departments = ["Все"] + sorted(deps_set)
 
-        # Переменные формы
-        self.var_fio   = tk.StringVar()
-        self.var_tbn   = tk.StringVar()
+        # Текущий выбранный сотрудник
+        self._selected_fio: str = ""
+        self._selected_tbn: str = ""
+
+        # Переменные фильтра
         self.var_year  = tk.StringVar(value="")
         self.var_month = tk.StringVar(value="Все")
         self.var_dep   = tk.StringVar(value="Все")
 
-        self.tree  = None
+        # Данные таблицы
         self._rows: List[Dict[str, Any]] = []
 
         self._build_ui()
 
     # ──────────────────────────────────────────────────────────
-    #  UI
+    #  Построение UI
     # ──────────────────────────────────────────────────────────
 
     def _build_ui(self):
@@ -194,113 +205,275 @@ class WorkersPage(tk.Frame):
             bg=WK_COLORS["accent"], fg="white", padx=12
         ).pack(side="left")
 
-        # ── Панель поиска сотрудника ──────────────────────────
-        search_pnl = tk.LabelFrame(
-            self, text=" 🔍 Поиск сотрудника ",
+        # ── Основная область: Sidebar + Content ───────────────
+        main = tk.Frame(self, bg=WK_COLORS["bg"])
+        main.pack(fill="both", expand=True, padx=0, pady=0)
+        main.grid_columnconfigure(1, weight=1)
+        main.grid_rowconfigure(0, weight=1)
+
+        self._build_sidebar(main)
+        self._build_content(main)
+
+        # ── Нижняя панель (итоги) ─────────────────────────────
+        bottom = tk.Frame(self, bg=WK_COLORS["accent_light"], pady=5)
+        bottom.pack(fill="x", padx=0, pady=0)
+
+        self.lbl_total = tk.Label(
+            bottom, text="Выберите сотрудника в списке слева",
+            font=("Segoe UI", 9, "bold"),
+            fg=WK_COLORS["accent"],
+            bg=WK_COLORS["accent_light"]
+        )
+        self.lbl_total.pack(side="left", padx=10)
+
+        tk.Label(
+            bottom,
+            text="🟡 Переработка  🟢 Ночные часы",
+            font=("Segoe UI", 8), fg="#555",
+            bg=WK_COLORS["accent_light"]
+        ).pack(side="right", padx=10)
+
+    # ── Левая панель — список сотрудников ─────────────────────
+
+    def _build_sidebar(self, parent):
+        sidebar = tk.Frame(
+            parent,
+            bg=WK_COLORS["sidebar_bg"],
+            width=260,
+            relief="flat"
+        )
+        sidebar.grid(row=0, column=0, sticky="nsew",
+                     padx=(10, 4), pady=10)
+        sidebar.grid_propagate(False)
+        sidebar.grid_rowconfigure(2, weight=1)
+        sidebar.grid_columnconfigure(0, weight=1)
+
+        # Заголовок сайдбара
+        hdr_sb = tk.Frame(sidebar, bg=WK_COLORS["sidebar_hdr"], pady=6)
+        hdr_sb.grid(row=0, column=0, sticky="ew")
+        tk.Label(
+            hdr_sb, text="👤  Сотрудники",
+            font=("Segoe UI", 9, "bold"),
+            bg=WK_COLORS["sidebar_hdr"], fg=WK_COLORS["accent"],
+            padx=8
+        ).pack(side="left")
+
+        self.lbl_emp_count = tk.Label(
+            hdr_sb, text="",
+            font=("Segoe UI", 8), fg="#666",
+            bg=WK_COLORS["sidebar_hdr"]
+        )
+        self.lbl_emp_count.pack(side="right", padx=6)
+
+        # Строка поиска
+        srch = tk.Frame(sidebar, bg=WK_COLORS["sidebar_bg"], pady=4)
+        srch.grid(row=1, column=0, sticky="ew", padx=6)
+        srch.grid_columnconfigure(0, weight=1)
+
+        self.var_search = tk.StringVar()
+        ent_srch = ttk.Entry(
+            srch, textvariable=self.var_search,
+            font=("Segoe UI", 9)
+        )
+        ent_srch.grid(row=0, column=0, sticky="ew")
+        ent_srch.bind("<KeyRelease>", self._on_search_key)
+
+        # Кнопка очистить поиск
+        tk.Label(
+            srch, text="🔍",
+            bg=WK_COLORS["sidebar_bg"], font=("Segoe UI", 10)
+        ).grid(row=0, column=1, padx=(4, 0))
+
+        # Фильтр по подразделению
+        dep_f = tk.Frame(sidebar, bg=WK_COLORS["sidebar_bg"])
+        dep_f.grid(row=2, column=0, sticky="ew", padx=6, pady=(2, 0))
+        dep_f.grid_columnconfigure(0, weight=1)
+
+        self.var_sidebar_dep = tk.StringVar(value="Все")
+        self.cmb_sidebar_dep = ttk.Combobox(
+            dep_f, state="readonly", width=28,
+            textvariable=self.var_sidebar_dep,
+            values=self.departments,
+            font=("Segoe UI", 8)
+        )
+        self.cmb_sidebar_dep.grid(row=0, column=0, sticky="ew", pady=2)
+        self.cmb_sidebar_dep.bind(
+            "<<ComboboxSelected>>",
+            lambda e: self._rebuild_sidebar_list()
+        )
+
+        # Список сотрудников
+        list_frame = tk.Frame(sidebar, bg=WK_COLORS["sidebar_bg"])
+        list_frame.grid(row=3, column=0, sticky="nsew", padx=6, pady=(4, 6))
+        list_frame.grid_rowconfigure(0, weight=1)
+        list_frame.grid_columnconfigure(0, weight=1)
+        sidebar.grid_rowconfigure(3, weight=1)
+
+        self.lb_employees = tk.Listbox(
+            list_frame,
+            font=("Segoe UI", 9),
+            bg=WK_COLORS["panel"],
+            selectbackground=WK_COLORS["accent"],
+            selectforeground="white",
+            activestyle="none",
+            relief="flat",
+            bd=1,
+            highlightthickness=1,
+            highlightcolor=WK_COLORS["border"],
+            highlightbackground=WK_COLORS["border"],
+        )
+        vsb_lb = ttk.Scrollbar(
+            list_frame, orient="vertical",
+            command=self.lb_employees.yview
+        )
+        self.lb_employees.configure(yscrollcommand=vsb_lb.set)
+        self.lb_employees.grid(row=0, column=0, sticky="nsew")
+        vsb_lb.grid(row=0, column=1, sticky="ns")
+
+        self.lb_employees.bind("<<ListboxSelect>>", self._on_emp_select)
+        self.lb_employees.bind("<Double-1>",        self._on_emp_double)
+        self.lb_employees.bind("<Return>",          self._on_emp_double)
+
+        # Заполняем список
+        self._rebuild_sidebar_list()
+
+    # ── Правая панель — карточка + фильтры + таблица ──────────
+
+    def _build_content(self, parent):
+        content = tk.Frame(parent, bg=WK_COLORS["bg"])
+        content.grid(row=0, column=1, sticky="nsew",
+                     padx=(0, 10), pady=10)
+        content.grid_rowconfigure(2, weight=1)
+        content.grid_columnconfigure(0, weight=1)
+
+        # ── Карточка сотрудника ───────────────────────────────
+        card_pnl = tk.LabelFrame(
+            content, text=" 👤 Выбранный сотрудник ",
             font=("Segoe UI", 9, "bold"),
             bg=WK_COLORS["panel"], fg=WK_COLORS["accent"],
             relief="groove", bd=1, padx=10, pady=8
         )
-        search_pnl.pack(fill="x", padx=10, pady=(8, 4))
-        search_pnl.grid_columnconfigure(1, weight=1)
-        search_pnl.grid_columnconfigure(3, weight=0)
+        card_pnl.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        card_pnl.grid_columnconfigure(1, weight=1)
 
-        # ФИО
-        self._lbl(search_pnl, "ФИО", 0, 0, required=True)
-        self.cmb_fio = AutoCompleteCombobox(
-            search_pnl, width=40,
-            textvariable=self.var_fio,
-            font=("Segoe UI", 9)
-        )
-        self.cmb_fio.set_completion_list(self.emp_names)
-        self.cmb_fio.grid(row=0, column=1, sticky="ew", pady=3)
-        self.cmb_fio.bind("<<ComboboxSelected>>", self._on_fio_selected)
-
-        # Таб. №
-        self._lbl(search_pnl, "Таб. №", 0, 2)
-        self.ent_tbn = ttk.Entry(
-            search_pnl, width=14,
-            textvariable=self.var_tbn,
-            font=("Segoe UI", 9)
-        )
-        self.ent_tbn.grid(row=0, column=3, sticky="w", padx=(0, 12), pady=3)
-
-        # Карточка сотрудника (авто-заполняется)
-        self.lbl_card = tk.Label(
-            search_pnl, text="",
-            font=("Segoe UI", 8, "italic"), fg="#555",
+        # ФИО крупно
+        self.lbl_card_fio = tk.Label(
+            card_pnl, text="— не выбран —",
+            font=("Segoe UI", 11, "bold"),
+            fg=WK_COLORS["accent"],
             bg=WK_COLORS["panel"], anchor="w"
         )
-        self.lbl_card.grid(row=1, column=1, columnspan=3,
-                           sticky="w", pady=(0, 3))
+        self.lbl_card_fio.grid(row=0, column=0, columnspan=4,
+                               sticky="ew", pady=(0, 4))
 
-        # ── Панель фильтров периода ───────────────────────────
+        # Детали
+        for col, label in enumerate(["Таб. №:", "Должность:", "Подразделение:"]):
+            tk.Label(
+                card_pnl, text=label,
+                font=("Segoe UI", 8), fg="#777",
+                bg=WK_COLORS["panel"]
+            ).grid(row=1, column=col * 2, sticky="e", padx=(0, 4))
+
+        self.lbl_card_tbn = tk.Label(
+            card_pnl, text="—",
+            font=("Segoe UI", 9, "bold"),
+            fg="#333", bg=WK_COLORS["panel"], anchor="w"
+        )
+        self.lbl_card_tbn.grid(row=1, column=1, sticky="w", padx=(0, 16))
+
+        self.lbl_card_pos = tk.Label(
+            card_pnl, text="—",
+            font=("Segoe UI", 9),
+            fg="#333", bg=WK_COLORS["panel"], anchor="w"
+        )
+        self.lbl_card_pos.grid(row=1, column=3, sticky="w", padx=(0, 16))
+
+        self.lbl_card_dep = tk.Label(
+            card_pnl, text="—",
+            font=("Segoe UI", 9),
+            fg="#333", bg=WK_COLORS["panel"], anchor="w"
+        )
+        self.lbl_card_dep.grid(row=1, column=5, sticky="w")
+
+        card_pnl.grid_columnconfigure(1, weight=0)
+        card_pnl.grid_columnconfigure(3, weight=1)
+        card_pnl.grid_columnconfigure(5, weight=1)
+
+        # ── Фильтр периода ────────────────────────────────────
         flt_pnl = tk.LabelFrame(
-            self, text=" 📅 Фильтр периода (необязательно) ",
+            content, text=" 📅 Фильтр периода (необязательно) ",
             font=("Segoe UI", 9, "bold"),
             bg=WK_COLORS["panel"], fg=WK_COLORS["accent"],
-            relief="groove", bd=1, padx=10, pady=8
+            relief="groove", bd=1, padx=10, pady=6
         )
-        flt_pnl.pack(fill="x", padx=10, pady=(2, 4))
+        flt_pnl.grid(row=1, column=0, sticky="ew", pady=(0, 4))
 
         # Год
-        self._lbl(flt_pnl, "Год", 0, 0)
-        spn = tk.Spinbox(
+        tk.Label(
+            flt_pnl, text="Год:",
+            font=("Segoe UI", 9), bg=WK_COLORS["panel"]
+        ).grid(row=0, column=0, sticky="e", padx=(0, 6), pady=2)
+        tk.Spinbox(
             flt_pnl, from_=2000, to=2100, width=7,
-            textvariable=self.var_year,
-            font=("Segoe UI", 9)
-        )
-        spn.grid(row=0, column=1, sticky="w", pady=3)
+            textvariable=self.var_year, font=("Segoe UI", 9)
+        ).grid(row=0, column=1, sticky="w", pady=2)
 
         # Месяц
-        self._lbl(flt_pnl, "Месяц", 0, 2)
+        tk.Label(
+            flt_pnl, text="Месяц:",
+            font=("Segoe UI", 9), bg=WK_COLORS["panel"]
+        ).grid(row=0, column=2, sticky="e", padx=(16, 6), pady=2)
         ttk.Combobox(
-            flt_pnl, state="readonly", width=14,
+            flt_pnl, state="readonly", width=13,
             textvariable=self.var_month,
             values=["Все"] + [month_name_ru(i) for i in range(1, 13)]
-        ).grid(row=0, column=3, sticky="w", padx=(0, 16), pady=3)
+        ).grid(row=0, column=3, sticky="w", pady=2)
 
         # Подразделение
-        self._lbl(flt_pnl, "Подразделение", 0, 4)
+        tk.Label(
+            flt_pnl, text="Подразделение:",
+            font=("Segoe UI", 9), bg=WK_COLORS["panel"]
+        ).grid(row=0, column=4, sticky="e", padx=(16, 6), pady=2)
         ttk.Combobox(
-            flt_pnl, state="readonly", width=32,
+            flt_pnl, state="readonly", width=28,
             textvariable=self.var_dep,
             values=self.departments
-        ).grid(row=0, column=5, sticky="ew", pady=3)
+        ).grid(row=0, column=5, sticky="ew", pady=2)
         flt_pnl.grid_columnconfigure(5, weight=1)
 
         # Кнопки
-        btn_pnl = tk.Frame(flt_pnl, bg=WK_COLORS["panel"])
-        btn_pnl.grid(row=0, column=6, sticky="e", padx=(16, 0))
+        btn_f = tk.Frame(flt_pnl, bg=WK_COLORS["panel"])
+        btn_f.grid(row=0, column=6, sticky="e", padx=(14, 0))
 
         tk.Button(
-            btn_pnl,
-            text="🔍  Найти",
+            btn_f, text="🔍  Показать",
             font=("Segoe UI", 9, "bold"),
             bg=WK_COLORS["btn_save_bg"], fg=WK_COLORS["btn_save_fg"],
             activebackground="#0d47a1", activeforeground="white",
-            relief="flat", cursor="hand2", padx=12, pady=4,
+            relief="flat", cursor="hand2", padx=10, pady=3,
             command=self._search
         ).pack(side="left", padx=(0, 6))
 
         ttk.Button(
-            btn_pnl, text="Сбросить",
-            command=self._reset
+            btn_f, text="Сбросить",
+            command=self._reset_filters
         ).pack(side="left", padx=(0, 6))
 
         ttk.Button(
-            btn_pnl, text="📊 Excel",
+            btn_f, text="📊 Excel",
             command=self._export_excel
         ).pack(side="left")
 
-        # ── Таблица результатов ───────────────────────────────
+        # ── Таблица истории ───────────────────────────────────
         tbl_pnl = tk.LabelFrame(
-            self, text=" 📋 История работы на объектах ",
+            content, text=" 📋 История работы на объектах ",
             font=("Segoe UI", 9, "bold"),
             bg=WK_COLORS["panel"], fg=WK_COLORS["accent"],
             relief="groove", bd=1
         )
-        tbl_pnl.pack(fill="both", expand=True, padx=10, pady=(2, 4))
+        tbl_pnl.grid(row=2, column=0, sticky="nsew")
+        tbl_pnl.grid_rowconfigure(0, weight=1)
+        tbl_pnl.grid_columnconfigure(0, weight=1)
 
         cols = (
             "period", "object", "object_id", "department",
@@ -313,22 +486,21 @@ class WorkersPage(tk.Frame):
         )
 
         heads = {
-            "period":         ("Период",        100, "center"),
-            "object":         ("Объект (адрес)", 340, "w"),
-            "object_id":      ("ID объекта",      90, "center"),
-            "department":     ("Подразделение",  160, "w"),
-            "total_days":     ("Дни",             60, "center"),
-            "total_hours":    ("Часы",            80, "e"),
-            "night_hours":    ("Ночных ч.",       80, "e"),
-            "overtime_day":   ("Пер. день",       90, "e"),
-            "overtime_night": ("Пер. ночь",       90, "e"),
+            "period":         ("Период",         100, "center"),
+            "object":         ("Объект (адрес)",  340, "w"),
+            "object_id":      ("ID объекта",       90, "center"),
+            "department":     ("Подразделение",   160, "w"),
+            "total_days":     ("Дни",              60, "center"),
+            "total_hours":    ("Часы",             80, "e"),
+            "night_hours":    ("Ночных ч.",        80, "e"),
+            "overtime_day":   ("Пер. день",        90, "e"),
+            "overtime_night": ("Пер. ночь",        90, "e"),
         }
         for col, (text, width, anchor) in heads.items():
             self.tree.heading(col, text=text)
             self.tree.column(col, width=width, anchor=anchor,
                              stretch=(col == "object"))
 
-        # Теги цветов
         self.tree.tag_configure("even",  background=WK_COLORS["row_even"])
         self.tree.tag_configure("odd",   background=WK_COLORS["row_odd"])
         self.tree.tag_configure("ot",    background=WK_COLORS["row_ot"])
@@ -339,84 +511,123 @@ class WorkersPage(tk.Frame):
             font=("Segoe UI", 9, "bold")
         )
 
-        vsb = ttk.Scrollbar(tbl_pnl, orient="vertical",
-                            command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
-
-        # ── Нижняя панель (итоги + статус) ───────────────────
-        bottom = tk.Frame(self, bg=WK_COLORS["accent_light"], pady=5)
-        bottom.pack(fill="x", padx=10, pady=(0, 8))
-
-        self.lbl_total = tk.Label(
-            bottom,
-            text="",
-            font=("Segoe UI", 9, "bold"),
-            fg=WK_COLORS["accent"],
-            bg=WK_COLORS["accent_light"]
+        vsb = ttk.Scrollbar(
+            tbl_pnl, orient="vertical", command=self.tree.yview
         )
-        self.lbl_total.pack(side="left", padx=10)
-
-        tk.Label(
-            bottom,
-            text="Строки с переработкой выделены жёлтым, "
-                 "с ночными часами — зелёным.",
-            font=("Segoe UI", 8, "italic"), fg="#555",
-            bg=WK_COLORS["accent_light"]
-        ).pack(side="right", padx=10)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
 
     # ──────────────────────────────────────────────────────────
-    #  Вспомогательный метод меток
+    #  Левый список: заполнение и поиск
     # ──────────────────────────────────────────────────────────
 
-    def _lbl(self, parent, text: str, row: int, col: int,
-             required: bool = False):
-        display = f"{text}  *:" if required else f"{text}:"
-        fg = WK_COLORS["warning"] if required else "#333"
-        tk.Label(
-            parent, text=display,
-            font=("Segoe UI", 9), fg=fg,
-            bg=WK_COLORS["panel"], anchor="e"
-        ).grid(row=row, column=col, sticky="e",
-               padx=(0, 6), pady=3)
+    def _rebuild_sidebar_list(self, filter_text: str = ""):
+        """Перестраивает Listbox с учётом строки поиска и фильтра подразделения."""
+        dep_filter = self.var_sidebar_dep.get().strip()
+        ft         = filter_text.strip().lower()
 
-    # ──────────────────────────────────────────────────────────
-    #  Логика
-    # ──────────────────────────────────────────────────────────
+        self.lb_employees.delete(0, "end")
+        self._lb_data: List[Dict[str, str]] = []   # параллельный список
 
-    def _on_fio_selected(self, event=None):
-        fio  = self.var_fio.get().strip()
-        info = self.emp_info.get(fio, {})
-        tbn  = info.get("tbn", "")
-        pos  = info.get("pos", "")
-        dep  = info.get("dep", "")
+        for fio, tbn, pos, dep in self.employees:
+            # Фильтр подразделения
+            if dep_filter and dep_filter != "Все":
+                if (dep or "").strip() != dep_filter:
+                    continue
+            # Строка поиска
+            if ft:
+                if (ft not in fio.lower()
+                        and ft not in (tbn or "").lower()
+                        and ft not in (pos or "").lower()):
+                    continue
 
-        if tbn:
-            self.var_tbn.set(tbn)
+            display = f"{fio}"
+            if tbn:
+                display += f"  [{tbn}]"
 
-        # Карточка
-        parts = []
-        if tbn:
-            parts.append(f"Таб. №: {tbn}")
-        if pos:
-            parts.append(f"Должность: {pos}")
-        if dep:
-            parts.append(f"Подразделение: {dep}")
-            # Авто-устанавливаем подразделение в фильтр
-            if dep in self.departments:
-                self.var_dep.set(dep)
+            self.lb_employees.insert("end", display)
+            self._lb_data.append({
+                "fio": fio, "tbn": tbn or "",
+                "pos": pos or "", "dep": dep or ""
+            })
 
+        count = self.lb_employees.size()
         try:
-            self.lbl_card.config(
-                text="  |  ".join(parts) if parts else ""
+            self.lbl_emp_count.config(text=f"{count} чел.")
+        except Exception:
+            pass
+
+        # Если ранее был выбран сотрудник — пытаемся восстановить выделение
+        if self._selected_fio:
+            for i, d in enumerate(self._lb_data):
+                if d["fio"] == self._selected_fio:
+                    self.lb_employees.selection_clear(0, "end")
+                    self.lb_employees.selection_set(i)
+                    self.lb_employees.see(i)
+                    break
+
+    def _on_search_key(self, _event=None):
+        self._rebuild_sidebar_list(self.var_search.get())
+
+    # ──────────────────────────────────────────────────────────
+    #  Выбор сотрудника
+    # ──────────────────────────────────────────────────────────
+
+    def _on_emp_select(self, _event=None):
+        """Выбор сотрудника — обновляем карточку."""
+        sel = self.lb_employees.curselection()
+        if not sel:
+            return
+        emp = self._lb_data[sel[0]]
+        self._select_employee(emp)
+
+    def _on_emp_double(self, _event=None):
+        """Двойной клик / Enter — выбор + автозапуск поиска."""
+        sel = self.lb_employees.curselection()
+        if not sel:
+            return
+        emp = self._lb_data[sel[0]]
+        self._select_employee(emp)
+        self._search()
+
+    def _select_employee(self, emp: Dict[str, str]):
+        self._selected_fio = emp["fio"]
+        self._selected_tbn = emp["tbn"]
+
+        # Обновляем карточку
+        try:
+            self.lbl_card_fio.config(text=emp["fio"] or "—")
+            self.lbl_card_tbn.config(text=emp["tbn"] or "—")
+            self.lbl_card_pos.config(text=emp["pos"] or "—")
+            self.lbl_card_dep.config(text=emp["dep"] or "—")
+        except Exception:
+            pass
+
+        # Авто-подставляем подразделение в фильтр
+        if emp["dep"] and emp["dep"] in self.departments:
+            self.var_dep.set(emp["dep"])
+
+        # Очищаем таблицу (новые данные загрузятся по кнопке или double-click)
+        self._clear_table()
+
+    # ──────────────────────────────────────────────────────────
+    #  Поиск и таблица
+    # ──────────────────────────────────────────────────────────
+
+    def _clear_table(self):
+        if self.tree:
+            self.tree.delete(*self.tree.get_children())
+        self._rows = []
+        try:
+            self.lbl_total.config(
+                text=f"Выбран: {self._selected_fio}  —  "
+                     "нажмите «Показать» или двойной клик в списке"
             )
         except Exception:
             pass
 
-    def _reset(self):
-        self.var_fio.set("")
-        self.var_tbn.set("")
+    def _reset_filters(self):
         self.var_year.set("")
         self.var_month.set("Все")
         self.var_dep.set("Все")
@@ -424,24 +635,23 @@ class WorkersPage(tk.Frame):
         if self.tree:
             self.tree.delete(*self.tree.get_children())
         try:
-            self.lbl_card.config(text="")
             self.lbl_total.config(text="")
         except Exception:
             pass
 
     def _search(self):
-        fio = self.var_fio.get().strip()
-        tbn = self.var_tbn.get().strip()
+        fio = self._selected_fio
+        tbn = self._selected_tbn
 
         if not fio and not tbn:
             messagebox.showwarning(
                 "Работники",
-                "Введите ФИО и/или табельный номер для поиска."
+                "Выберите сотрудника в списке слева."
             )
             return
 
         # Год
-        year = None
+        year  = None
         y_str = self.var_year.get().strip()
         if y_str:
             try:
@@ -461,7 +671,9 @@ class WorkersPage(tk.Frame):
         m_name = self.var_month.get().strip()
         if m_name and m_name != "Все":
             try:
-                month = [month_name_ru(i) for i in range(1, 13)].index(m_name) + 1
+                month = (
+                    [month_name_ru(i) for i in range(1, 13)].index(m_name) + 1
+                )
             except ValueError:
                 pass
 
@@ -489,12 +701,11 @@ class WorkersPage(tk.Frame):
         if not rows:
             messagebox.showinfo(
                 "Работники",
-                "По заданным условиям ничего не найдено.\n"
-                "Проверьте правильность ФИО или табельного номера."
+                f"Для «{fio}» нет записей по заданным условиям."
             )
 
     # ──────────────────────────────────────────────────────────
-    #  Заполнение таблицы
+    #  Заполнение таблицы истории
     # ──────────────────────────────────────────────────────────
 
     def _fmt(self, v) -> str:
@@ -514,19 +725,13 @@ class WorkersPage(tk.Frame):
                 pass
             return
 
-        # Накопители для итоговой строки
-        sum_days  = 0.0
-        sum_hours = 0.0
-        sum_night = 0.0
-        sum_otd   = 0.0
-        sum_otn   = 0.0
+        sum_days = sum_hours = sum_night = sum_otd = sum_otn = 0.0
 
         for idx, r in enumerate(self._rows):
-            yr  = r.get("year")
-            mn  = r.get("month")
+            yr = r.get("year")
+            mn = r.get("month")
             period_str = (
-                f"{month_name_ru(mn)} {yr}"
-                if yr and mn else ""
+                f"{month_name_ru(mn)} {yr}" if yr and mn else ""
             )
 
             td  = float(r.get("total_days",    0) or 0)
@@ -541,7 +746,6 @@ class WorkersPage(tk.Frame):
             sum_otd   += otd
             sum_otn   += otn
 
-            # Тег: переработка приоритетнее ночных
             if otd > 0 or otn > 0:
                 tag = "ot"
             elif nh > 0:
@@ -567,14 +771,13 @@ class WorkersPage(tk.Frame):
                 tags=(tag,)
             )
 
-        # ── Итоговая строка ───────────────────────────────────
+        # Итоговая строка
         self.tree.insert(
             "", "end", iid="__total__",
             values=(
                 "ИТОГО",
                 f"Записей: {len(self._rows)}",
-                "",
-                "",
+                "", "",
                 self._fmt(sum_days),
                 self._fmt(sum_hours),
                 self._fmt(sum_night),
@@ -584,10 +787,10 @@ class WorkersPage(tk.Frame):
             tags=("total",)
         )
 
-        # ── Статус-бар ────────────────────────────────────────
-        parts = [f"Найдено записей: {len(self._rows)}"]
+        # Статус-бар
+        parts = [f"Записей: {len(self._rows)}"]
         if sum_days:
-            parts.append(f"Всего дней: {self._fmt(sum_days)}")
+            parts.append(f"Дней: {self._fmt(sum_days)}")
         if sum_hours:
             parts.append(f"Часов: {self._fmt(sum_hours)}")
         if sum_night:
@@ -608,13 +811,10 @@ class WorkersPage(tk.Frame):
 
     def _export_excel(self):
         if not self._rows:
-            messagebox.showinfo("Экспорт",
-                                "Нет данных для выгрузки.")
+            messagebox.showinfo("Экспорт", "Нет данных для выгрузки.")
             return
 
-        fio = self.var_fio.get().strip()
-        tbn = self.var_tbn.get().strip()
-        who = fio or tbn or "работник"
+        who = self._selected_fio or self._selected_tbn or "работник"
 
         path = filedialog.asksaveasfilename(
             title="Сохранить историю работника",
@@ -629,14 +829,20 @@ class WorkersPage(tk.Frame):
             return
 
         try:
+            from openpyxl.styles import Font, PatternFill, Alignment
+
             wb = Workbook()
             ws = wb.active
             ws.title = "История работы"
 
-            from openpyxl.styles import Font, PatternFill, Alignment
-
-            # Шапка
-            ws.append([f"История работы: {who}"])
+            # Инфо о сотруднике
+            info = self.emp_info.get(self._selected_fio, {})
+            ws.append([f"Сотрудник: {who}"])
+            ws.append([
+                f"Таб. №: {info.get('tbn', '—')}  |  "
+                f"Должность: {info.get('pos', '—')}  |  "
+                f"Подразделение: {info.get('dep', '—')}"
+            ])
             ws.append([
                 f"Экспорт: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
             ])
@@ -650,7 +856,6 @@ class WorkersPage(tk.Frame):
             ws.append(header)
             hdr_row = ws.max_row
 
-            from openpyxl.styles import PatternFill, Font
             fill_hdr   = PatternFill("solid", fgColor="1565C0")
             fill_ot    = PatternFill("solid", fgColor="FFF9C4")
             fill_night = PatternFill("solid", fgColor="E8F5E9")
@@ -667,13 +872,11 @@ class WorkersPage(tk.Frame):
             sum_days = sum_hours = sum_night = sum_otd = sum_otn = 0.0
 
             for r in self._rows:
-                yr  = r.get("year")
-                mn  = r.get("month")
+                yr = r.get("year")
+                mn = r.get("month")
                 period_str = (
-                    f"{month_name_ru(mn)} {yr}"
-                    if yr and mn else ""
+                    f"{month_name_ru(mn)} {yr}" if yr and mn else ""
                 )
-
                 td  = float(r.get("total_days",    0) or 0)
                 th  = float(r.get("total_hours",   0) or 0)
                 nh  = float(r.get("night_hours",   0) or 0)
@@ -694,40 +897,38 @@ class WorkersPage(tk.Frame):
                     td or None, th or None,
                     nh or None, otd or None, otn or None,
                 ])
-                cur = ws.max_row
+                cur_r = ws.max_row
                 if otd > 0 or otn > 0:
                     for c in range(1, len(header) + 1):
-                        ws.cell(cur, c).fill = fill_ot
+                        ws.cell(cur_r, c).fill = fill_ot
                 elif nh > 0:
                     for c in range(1, len(header) + 1):
-                        ws.cell(cur, c).fill = fill_night
+                        ws.cell(cur_r, c).fill = fill_night
 
-            # Итоговая строка
+            # Итог
             ws.append([
                 "ИТОГО", f"Записей: {len(self._rows)}", "", "",
                 sum_days or None, sum_hours or None,
                 sum_night or None, sum_otd or None, sum_otn or None,
             ])
-            tot_row = ws.max_row
+            tot = ws.max_row
             for c in range(1, len(header) + 1):
-                cell      = ws.cell(tot_row, c)
-                cell.fill = fill_total
-                cell.font = font_total
+                ws.cell(tot, c).fill = fill_total
+                ws.cell(tot, c).font = font_total
 
-            # Ширины
             widths = [14, 44, 12, 22, 8, 10, 10, 12, 12]
             for i, w in enumerate(widths, 1):
                 ws.column_dimensions[get_column_letter(i)].width = w
 
             ws.freeze_panes = f"A{hdr_row + 1}"
-
             wb.save(path)
+
             messagebox.showinfo(
                 "Экспорт",
                 f"Файл сохранён:\n{path}\nЗаписей: {len(self._rows)}"
             )
         except Exception as e:
-            logging.exception("Ошибка экспорта работника")
+            logging.exception("Ошибка экспорта")
             messagebox.showerror("Экспорт", f"Ошибка:\n{e}")
 
 
