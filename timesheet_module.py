@@ -2337,6 +2337,16 @@ class TimesheetPage(tk.Frame):
         )
         ent_filter.pack(side="left", padx=(4, 8))
 
+        def on_filter_click(event):
+            # Закрываем редактор активной ячейки в гриде (если он открыт)
+            if hasattr(self, "grid") and self.grid is not None:
+                self.grid.close_editor(commit=True)
+            # Переключаем фокус на поле поиска
+            # Ставим через after_idle, чтобы избежать конфликтов с другими событиями
+            self.after_idle(lambda: ent_filter.focus_set())
+    
+        ent_filter.bind("<Button-1>", on_filter_click)
+
         ttk.Button(
             bar, text="Очистить",
             command=self._clear_filter
