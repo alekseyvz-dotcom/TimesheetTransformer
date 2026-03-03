@@ -4207,9 +4207,8 @@ class TimesheetRegistryPage(tk.Frame):
         self._load_departments()
         self._load_data()
 
-    # ──────────────────────────────────────────────────────────
+
     def _build_ui(self):
-        # ── Заголовок ─────────────────────────────────────────
         hdr = tk.Frame(self, bg=TS_COLORS["accent"], pady=6)
         hdr.pack(fill="x")
         tk.Label(
@@ -4217,7 +4216,7 @@ class TimesheetRegistryPage(tk.Frame):
             font=("Segoe UI", 12, "bold"),
             bg=TS_COLORS["accent"], fg="white", padx=12
         ).pack(side="left")
-
+    
         # ── Панель фильтров ───────────────────────────────────
         filter_pnl = tk.LabelFrame(
             self, text=" 🔍 Фильтры ",
@@ -4226,77 +4225,84 @@ class TimesheetRegistryPage(tk.Frame):
             relief="groove", bd=1, padx=10, pady=8
         )
         filter_pnl.pack(fill="x", padx=10, pady=(8, 4))
-        filter_pnl.grid_columnconfigure(1, weight=1)
-        filter_pnl.grid_columnconfigure(3, weight=2)
-
-        # Строка 0: год, месяц, подразделение
+    
+        # ── Внутри filter_pnl: левая часть (поля) + правая часть (кнопки)
+        fields_frame = tk.Frame(filter_pnl, bg=TS_COLORS["panel"])
+        fields_frame.pack(side="left", fill="x", expand=True)
+    
+        btn_frame = tk.Frame(filter_pnl, bg=TS_COLORS["panel"])
+        btn_frame.pack(side="right", padx=(20, 0))
+    
+        # ── Строка 0: Год, Месяц, Подразделение ──────────────
+        row0 = tk.Frame(fields_frame, bg=TS_COLORS["panel"])
+        row0.pack(fill="x", pady=(0, 4))
+    
         tk.Label(
-            filter_pnl, text="Год:",
+            row0, text="Год:",
             font=("Segoe UI", 9), bg=TS_COLORS["panel"]
-        ).grid(row=0, column=0, sticky="e", padx=(0, 6), pady=3)
-
+        ).pack(side="left", padx=(0, 4))
+    
         spn_year = tk.Spinbox(
-            filter_pnl, from_=2000, to=2100, width=7,
+            row0, from_=2000, to=2100, width=6,
             textvariable=self.var_year, font=("Segoe UI", 9)
         )
-        spn_year.grid(row=0, column=1, sticky="w", pady=3)
+        spn_year.pack(side="left")
         self.var_year.trace_add("write", self._on_year_changed)
-
+    
         tk.Label(
-            filter_pnl, text="Месяц:",
+            row0, text="Месяц:",
             font=("Segoe UI", 9), bg=TS_COLORS["panel"]
-        ).grid(row=0, column=2, sticky="e", padx=(16, 6), pady=3)
-
+        ).pack(side="left", padx=(16, 4))
+    
         cmb_month = ttk.Combobox(
-            filter_pnl, state="readonly", width=14,
+            row0, state="readonly", width=12,
             textvariable=self.var_month,
             values=["Все"] + [month_name_ru(i) for i in range(1, 13)]
         )
-        cmb_month.grid(row=0, column=3, sticky="w", pady=3)
+        cmb_month.pack(side="left")
         cmb_month.bind("<<ComboboxSelected>>", lambda e: self._load_data())
-
+    
         tk.Label(
-            filter_pnl, text="Подразделение:",
+            row0, text="Подразделение:",
             font=("Segoe UI", 9), bg=TS_COLORS["panel"]
-        ).grid(row=0, column=4, sticky="e", padx=(16, 6), pady=3)
-
+        ).pack(side="left", padx=(16, 4))
+    
         self._cmb_dep = ttk.Combobox(
-            filter_pnl, state="readonly", width=24,
+            row0, state="readonly", width=28,
             textvariable=self.var_dep, values=["Все"]
         )
-        self._cmb_dep.grid(row=0, column=5, sticky="w", pady=3)
+        self._cmb_dep.pack(side="left")
         self._cmb_dep.bind("<<ComboboxSelected>>", lambda e: self._load_data())
-
-        # Строка 1: адрес, ID объекта
+    
+        # ── Строка 1: Объект (адрес), ID объекта ──────────────
+        row1 = tk.Frame(fields_frame, bg=TS_COLORS["panel"])
+        row1.pack(fill="x", pady=(0, 0))
+    
         tk.Label(
-            filter_pnl, text="Объект (адрес):",
+            row1, text="Объект (адрес):",
             font=("Segoe UI", 9), bg=TS_COLORS["panel"]
-        ).grid(row=1, column=0, sticky="e", padx=(0, 6), pady=3)
-
+        ).pack(side="left", padx=(0, 4))
+    
         ent_addr = ttk.Entry(
-            filter_pnl, width=38,
+            row1, width=40,
             textvariable=self.var_obj_addr, font=("Segoe UI", 9)
         )
-        ent_addr.grid(row=1, column=1, columnspan=2, sticky="w", pady=3)
+        ent_addr.pack(side="left")
         self.var_obj_addr.trace_add("write", self._on_text_filter_changed)
-
+    
         tk.Label(
-            filter_pnl, text="ID объекта:",
+            row1, text="ID объекта:",
             font=("Segoe UI", 9), bg=TS_COLORS["panel"]
-        ).grid(row=1, column=3, sticky="e", padx=(16, 6), pady=3)
-
+        ).pack(side="left", padx=(16, 4))
+    
         ent_oid = ttk.Entry(
-            filter_pnl, width=18,
+            row1, width=16,
             textvariable=self.var_obj_id, font=("Segoe UI", 9)
         )
-        ent_oid.grid(row=1, column=4, sticky="w", pady=3)
+        ent_oid.pack(side="left")
         self.var_obj_id.trace_add("write", self._on_text_filter_changed)
-
-        # Кнопки фильтра (правая колонка, 2 строки)
-        btn_frame = tk.Frame(filter_pnl, bg=TS_COLORS["panel"])
-        btn_frame.grid(row=0, column=6, rowspan=2,
-                       sticky="e", padx=(20, 0))
-
+    
+        # ── Кнопки (правая часть) ─────────────────────────────
         tk.Button(
             btn_frame,
             text="🔄  Применить",
@@ -4306,22 +4312,22 @@ class TimesheetRegistryPage(tk.Frame):
             relief="flat", cursor="hand2", padx=10, pady=4,
             command=self._load_data
         ).pack(fill="x", pady=(0, 4))
-
+    
         ttk.Button(
             btn_frame, text="Сбросить фильтры",
             command=self._reset_filters
         ).pack(fill="x", pady=(0, 4))
-
+    
         ttk.Button(
             btn_frame, text="📊 Выгрузить в Excel",
             command=self._export_to_excel
         ).pack(fill="x", pady=(0, 4))
-
+    
         ttk.Button(
             btn_frame, text="📈 Отчёт по заполненности",
             command=self._export_fill_report
         ).pack(fill="x")
-
+    
         # ── Таблица ───────────────────────────────────────────
         tbl_frame = tk.LabelFrame(
             self, text=" 📋 Список табелей ",
@@ -4330,13 +4336,13 @@ class TimesheetRegistryPage(tk.Frame):
             relief="groove", bd=1
         )
         tbl_frame.pack(fill="both", expand=True, padx=10, pady=(4, 4))
-
+    
         cols = ("year", "month", "object", "department", "user", "updated_at")
         self.tree = ttk.Treeview(
             tbl_frame, columns=cols,
             show="headings", selectmode="browse"
         )
-
+    
         heads = {
             "year":       ("Год",           65,  "center"),
             "month":      ("Месяц",         95,  "center"),
@@ -4349,20 +4355,20 @@ class TimesheetRegistryPage(tk.Frame):
             self.tree.heading(col, text=text)
             self.tree.column(col, width=width, anchor=anchor,
                              stretch=(col == "object"))
-
+    
         vsb = ttk.Scrollbar(tbl_frame, orient="vertical",
                             command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
-
+    
         self.tree.bind("<Double-1>", self._on_open)
         self.tree.bind("<Return>",   self._on_open)
-
+    
         # ── Нижняя панель ─────────────────────────────────────
         bottom = tk.Frame(self, bg=TS_COLORS["accent_light"], pady=5)
         bottom.pack(fill="x", padx=10, pady=(0, 8))
-
+    
         self.lbl_count = tk.Label(
             bottom, text="Табелей: 0",
             font=("Segoe UI", 9, "bold"),
@@ -4370,14 +4376,14 @@ class TimesheetRegistryPage(tk.Frame):
             bg=TS_COLORS["accent_light"]
         )
         self.lbl_count.pack(side="left", padx=10)
-
+    
         tk.Label(
             bottom,
             text="Двойной щелчок или Enter — открыть табель",
             font=("Segoe UI", 9, "italic"), fg="#555",
             bg=TS_COLORS["accent_light"]
         ).pack(side="right", padx=10)
-
+    
     # ──────────────────────────────────────────────────────────
     def _load_departments(self):
         self._all_departments = []
