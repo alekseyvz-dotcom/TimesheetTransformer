@@ -1,4 +1,4 @@
-# main_app.spec
+# main_app.spec  (исправленный/дополненный для gpr_module)
 
 # -*- mode: python ; coding: utf-8 -*-
 import os
@@ -35,12 +35,36 @@ a = Analysis(
         ('analytics_module.py', '.'),
         ('payroll_module.py', '.'),
         ('brigades_module.py', '.'),
-    ] + pandas_datas + psycopg2_datas, # Добавляем данные библиотек
+        ('gpr_module.py', '.'),  # <-- ДОБАВИТЬ
+    ] + pandas_datas + psycopg2_datas,
     hiddenimports=[
-        'settings_manager', 'menu_spec.py', 'analytics_module.py', 'meals_module', 'meals_employees.py', 'SpecialOrders', 'lodging_module.py', 'objects',
-        'assets_logo', 'timesheet_transformer', 'timesheet_compare.py', 'virtual_timesheet_grid.py', 'employees.py', 'BudgetAnalyzer', 'timesheet_modyle', 'employee_card.py', 'payroll_module', 'brigades_module',
-        'psycopg2', 'psycopg2.extras',
-        'pandas', 'openpyxl', 'PIL'
+        # ВАЖНО: в hiddenimports указывать ИМЕНА МОДУЛЕЙ, без ".py"
+        'settings_manager',
+        'menu_spec',
+        'analytics_module',
+        'meals_module',
+        'meals_employees',
+        'SpecialOrders',
+        'lodging_module',
+        'objects',
+        'assets_logo',
+        'timesheet_transformer',
+        'timesheet_compare',
+        'virtual_timesheet_grid',
+        'employees',
+        'BudgetAnalyzer',
+        'timesheet_module',     # <-- ИСПРАВЛЕНО (у вас было timesheet_modyle)
+        'employee_card',
+        'payroll_module',
+        'brigades_module',
+        'gpr_module',           # <-- ДОБАВИТЬ
+
+        'psycopg2',
+        'psycopg2.extras',
+
+        'pandas',
+        'openpyxl',
+        'PIL',
     ] + collect_submodules('pandas'),
     hookspath=[],
     hooksconfig={},
@@ -52,6 +76,7 @@ a = Analysis(
     noarchive=False,
     clean=True
 )
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
