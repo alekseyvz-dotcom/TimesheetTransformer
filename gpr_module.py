@@ -1,185 +1,263 @@
+# gpr_module.py  — профессиональный модуль ГПР v2
 from __future__ import annotations
 
 import sys
 import logging
-from datetime import datetime, date
-from typing import Any, Dict, List, Optional, Tuple
+import calendar
+from datetime import datetime, date, timedelta
+from typing import Any, Dict, List, Optional, Tuple, Set
+from pathlib import Path
 
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, execute_values
 
+try:
+    from openpyxl import Workbook
+    from openpyxl.utils import get_column_letter
+    from openpyxl.styles import Font, PatternFill, Alignment
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
 
-# ------------------------- DB pool wiring -------------------------
+
+# ═══════════════════════════════════════════════════════════════
+#  COLORS / THEME
+# ═══════════════════════════════════════════════════════════════
+C = {
+    "bg":           "#f0f2f5",
+    "panel":        "#ffffff",
+    "accent":       "#1565c0",
+    "accent_light": "#e3f2fd",
+    "success":      "#2e7d32",
+    "warning":      "#ed6c02",
+    "error":        "#d32f2f",
+    "border":       "#dde1e7",
+    "text":         "#1a1a2e",
+    "text2":        "#555",
+    "text3":        "#999",
+    "btn_bg":       "#1565c0",
+    "btn_fg":       "#ffffff",
+}
+
+STATUS_COLORS = {
+    "planned":     ("#90caf9", "#1565c0", "Запланировано"),
+    "in_progress": ("#ffcc80", "#e65100", "В работе"),
+    "done":        ("#a5d6a7", "#1b5e20", "Выполнено"),
+    "paused":      ("#fff176", "#f9a825", "Приостановлено"),
+    "canceled":    ("#ef9a9a", "#b71c1c", "Отменено"),
+}
+
+STATUS_LIST = ["planned", "in_progress", "done", "paused", "canceled"]
+STATUS_LABELS = {k: v[2] for k, v in STATUS_COLORS.items()}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  DB POOL
+# ═══════════════════════════════════════════════════════════════
 db_connection_pool = None
 
 def set_db_pool(pool):
     global db_connection_pool
     db_connection_pool = pool
 
-def get_db_connection():
+def _conn():
     if not db_connection_pool:
-        raise RuntimeError("Пул соединений не был установлен (gpr_module.set_db_pool).")
+        raise RuntimeError("DB pool not set (gpr_module.set_db_pool)")
     return db_connection_pool.getconn()
 
-def release_db_connection(conn):
+def _release(conn):
     if db_connection_pool and conn:
         db_connection_pool.putconn(conn)
 
 
-# ------------------------- Utilities -------------------------
-
-def _parse_date_ru(s: str) -> date:
+# ═══════════════════════════════════════════════════════════════
+#  UTILITIES
+# ═══════════════════════════════════════════════════════════════
+def _parse_date(s: str) -> date:
     return datetime.strptime(s.strip(), "%d.%m.%Y").date()
 
-def _format_date_ru(d: date) -> str:
-    return d.strftime("%d.%m.%Y")
+def _fmt_date(d) -> str:
+    if isinstance(d, date):
+        return d.strftime("%d.%m.%Y")
+    return str(d or "")
 
 def _today() -> date:
     return datetime.now().date()
 
-def _month_start(d: date) -> date:
-    return date(d.year, d.month, 1)
+def _quarter_range() -> Tuple[date, date]:
+    t = _today()
+    q_start_month = ((t.month - 1) // 3) * 3 + 1
+    d0 = date(t.year, q_start_month, 1)
+    end_month = q_start_month + 2
+    d1 = date(t.year, end_month, calendar.monthrange(t.year, end_month)[1])
+    return d0, d1
 
-def _month_end(d: date) -> date:
-    # простой способ: следующий месяц - 1 день
-    if d.month == 12:
-        return date(d.year, 12, 31)
-    nm = date(d.year, d.month + 1, 1)
-    return nm.fromordinal(nm.toordinal() - 1)
+def _safe_float(v) -> Optional[float]:
+    if v is None:
+        return None
+    try:
+        return float(str(v).replace(",", "."))
+    except Exception:
+        return None
+
+def _fmt_qty(v) -> str:
+    f = _safe_float(v)
+    if f is None:
+        return ""
+    return f"{f:.3f}".rstrip("0").rstrip(".")
 
 
-# ------------------------- DB service layer -------------------------
-
+# ═══════════════════════════════════════════════════════════════
+#  SERVICE LAYER
+# ═══════════════════════════════════════════════════════════════
 class GprService:
-    """
-    Минимальный сервис для ГПР v1:
-    - текущий план на объект (gpr_plans.is_current=true)
-    - задачи плана (gpr_tasks)
-    - справочники: work_types, uom
-    """
 
-    # ---------- objects ----------
+    # ── objects ──
     @staticmethod
     def load_objects_short() -> List[Dict[str, Any]]:
         conn = None
         try:
-            conn = get_db_connection()
+            conn = _conn()
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT id, COALESCE(short_name,'') AS short_name, address
-                    FROM public.objects
-                    ORDER BY address
+                    SELECT id, COALESCE(short_name,'') AS short_name,
+                           address, COALESCE(status,'') AS status
+                    FROM public.objects ORDER BY address
                 """)
                 return [dict(r) for r in cur.fetchall()]
         finally:
-            release_db_connection(conn)
+            _release(conn)
 
-    # ---------- dictionaries ----------
+    # ── dictionaries ──
     @staticmethod
     def load_work_types() -> List[Dict[str, Any]]:
         conn = None
         try:
-            conn = get_db_connection()
+            conn = _conn()
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
                     SELECT id, COALESCE(code,'') AS code, name
-                    FROM public.gpr_work_types
-                    WHERE is_active = true
+                    FROM public.gpr_work_types WHERE is_active=true
                     ORDER BY sort_order, name
                 """)
                 return [dict(r) for r in cur.fetchall()]
         finally:
-            release_db_connection(conn)
+            _release(conn)
 
     @staticmethod
     def load_uoms() -> List[Dict[str, Any]]:
         conn = None
         try:
-            conn = get_db_connection()
+            conn = _conn()
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT code, name
-                    FROM public.gpr_uom
-                    ORDER BY code
-                """)
+                cur.execute("SELECT code, name FROM public.gpr_uom ORDER BY code")
                 return [dict(r) for r in cur.fetchall()]
         finally:
-            release_db_connection(conn)
+            _release(conn)
 
-    # ---------- plans ----------
     @staticmethod
-    def get_or_create_current_plan(object_db_id: int, user_id: Optional[int]) -> int:
+    def load_statuses() -> List[Dict[str, Any]]:
         conn = None
         try:
-            conn = get_db_connection()
-            with conn, conn.cursor() as cur:
+            conn = _conn()
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT code, name FROM public.gpr_statuses ORDER BY code")
+                return [dict(r) for r in cur.fetchall()]
+        finally:
+            _release(conn)
+
+    # ── plans ──
+    @staticmethod
+    def get_or_create_current_plan(object_db_id: int, user_id: Optional[int]) -> Dict[str, Any]:
+        conn = None
+        try:
+            conn = _conn()
+            with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT id
-                    FROM public.gpr_plans
-                    WHERE object_db_id = %s AND is_current = true
+                    SELECT p.*, u.full_name AS creator_name
+                    FROM public.gpr_plans p
+                    LEFT JOIN public.app_users u ON u.id = p.created_by
+                    WHERE p.object_db_id=%s AND p.is_current=true
                 """, (object_db_id,))
                 row = cur.fetchone()
                 if row:
-                    return int(row[0])
+                    return dict(row)
 
                 cur.execute("""
                     INSERT INTO public.gpr_plans(object_db_id, version_no, is_current, is_baseline, created_by)
                     VALUES (%s, 1, true, false, %s)
                     RETURNING id
                 """, (object_db_id, user_id))
-                return int(cur.fetchone()[0])
-        finally:
-            release_db_connection(conn)
+                pid = cur.fetchone()["id"]
 
-    # ---------- tasks ----------
+                cur.execute("""
+                    SELECT p.*, u.full_name AS creator_name
+                    FROM public.gpr_plans p
+                    LEFT JOIN public.app_users u ON u.id = p.created_by
+                    WHERE p.id=%s
+                """, (pid,))
+                return dict(cur.fetchone())
+        finally:
+            _release(conn)
+
+    # ── tasks ──
     @staticmethod
     def load_plan_tasks(plan_id: int) -> List[Dict[str, Any]]:
         conn = None
         try:
-            conn = get_db_connection()
+            conn = _conn()
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT
-                        t.id,
-                        t.parent_id,
-                        t.work_type_id,
-                        wt.name AS work_type_name,
-                        t.name,
-                        t.uom_code,
-                        t.plan_qty,
-                        t.plan_start,
-                        t.plan_finish,
-                        t.status,
-                        t.sort_order,
-                        t.is_milestone
+                    SELECT t.id, t.parent_id, t.work_type_id,
+                           wt.name AS work_type_name,
+                           t.name, t.uom_code, t.plan_qty,
+                           t.plan_start, t.plan_finish,
+                           t.status, t.sort_order, t.is_milestone,
+                           t.created_by, t.created_at, t.updated_at
                     FROM public.gpr_tasks t
                     JOIN public.gpr_work_types wt ON wt.id = t.work_type_id
                     WHERE t.plan_id = %s
-                    ORDER BY t.sort_order, wt.sort_order, wt.name, t.name, t.plan_start, t.id
+                    ORDER BY t.sort_order, wt.sort_order, wt.name,
+                             t.name, t.plan_start, t.id
                 """, (plan_id,))
                 return [dict(r) for r in cur.fetchall()]
         finally:
-            release_db_connection(conn)
+            _release(conn)
 
     @staticmethod
-    def replace_plan_tasks(plan_id: int, user_id: Optional[int], tasks: List[Dict[str, Any]]) -> None:
-        """
-        Полная замена задач плана. Для v1 это проще всего.
-        Важно: parent_id пока не восстанавливаем (WBS можно добавить позже аккуратно).
-        """
+    def load_task_facts_cumulative(task_ids: List[int]) -> Dict[int, float]:
+        if not task_ids:
+            return {}
         conn = None
         try:
-            conn = get_db_connection()
-            with conn, conn.cursor() as cur:
-                cur.execute("DELETE FROM public.gpr_tasks WHERE plan_id = %s", (plan_id,))
+            conn = _conn()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT task_id, SUM(fact_qty) AS total
+                    FROM public.gpr_task_facts
+                    WHERE task_id = ANY(%s)
+                    GROUP BY task_id
+                """, (task_ids,))
+                return {r[0]: float(r[1]) for r in cur.fetchall()}
+        finally:
+            _release(conn)
 
+    @staticmethod
+    def replace_plan_tasks(plan_id: int, user_id: Optional[int],
+                           tasks: List[Dict[str, Any]]) -> None:
+        conn = None
+        try:
+            conn = _conn()
+            with conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM public.gpr_tasks WHERE plan_id=%s",
+                            (plan_id,))
                 if tasks:
-                    values = []
+                    vals = []
                     for i, t in enumerate(tasks):
-                        values.append((
+                        vals.append((
                             plan_id,
                             int(t["work_type_id"]),
                             (t.get("name") or "").strip(),
@@ -192,366 +270,436 @@ class GprService:
                             bool(t.get("is_milestone") or False),
                             user_id,
                         ))
-
                     execute_values(cur, """
                         INSERT INTO public.gpr_tasks
-                            (plan_id, work_type_id, name, uom_code, plan_qty, plan_start, plan_finish,
-                             status, sort_order, is_milestone, created_by)
+                        (plan_id,work_type_id,name,uom_code,plan_qty,
+                         plan_start,plan_finish,status,sort_order,is_milestone,created_by)
                         VALUES %s
-                    """, values)
-
-                cur.execute("UPDATE public.gpr_plans SET updated_at = now() WHERE id = %s", (plan_id,))
+                    """, vals)
+                cur.execute(
+                    "UPDATE public.gpr_plans SET updated_at=now() WHERE id=%s",
+                    (plan_id,))
         finally:
-            release_db_connection(conn)
+            _release(conn)
 
-    # ---------- templates ----------
+    @staticmethod
+    def update_task_status(task_id: int, new_status: str) -> None:
+        conn = None
+        try:
+            conn = _conn()
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE public.gpr_tasks SET status=%s, updated_at=now() WHERE id=%s",
+                    (new_status, task_id))
+        finally:
+            _release(conn)
+
+    # ── templates ──
     @staticmethod
     def load_templates() -> List[Dict[str, Any]]:
         conn = None
         try:
-            conn = get_db_connection()
+            conn = _conn()
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT id, name
-                    FROM public.gpr_templates
-                    WHERE is_active = true
-                    ORDER BY name
+                    SELECT id, name FROM public.gpr_templates
+                    WHERE is_active=true ORDER BY name
                 """)
                 return [dict(r) for r in cur.fetchall()]
         finally:
-            release_db_connection(conn)
+            _release(conn)
 
     @staticmethod
     def load_template_tasks(template_id: int) -> List[Dict[str, Any]]:
         conn = None
         try:
-            conn = get_db_connection()
+            conn = _conn()
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT
-                        id, parent_id, work_type_id, name, uom_code, default_qty,
-                        is_milestone, sort_order
+                    SELECT id, parent_id, work_type_id, name, uom_code,
+                           default_qty, is_milestone, sort_order
                     FROM public.gpr_template_tasks
-                    WHERE template_id = %s
-                    ORDER BY sort_order, id
+                    WHERE template_id=%s ORDER BY sort_order, id
                 """, (template_id,))
                 return [dict(r) for r in cur.fetchall()]
         finally:
-            release_db_connection(conn)
+            _release(conn)
 
 
-# ------------------------- Dialogs -------------------------
+# ═══════════════════════════════════════════════════════════════
+#  AUTOCOMPLETE COMBOBOX
+# ═══════════════════════════════════════════════════════════════
+class _AutoCombo(ttk.Combobox):
+    def __init__(self, master=None, **kw):
+        super().__init__(master, **kw)
+        self._all: List[str] = []
+        self.bind("<KeyRelease>", self._filter)
 
+    def set_values(self, vals: List[str]):
+        self._all = list(vals or [])
+        self.config(values=self._all)
+
+    def _filter(self, _e=None):
+        q = self.get().strip().lower()
+        if not q:
+            self.config(values=self._all)
+            return
+        f = [v for v in self._all if q in v.lower()]
+        self.config(values=f)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  DIALOGS
+# ═══════════════════════════════════════════════════════════════
 class DateRangeDialog(simpledialog.Dialog):
-    def __init__(self, parent, init_from: date, init_to: date):
-        self.init_from = init_from
-        self.init_to = init_to
+    def __init__(self, parent, d0: date, d1: date):
+        self._d0, self._d1 = d0, d1
         self.result: Optional[Tuple[date, date]] = None
-        super().__init__(parent, title="Диапазон дат")
+        super().__init__(parent, title="Диапазон дат отображения")
 
-    def body(self, master):
-        tk.Label(master, text="С (дд.мм.гггг):").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.ent_from = ttk.Entry(master, width=14)
-        self.ent_from.grid(row=0, column=1, sticky="w", pady=4)
-        self.ent_from.insert(0, _format_date_ru(self.init_from))
+    def body(self, m):
+        tk.Label(m, text="С (дд.мм.гггг):").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.e0 = ttk.Entry(m, width=14); self.e0.grid(row=0, column=1, pady=4)
+        self.e0.insert(0, _fmt_date(self._d0))
 
-        tk.Label(master, text="По (дд.мм.гггг):").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.ent_to = ttk.Entry(master, width=14)
-        self.ent_to.grid(row=1, column=1, sticky="w", pady=4)
-        self.ent_to.insert(0, _format_date_ru(self.init_to))
+        tk.Label(m, text="По (дд.мм.гггг):").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
+        self.e1 = ttk.Entry(m, width=14); self.e1.grid(row=1, column=1, pady=4)
+        self.e1.insert(0, _fmt_date(self._d1))
 
-        tk.Label(master, text="Подсказка: формат 01.03.2026", fg="#777").grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(6, 0)
-        )
-        return self.ent_from
+        ttk.Button(m, text="Текущий квартал", command=self._set_quarter).grid(
+            row=2, column=0, columnspan=2, pady=(8, 0))
+        return self.e0
+
+    def _set_quarter(self):
+        d0, d1 = _quarter_range()
+        self.e0.delete(0, "end"); self.e0.insert(0, _fmt_date(d0))
+        self.e1.delete(0, "end"); self.e1.insert(0, _fmt_date(d1))
 
     def validate(self):
         try:
-            d1 = _parse_date_ru(self.ent_from.get())
-            d2 = _parse_date_ru(self.ent_to.get())
-            if d2 < d1:
-                raise ValueError("Конечная дата меньше начальной")
-            self._d1, self._d2 = d1, d2
-            return True
+            a, b = _parse_date(self.e0.get()), _parse_date(self.e1.get())
+            if b < a: raise ValueError("end < start")
+            self._a, self._b = a, b; return True
         except Exception as e:
-            messagebox.showwarning("Диапазон дат", f"Некорректные даты: {e}", parent=self)
-            return False
+            messagebox.showwarning("Даты", str(e), parent=self); return False
 
     def apply(self):
-        self.result = (self._d1, self._d2)
+        self.result = (self._a, self._b)
 
 
 class TaskEditDialog(simpledialog.Dialog):
-    def __init__(self, parent, work_types: List[Dict[str, Any]], uoms: List[Dict[str, Any]], init: Optional[Dict[str, Any]] = None):
-        self.work_types = work_types
-        self.uoms = uoms
-        self.init = init or {}
+    def __init__(self, parent, wt, uoms, statuses_db=None, init=None):
+        self.wt = wt; self.uoms = uoms; self.init = init or {}
+        self._statuses_db = statuses_db or []
         self.result: Optional[Dict[str, Any]] = None
         super().__init__(parent, title="Работа ГПР")
 
-    def body(self, master):
-        wt_vals = [f"{w['name']} (id={w['id']})" for w in self.work_types]
-        uom_vals = [f"{u['code']} — {u['name']}" for u in self.uoms]
+    def body(self, m):
+        wt_v = [w["name"] for w in self.wt]
+        uom_v = [f"{u['code']} — {u['name']}" for u in self.uoms]
+        st_v = [STATUS_LABELS.get(s, s) for s in STATUS_LIST]
 
-        tk.Label(master, text="Тип работ:").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.cmb_wt = ttk.Combobox(master, state="readonly", width=40, values=wt_vals)
-        self.cmb_wt.grid(row=0, column=1, sticky="w", pady=4)
+        r = 0
+        tk.Label(m, text="Тип работ *:").grid(row=r, column=0, sticky="e", padx=(0, 6), pady=3)
+        self.cmb_wt = ttk.Combobox(m, state="readonly", width=42, values=wt_v)
+        self.cmb_wt.grid(row=r, column=1, pady=3); r += 1
 
-        tk.Label(master, text="Вид работ:").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.ent_name = ttk.Entry(master, width=44)
-        self.ent_name.grid(row=1, column=1, sticky="w", pady=4)
+        tk.Label(m, text="Вид работ *:").grid(row=r, column=0, sticky="e", padx=(0, 6), pady=3)
+        self.ent_name = ttk.Entry(m, width=46)
+        self.ent_name.grid(row=r, column=1, pady=3); r += 1
 
-        tk.Label(master, text="Ед. изм.:").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.cmb_uom = ttk.Combobox(master, state="readonly", width=40, values=["(нет)"] + uom_vals)
-        self.cmb_uom.grid(row=2, column=1, sticky="w", pady=4)
+        tk.Label(m, text="Ед. изм.:").grid(row=r, column=0, sticky="e", padx=(0, 6), pady=3)
+        self.cmb_uom = ttk.Combobox(m, state="readonly", width=42, values=["—"] + uom_v)
+        self.cmb_uom.grid(row=r, column=1, pady=3); r += 1
 
-        tk.Label(master, text="Плановый объём:").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.ent_qty = ttk.Entry(master, width=18)
-        self.ent_qty.grid(row=3, column=1, sticky="w", pady=4)
+        tk.Label(m, text="Объём план:").grid(row=r, column=0, sticky="e", padx=(0, 6), pady=3)
+        self.ent_qty = ttk.Entry(m, width=18)
+        self.ent_qty.grid(row=r, column=1, sticky="w", pady=3); r += 1
 
-        tk.Label(master, text="Начало (дд.мм.гггг):").grid(row=4, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.ent_start = ttk.Entry(master, width=14)
-        self.ent_start.grid(row=4, column=1, sticky="w", pady=4)
+        tk.Label(m, text="Начало *:").grid(row=r, column=0, sticky="e", padx=(0, 6), pady=3)
+        self.ent_s = ttk.Entry(m, width=14)
+        self.ent_s.grid(row=r, column=1, sticky="w", pady=3); r += 1
 
-        tk.Label(master, text="Окончание (дд.мм.гггг):").grid(row=5, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.ent_finish = ttk.Entry(master, width=14)
-        self.ent_finish.grid(row=5, column=1, sticky="w", pady=4)
+        tk.Label(m, text="Окончание *:").grid(row=r, column=0, sticky="e", padx=(0, 6), pady=3)
+        self.ent_f = ttk.Entry(m, width=14)
+        self.ent_f.grid(row=r, column=1, sticky="w", pady=3); r += 1
 
-        self.var_milestone = tk.BooleanVar(value=bool(self.init.get("is_milestone", False)))
-        ttk.Checkbutton(master, text="Веха", variable=self.var_milestone).grid(row=6, column=1, sticky="w", pady=(6, 0))
+        tk.Label(m, text="Статус:").grid(row=r, column=0, sticky="e", padx=(0, 6), pady=3)
+        self.cmb_st = ttk.Combobox(m, state="readonly", width=20, values=st_v)
+        self.cmb_st.grid(row=r, column=1, sticky="w", pady=3); r += 1
 
-        # init values
-        if self.work_types:
-            init_wt_id = self.init.get("work_type_id")
-            if init_wt_id:
-                for i, w in enumerate(self.work_types):
-                    if int(w["id"]) == int(init_wt_id):
-                        self.cmb_wt.current(i)
-                        break
-            else:
-                self.cmb_wt.current(0)
+        self.var_ms = tk.BooleanVar(value=bool(self.init.get("is_milestone")))
+        ttk.Checkbutton(m, text="Веха (milestone)", variable=self.var_ms).grid(
+            row=r, column=1, sticky="w", pady=3)
+
+        # fill init
+        iw = self.init.get("work_type_id")
+        if iw:
+            for i, w in enumerate(self.wt):
+                if int(w["id"]) == int(iw): self.cmb_wt.current(i); break
+        elif self.wt:
+            self.cmb_wt.current(0)
 
         self.ent_name.insert(0, self.init.get("name", ""))
 
-        init_uom = self.init.get("uom_code")
-        if init_uom:
-            # +1 because "(нет)"
-            for i, u in enumerate(self.uoms, start=1):
-                if u["code"] == init_uom:
-                    self.cmb_uom.current(i)
-                    break
+        iu = self.init.get("uom_code")
+        if iu:
+            for i, u in enumerate(self.uoms, 1):
+                if u["code"] == iu: self.cmb_uom.current(i); break
         else:
             self.cmb_uom.current(0)
 
         if self.init.get("plan_qty") is not None:
-            self.ent_qty.insert(0, str(self.init.get("plan_qty")))
+            self.ent_qty.insert(0, _fmt_qty(self.init["plan_qty"]))
 
-        d1 = self.init.get("plan_start") or _today()
-        d2 = self.init.get("plan_finish") or _today()
-        if isinstance(d1, str):
-            d1 = datetime.fromisoformat(d1).date()
-        if isinstance(d2, str):
-            d2 = datetime.fromisoformat(d2).date()
-        self.ent_start.insert(0, _format_date_ru(d1))
-        self.ent_finish.insert(0, _format_date_ru(d2))
+        d0 = self.init.get("plan_start") or _today()
+        d1 = self.init.get("plan_finish") or _today()
+        if isinstance(d0, str): d0 = datetime.fromisoformat(d0).date()
+        if isinstance(d1, str): d1 = datetime.fromisoformat(d1).date()
+        self.ent_s.insert(0, _fmt_date(d0))
+        self.ent_f.insert(0, _fmt_date(d1))
+
+        ist = self.init.get("status", "planned")
+        try:
+            self.cmb_st.current(STATUS_LIST.index(ist))
+        except Exception:
+            self.cmb_st.current(0)
 
         return self.ent_name
 
     def validate(self):
         try:
-            if self.cmb_wt.current() < 0:
-                raise ValueError("Выберите тип работ")
-            wt_id = int(self.work_types[self.cmb_wt.current()]["id"])
+            wi = self.cmb_wt.current()
+            if wi < 0: raise ValueError("Выберите тип работ")
+            wt_id = int(self.wt[wi]["id"])
+            nm = (self.ent_name.get() or "").strip()
+            if not nm: raise ValueError("Введите вид работ")
 
-            name = (self.ent_name.get() or "").strip()
-            if not name:
-                raise ValueError("Введите вид работ")
+            uom = None
+            ui = self.cmb_uom.current()
+            if ui > 0: uom = self.uoms[ui - 1]["code"]
 
-            uom_code = None
-            uom_idx = self.cmb_uom.current()
-            if uom_idx > 0:
-                uom_code = self.uoms[uom_idx - 1]["code"]
+            qty = _safe_float(self.ent_qty.get())
+            ds = _parse_date(self.ent_s.get())
+            df = _parse_date(self.ent_f.get())
+            if df < ds: raise ValueError("Окончание раньше начала")
 
-            qty_raw = (self.ent_qty.get() or "").strip().replace(",", ".")
-            qty = None
-            if qty_raw:
-                qty = float(qty_raw)
+            si = self.cmb_st.current()
+            st = STATUS_LIST[si] if si >= 0 else "planned"
 
-            ds = _parse_date_ru(self.ent_start.get())
-            df = _parse_date_ru(self.ent_finish.get())
-            if df < ds:
-                raise ValueError("Окончание раньше начала")
-
-            self._out = {
-                "work_type_id": wt_id,
-                "name": name,
-                "uom_code": uom_code,
-                "plan_qty": qty,
-                "plan_start": ds,
-                "plan_finish": df,
-                "status": "planned",
-                "is_milestone": bool(self.var_milestone.get()),
-            }
+            self._out = dict(
+                work_type_id=wt_id, name=nm, uom_code=uom, plan_qty=qty,
+                plan_start=ds, plan_finish=df, status=st,
+                is_milestone=bool(self.var_ms.get()),
+            )
             return True
         except Exception as e:
-            messagebox.showwarning("Работа ГПР", str(e), parent=self)
-            return False
+            messagebox.showwarning("Работа", str(e), parent=self); return False
 
     def apply(self):
         self.result = dict(self._out)
 
 
-# ------------------------- Gantt Canvas -------------------------
+class TemplateSelectDialog(simpledialog.Dialog):
+    def __init__(self, parent, templates):
+        self.templates = templates
+        self.result: Optional[int] = None
+        super().__init__(parent, title="Выбор шаблона ГПР")
 
+    def body(self, m):
+        tk.Label(m, text="Выберите шаблон:").pack(anchor="w", pady=(0, 6))
+        self.lb = tk.Listbox(m, width=50, height=min(15, max(4, len(self.templates))))
+        for t in self.templates:
+            self.lb.insert("end", t["name"])
+        self.lb.pack(fill="both", expand=True)
+        if self.templates:
+            self.lb.selection_set(0)
+        return self.lb
+
+    def validate(self):
+        sel = self.lb.curselection()
+        if not sel:
+            messagebox.showwarning("Шаблон", "Выберите шаблон.", parent=self)
+            return False
+        self._idx = sel[0]
+        return True
+
+    def apply(self):
+        self.result = int(self.templates[self._idx]["id"])
+
+
+# ═══════════════════════════════════════════════════════════════
+#  GANTT CANVAS (professional)
+# ═══════════════════════════════════════════════════════════════
 class GanttCanvas(tk.Frame):
-    """
-    Простой Canvas-Гант:
-    - слева таблица (Treeview) в родителе
-    - здесь: шкала дат + полосы
-    - поддерживает горизонтальный/вертикальный скролл
-    """
-    def __init__(self, master, *, day_px: int = 18, row_h: int = 24):
-        super().__init__(master)
-        self.day_px = int(day_px)
-        self.row_h = int(row_h)
+    MONTH_H = 20
+    DAY_H = 22
+    HEADER_H = MONTH_H + DAY_H
 
-        self.header = tk.Canvas(self, height=28, bg="#e8eaed", highlightthickness=0)
+    def __init__(self, master, *, day_px=20, row_h=26):
+        super().__init__(master, bg=C["panel"])
+        self.day_px = day_px
+        self.row_h = row_h
+
+        self.hdr = tk.Canvas(self, height=self.HEADER_H, bg="#e8eaed", highlightthickness=0)
         self.body = tk.Canvas(self, bg="#ffffff", highlightthickness=0)
-
-        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self._yview)
+        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.body.yview)
         self.hsb = ttk.Scrollbar(self, orient="horizontal", command=self._xview)
 
-        self.header.grid(row=0, column=0, sticky="ew")
+        self.hdr.grid(row=0, column=0, sticky="ew")
         self.body.grid(row=1, column=0, sticky="nsew")
         self.vsb.grid(row=1, column=1, sticky="ns")
         self.hsb.grid(row=2, column=0, sticky="ew")
-
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        self.body.configure(yscrollcommand=self.vsb.set)
-        self.body.configure(xscrollcommand=self._on_body_xscroll)
+        self.body.configure(yscrollcommand=self.vsb.set,
+                            xscrollcommand=self._on_xscroll)
 
-        self._range: Tuple[date, date] = (_today(), _today())
+        self._range: Tuple[date, date] = _quarter_range()
         self._rows: List[Dict[str, Any]] = []
-
-        self._colors = {
-            "planned": "#90caf9",
-            "in_progress": "#ffcc80",
-            "done": "#a5d6a7",
-            "paused": "#ffe082",
-            "canceled": "#ef9a9a",
-        }
+        self._facts: Dict[int, float] = {}
 
         self.body.bind("<Configure>", lambda e: self.redraw())
-        self.body.bind("<MouseWheel>", self._on_wheel)
-        self.body.bind("<Shift-MouseWheel>", self._on_shift_wheel)
+        self.body.bind("<MouseWheel>", self._wheel)
+        self.body.bind("<Shift-MouseWheel>", self._hwheel)
 
-    def set_range(self, d_from: date, d_to: date):
-        self._range = (d_from, d_to)
-        self.redraw()
+    # public
+    def set_range(self, d0, d1):
+        self._range = (d0, d1); self.redraw()
 
-    def set_rows(self, rows: List[Dict[str, Any]]):
-        self._rows = rows or []
-        self.redraw()
+    def set_data(self, rows, facts=None):
+        self._rows = rows or []; self._facts = facts or {}; self.redraw()
 
-    def sync_yview(self, fraction: float):
-        """Синхронизация вертикали с Treeview (если нужно)."""
-        try:
-            self.body.yview_moveto(fraction)
-        except Exception:
-            pass
+    def sync_y(self, frac):
+        try: self.body.yview_moveto(frac)
+        except: pass
 
-    def _yview(self, *args):
-        self.body.yview(*args)
+    # scroll
+    def _xview(self, *a):
+        self.body.xview(*a)
 
-    def _xview(self, *args):
-        self.body.xview(*args)
+    def _on_xscroll(self, f0, f1):
+        self.hsb.set(f0, f1); self.hdr.xview_moveto(f0)
 
-    def _on_body_xscroll(self, f1, f2):
-        self.hsb.set(f1, f2)
-        self.header.xview_moveto(f1)
+    def _wheel(self, e):
+        d = -1*(e.delta//120) if e.delta else 0
+        self.body.yview_scroll(d, "units"); return "break"
 
-    def _on_wheel(self, event):
-        delta = -1 * (event.delta // 120) if event.delta else 0
-        self.body.yview_scroll(delta, "units")
-        return "break"
+    def _hwheel(self, e):
+        d = -1*(e.delta//120) if e.delta else 0
+        self.body.xview_scroll(d, "units"); return "break"
 
-    def _on_shift_wheel(self, event):
-        delta = -1 * (event.delta // 120) if event.delta else 0
-        self.body.xview_scroll(delta, "units")
-        return "break"
-
+    # draw
     def redraw(self):
         d0, d1 = self._range
-        if d1 < d0:
-            return
-
+        if d1 < d0: return
         days = (d1 - d0).days + 1
-        total_w = max(1, days * self.day_px)
-        total_h = max(1, len(self._rows) * self.row_h)
+        tw = max(1, days * self.day_px)
+        th = max(1, len(self._rows) * self.row_h)
 
-        self.header.delete("all")
-        self.body.delete("all")
+        self.hdr.delete("all"); self.body.delete("all")
+        self.hdr.configure(scrollregion=(0, 0, tw, self.HEADER_H))
+        self.body.configure(scrollregion=(0, 0, tw, th))
 
-        self.header.configure(scrollregion=(0, 0, total_w, 28))
-        self.body.configure(scrollregion=(0, 0, total_w, total_h))
+        # ── month row ──
+        cur = date(d0.year, d0.month, 1)
+        while cur <= d1:
+            mr = calendar.monthrange(cur.year, cur.month)[1]
+            ms = max(cur, d0)
+            me = min(date(cur.year, cur.month, mr), d1)
+            x0 = (ms - d0).days * self.day_px
+            x1 = ((me - d0).days + 1) * self.day_px
+            self.hdr.create_rectangle(x0, 0, x1, self.MONTH_H,
+                                      fill="#d6dbe0", outline="#bbb")
+            lbl = f"{cur.strftime('%b %Y')}"
+            if (x1 - x0) > 40:
+                self.hdr.create_text((x0+x1)/2, self.MONTH_H/2,
+                                     text=lbl, font=("Segoe UI", 8, "bold"), fill="#333")
+            if cur.month == 12:
+                cur = date(cur.year+1, 1, 1)
+            else:
+                cur = date(cur.year, cur.month+1, 1)
 
-        # header day numbers (простая шкала)
+        # ── day row ──
         for i in range(days):
-            x0 = i * self.day_px
-            x1 = x0 + self.day_px
-            cur = d0.fromordinal(d0.toordinal() + i)
-            fill = "#f3f4f6" if cur.weekday() < 5 else "#ffecec"
-            self.header.create_rectangle(x0, 0, x1, 28, fill=fill, outline="#d0d0d0")
-            if self.day_px >= 16:
-                self.header.create_text((x0 + x1) / 2, 14, text=str(cur.day), fill="#333", font=("Segoe UI", 8))
+            x0 = i * self.day_px; x1 = x0 + self.day_px
+            d = d0 + timedelta(days=i)
+            wd = d.weekday()
+            fill = "#ffecec" if wd >= 5 else "#f3f4f6"
+            self.hdr.create_rectangle(x0, self.MONTH_H, x1, self.HEADER_H,
+                                      fill=fill, outline="#d0d0d0")
+            if self.day_px >= 14:
+                self.hdr.create_text((x0+x1)/2, self.MONTH_H + self.DAY_H/2,
+                                     text=str(d.day), font=("Segoe UI", 7), fill="#555")
 
-        # body grid + bars
+        # ── today line ──
+        td = _today()
+        if d0 <= td <= d1:
+            tx = (td - d0).days * self.day_px + self.day_px // 2
+            self.hdr.create_line(tx, 0, tx, self.HEADER_H, fill=C["error"], width=2)
+            self.body.create_line(tx, 0, tx, th, fill=C["error"], width=1, dash=(4, 2))
+
+        # ── rows ──
         for r, t in enumerate(self._rows):
-            y0 = r * self.row_h
-            y1 = y0 + self.row_h
-            # zebra
-            bg = "#ffffff" if r % 2 == 0 else "#fafafa"
-            self.body.create_rectangle(0, y0, total_w, y1, fill=bg, outline="")
+            y0 = r * self.row_h; y1 = y0 + self.row_h
+            bg = "#ffffff" if r % 2 == 0 else "#f8f9fa"
+            self.body.create_rectangle(0, y0, tw, y1, fill=bg, outline="")
 
-            # task bar
-            ts: date = t.get("plan_start")
-            tf: date = t.get("plan_finish")
-            if not isinstance(ts, date) or not isinstance(tf, date):
-                continue
+            ts, tf = t.get("plan_start"), t.get("plan_finish")
+            if not isinstance(ts, date) or not isinstance(tf, date): continue
+            if tf < d0 or ts > d1: continue
+            s2 = max(ts, d0); f2 = min(tf, d1)
+            bx0 = (s2 - d0).days * self.day_px
+            bx1 = ((f2 - d0).days + 1) * self.day_px
 
-            # clamp to range
-            if tf < d0 or ts > d1:
-                continue
-            ts2 = max(ts, d0)
-            tf2 = min(tf, d1)
+            st = (t.get("status") or "planned").strip()
+            col, _, _ = STATUS_COLORS.get(st, ("#90caf9", "#555", ""))
 
-            x0 = (ts2 - d0).days * self.day_px
-            x1 = ((tf2 - d0).days + 1) * self.day_px
+            # bar
+            by0 = y0 + 5; by1 = y1 - 5
+            self.body.create_rectangle(bx0+1, by0, bx1-1, by1,
+                                       fill=col, outline="#5f6368")
 
-            status = (t.get("status") or "planned").strip()
-            col = self._colors.get(status, "#90caf9")
+            # fact overlay
+            tid = t.get("id")
+            pq = _safe_float(t.get("plan_qty"))
+            fq = self._facts.get(tid, 0) if tid else 0
+            if pq and pq > 0 and fq > 0:
+                pct = min(1.0, fq / pq)
+                fw = max(2, int((bx1 - bx0 - 2) * pct))
+                self.body.create_rectangle(bx0+1, by0, bx0+1+fw, by1,
+                                           fill="#388e3c", outline="")
 
-            self.body.create_rectangle(x0 + 1, y0 + 4, x1 - 1, y1 - 4, fill=col, outline="#5f6368")
-            # milestone marker
-            if bool(t.get("is_milestone")):
-                cx = x0 + 6
-                cy = (y0 + y1) / 2
-                self.body.create_polygon(cx, cy, cx + 8, cy - 6, cx + 16, cy, cx + 8, cy + 6, fill="#1a73e8", outline="")
+            # milestone
+            if t.get("is_milestone"):
+                cx = bx0 + 6; cy = (y0+y1)/2
+                self.body.create_polygon(
+                    cx, cy, cx+7, cy-5, cx+14, cy, cx+7, cy+5,
+                    fill="#1a73e8", outline="")
 
-        # grid vertical lines (редко, чтобы не тормозить)
-        step = 7 if self.day_px >= 12 else 14
+            # task name on bar
+            bar_w = bx1 - bx0
+            if bar_w > 60:
+                nm = (t.get("name") or "")[:30]
+                self.body.create_text(bx0+4, (y0+y1)/2, text=nm,
+                                      anchor="w", font=("Segoe UI", 7),
+                                      fill="#333")
+
+        # weekly grid
+        step = 7 if self.day_px >= 10 else 14
         for i in range(0, days, step):
             x = i * self.day_px
-            self.body.create_line(x, 0, x, total_h, fill="#eeeeee")
+            self.body.create_line(x, 0, x, th, fill="#eeeeee")
 
 
-# ------------------------- Main Page -------------------------
-
+# ═══════════════════════════════════════════════════════════════
+#  MAIN PAGE
+# ═══════════════════════════════════════════════════════════════
 class GprPage(tk.Frame):
+
     def __init__(self, master, app_ref):
-        super().__init__(master, bg="#f7f7f7")
+        super().__init__(master, bg=C["bg"])
         self.app_ref = app_ref
 
         self.objects: List[Dict[str, Any]] = []
@@ -559,342 +707,587 @@ class GprPage(tk.Frame):
         self.uoms: List[Dict[str, Any]] = []
 
         self.object_db_id: Optional[int] = None
+        self.plan_info: Optional[Dict[str, Any]] = None
         self.plan_id: Optional[int] = None
 
-        self.range_from: date = _month_start(_today())
-        self.range_to: date = _month_end(_today())
-
         self.tasks: List[Dict[str, Any]] = []
+        self.tasks_filtered: List[Dict[str, Any]] = []
+        self.facts: Dict[int, float] = {}
+
+        q = _quarter_range()
+        self.range_from: date = q[0]
+        self.range_to: date = q[1]
 
         self._build_ui()
         self._load_refs()
-        self._refresh_objects_ui()
 
-    # ---------- UI ----------
+    # ══════════════════════════════════════════════════════════
+    #  BUILD UI
+    # ══════════════════════════════════════════════════════════
     def _build_ui(self):
-        top = tk.Frame(self, bg="#ffffff")
-        top.pack(fill="x", padx=10, pady=10)
+        # ── header ──
+        hdr = tk.Frame(self, bg=C["accent"], pady=6)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="📊  ГПР — График производства работ",
+                 font=("Segoe UI", 12, "bold"), bg=C["accent"], fg="white",
+                 padx=12).pack(side="left")
 
-        # object
-        tk.Label(top, text="Объект:", bg="#ffffff").grid(row=0, column=0, sticky="e", padx=(0, 6))
-        self.cmb_object = ttk.Combobox(top, state="readonly", width=60, values=[])
-        self.cmb_object.grid(row=0, column=1, sticky="w")
+        self.lbl_plan_info = tk.Label(
+            hdr, text="", font=("Segoe UI", 8), bg=C["accent"], fg="#bbdefb",
+            padx=12)
+        self.lbl_plan_info.pack(side="right")
 
-        ttk.Button(top, text="Открыть", command=self._open_object).grid(row=0, column=2, padx=(10, 0))
+        # ── top panel (object + range) ──
+        top = tk.LabelFrame(self, text=" 📍 Объект и диапазон ",
+                            font=("Segoe UI", 9, "bold"),
+                            bg=C["panel"], fg=C["accent"],
+                            relief="groove", bd=1, padx=10, pady=8)
+        top.pack(fill="x", padx=10, pady=(8, 4))
+        top.grid_columnconfigure(1, weight=1)
 
-        # range
-        tk.Label(top, text="Диапазон:", bg="#ffffff").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=(8, 0))
-        self.lbl_range = tk.Label(top, text="", bg="#ffffff", fg="#444")
-        self.lbl_range.grid(row=1, column=1, sticky="w", pady=(8, 0))
+        tk.Label(top, text="Объект:", bg=C["panel"],
+                 font=("Segoe UI", 9)).grid(row=0, column=0, sticky="e", padx=(0, 6))
+        self.cmb_obj = _AutoCombo(top, width=60, font=("Segoe UI", 9))
+        self.cmb_obj.grid(row=0, column=1, sticky="ew", pady=3)
 
-        ttk.Button(top, text="Изменить…", command=self._change_range).grid(row=1, column=2, padx=(10, 0), pady=(8, 0))
+        btn_f = tk.Frame(top, bg=C["panel"])
+        btn_f.grid(row=0, column=2, padx=(8, 0))
+        self._accent_btn(btn_f, "▶  Открыть", self._open_object).pack(side="left")
 
-        # toolbar
-        bar = tk.Frame(self, bg="#f7f7f7")
-        bar.pack(fill="x", padx=10, pady=(0, 6))
+        tk.Label(top, text="Диапазон:", bg=C["panel"],
+                 font=("Segoe UI", 9)).grid(row=1, column=0, sticky="e", padx=(0, 6))
 
-        ttk.Button(bar, text="➕ Добавить работу", command=self._add_task).pack(side="left")
-        ttk.Button(bar, text="✏️ Редактировать", command=self._edit_selected).pack(side="left", padx=(6, 0))
-        ttk.Button(bar, text="🗑 Удалить", command=self._delete_selected).pack(side="left", padx=(6, 0))
-        ttk.Button(bar, text="📋 Из шаблона…", command=self._apply_template).pack(side="left", padx=(16, 0))
+        range_f = tk.Frame(top, bg=C["panel"])
+        range_f.grid(row=1, column=1, sticky="w", pady=3)
+        self.lbl_range = tk.Label(range_f, text="", bg=C["panel"], fg=C["text2"],
+                                  font=("Segoe UI", 9))
+        self.lbl_range.pack(side="left")
+        ttk.Button(range_f, text="Изменить…", command=self._change_range).pack(
+            side="left", padx=(12, 0))
+        ttk.Button(range_f, text="По работам", command=self._fit_range).pack(
+            side="left", padx=(6, 0))
 
-        ttk.Button(bar, text="💾 Сохранить", command=self._save).pack(side="right")
+        # ── toolbar ──
+        bar = tk.Frame(self, bg=C["accent_light"], pady=5)
+        bar.pack(fill="x", padx=10)
 
-        # split: left tree + right gantt
-        main = tk.PanedWindow(self, orient="horizontal", sashrelief="raised", bg="#f7f7f7")
-        main.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self._tb_btn(bar, "➕ Добавить", self._add_task)
+        self._tb_btn(bar, "✏️ Редактировать", self._edit_selected)
+        self._tb_btn(bar, "🗑 Удалить", self._delete_selected)
+        tk.Frame(bar, bg=C["border"], width=1).pack(side="left", fill="y", padx=8)
+        self._tb_btn(bar, "📋 Из шаблона…", self._apply_template)
+        self._tb_btn(bar, "📥 Экспорт Excel", self._export_excel)
+        tk.Frame(bar, bg=C["border"], width=1).pack(side="left", fill="y", padx=8)
+        self._tb_btn(bar, "🔍−", lambda: self._zoom(-2))
+        self._tb_btn(bar, "🔍+", lambda: self._zoom(2))
 
-        left = tk.Frame(main, bg="#ffffff")
-        right = tk.Frame(main, bg="#ffffff")
-        main.add(left, minsize=420)
-        main.add(right, minsize=420)
+        self._accent_btn(bar, "💾  СОХРАНИТЬ", self._save).pack(side="right", padx=(4, 8))
 
-        # Treeview tasks
-        cols = ("type", "name", "start", "finish", "uom", "qty")
-        self.tree = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
-        self.tree.heading("type", text="Тип работ")
-        self.tree.heading("name", text="Вид работ")
-        self.tree.heading("start", text="Начало")
-        self.tree.heading("finish", text="Конец")
-        self.tree.heading("uom", text="Ед.")
-        self.tree.heading("qty", text="Объём")
+        # ── filter bar ──
+        fbar = tk.Frame(self, bg=C["bg"], pady=4)
+        fbar.pack(fill="x", padx=10)
 
-        self.tree.column("type", width=140, anchor="w")
-        self.tree.column("name", width=260, anchor="w")
-        self.tree.column("start", width=90, anchor="center")
-        self.tree.column("finish", width=90, anchor="center")
-        self.tree.column("uom", width=60, anchor="center")
-        self.tree.column("qty", width=80, anchor="e")
+        tk.Label(fbar, text="Фильтр тип:", bg=C["bg"],
+                 font=("Segoe UI", 8)).pack(side="left")
+        self.cmb_filt_wt = ttk.Combobox(fbar, state="readonly", width=20,
+                                         values=["Все"])
+        self.cmb_filt_wt.pack(side="left", padx=(4, 12)); self.cmb_filt_wt.current(0)
+        self.cmb_filt_wt.bind("<<ComboboxSelected>>", lambda e: self._apply_filter())
 
-        vsb = ttk.Scrollbar(left, orient="vertical", command=self._on_tree_yview)
+        tk.Label(fbar, text="Статус:", bg=C["bg"],
+                 font=("Segoe UI", 8)).pack(side="left")
+        self.cmb_filt_st = ttk.Combobox(fbar, state="readonly", width=16,
+                                         values=["Все"] + [STATUS_LABELS[s] for s in STATUS_LIST])
+        self.cmb_filt_st.pack(side="left", padx=(4, 12)); self.cmb_filt_st.current(0)
+        self.cmb_filt_st.bind("<<ComboboxSelected>>", lambda e: self._apply_filter())
+
+        tk.Label(fbar, text="Поиск:", bg=C["bg"],
+                 font=("Segoe UI", 8)).pack(side="left")
+        self.var_search = tk.StringVar()
+        ent_s = ttk.Entry(fbar, textvariable=self.var_search, width=24)
+        ent_s.pack(side="left", padx=(4, 0))
+        ent_s.bind("<KeyRelease>", lambda e: self._apply_filter())
+
+        # ── summary ──
+        self.lbl_summary = tk.Label(self, text="", bg=C["bg"],
+                                    font=("Segoe UI", 8), fg=C["text2"], anchor="w")
+        self.lbl_summary.pack(fill="x", padx=14, pady=(2, 0))
+
+        # ── legend ──
+        leg = tk.Frame(self, bg=C["bg"])
+        leg.pack(fill="x", padx=14, pady=(0, 2))
+        for code in STATUS_LIST:
+            col, _, label = STATUS_COLORS[code]
+            f = tk.Frame(leg, bg=C["bg"])
+            f.pack(side="left", padx=(0, 12))
+            tk.Canvas(f, width=12, height=12, bg=col, highlightthickness=1,
+                      highlightbackground="#999").pack(side="left", padx=(0, 3))
+            tk.Label(f, text=label, bg=C["bg"], font=("Segoe UI", 7),
+                     fg=C["text2"]).pack(side="left")
+
+        # ── split: tree + gantt ──
+        pw = tk.PanedWindow(self, orient="horizontal", sashrelief="raised",
+                            bg=C["bg"])
+        pw.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+
+        left = tk.Frame(pw, bg=C["panel"])
+        right = tk.Frame(pw, bg=C["panel"])
+        pw.add(left, minsize=480); pw.add(right, minsize=400)
+
+        cols = ("type", "name", "start", "finish", "uom", "qty", "status")
+        self.tree = ttk.Treeview(left, columns=cols, show="headings",
+                                 selectmode="browse")
+        heads = {"type": ("Тип работ", 130), "name": ("Вид работ", 220),
+                 "start": ("Начало", 85), "finish": ("Конец", 85),
+                 "uom": ("Ед.", 50), "qty": ("Объём", 75),
+                 "status": ("Статус", 100)}
+        for c, (t, w) in heads.items():
+            self.tree.heading(c, text=t)
+            self.tree.column(c, width=w, anchor="center" if c in ("start", "finish", "uom", "status") else ("e" if c == "qty" else "w"))
+
+        vsb = ttk.Scrollbar(left, orient="vertical", command=self._tree_yview)
         self.tree.configure(yscrollcommand=vsb.set)
-
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
         self.tree.bind("<Double-1>", lambda e: self._edit_selected())
         self.tree.bind("<Return>", lambda e: self._edit_selected())
 
-        # Gantt
-        self.gantt = GanttCanvas(right, day_px=18, row_h=24)
+        self.gantt = GanttCanvas(right, day_px=20, row_h=26)
         self.gantt.pack(fill="both", expand=True)
+
+        # ── bottom info ──
+        bot = tk.Frame(self, bg=C["accent_light"], pady=4)
+        bot.pack(fill="x", padx=10, pady=(0, 6))
+        self.lbl_bottom = tk.Label(bot, text="Выберите объект и нажмите «Открыть»",
+                                   font=("Segoe UI", 9, "bold"), fg=C["accent"],
+                                   bg=C["accent_light"])
+        self.lbl_bottom.pack(side="left", padx=10)
 
         self._update_range_label()
 
-    def _on_tree_yview(self, *args):
-        # Treeview scroll
-        self.tree.yview(*args)
-        # sync gantt
-        try:
-            f = self.tree.yview()[0]
-            self.gantt.sync_yview(float(f))
-        except Exception:
-            pass
+    # ── UI helpers ──
+    def _accent_btn(self, parent, text, cmd):
+        b = tk.Button(parent, text=text, font=("Segoe UI", 9, "bold"),
+                      bg=C["btn_bg"], fg=C["btn_fg"],
+                      activebackground="#0d47a1", activeforeground="white",
+                      relief="flat", cursor="hand2", padx=10, pady=3, command=cmd)
+        b.pack(side="left", padx=2)
+        b.bind("<Enter>", lambda e: b.config(bg="#0d47a1"))
+        b.bind("<Leave>", lambda e: b.config(bg=C["btn_bg"]))
+        return b
 
-    # ---------- Data loading ----------
+    def _tb_btn(self, parent, text, cmd):
+        ttk.Button(parent, text=text, command=cmd).pack(side="left", padx=2)
+
+    def _tree_yview(self, *a):
+        self.tree.yview(*a)
+        try: self.gantt.sync_y(float(self.tree.yview()[0]))
+        except: pass
+
+    # ══════════════════════════════════════════════════════════
+    #  DATA
+    # ══════════════════════════════════════════════════════════
     def _load_refs(self):
         try:
             self.objects = GprService.load_objects_short()
             self.work_types = GprService.load_work_types()
             self.uoms = GprService.load_uoms()
         except Exception as e:
-            logging.exception("GPR: error loading refs")
-            messagebox.showerror("ГПР", f"Не удалось загрузить справочники:\n{e}", parent=self)
+            logging.exception("GPR refs error")
+            messagebox.showerror("ГПР", f"Ошибка загрузки справочников:\n{e}", parent=self)
+            return
 
-    def _refresh_objects_ui(self):
         vals = []
         for o in self.objects:
-            label = f"{o['address']}"
-            if o.get("short_name"):
-                label = f"{o['short_name']} — {o['address']}"
-            vals.append(label)
-        self.cmb_object.configure(values=vals)
-        if vals:
-            self.cmb_object.current(0)
+            sn = o.get("short_name") or ""
+            lbl = f"{sn} — {o['address']}" if sn else o["address"]
+            vals.append(lbl)
+        self.cmb_obj.set_values(vals)
+
+        wt_names = ["Все"] + [w["name"] for w in self.work_types]
+        self.cmb_filt_wt.config(values=wt_names)
 
     def _update_range_label(self):
-        self.lbl_range.config(text=f"{_format_date_ru(self.range_from)} — {_format_date_ru(self.range_to)}")
+        self.lbl_range.config(
+            text=f"{_fmt_date(self.range_from)} — {_fmt_date(self.range_to)}")
         self.gantt.set_range(self.range_from, self.range_to)
 
-    # ---------- Actions ----------
-    def _selected_object_db_id(self) -> Optional[int]:
-        idx = self.cmb_object.current()
-        if idx < 0 or idx >= len(self.objects):
-            return None
+    def _update_plan_info(self):
+        p = self.plan_info
+        if not p:
+            self.lbl_plan_info.config(text="")
+            return
+        cr = p.get("creator_name") or "—"
+        upd = p.get("updated_at")
+        upd_s = upd.strftime("%d.%m.%Y %H:%M") if isinstance(upd, datetime) else str(upd or "")
+        v = p.get("version_no", 1)
+        self.lbl_plan_info.config(
+            text=f"Версия: {v}  |  Создал: {cr}  |  Обновлён: {upd_s}")
+
+    def _update_summary(self):
+        total = len(self.tasks)
+        by_st = {}
+        overdue = 0
+        td = _today()
+        for t in self.tasks:
+            st = t.get("status", "planned")
+            by_st[st] = by_st.get(st, 0) + 1
+            if st not in ("done", "canceled"):
+                pf = t.get("plan_finish")
+                if isinstance(pf, date) and pf < td:
+                    overdue += 1
+
+        parts = [f"Всего: {total}"]
+        for s in STATUS_LIST:
+            if by_st.get(s, 0) > 0:
+                parts.append(f"{STATUS_LABELS[s]}: {by_st[s]}")
+        if overdue > 0:
+            parts.append(f"⚠ Просрочено: {overdue}")
+        self.lbl_summary.config(text="  |  ".join(parts))
+
+    # ══════════════════════════════════════════════════════════
+    #  ACTIONS
+    # ══════════════════════════════════════════════════════════
+    def _sel_obj_id(self) -> Optional[int]:
+        idx = self.cmb_obj.current()
+        if idx < 0 or idx >= len(self.objects): return None
         return int(self.objects[idx]["id"])
 
     def _open_object(self):
-        object_db_id = self._selected_object_db_id()
-        if not object_db_id:
-            messagebox.showwarning("ГПР", "Выберите объект.", parent=self)
+        oid = self._sel_obj_id()
+        if not oid:
+            messagebox.showwarning("ГПР", "Выберите объект из списка.", parent=self)
             return
-
-        self.object_db_id = object_db_id
-        user_id = (self.app_ref.current_user or {}).get("id")
-
+        self.object_db_id = oid
+        uid = (self.app_ref.current_user or {}).get("id")
         try:
-            self.plan_id = GprService.get_or_create_current_plan(object_db_id, user_id)
+            self.plan_info = GprService.get_or_create_current_plan(oid, uid)
+            self.plan_id = int(self.plan_info["id"])
             self.tasks = GprService.load_plan_tasks(self.plan_id)
+            tids = [t["id"] for t in self.tasks if t.get("id")]
+            self.facts = GprService.load_task_facts_cumulative(tids)
         except Exception as e:
-            logging.exception("GPR: open object error")
+            logging.exception("GPR open error")
             messagebox.showerror("ГПР", f"Не удалось открыть ГПР:\n{e}", parent=self)
             return
 
-        self._render_tasks()
+        self._update_plan_info()
+        self._apply_filter()
+        self._update_summary()
 
-    def _render_tasks(self):
-        self.tree.delete(*self.tree.get_children())
+        obj = next((o for o in self.objects if int(o["id"]) == oid), None)
+        addr = obj["address"] if obj else ""
+        self.lbl_bottom.config(text=f"Объект: {addr}  |  Работ: {len(self.tasks)}")
 
+    def _apply_filter(self):
+        wt_idx = self.cmb_filt_wt.current()
+        wt_name = None
+        if wt_idx > 0:
+            wt_name = self.work_types[wt_idx - 1]["name"]
+
+        st_idx = self.cmb_filt_st.current()
+        st_code = None
+        if st_idx > 0:
+            st_code = STATUS_LIST[st_idx - 1]
+
+        q = (self.var_search.get() or "").strip().lower()
+
+        res = []
         for t in self.tasks:
+            if wt_name and (t.get("work_type_name") or "") != wt_name:
+                continue
+            if st_code and (t.get("status") or "") != st_code:
+                continue
+            if q:
+                nm = (t.get("name") or "").lower()
+                wtn = (t.get("work_type_name") or "").lower()
+                if q not in nm and q not in wtn:
+                    continue
+            res.append(t)
+
+        self.tasks_filtered = res
+        self._render()
+
+    def _render(self):
+        self.tree.delete(*self.tree.get_children())
+        for t in self.tasks_filtered:
             iid = str(t.get("id") or "")
-            wt = t.get("work_type_name") or ""
-            nm = t.get("name") or ""
-            ds = t.get("plan_start")
-            df = t.get("plan_finish")
-            uom = t.get("uom_code") or ""
-            qty = t.get("plan_qty")
-            qty_str = ""
-            if qty is not None:
-                try:
-                    qty_str = f"{float(qty):.3f}".rstrip("0").rstrip(".")
-                except Exception:
-                    qty_str = str(qty)
-
-            self.tree.insert(
-                "", "end", iid=iid if iid else None,
-                values=(wt, nm, _format_date_ru(ds), _format_date_ru(df), uom, qty_str),
-            )
-
-        # gantt uses same order as tree
-        self.gantt.set_rows(self.tasks)
+            st_label = STATUS_LABELS.get(t.get("status", ""), t.get("status", ""))
+            self.tree.insert("", "end", iid=iid if iid else None, values=(
+                t.get("work_type_name", ""),
+                t.get("name", ""),
+                _fmt_date(t.get("plan_start")),
+                _fmt_date(t.get("plan_finish")),
+                t.get("uom_code") or "",
+                _fmt_qty(t.get("plan_qty")),
+                st_label,
+            ))
+        self.gantt.set_data(self.tasks_filtered, self.facts)
 
     def _change_range(self):
         dlg = DateRangeDialog(self, self.range_from, self.range_to)
         if dlg.result:
             self.range_from, self.range_to = dlg.result
             self._update_range_label()
-            self.gantt.set_rows(self.tasks)
+            self.gantt.set_data(self.tasks_filtered, self.facts)
 
-    def _add_task(self):
-        if not self.plan_id:
-            messagebox.showinfo("ГПР", "Сначала выберите объект и нажмите «Открыть».", parent=self)
+    def _fit_range(self):
+        if not self.tasks:
             return
-        dlg = TaskEditDialog(self, self.work_types, self.uoms, init={
-            "plan_start": self.range_from,
-            "plan_finish": self.range_from,
-        })
-        if not dlg.result:
-            return
+        d0 = min(t["plan_start"] for t in self.tasks if isinstance(t.get("plan_start"), date))
+        d1 = max(t["plan_finish"] for t in self.tasks if isinstance(t.get("plan_finish"), date))
+        self.range_from = d0 - timedelta(days=7)
+        self.range_to = d1 + timedelta(days=7)
+        self._update_range_label()
+        self.gantt.set_data(self.tasks_filtered, self.facts)
 
-        t = dlg.result
-        # locally assign id None; will get real id after save
-        t["id"] = None
-        t["work_type_name"] = next((w["name"] for w in self.work_types if int(w["id"]) == int(t["work_type_id"])), "")
-        t["sort_order"] = len(self.tasks) * 10
-        self.tasks.append(t)
-        self._render_tasks()
+    def _zoom(self, delta):
+        self.gantt.day_px = max(6, min(50, self.gantt.day_px + delta))
+        self.gantt.redraw()
 
-    def _selected_task_index(self) -> Optional[int]:
+    # ── CRUD ──
+    def _find_task_idx(self) -> Optional[int]:
         sel = self.tree.selection()
-        if not sel:
-            return None
+        if not sel: return None
         iid = sel[0]
-        # try by id first
         try:
             tid = int(iid)
             for i, t in enumerate(self.tasks):
-                if t.get("id") and int(t["id"]) == tid:
-                    return i
-        except Exception:
-            pass
-        # fallback: by tree index
-        try:
-            return self.tree.index(iid)
-        except Exception:
-            return None
+                if t.get("id") and int(t["id"]) == tid: return i
+        except: pass
+        try: return self.tree.index(iid)
+        except: return None
+
+    def _add_task(self):
+        if not self.plan_id:
+            messagebox.showinfo("ГПР", "Сначала откройте объект.", parent=self)
+            return
+        dlg = TaskEditDialog(self, self.work_types, self.uoms, init={
+            "plan_start": self.range_from, "plan_finish": self.range_from})
+        if not dlg.result: return
+        t = dlg.result
+        t["id"] = None
+        t["work_type_name"] = next(
+            (w["name"] for w in self.work_types if int(w["id"]) == int(t["work_type_id"])), "")
+        t["sort_order"] = len(self.tasks) * 10
+        self.tasks.append(t)
+        self._apply_filter()
+        self._update_summary()
 
     def _edit_selected(self):
-        idx = self._selected_task_index()
-        if idx is None:
-            return
+        idx = self._find_task_idx()
+        if idx is None: return
         t0 = self.tasks[idx]
         dlg = TaskEditDialog(self, self.work_types, self.uoms, init=t0)
-        if not dlg.result:
-            return
+        if not dlg.result: return
         upd = dlg.result
-        # keep id
         upd["id"] = t0.get("id")
         upd["sort_order"] = t0.get("sort_order", idx * 10)
-        upd["work_type_name"] = next((w["name"] for w in self.work_types if int(w["id"]) == int(upd["work_type_id"])), "")
+        upd["work_type_name"] = next(
+            (w["name"] for w in self.work_types if int(w["id"]) == int(upd["work_type_id"])), "")
         self.tasks[idx] = upd
-        self._render_tasks()
+        self._apply_filter()
+        self._update_summary()
 
     def _delete_selected(self):
-        idx = self._selected_task_index()
-        if idx is None:
-            return
-        if not messagebox.askyesno("ГПР", "Удалить выбранную работу?", parent=self):
-            return
+        idx = self._find_task_idx()
+        if idx is None: return
+        if not messagebox.askyesno("ГПР", "Удалить работу?", parent=self): return
         self.tasks.pop(idx)
-        self._render_tasks()
+        self._apply_filter()
+        self._update_summary()
 
     def _apply_template(self):
         if not self.plan_id:
-            messagebox.showinfo("ГПР", "Сначала выберите объект и нажмите «Открыть».", parent=self)
-            return
-
+            messagebox.showinfo("ГПР", "Сначала откройте объект.", parent=self); return
         try:
-            templates = GprService.load_templates()
+            tpls = GprService.load_templates()
         except Exception as e:
-            messagebox.showerror("ГПР", f"Не удалось загрузить шаблоны:\n{e}", parent=self)
-            return
+            messagebox.showerror("ГПР", f"Ошибка:\n{e}", parent=self); return
+        if not tpls:
+            messagebox.showinfo("ГПР", "Шаблонов нет.", parent=self); return
 
-        if not templates:
-            messagebox.showinfo("ГПР", "Шаблонов нет (таблица gpr_templates пустая).", parent=self)
-            return
-
-        # simple choice
-        choices = [f"{t['name']} (id={t['id']})" for t in templates]
-        choice = simpledialog.askstring("Шаблон", "Введите id шаблона или выберите из списка:\n\n" + "\n".join(choices[:20]), parent=self)
-        if not choice:
-            return
+        dlg = TemplateSelectDialog(self, tpls)
+        if not dlg.result: return
 
         try:
-            # extract id
-            tid = int("".join(ch for ch in choice if ch.isdigit()))
-        except Exception:
-            messagebox.showwarning("Шаблон", "Не удалось распознать id шаблона.", parent=self)
-            return
-
-        try:
-            tmpl_tasks = GprService.load_template_tasks(tid)
+            tt = GprService.load_template_tasks(dlg.result)
         except Exception as e:
-            messagebox.showerror("ГПР", f"Не удалось загрузить задачи шаблона:\n{e}", parent=self)
+            messagebox.showerror("ГПР", f"Ошибка:\n{e}", parent=self); return
+        if not tt:
+            messagebox.showinfo("ГПР", "В шаблоне нет задач.", parent=self); return
+        if self.tasks and not messagebox.askyesno(
+                "ГПР", "Заменить текущие работы?", parent=self):
             return
 
-        if not tmpl_tasks:
-            messagebox.showinfo("ГПР", "В выбранном шаблоне нет задач.", parent=self)
-            return
-
-        if self.tasks and not messagebox.askyesno("ГПР", "Заменить текущие работы на работы из шаблона?", parent=self):
-            return
-
-        # convert template tasks to plan tasks with dates inside current range start (simple)
         base = self.range_from
         out = []
-        for i, tt in enumerate(tmpl_tasks):
-            wt_id = int(tt["work_type_id"])
-            wt_name = next((w["name"] for w in self.work_types if int(w["id"]) == wt_id), "")
-
-            out.append({
-                "id": None,
-                "work_type_id": wt_id,
-                "work_type_name": wt_name,
-                "name": tt["name"],
-                "uom_code": tt.get("uom_code"),
-                "plan_qty": tt.get("default_qty"),
-                "plan_start": base,
-                "plan_finish": base,
-                "status": "planned",
-                "is_milestone": bool(tt.get("is_milestone") or False),
-                "sort_order": int(tt.get("sort_order") if tt.get("sort_order") is not None else i * 10),
-            })
-
+        for i, x in enumerate(tt):
+            wid = int(x["work_type_id"])
+            wn = next((w["name"] for w in self.work_types if int(w["id"]) == wid), "")
+            out.append(dict(
+                id=None, work_type_id=wid, work_type_name=wn,
+                name=x["name"], uom_code=x.get("uom_code"),
+                plan_qty=x.get("default_qty"),
+                plan_start=base, plan_finish=base,
+                status="planned",
+                is_milestone=bool(x.get("is_milestone")),
+                sort_order=int(x.get("sort_order") if x.get("sort_order") is not None else i*10),
+            ))
         self.tasks = out
-        self._render_tasks()
+        self._apply_filter()
+        self._update_summary()
 
     def _save(self):
         if not self.plan_id:
-            messagebox.showinfo("ГПР", "Сначала выберите объект и нажмите «Открыть».", parent=self)
-            return
-
-        # quick validation
+            messagebox.showinfo("ГПР", "Сначала откройте объект.", parent=self); return
         for t in self.tasks:
             if not t.get("name"):
-                messagebox.showwarning("ГПР", "Есть работа без названия.", parent=self)
-                return
-            if not t.get("work_type_id"):
-                messagebox.showwarning("ГПР", "Есть работа без типа.", parent=self)
-                return
-            ds = t.get("plan_start")
-            df = t.get("plan_finish")
+                messagebox.showwarning("ГПР", "Есть работа без названия.", parent=self); return
+            ds, df = t.get("plan_start"), t.get("plan_finish")
             if not isinstance(ds, date) or not isinstance(df, date) or df < ds:
-                messagebox.showwarning("ГПР", f"Некорректные даты у работы: {t.get('name')}", parent=self)
-                return
+                messagebox.showwarning("ГПР",
+                    f"Некорректные даты: {t.get('name')}", parent=self); return
 
-        user_id = (self.app_ref.current_user or {}).get("id")
+        uid = (self.app_ref.current_user or {}).get("id")
         try:
-            GprService.replace_plan_tasks(self.plan_id, user_id, self.tasks)
-            # reload from db to get ids/order
+            GprService.replace_plan_tasks(self.plan_id, uid, self.tasks)
             self.tasks = GprService.load_plan_tasks(self.plan_id)
-            self._render_tasks()
+            tids = [t["id"] for t in self.tasks if t.get("id")]
+            self.facts = GprService.load_task_facts_cumulative(tids)
+            self.plan_info = GprService.get_or_create_current_plan(self.object_db_id, uid)
+            self._update_plan_info()
+            self._apply_filter()
+            self._update_summary()
             messagebox.showinfo("ГПР", "Сохранено.", parent=self)
         except Exception as e:
-            logging.exception("GPR save error")
+            logging.exception("GPR save err")
             messagebox.showerror("ГПР", f"Ошибка сохранения:\n{e}", parent=self)
 
+    # ══════════════════════════════════════════════════════════
+    #  EXPORT TO EXCEL
+    # ══════════════════════════════════════════════════════════
+    def _export_excel(self):
+        if not self.tasks:
+            messagebox.showinfo("ГПР", "Нет данных для выгрузки.", parent=self)
+            return
 
-# ------------------------- API for main_app -------------------------
+        if not HAS_OPENPYXL:
+            messagebox.showwarning("ГПР",
+                "Для экспорта необходима библиотека openpyxl.", parent=self)
+            return
 
+        obj = next((o for o in self.objects
+                     if int(o["id"]) == self.object_db_id), None)
+        obj_name = (obj["short_name"] or obj["address"]) if obj else "объект"
+        default_name = f"ГПР_{obj_name}_{_today().strftime('%Y%m%d')}.xlsx"
+        # убираем спецсимволы из имени файла
+        default_name = "".join(
+            c if c.isalnum() or c in "._- ()" else "_" for c in default_name
+        )
+
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Сохранить ГПР в Excel",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Excel", "*.xlsx"), ("Все файлы", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "ГПР"
+
+            # ── заголовки ──
+            headers = [
+                "№", "Тип работ", "Вид работ", "Ед. изм.",
+                "Объём план", "Начало", "Окончание",
+                "Длительность (дн.)", "Статус", "Факт (накоп.)", "% выполнения",
+            ]
+            widths = [6, 22, 36, 8, 14, 14, 14, 14, 16, 14, 14]
+
+            for i, h in enumerate(headers, 1):
+                cell = ws.cell(1, i, h)
+                cell.font = Font(bold=True, size=10)
+                cell.fill = PatternFill("solid", fgColor="D6DCE4")
+                cell.alignment = Alignment(horizontal="center", vertical="center",
+                                           wrap_text=True)
+
+            for i, w in enumerate(widths, 1):
+                ws.column_dimensions[get_column_letter(i)].width = w
+
+            ws.freeze_panes = "A2"
+
+            # ── строки ──
+            status_fill = {
+                "planned":     PatternFill("solid", fgColor="D6EAFF"),
+                "in_progress": PatternFill("solid", fgColor="FFF3CD"),
+                "done":        PatternFill("solid", fgColor="D4EDDA"),
+                "paused":      PatternFill("solid", fgColor="FFF9C4"),
+                "canceled":    PatternFill("solid", fgColor="F8D7DA"),
+            }
+
+            for row_num, t in enumerate(self.tasks, start=2):
+                ds = t.get("plan_start")
+                df = t.get("plan_finish")
+                dur = (df - ds).days + 1 if isinstance(ds, date) and isinstance(df, date) else ""
+
+                pq = _safe_float(t.get("plan_qty"))
+                tid = t.get("id")
+                fq = self.facts.get(tid, 0) if tid else 0
+                pct = ""
+                if pq and pq > 0:
+                    pct = f"{min(100.0, fq / pq * 100):.1f}%"
+
+                st_code = t.get("status", "planned")
+                st_label = STATUS_LABELS.get(st_code, st_code)
+
+                values = [
+                    row_num - 1,
+                    t.get("work_type_name", ""),
+                    t.get("name", ""),
+                    t.get("uom_code") or "",
+                    _fmt_qty(pq) if pq else "",
+                    _fmt_date(ds),
+                    _fmt_date(df),
+                    dur,
+                    st_label,
+                    _fmt_qty(fq) if fq else "",
+                    pct,
+                ]
+
+                for col, val in enumerate(values, 1):
+                    cell = ws.cell(row_num, col, val)
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                    # подкрашиваем статус
+                    if col == 9:
+                        fill = status_fill.get(st_code)
+                        if fill:
+                            cell.fill = fill
+
+            # ── итоговая строка ──
+            last_row = len(self.tasks) + 2
+            ws.cell(last_row, 1, "").font = Font(bold=True)
+            ws.cell(last_row, 2, f"Итого работ: {len(self.tasks)}").font = Font(bold=True)
+
+            done_cnt = sum(1 for t in self.tasks if t.get("status") == "done")
+            ws.cell(last_row, 9, f"Выполнено: {done_cnt}").font = Font(bold=True)
+
+            wb.save(path)
+            messagebox.showinfo("ГПР", f"Файл сохранён:\n{path}", parent=self)
+
+        except Exception as e:
+            logging.exception("GPR excel export error")
+            messagebox.showerror("ГПР", f"Ошибка экспорта:\n{e}", parent=self)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  API for main_app
+# ═══════════════════════════════════════════════════════════════
 def create_gpr_page(parent, app_ref) -> GprPage:
+    """Фабричная функция — вызывается из main_app._show_page."""
     return GprPage(parent, app_ref=app_ref)
