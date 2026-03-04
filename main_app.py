@@ -131,6 +131,7 @@ meals_reports_module = None
 employee_card_module = None
 payroll_module = None
 brigades_module = None
+gpr_module = None
 
 def perform_heavy_imports():
     global BudgetAnalyzer, _assets_logo, _LOGO_BASE64, SpecialOrders, \
@@ -138,7 +139,7 @@ def perform_heavy_imports():
            analytics_module, timesheet_transformer, employees_module, \
            timesheet_compare, meals_employees_module, lodging_module, \
            meals_reports_module, employee_card_module, payroll_module, \
-           brigades_module
+           brigades_module, gpr_module
            
     import BudgetAnalyzer
     import assets_logo as _assets_logo
@@ -148,7 +149,8 @@ def perform_heavy_imports():
     import meals_reports as meals_reports_module
     import objects
     import settings_manager as Settings
-    import timesheet_module 
+    import timesheet_module
+    import gpr_module as gpr_module
     import analytics_module
     import employees as employees_module
     import timesheet_compare
@@ -1031,6 +1033,17 @@ class MainApp(tk.Tk):
         self._menubar.add_cascade(label="Объектный табель", menu=m_ts)
         self._menu_timesheets = m_ts
 
+        m_gpr = tk.Menu(self._menubar, tearoff=0)
+        m_gpr.add_command(
+            label="ГПР (Диаграмма Ганта)",
+            command=lambda: self._show_page(
+                "gpr",
+                lambda p: gpr_module.create_gpr_page(p, self),
+            ),
+        )
+        self._menubar.add_cascade(label="Планирование (ГПР)", menu=m_gpr)
+        self._menu_gpr = m_gpr
+
         # === Автотранспорт ===
         m_transport = tk.Menu(self._menubar, tearoff=0)
         m_transport.add_command(label="Создать заявку", command=lambda: self._show_page("transport", lambda p: SpecialOrders.create_page(p, self)))
@@ -1315,6 +1328,7 @@ if __name__ == "__main__":
                 objects,
                 Settings,
                 timesheet_module,
+                gpr_module,
                 analytics_module,
                 employees_module,
                 timesheet_compare,
