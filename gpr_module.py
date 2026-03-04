@@ -1,5 +1,3 @@
-```python
-# gpr_module.py
 from __future__ import annotations
 
 import sys
