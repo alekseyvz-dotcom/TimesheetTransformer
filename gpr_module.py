@@ -123,9 +123,13 @@ class GprService:
             conn = _conn()
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT id, COALESCE(short_name,'') AS short_name,
-                           address, COALESCE(status,'') AS status
-                    FROM public.objects ORDER BY address
+                    SELECT id,
+                           COALESCE(short_name,'') AS short_name,
+                           address,
+                           COALESCE(excel_id,'') AS excel_id,
+                           COALESCE(status,'') AS status
+                    FROM public.objects
+                    ORDER BY address, short_name
                 """)
                 return [dict(r) for r in cur.fetchall()]
         finally:
@@ -900,9 +904,21 @@ class GprPage(tk.Frame):
 
         vals = []
         for o in self.objects:
-            sn = o.get("short_name") or ""
-            lbl = f"{sn} — {o['address']}" if sn else o["address"]
+            sn = (o.get("short_name") or "").strip()
+            addr = (o.get("address") or "").strip()
+            eid = (o.get("excel_id") or "").strip()
+            
+            # Формируем уникальную метку
+            parts = []
+            if sn:
+                parts.append(sn)
+            parts.append(addr)
+            if eid:
+                parts.append(f"[{eid}]")
+            
+            lbl = " — ".join(parts)
             vals.append(lbl)
+        
         self.cmb_obj.set_values(vals)
 
         wt_names = ["Все"] + [w["name"] for w in self.work_types]
