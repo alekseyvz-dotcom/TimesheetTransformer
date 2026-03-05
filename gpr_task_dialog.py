@@ -244,7 +244,17 @@ class TaskEditDialogPro(tk.Toplevel):
         tk.Label(grp1, text="Вид работ *:", bg=C["panel"],
                  font=("Segoe UI", 9)).grid(row=r, column=0, sticky="e", padx=(0, 8), pady=4)
         self.ent_name = ttk.Entry(grp1, width=48, font=("Segoe UI", 9))
-        self.ent_name.grid(row=r, column=1, sticky="ew", padyuom_frame, state="readonly", width=20,
+        self.ent_name.grid(row=r, column=1, sticky="ew", pady=4)
+        r += 1
+
+        # Ед. изм. + Объём (в одной строке)
+        tk.Label(grp1, text="Ед. изм.:", bg=C["panel"],
+                 font=("Segoe UI", 9)).grid(row=r, column=0, sticky="e", padx=(0, 8), pady=4)
+        uom_frame = tk.Frame(grp1, bg=C["panel"])
+        uom_frame.grid(row=r, column=1, sticky="w", pady=4)
+
+        uom_vals = ["—"] + [f"{u['code']} — {u['name']}" for u in self.uoms]
+        self.cmb_uom = ttk.Combobox(uom_frame, state="readonly", width=20,
                                      values=uom_vals, font=("Segoe UI", 9))
         self.cmb_uom.pack(side="left")
 
