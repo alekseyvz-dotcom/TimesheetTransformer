@@ -174,23 +174,34 @@ db_connection_pool = None
 # --- ГЛАВНЫЕ УТИЛИТЫ ПРИЛОЖЕНИЯ ---
 
 def initialize_db_pool():
-    """Создает пул соединений с БД. Вызывается один раз при старте приложения."""
     global db_connection_pool
-    if db_connection_pool: return
+    if db_connection_pool:
+        return
     try:
         provider = Settings.get_db_provider().strip().lower()
-        if provider != "postgres": raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
+        if provider != "postgres":
+            raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
         db_url = Settings.get_database_url().strip()
-        if not db_url: raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
+        if not db_url:
+            raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
+
+        logging.info(f">>> DB URL host: {urlparse(db_url).hostname}")
+        logging.info(f">>> DB URL port: {urlparse(db_url).port}")
+        logging.info(f">>> DB URL dbname: {urlparse(db_url).path}")
 
         url = urlparse(db_url)
         db_connection_pool = pool.SimpleConnectionPool(
             minconn=1, maxconn=10,
-            host=url.hostname or "localhost", port=url.port or 5432,
-            dbname=url.path.lstrip("/"), user=url.username, password=url.password,
-            sslmode=(parse_qs(url.query).get("sslmode", [Settings.get_db_sslmode()])[0] or "require"),
+            host=url.hostname or "localhost",
+            port=url.port or 5432,
+            dbname=url.path.lstrip("/"),
+            user=url.username,
+            password=url.password,
+            sslmode=(parse_qs(url.query).get("sslmode",
+                     [Settings.get_db_sslmode()])[0] or "require"),
+            connect_timeout=10,       # ← ТАЙМАУТ 10 секунд
         )
-        logging.info("Пул соединений с БД успешно инициализирован.")
+        logging.info(">>> Пул соединений с БД успешно создан")
     except Exception as e:
         logging.exception("Критическая ошибка: не удалось создать пул соединений с БД.")
         db_connection_pool = None
