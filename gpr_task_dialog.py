@@ -1,4 +1,3 @@
-# gpr_task_dialog.py — Профессиональный диалог добавления/редактирования работы ГПР
 from __future__ import annotations
 
 import logging
@@ -10,13 +9,78 @@ from tkinter import ttk, messagebox
 
 from psycopg2.extras import RealDictCursor
 
-from gpr_module import (
-    _conn, _release, _today, _fmt_date, _parse_date,
-    _fmt_qty, _safe_float,
-    C, STATUS_LABELS, STATUS_LIST, STATUS_COLORS,
-)
+# ═══════════════════════════════════════════════════════════════
+#  Собственный пул (устанавливается из main_app)
+# ═══════════════════════════════════════════════════════════════
+db_connection_pool = None
 
+def set_db_pool(pool):
+    global db_connection_pool
+    db_connection_pool = pool
 
+def _conn():
+    if not db_connection_pool:
+        raise RuntimeError("DB pool not set (gpr_task_dialog)")
+    return db_connection_pool.getconn()
+
+def _release(conn):
+    if db_connection_pool and conn:
+        db_connection_pool.putconn(conn)
+
+# ═══════════════════════════════════════════════════════════════
+#  Константы (копия из gpr_module, без импорта)
+# ═══════════════════════════════════════════════════════════════
+C = {
+    "bg":           "#f0f2f5",
+    "panel":        "#ffffff",
+    "accent":       "#1565c0",
+    "accent_light": "#e3f2fd",
+    "success":      "#2e7d32",
+    "warning":      "#ed6c02",
+    "error":        "#d32f2f",
+    "border":       "#dde1e7",
+    "text":         "#1a1a2e",
+    "text2":        "#555",
+    "text3":        "#999",
+    "btn_bg":       "#1565c0",
+    "btn_fg":       "#ffffff",
+}
+
+STATUS_COLORS = {
+    "planned":     ("#90caf9", "#1565c0", "Запланировано"),
+    "in_progress": ("#ffcc80", "#e65100", "В работе"),
+    "done":        ("#a5d6a7", "#1b5e20", "Выполнено"),
+    "paused":      ("#fff176", "#f9a825", "Приостановлено"),
+    "canceled":    ("#ef9a9a", "#b71c1c", "Отменено"),
+}
+
+STATUS_LIST = ["planned", "in_progress", "done", "paused", "canceled"]
+STATUS_LABELS = {k: v[2] for k, v in STATUS_COLORS.items()}
+
+def _parse_date(s: str) -> date:
+    return datetime.strptime(s.strip(), "%d.%m.%Y").date()
+
+def _fmt_date(d) -> str:
+    if isinstance(d, date):
+        return d.strftime("%d.%m.%Y")
+    return str(d or "")
+
+def _today() -> date:
+    return datetime.now().date()
+
+def _safe_float(v) -> Optional[float]:
+    if v is None:
+        return None
+    try:
+        return float(str(v).replace(",", "."))
+    except Exception:
+        return None
+
+def _fmt_qty(v) -> str:
+    f = _safe_float(v)
+    if f is None:
+        return ""
+    return f"{f:.3f}".rstrip("0").rstrip(".")
 # ═══════════════════════════════════════════════════════════════
 #  Сервис: работники
 # ═══════════════════════════════════════════════════════════════
