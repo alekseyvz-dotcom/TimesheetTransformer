@@ -538,21 +538,21 @@ class TemplateSelectDialog(simpledialog.Dialog):
 #  GANTT CANVAS (professional)
 # ═══════════════════════════════════════════════════════════════
 class GanttCanvas(tk.Frame):
+    """Гант, синхронизированный с Treeview по позициям строк."""
     MONTH_H = 20
     DAY_H = 22
     HEADER_H = MONTH_H + DAY_H
 
-    def __init__(self, master, *, day_px=20, row_h=26, on_yscroll=None):
+    def __init__(self, master, *, day_px=20, linked_tree=None):
         super().__init__(master, bg=C["panel"])
         self.day_px = day_px
-        self.row_h = row_h
-        self._on_yscroll_cb = on_yscroll  # callback для синхронизации
+        self._tree = linked_tree  # ссылка на Treeview
 
-        self.hdr = tk.Canvas(self, height=self.HEADER_H, bg="#e8eaed", highlightthickness=0)
+        self.hdr = tk.Canvas(self, height=self.HEADER_H, bg="#e8eaed",
+                             highlightthickness=0)
         self.body = tk.Canvas(self, bg="#ffffff", highlightthickness=0)
         self.hsb = ttk.Scrollbar(self, orient="horizontal", command=self._xview)
 
-        # УБИРАЕМ собственный vsb — скролл будет внешний
         self.hdr.grid(row=0, column=0, sticky="ew")
         self.body.grid(row=1, column=0, sticky="nsew")
         self.hsb.grid(row=2, column=0, sticky="ew")
@@ -565,62 +565,89 @@ class GanttCanvas(tk.Frame):
         self._rows: List[Dict[str, Any]] = []
         self._facts: Dict[int, float] = {}
 
-        self.body.bind("<Configure>", lambda e: self.redraw())
+        self.body.bind("<Configure>", lambda e: self.after_idle(self.redraw))
         self.body.bind("<MouseWheel>", self._wheel)
         self.body.bind("<Shift-MouseWheel>", self._hwheel)
 
-    # public
+    def set_tree(self, tree):
+        self._tree = tree
+
     def set_range(self, d0, d1):
-        self._range = (d0, d1); self.redraw()
+        self._range = (d0, d1)
+        self.redraw()
 
     def set_data(self, rows, facts=None):
-        self._rows = rows or []; self._facts = facts or {}; self.redraw()
+        self._rows = rows or []
+        self._facts = facts or {}
+        self.after(50, self.redraw)  # даём Treeview время отрисоваться
 
-    def yview(self, *args):
-        """Вызывается внешним scrollbar'ом."""
-        self.body.yview(*args)
-
-    def yview_moveto(self, fraction):
-        self.body.yview_moveto(fraction)
-
-    def _report_yscroll(self, first, last):
-        """Когда body прокручивается — уведомляем callback."""
-        if self._on_yscroll_cb:
-            self._on_yscroll_cb(first, last)
-
-    # scroll
     def _xview(self, *a):
         self.body.xview(*a)
 
     def _on_xscroll(self, f0, f1):
-        self.hsb.set(f0, f1); self.hdr.xview_moveto(f0)
+        self.hsb.set(f0, f1)
+        self.hdr.xview_moveto(f0)
 
     def _wheel(self, e):
-        d = -1*(e.delta//120) if e.delta else 0
-        self.body.yview_scroll(d, "units")
+        """Колёсико на Ганте → скроллим Treeview (он главный)."""
+        if self._tree:
+            d = -1 * (e.delta // 120) if e.delta else 0
+            self._tree.yview_scroll(d, "units")
+            self.after_idle(self.redraw)
         return "break"
 
     def _hwheel(self, e):
-        d = -1*(e.delta//120) if e.delta else 0
+        d = -1 * (e.delta // 120) if e.delta else 0
         self.body.xview_scroll(d, "units")
         return "break"
 
-    # draw — метод redraw() остаётся БЕЗ ИЗМЕНЕНИЙ (полностью как у вас)
+    def _get_tree_row_positions(self) -> List[Tuple[int, int]]:
+        """
+        Возвращает список (y_top, y_bottom) для каждой видимой строки Treeview,
+        в координатах Canvas (пиксели от верха body).
+        """
+        if not self._tree:
+            return []
+
+        positions = []
+        items = self._tree.get_children()
+        tree_top = self._tree.winfo_rooty()
+        canvas_top = self.body.winfo_rooty()
+        offset = tree_top - canvas_top
+
+        for iid in items:
+            try:
+                bbox = self._tree.bbox(iid)
+                if bbox:
+                    # bbox = (x, y, width, height) относительно Treeview
+                    y_in_tree = bbox[1]
+                    h = bbox[3]
+                    y_top = y_in_tree + offset
+                    y_bot = y_top + h
+                    positions.append((y_top, y_bot))
+                else:
+                    positions.append(None)  # строка не видна
+            except Exception:
+                positions.append(None)
+
+        return positions
+
     def redraw(self):
         d0, d1 = self._range
-        if d1 < d0: return
+        if d1 < d0:
+            return
         days = (d1 - d0).days + 1
         tw = max(1, days * self.day_px)
-        th = max(1, len(self._rows) * self.row_h)
+        body_h = self.body.winfo_height()
+        if body_h < 10:
+            body_h = 600
 
-        self.hdr.delete("all"); self.body.delete("all")
+        self.hdr.delete("all")
+        self.body.delete("all")
         self.hdr.configure(scrollregion=(0, 0, tw, self.HEADER_H))
-        self.body.configure(scrollregion=(0, 0, tw, th))
+        self.body.configure(scrollregion=(0, 0, tw, body_h))
 
-        # Подключаем yscroll callback ПОСЛЕ установки scrollregion
-        self.body.configure(yscrollcommand=self._report_yscroll)
-
-        # ── month row ──
+        # ── Заголовок: месяцы ──
         cur = date(d0.year, d0.month, 1)
         while cur <= d1:
             mr = calendar.monthrange(cur.year, cur.month)[1]
@@ -630,81 +657,103 @@ class GanttCanvas(tk.Frame):
             x1 = ((me - d0).days + 1) * self.day_px
             self.hdr.create_rectangle(x0, 0, x1, self.MONTH_H,
                                       fill="#d6dbe0", outline="#bbb")
-            lbl = f"{cur.strftime('%b %Y')}"
             if (x1 - x0) > 40:
-                self.hdr.create_text((x0+x1)/2, self.MONTH_H/2,
-                                     text=lbl, font=("Segoe UI", 8, "bold"), fill="#333")
+                self.hdr.create_text((x0 + x1) / 2, self.MONTH_H / 2,
+                                     text=cur.strftime('%b %Y'),
+                                     font=("Segoe UI", 8, "bold"), fill="#333")
             if cur.month == 12:
-                cur = date(cur.year+1, 1, 1)
+                cur = date(cur.year + 1, 1, 1)
             else:
-                cur = date(cur.year, cur.month+1, 1)
+                cur = date(cur.year, cur.month + 1, 1)
 
-        # ── day row ──
+        # ── Заголовок: дни ──
         for i in range(days):
-            x0 = i * self.day_px; x1 = x0 + self.day_px
+            x0 = i * self.day_px
+            x1 = x0 + self.day_px
             d = d0 + timedelta(days=i)
-            wd = d.weekday()
-            fill = "#ffecec" if wd >= 5 else "#f3f4f6"
+            fill = "#ffecec" if d.weekday() >= 5 else "#f3f4f6"
             self.hdr.create_rectangle(x0, self.MONTH_H, x1, self.HEADER_H,
                                       fill=fill, outline="#d0d0d0")
             if self.day_px >= 14:
-                self.hdr.create_text((x0+x1)/2, self.MONTH_H + self.DAY_H/2,
-                                     text=str(d.day), font=("Segoe UI", 7), fill="#555")
+                self.hdr.create_text((x0 + x1) / 2, self.MONTH_H + self.DAY_H / 2,
+                                     text=str(d.day), font=("Segoe UI", 7),
+                                     fill="#555")
 
-        # ── today line ──
+        # ── Линия «сегодня» ──
         td = _today()
         if d0 <= td <= d1:
             tx = (td - d0).days * self.day_px + self.day_px // 2
-            self.hdr.create_line(tx, 0, tx, self.HEADER_H, fill=C["error"], width=2)
-            self.body.create_line(tx, 0, tx, th, fill=C["error"], width=1, dash=(4, 2))
+            self.hdr.create_line(tx, 0, tx, self.HEADER_H,
+                                 fill=C["error"], width=2)
+            self.body.create_line(tx, 0, tx, body_h,
+                                  fill=C["error"], width=1, dash=(4, 2))
 
-        # ── rows ──
-        for r, t in enumerate(self._rows):
-            y0 = r * self.row_h; y1 = y0 + self.row_h
-            bg = "#ffffff" if r % 2 == 0 else "#f8f9fa"
+        # ── Получаем позиции строк из Treeview ──
+        positions = self._get_tree_row_positions()
+
+        # ── Рисуем бары по реальным позициям ──
+        for row_idx, t in enumerate(self._rows):
+            if row_idx >= len(positions) or positions[row_idx] is None:
+                continue
+
+            y0, y1 = positions[row_idx]
+
+            # Зебра
+            bg = "#ffffff" if row_idx % 2 == 0 else "#f8f9fa"
             self.body.create_rectangle(0, y0, tw, y1, fill=bg, outline="")
 
-            ts, tf = t.get("plan_start"), t.get("plan_finish")
-            if not isinstance(ts, date) or not isinstance(tf, date): continue
-            if tf < d0 or ts > d1: continue
-            s2 = max(ts, d0); f2 = min(tf, d1)
+            ts = t.get("plan_start")
+            tf = t.get("plan_finish")
+            if not isinstance(ts, date) or not isinstance(tf, date):
+                continue
+            if tf < d0 or ts > d1:
+                continue
+
+            s2 = max(ts, d0)
+            f2 = min(tf, d1)
             bx0 = (s2 - d0).days * self.day_px
             bx1 = ((f2 - d0).days + 1) * self.day_px
 
             st = (t.get("status") or "planned").strip()
             col, _, _ = STATUS_COLORS.get(st, ("#90caf9", "#555", ""))
 
-            by0 = y0 + 5; by1 = y1 - 5
-            self.body.create_rectangle(bx0+1, by0, bx1-1, by1,
+            # Бар
+            by0 = y0 + 4
+            by1 = y1 - 4
+            self.body.create_rectangle(bx0 + 1, by0, bx1 - 1, by1,
                                        fill=col, outline="#5f6368")
 
+            # Факт (зелёная полоска)
             tid = t.get("id")
             pq = _safe_float(t.get("plan_qty"))
             fq = self._facts.get(tid, 0) if tid else 0
             if pq and pq > 0 and fq > 0:
                 pct = min(1.0, fq / pq)
                 fw = max(2, int((bx1 - bx0 - 2) * pct))
-                self.body.create_rectangle(bx0+1, by0, bx0+1+fw, by1,
+                self.body.create_rectangle(bx0 + 1, by0, bx0 + 1 + fw, by1,
                                            fill="#388e3c", outline="")
 
+            # Веха
             if t.get("is_milestone"):
-                cx = bx0 + 6; cy = (y0+y1)/2
+                cx = bx0 + 6
+                cy = (y0 + y1) / 2
                 self.body.create_polygon(
-                    cx, cy, cx+7, cy-5, cx+14, cy, cx+7, cy+5,
+                    cx, cy, cx + 7, cy - 5, cx + 14, cy, cx + 7, cy + 5,
                     fill="#1a73e8", outline="")
 
+            # Название на баре
             bar_w = bx1 - bx0
             if bar_w > 60:
                 nm = (t.get("name") or "")[:30]
-                self.body.create_text(bx0+4, (y0+y1)/2, text=nm,
+                self.body.create_text(bx0 + 4, (y0 + y1) / 2, text=nm,
                                       anchor="w", font=("Segoe UI", 7),
                                       fill="#333")
 
+        # Сетка
         step = 7 if self.day_px >= 10 else 14
         for i in range(0, days, step):
             x = i * self.day_px
-            self.body.create_line(x, 0, x, th, fill="#eeeeee")
-
+            self.body.create_line(x, 0, x, body_h, fill="#eeeeee")
 # ═══════════════════════════════════════════════════════════════
 #  MAIN PAGE
 # ═══════════════════════════════════════════════════════════════
@@ -837,16 +886,17 @@ class GprPage(tk.Frame):
             tk.Label(f, text=label, bg=C["bg"], font=("Segoe UI", 7),
                      fg=C["text2"]).pack(side="left")
 
-        # ── split: tree + gantt (синхронизированный скролл) ──
+        # ── split: tree + gantt ──
         pw = tk.PanedWindow(self, orient="horizontal", sashrelief="raised",
                             bg=C["bg"])
         pw.pack(fill="both", expand=True, padx=10, pady=(4, 10))
 
         left = tk.Frame(pw, bg=C["panel"])
-        right_frame = tk.Frame(pw, bg=C["panel"])
-        pw.add(left, minsize=480); pw.add(right_frame, minsize=400)
+        right = tk.Frame(pw, bg=C["panel"])
+        pw.add(left, minsize=480)
+        pw.add(right, minsize=400)
 
-        # Treeview (БЕЗ собственного scrollbar)
+        # Treeview
         cols = ("type", "name", "start", "finish", "uom", "qty", "status")
         self.tree = ttk.Treeview(left, columns=cols, show="headings",
                                  selectmode="browse")
@@ -856,43 +906,23 @@ class GprPage(tk.Frame):
                  "status": ("Статус", 100)}
         for c, (t, w) in heads.items():
             self.tree.heading(c, text=t)
-            anc = "center" if c in ("start", "finish", "uom", "status") else ("e" if c == "qty" else "w")
+            anc = "center" if c in ("start", "finish", "uom", "status") else (
+                "e" if c == "qty" else "w")
             self.tree.column(c, width=w, anchor=anc)
 
+        vsb = ttk.Scrollbar(left, orient="vertical", command=self._on_tree_scroll)
+        self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
 
         self.tree.bind("<Double-1>", lambda e: self._edit_selected())
         self.tree.bind("<Return>", lambda e: self._edit_selected())
-
-        # Gantt canvas + общий vsb справа от всего PanedWindow
-        gantt_and_vsb = tk.Frame(right_frame, bg=C["panel"])
-        gantt_and_vsb.pack(fill="both", expand=True)
-
-        self.gantt = GanttCanvas(gantt_and_vsb, day_px=20, row_h=26,
-                                 on_yscroll=self._on_gantt_yscroll)
-        self.gantt.pack(side="left", fill="both", expand=True)
-
-        # Один общий вертикальный scrollbar
-        self.shared_vsb = ttk.Scrollbar(gantt_and_vsb, orient="vertical",
-                                         command=self._shared_yview)
-        self.shared_vsb.pack(side="right", fill="y")
-
-        # Подключаем Treeview yscroll → синхронизация
-        self.tree.configure(yscrollcommand=self._on_tree_yscroll)
-
-        # Привязка колёсика на Treeview
         self.tree.bind("<MouseWheel>", self._on_tree_wheel)
 
-        # ── bottom info ──
-        bot = tk.Frame(self, bg=C["accent_light"], pady=4)
-        bot.pack(fill="x", padx=10, pady=(0, 6))
-        self.lbl_bottom = tk.Label(bot, text="Выберите объект и нажмите «Открыть»",
-                                   font=("Segoe UI", 9, "bold"), fg=C["accent"],
-                                   bg=C["accent_light"])
-        self.lbl_bottom.pack(side="left", padx=10)
-
-        self._update_range_label()
-
+        # Gantt (привязан к Treeview)
+        self.gantt = GanttCanvas(right, day_px=20, linked_tree=self.tree)
+        self.gantt.pack(fill="both", expand=True)
+        
     # ── UI helpers ──
     def _accent_btn(self, parent, text, cmd):
         b = tk.Button(parent, text=text, font=("Segoe UI", 9, "bold"),
@@ -907,28 +937,17 @@ class GprPage(tk.Frame):
     def _tb_btn(self, parent, text, cmd):
         ttk.Button(parent, text=text, command=cmd).pack(side="left", padx=2)
 
-    # ── Синхронизация вертикального скролла ──
-
-    def _shared_yview(self, *args):
-        """Общий scrollbar двигает и tree, и gantt."""
+    
+    def _on_tree_scroll(self, *args):
+        """Scrollbar двигает Treeview, потом перерисовываем Гант."""
         self.tree.yview(*args)
-        self.gantt.yview(*args)
-
-    def _on_tree_yscroll(self, first, last):
-        """Tree прокрутился — двигаем gantt и scrollbar."""
-        self.shared_vsb.set(first, last)
-        self.gantt.yview_moveto(float(first))
-
-    def _on_gantt_yscroll(self, first, last):
-        """Gantt прокрутился — двигаем tree и scrollbar."""
-        self.shared_vsb.set(first, last)
-        self.tree.yview_moveto(float(first))
+        self.gantt.after_idle(self.gantt.redraw)
 
     def _on_tree_wheel(self, event):
-        """Колёсико мыши на Treeview — скроллим оба."""
-        delta = -1 * (event.delta // 120) if event.delta else 0
-        self.tree.yview_scroll(delta, "units")
-        self.gantt.body.yview_scroll(delta, "units")
+        """Колёсико на Treeview → скролл + перерисовка Ганта."""
+        d = -1 * (event.delta // 120) if event.delta else 0
+        self.tree.yview_scroll(d, "units")
+        self.gantt.after_idle(self.gantt.redraw)
         return "break"
 
     # ══════════════════════════════════════════════════════════
