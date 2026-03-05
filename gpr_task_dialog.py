@@ -81,6 +81,42 @@ def _fmt_qty(v) -> str:
     if f is None:
         return ""
     return f"{f:.3f}".rstrip("0").rstrip(".")
+
+# Загрузка всех активных сотрудников для SelectEmployeesDialog
+def _load_all_employees() -> List[Tuple[str, str, str, str]]:
+    """Возвращает [(fio, tbn, position, department), ...]."""
+    conn = None
+    try:
+        conn = _conn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT e.fio,
+                       COALESCE(e.tbn, '') AS tbn,
+                       COALESCE(e.position, '') AS position,
+                       COALESCE(d.name, '') AS department
+                FROM public.employees e
+                LEFT JOIN public.departments d ON d.id = e.department_id
+                WHERE e.is_fired = false
+                ORDER BY e.fio
+            """)
+            return cur.fetchall()
+    finally:
+        _release(conn)
+
+def _find_employee_id(fio: str, tbn: str) -> Optional[int]:
+    """По ФИО и ТБН находим id сотрудника."""
+    conn = None
+    try:
+        conn = _conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM public.employees WHERE fio=%s AND COALESCE(tbn,'')=%s LIMIT 1",
+                (fio, tbn))
+            row = cur.fetchone()
+            return row[0] if row else None
+    finally:
+        _release(conn)
+        
 # ═══════════════════════════════════════════════════════════════
 #  Сервис: работники
 # ═══════════════════════════════════════════════════════════════
@@ -188,6 +224,245 @@ TASK_ROLES = {
 TASK_ROLE_LIST = list(TASK_ROLES.keys())
 TASK_ROLE_LABELS = list(TASK_ROLES.values())
 
+class SelectEmployeesDialog(tk.Toplevel):
+
+    def __init__(self, parent, employees, current_dep: str):
+        super().__init__(parent)
+        self.parent = parent
+        self.employees = employees
+        self.current_dep = (current_dep or "").strip()
+        self.result = None
+
+        self.title("Выбор сотрудников")
+        self.resizable(True, True)
+        self.grab_set()
+
+        self.var_only_dep = tk.BooleanVar(
+            value=bool(self.current_dep and self.current_dep != "Все")
+        )
+        self.var_search = tk.StringVar()
+
+        main = tk.Frame(self, padx=10, pady=10)
+        main.pack(fill="both", expand=True)
+
+        # --- Верхняя панель ---
+        top = tk.Frame(main)
+        top.pack(fill="x")
+
+        tk.Label(
+            top,
+            text=f"Подразделение: {self.current_dep or 'Все'}",
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        ttk.Checkbutton(
+            top,
+            text="Показывать только сотрудников этого подразделения",
+            variable=self.var_only_dep,
+            command=self._refilter,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 4))
+
+        tk.Label(top, text="Поиск (ФИО / таб.№):").grid(
+            row=2, column=0, sticky="w", pady=(4, 2)
+        )
+        ent_search = ttk.Entry(top, textvariable=self.var_search, width=40)
+        ent_search.grid(row=2, column=1, sticky="w", pady=(4, 2))
+        ent_search.bind("<KeyRelease>", lambda e: self._refilter())
+
+        tbl_frame = tk.Frame(main)
+        tbl_frame.pack(fill="both", expand=True, pady=(8, 4))
+
+        columns = ("fio", "tbn", "pos", "dep")
+        # первая псевдо-колонка "#" под чекбокс
+        self.tree = ttk.Treeview(
+            tbl_frame,
+            columns=columns,
+            show="headings",
+            selectmode="none",  # выбор только через чекбокс
+        )
+
+        self.tree.heading("fio", text="ФИО")
+        self.tree.heading("tbn", text="Таб.№")
+        self.tree.heading("pos", text="Должность")
+        self.tree.heading("dep", text="Подразделение")
+
+        self.tree.column("fio", width=260, anchor="w")
+        self.tree.column("tbn", width=80, anchor="center", stretch=False)
+        self.tree.column("pos", width=180, anchor="w")
+        self.tree.column("dep", width=140, anchor="w")
+
+        bold_font = ("Segoe UI", 9, "bold")
+        normal_font = ("Segoe UI", 9)
+        self.tree.tag_configure("checked", font=bold_font)
+        self.tree.tag_configure("unchecked", font=normal_font)
+
+        vsb = ttk.Scrollbar(tbl_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        self.tree.bind("<Button-1>", self._on_tree_click)
+
+        self._filtered_indices = []
+
+        self._selected_indices = set()
+
+        self._refilter()
+        self._update_selected_count()
+
+        # --- Кнопки управления выбором ---
+        sel_frame = tk.Frame(main)
+        sel_frame.pack(fill="x")
+        ttk.Button(sel_frame, text="Отметить всех", command=self._select_all).pack(
+            side="left", padx=(0, 4)
+        )
+        ttk.Button(sel_frame, text="Снять все", command=self._clear_all).pack(
+            side="left", padx=4
+        )
+
+        self.lbl_selected = tk.Label(
+            sel_frame,
+            text="Выбрано: 0",
+            bg=sel_frame["bg"],
+        )
+        self.lbl_selected.pack(side="right")
+
+        # --- Низ: OK / Отмена ---
+        btns = tk.Frame(main)
+        btns.pack(fill="x", pady=(8, 0))
+        ttk.Button(btns, text="OK", command=self._on_ok).pack(
+            side="right", padx=(4, 0)
+        )
+        ttk.Button(btns, text="Отмена", command=self._on_cancel).pack(
+            side="right"
+        )
+
+        main.rowconfigure(2, weight=1)
+        main.columnconfigure(0, weight=1)
+
+        # Центрируем
+        try:
+            self.update_idletasks()
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            sw = self.winfo_width()
+            sh = self.winfo_height()
+            self.geometry(f"+{px + (pw - sw)//2}+{py + (ph - sh)//2}")
+        except Exception:
+            pass
+
+    def _update_selected_count(self):
+        """Обновляет текст 'Выбрано: N'."""
+        try:
+            self.lbl_selected.config(text=f"Выбрано: {len(self._selected_indices)}")
+        except Exception:
+            pass
+
+    def _refilter(self):
+        """Перестроить список в treeview по фильтрам."""
+        search = self.var_search.get().strip().lower()
+        only_dep = self.var_only_dep.get()
+        dep_sel = self.current_dep
+
+        self.tree.delete(*self.tree.get_children())
+        self._filtered_indices.clear()
+
+        for idx, (fio, tbn, pos, dep) in enumerate(self.employees):
+            if only_dep and dep_sel and dep_sel != "Все":
+                if (dep or "").strip() != dep_sel:
+                    continue
+
+            if search:
+                if search not in fio.lower() and search not in (tbn or "").lower():
+                    continue
+
+            # Отобразим строку
+            # "чекбокс" будем рисовать через префикс [x]/[ ] у ФИО либо через tag
+            checked = (idx in self._selected_indices)
+            display_fio = f"[{'x' if checked else ' '}] {fio}"
+
+            iid = f"emp_{idx}"
+            self.tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(display_fio, tbn, pos, dep),
+                tags=("checked" if checked else "unchecked",),
+            )
+            self._filtered_indices.append(idx)
+
+    def _toggle_index(self, idx: int):
+        """Переключает выбранность сотрудника по глобальному индексу employees."""
+        if idx in self._selected_indices:
+            self._selected_indices.remove(idx)
+        else:
+            self._selected_indices.add(idx)
+        self._update_selected_count()
+
+    def _on_tree_click(self, event):
+        """
+        ЛКМ по строке — переключаем чекбокс.
+        """
+        region = self.tree.identify("region", event.x, event.y)
+        if region != "cell":
+            return
+
+        row_id = self.tree.identify_row(event.y)
+        if not row_id:
+            return
+
+        # Ищем индекс в _filtered_indices
+        try:
+            # i — позиция в текущем отфильтрованном списке
+            i = self.tree.index(row_id)
+            emp_index = self._filtered_indices[i]
+        except Exception:
+            return
+
+        self._toggle_index(emp_index)
+        # Обновим отображение только этой строки
+        fio, tbn, pos, dep = self.employees[emp_index]
+        checked = (emp_index in self._selected_indices)
+        display_fio = f"[{'x' if checked else ' '}] {fio}"
+        self.tree.item(
+            row_id,
+            values=(display_fio, tbn, pos, dep),
+            tags=("checked" if checked else "unchecked",),
+        )
+
+    def _select_all(self):
+        """Отметить всех в текущей выборке."""
+        for emp_index in self._filtered_indices:
+            self._selected_indices.add(emp_index)
+        self._refilter()
+        self._update_selected_count()
+
+    def _clear_all(self):
+        """Снять все отметки (по всему списку)."""
+        self._selected_indices.clear()
+        self._refilter()
+        self._update_selected_count()
+
+    def _on_ok(self):
+        if not self._selected_indices:
+            if not messagebox.askyesno(
+                "Выбор сотрудников",
+                "Не выбрано ни одного сотрудника.\nЗакрыть окно?",
+                parent=self,
+            ):
+                return
+            self.result = []
+        else:
+            chosen = [self.employees[i] for i in sorted(self._selected_indices)]
+            self.result = chosen
+        self.destroy()
+
+    def _on_cancel(self):
+        self.result = None
+        self.destroy()
 
 # ═══════════════════════════════════════════════════════════════
 #  Профессиональный диалог работы ГПР
@@ -395,101 +670,114 @@ class TaskEditDialogPro(tk.Toplevel):
                          variable=self.var_milestone).grid(
             row=r, column=0, columnspan=2, sticky="w", pady=(4, 2))
 
-    # ── Вкладка: Назначения работников ──
+
     def _build_assign_tab(self, parent):
-        # Верхняя часть: поиск
-        search_frame = tk.LabelFrame(parent, text=" 🔍 Поиск работника ",
-                                      font=("Segoe UI", 9, "bold"),
-                                      bg=C["panel"], fg=C["accent"],
-                                      padx=10, pady=6)
-        search_frame.pack(fill="x", padx=12, pady=(10, 4))
+        # Кнопка добавления
+        bar = tk.Frame(parent, bg=C["panel"])
+        bar.pack(fill="x", padx=12, pady=(10, 4))
 
-        sf = tk.Frame(search_frame, bg=C["panel"])
-        sf.pack(fill="x")
+        tk.Button(bar, text="👷 Выбрать работников…",
+                  font=("Segoe UI", 9, "bold"),
+                  bg=C["btn_bg"], fg=C["btn_fg"],
+                  activebackground="#0d47a1", activeforeground="white",
+                  relief="flat", cursor="hand2", padx=12, pady=4,
+                  command=self._open_employee_selector).pack(side="left", padx=2)
 
-        tk.Label(sf, text="ФИО / ТБН / Должность:", bg=C["panel"],
+        ttk.Button(bar, text="🗑 Снять выбранного",
+                   command=self._remove_assignment).pack(side="left", padx=(12, 2))
+
+        self.lbl_assign_count = tk.Label(bar, text="Назначено: 0",
+                                          bg=C["panel"], font=("Segoe UI", 9),
+                                          fg=C["text2"])
+        self.lbl_assign_count.pack(side="right", padx=8)
+
+        # Роль по умолчанию
+        role_frame = tk.Frame(parent, bg=C["panel"])
+        role_frame.pack(fill="x", padx=12, pady=(0, 4))
+        tk.Label(role_frame, text="Роль для новых:", bg=C["panel"],
                  font=("Segoe UI", 9)).pack(side="left")
-        self.var_emp_search = tk.StringVar()
-        self.ent_emp_search = ttk.Entry(sf, textvariable=self.var_emp_search,
-                                         width=32, font=("Segoe UI", 9))
-        self.ent_emp_search.pack(side="left", padx=(6, 8))
-        self.ent_emp_search.bind("<Return>", lambda e: self._search_employees())
-
-        ttk.Button(sf, text="Найти", command=self._search_employees).pack(side="left", padx=2)
-
-        tk.Label(sf, text="  Роль:", bg=C["panel"],
-                 font=("Segoe UI", 9)).pack(side="left", padx=(12, 4))
-        self.cmb_role = ttk.Combobox(sf, state="readonly", width=14,
+        self.cmb_role = ttk.Combobox(role_frame, state="readonly", width=14,
                                       values=TASK_ROLE_LABELS,
                                       font=("Segoe UI", 9))
-        self.cmb_role.pack(side="left")
+        self.cmb_role.pack(side="left", padx=(6, 0))
         self.cmb_role.current(0)
 
-        ttk.Button(sf, text="➕ Назначить выбранного",
-                   command=self._assign_selected).pack(side="left", padx=(12, 0))
-
-        # Результаты поиска
-        src_frame = tk.Frame(search_frame, bg=C["panel"])
-        src_frame.pack(fill="x", pady=(6, 0))
-
-        cols_s = ("fio", "tbn", "position", "department")
-        self.emp_tree = ttk.Treeview(src_frame, columns=cols_s, show="headings",
-                                      selectmode="browse", height=5)
-        for c, t, w in [
-            ("fio",        "ФИО",         200),
-            ("tbn",        "ТБН",         80),
-            ("position",   "Должность",   160),
-            ("department", "Подразделение",160),
-        ]:
-            self.emp_tree.heading(c, text=t)
-            self.emp_tree.column(c, width=w, anchor="w")
-
-        vsb_e = ttk.Scrollbar(src_frame, orient="vertical", command=self.emp_tree.yview)
-        self.emp_tree.configure(yscrollcommand=vsb_e.set)
-        self.emp_tree.pack(side="left", fill="x", expand=True)
-        vsb_e.pack(side="right", fill="y")
-
-        self.emp_tree.bind("<Double-1>", lambda e: self._assign_selected())
-
-        # Нижняя часть: текущие назначения
-        assign_frame = tk.LabelFrame(parent, text=" 👷 Назначенные работники ",
+        # Таблица назначенных
+        assign_frame = tk.LabelFrame(parent, text=" Назначенные работники ",
                                       font=("Segoe UI", 9, "bold"),
                                       bg=C["panel"], fg=C["accent"],
                                       padx=10, pady=6)
         assign_frame.pack(fill="both", expand=True, padx=12, pady=(4, 8))
 
-        bar = tk.Frame(assign_frame, bg=C["panel"])
-        bar.pack(fill="x")
-        ttk.Button(bar, text="🗑 Снять назначение",
-                   command=self._remove_assignment).pack(side="left", padx=2)
-        self.lbl_assign_count = tk.Label(bar, text="Назначено: 0",
-                                          bg=C["panel"], font=("Segoe UI", 8),
-                                          fg=C["text2"])
-        self.lbl_assign_count.pack(side="right", padx=8)
-
         cols_a = ("fio", "tbn", "position", "role", "department")
         self.assign_tree = ttk.Treeview(assign_frame, columns=cols_a,
                                          show="headings", selectmode="browse",
-                                         height=6)
+                                         height=10)
         for c, t, w in [
-            ("fio",        "ФИО",          200),
+            ("fio",        "ФИО",          220),
             ("tbn",        "ТБН",          80),
-            ("position",   "Должность",    140),
-            ("role",       "Роль",         100),
-            ("department", "Подразделение", 140),
+            ("position",   "Должность",    160),
+            ("role",       "Роль",         110),
+            ("department", "Подразделение", 160),
         ]:
             self.assign_tree.heading(c, text=t)
             self.assign_tree.column(c, width=w, anchor="w")
 
-        vsb_a = ttk.Scrollbar(assign_frame, orient="vertical",
-                               command=self.assign_tree.yview)
-        self.assign_tree.configure(yscrollcommand=vsb_a.set)
+        vsb = ttk.Scrollbar(assign_frame, orient="vertical",
+                             command=self.assign_tree.yview)
+        self.assign_tree.configure(yscrollcommand=vsb.set)
         self.assign_tree.pack(side="left", fill="both", expand=True, pady=(4, 0))
-        vsb_a.pack(side="right", fill="y", pady=(4, 0))
+        vsb.pack(side="right", fill="y", pady=(4, 0))
 
-        # Подкраска ролей
         self.assign_tree.tag_configure("foreman", background="#e3f2fd")
         self.assign_tree.tag_configure("inspector", background="#fff3e0")
+
+    def _open_employee_selector(self):
+        """Открывает знакомый диалог выбора сотрудников."""
+        try:
+            employees = _load_all_employees()
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось загрузить сотрудников:\n{e}",
+                                 parent=self)
+            return
+
+        if not employees:
+            messagebox.showinfo("Сотрудники", "Список сотрудников пуст.", parent=self)
+            return
+
+        from gpr_task_dialog import SelectEmployeesDialog
+        dlg = SelectEmployeesDialog(self, employees, current_dep="Все")
+        self.wait_window(dlg)
+
+        if dlg.result is None:
+            return  # отмена
+
+        # Роль
+        ri = self.cmb_role.current()
+        role_code = TASK_ROLE_LIST[ri] if ri >= 0 else "executor"
+
+        for (fio, tbn, position, department) in dlg.result:
+            # Проверяем дубль
+            already = False
+            for a in self._assignments:
+                if a.get("fio") == fio and a.get("tbn", "") == tbn:
+                    already = True
+                    break
+            if already:
+                continue
+
+            emp_id = _find_employee_id(fio, tbn)
+            self._assignments.append({
+                "employee_id": emp_id,
+                "fio": fio,
+                "tbn": tbn,
+                "position": position,
+                "department": department,
+                "role_in_task": role_code,
+                "note": None,
+            })
+
+        self._render_assignments()
 
     # ══════════════════════════════════════════════════════
     #  FILL / INIT
