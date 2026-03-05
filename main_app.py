@@ -151,6 +151,7 @@ def perform_heavy_imports():
     import settings_manager as Settings
     import timesheet_module
     import gpr_module as gpr_module
+    import gpr_dictionaries
     import analytics_module
     import employees as employees_module
     import timesheet_compare
@@ -1039,6 +1040,13 @@ class MainApp(tk.Tk):
             command=lambda: self._show_page(
                 "gpr",
                 lambda p: gpr_module.create_gpr_page(p, self),
+            ),
+        )
+        m_gpr.add_command(
+            label="Справочники ГПР",
+            command=lambda: self._show_page(
+                "gpr_dicts",
+                lambda p: gpr_dictionaries.create_gpr_dicts_page(p, self),
             ),
         )
         self._menubar.add_cascade(label="Планирование (ГПР)", menu=m_gpr)
