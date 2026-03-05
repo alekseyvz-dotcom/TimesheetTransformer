@@ -901,26 +901,27 @@ class GprPage(tk.Frame):
             logging.exception("GPR refs error")
             messagebox.showerror("ГПР", f"Ошибка загрузки справочников:\n{e}", parent=self)
             return
-
+    
         vals = []
         for o in self.objects:
             sn = (o.get("short_name") or "").strip()
             addr = (o.get("address") or "").strip()
-            eid = (o.get("excel_id") or "").strip()
-            
-            # Формируем уникальную метку
-            parts = []
+            eid = str(o.get("excel_id") or "").strip()
+            db_id = str(o.get("id") or "")
+    
+            # ВСЕГДА показываем short_name + address + идентификатор
+            # Это гарантирует уникальность каждой строки
+            tag = f"[{eid}]" if eid else f"[id:{db_id}]"
+    
             if sn:
-                parts.append(sn)
-            parts.append(addr)
-            if eid:
-                parts.append(f"[{eid}]")
-            
-            lbl = " — ".join(parts)
+                lbl = f"{sn} — {addr} — {tag}"
+            else:
+                lbl = f"{addr} — {tag}"
+    
             vals.append(lbl)
-        
+    
         self.cmb_obj.set_values(vals)
-
+    
         wt_names = ["Все"] + [w["name"] for w in self.work_types]
         self.cmb_filt_wt.config(values=wt_names)
 
