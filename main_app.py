@@ -132,6 +132,8 @@ employee_card_module = None
 payroll_module = None
 brigades_module = None
 gpr_module = None
+gpr_task_dialog = None      
+gpr_dictionaries = None  
 
 def perform_heavy_imports():
     global BudgetAnalyzer, _assets_logo, _LOGO_BASE64, SpecialOrders, \
@@ -151,8 +153,8 @@ def perform_heavy_imports():
     import settings_manager as Settings
     import timesheet_module
     import gpr_module as gpr_module
-    import gpr_dictionaries
-    import gpr_task_dialog
+    import gpr_dictionaries as gpr_dictionaries
+    import gpr_task_dialog as gpr_task_dialog
     import analytics_module
     import employees as employees_module
     import timesheet_compare
