@@ -132,8 +132,8 @@ employee_card_module = None
 payroll_module = None
 brigades_module = None
 gpr_module = None
-gpr_task_dialog = None      
-gpr_dictionaries = None  
+gpr_task_dialog = None
+gpr_dictionaries = None
 
 def perform_heavy_imports():
     global BudgetAnalyzer, _assets_logo, _LOGO_BASE64, SpecialOrders, \
@@ -176,34 +176,23 @@ db_connection_pool = None
 # --- ГЛАВНЫЕ УТИЛИТЫ ПРИЛОЖЕНИЯ ---
 
 def initialize_db_pool():
+    """Создает пул соединений с БД. Вызывается один раз при старте приложения."""
     global db_connection_pool
-    if db_connection_pool:
-        return
+    if db_connection_pool: return
     try:
         provider = Settings.get_db_provider().strip().lower()
-        if provider != "postgres":
-            raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
+        if provider != "postgres": raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
         db_url = Settings.get_database_url().strip()
-        if not db_url:
-            raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
-
-        logging.info(f">>> DB URL host: {urlparse(db_url).hostname}")
-        logging.info(f">>> DB URL port: {urlparse(db_url).port}")
-        logging.info(f">>> DB URL dbname: {urlparse(db_url).path}")
+        if not db_url: raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
 
         url = urlparse(db_url)
         db_connection_pool = pool.SimpleConnectionPool(
             minconn=1, maxconn=10,
-            host=url.hostname or "localhost",
-            port=url.port or 5432,
-            dbname=url.path.lstrip("/"),
-            user=url.username,
-            password=url.password,
-            sslmode=(parse_qs(url.query).get("sslmode",
-                     [Settings.get_db_sslmode()])[0] or "require"),
-            connect_timeout=10,       # ← ТАЙМАУТ 10 секунд
+            host=url.hostname or "localhost", port=url.port or 5432,
+            dbname=url.path.lstrip("/"), user=url.username, password=url.password,
+            sslmode=(parse_qs(url.query).get("sslmode", [Settings.get_db_sslmode()])[0] or "require"),
         )
-        logging.info(">>> Пул соединений с БД успешно создан")
+        logging.info("Пул соединений с БД успешно инициализирован.")
     except Exception as e:
         logging.exception("Критическая ошибка: не удалось создать пул соединений с БД.")
         db_connection_pool = None
@@ -1332,27 +1321,18 @@ if __name__ == "__main__":
     
     def start_application():
         try:
-            logging.info(">>> ЭТАП 1: Начинаю импорт модулей...")
             splash.update_status("Загрузка модулей приложения...")
             perform_heavy_imports()
-            logging.info(">>> ЭТАП 2: Импорт модулей завершён")
-
+            
             splash.update_status("Проверка конфигурации...")
-            logging.info(">>> ЭТАП 3: ensure_config...")
             Settings.ensure_config()
-            logging.info(">>> ЭТАП 4: ensure_config OK")
 
             splash.update_status("Подключение к базе данных...")
-            logging.info(">>> ЭТАП 5: initialize_db_pool...")
             initialize_db_pool()
-            logging.info(">>> ЭТАП 6: Пул создан OK")
 
-            logging.info(">>> ЭТАП 7: sync_permissions...")
             sync_permissions_from_menu_spec()
-            logging.info(">>> ЭТАП 8: sync OK")
 
             splash.update_status("Передача настроек в модули...")
-            logging.info(">>> ЭТАП 9: set_db_pool для модулей...")
             modules_to_init = [
                 meals_module,
                 meals_reports_module,
@@ -1361,8 +1341,8 @@ if __name__ == "__main__":
                 Settings,
                 timesheet_module,
                 gpr_module,
-                gpr_task_dialog,
-                gpr_dictionaries,
+                 gpr_task_dialog,   
+                gpr_dictionaries, 
                 analytics_module,
                 employees_module,
                 timesheet_compare,
@@ -1373,27 +1353,23 @@ if __name__ == "__main__":
                 brigades_module,
             ]
             for module in modules_to_init:
-                mod_name = getattr(module, '__name__', '???')
-                logging.info(f"    set_db_pool -> {mod_name}")
                 if module and hasattr(module, "set_db_pool"):
                     module.set_db_pool(db_connection_pool)
-            logging.info(">>> ЭТАП 10: Все модули получили пул")
 
             splash.destroy()
             root.destroy()
-
-            logging.info(">>> ЭТАП 11: Запуск MainApp...")
+            
+            logging.debug("Инициализация успешна. Запускаем главный цикл приложения.")
             app = MainApp()
-            logging.info(">>> ЭТАП 12: MainApp создан, запуск mainloop")
             app.protocol("WM_DELETE_WINDOW", app.destroy)
             app.mainloop()
 
         except Exception as e:
-            logging.critical(f">>> КРИТИЧЕСКАЯ ОШИБКА: {e}", exc_info=True)
+            logging.critical("Приложение не может быть запущено из-за ошибки инициализации.", exc_info=True)
             splash.destroy()
-            messagebox.showerror(
-                "Критическая ошибка",
-                f"Не удалось инициализировать приложение.\n\nОшибка: {e}\n\nПроверьте настройки и доступность БД."
-            )
+            messagebox.showerror("Критическая ошибка", f"Не удалось инициализировать приложение.\n\nОшибка: {e}\n\nПроверьте настройки и доступность БД.")
             root.destroy()
             sys.exit(1)
+
+    root.after(100, start_application)
+    root.mainloop()
