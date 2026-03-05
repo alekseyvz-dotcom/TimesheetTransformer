@@ -139,7 +139,7 @@ def perform_heavy_imports():
            analytics_module, timesheet_transformer, employees_module, \
            timesheet_compare, meals_employees_module, lodging_module, \
            meals_reports_module, employee_card_module, payroll_module, \
-           brigades_module, gpr_module
+           brigades_module, gpr_module, gpr_task_dialog, gpr_dictionaries
            
     import BudgetAnalyzer
     import assets_logo as _assets_logo
@@ -1339,6 +1339,8 @@ if __name__ == "__main__":
                 Settings,
                 timesheet_module,
                 gpr_module,
+                 gpr_task_dialog,   
+                gpr_dictionaries, 
                 analytics_module,
                 employees_module,
                 timesheet_compare,
