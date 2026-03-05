@@ -35,7 +35,8 @@ a = Analysis(
         ('analytics_module.py', '.'),
         ('payroll_module.py', '.'),
         ('brigades_module.py', '.'),
-        ('gpr_module.py', '.'),  # <-- ДОБАВИТЬ
+        ('gpr_module.py', '.'),
+        ('gpr_dictionaries.py', '.'),
     ] + pandas_datas + psycopg2_datas,
     hiddenimports=[
         # ВАЖНО: в hiddenimports указывать ИМЕНА МОДУЛЕЙ, без ".py"
@@ -57,7 +58,8 @@ a = Analysis(
         'employee_card',
         'payroll_module',
         'brigades_module',
-        'gpr_module',           # <-- ДОБАВИТЬ
+        'gpr_module',
+        'gpr_dictionaries', 
 
         'psycopg2',
         'psycopg2.extras',
