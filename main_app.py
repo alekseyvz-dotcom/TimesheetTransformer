@@ -152,6 +152,7 @@ def perform_heavy_imports():
     import timesheet_module
     import gpr_module as gpr_module
     import gpr_dictionaries
+    import gpr_task_dialog
     import analytics_module
     import employees as employees_module
     import timesheet_compare
