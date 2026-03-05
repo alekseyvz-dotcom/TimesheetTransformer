@@ -1,8 +1,8 @@
-# gpr_dictionaries.py — Справочники ГПР (отдельный модуль)
+# gpr_dictionaries.py — начало файла
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import datetime, date
 from typing import Any, Dict, List, Optional, Tuple
 
 import tkinter as tk
@@ -10,13 +10,62 @@ from tkinter import ttk, messagebox, simpledialog
 
 from psycopg2.extras import RealDictCursor
 
-# Импортируем из gpr_module то, что нужно
-from gpr_module import (
-    _conn, _release, _today, _fmt_qty, _safe_float,
-    C, STATUS_LABELS, STATUS_LIST,
-    TaskEditDialog,
-)
+# Собственный пул
+db_connection_pool = None
 
+def set_db_pool(pool):
+    global db_connection_pool
+    db_connection_pool = pool
+
+def _conn():
+    if not db_connection_pool:
+        raise RuntimeError("DB pool not set (gpr_dictionaries)")
+    return db_connection_pool.getconn()
+
+def _release(conn):
+    if db_connection_pool and conn:
+        db_connection_pool.putconn(conn)
+
+# Константы
+C = {
+    "bg":           "#f0f2f5",
+    "panel":        "#ffffff",
+    "accent":       "#1565c0",
+    "accent_light": "#e3f2fd",
+    "success":      "#2e7d32",
+    "warning":      "#ed6c02",
+    "error":        "#d32f2f",
+    "border":       "#dde1e7",
+    "text":         "#1a1a2e",
+    "text2":        "#555",
+    "text3":        "#999",
+    "btn_bg":       "#1565c0",
+    "btn_fg":       "#ffffff",
+}
+
+STATUS_LABELS = {
+    "planned": "Запланировано",
+    "in_progress": "В работе",
+    "done": "Выполнено",
+    "paused": "Приостановлено",
+    "canceled": "Отменено",
+}
+STATUS_LIST = ["planned", "in_progress", "done", "paused", "canceled"]
+
+def _today() -> date:
+    return datetime.now().date()
+
+def _safe_float(v):
+    if v is None: return None
+    try: return float(str(v).replace(",", "."))
+    except: return None
+
+def _fmt_qty(v) -> str:
+    f = _safe_float(v)
+    if f is None: return ""
+    return f"{f:.3f}".rstrip("0").rstrip(".")
+
+from gpr_task_dialog import open_task_dialog
 
 # ═══════════════════════════════════════════════════════════════
 #  Универсальный диалог справочника
