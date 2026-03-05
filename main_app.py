@@ -1319,18 +1319,27 @@ if __name__ == "__main__":
     
     def start_application():
         try:
+            logging.info(">>> ЭТАП 1: Начинаю импорт модулей...")
             splash.update_status("Загрузка модулей приложения...")
             perform_heavy_imports()
-            
+            logging.info(">>> ЭТАП 2: Импорт модулей завершён")
+
             splash.update_status("Проверка конфигурации...")
+            logging.info(">>> ЭТАП 3: ensure_config...")
             Settings.ensure_config()
+            logging.info(">>> ЭТАП 4: ensure_config OK")
 
             splash.update_status("Подключение к базе данных...")
+            logging.info(">>> ЭТАП 5: initialize_db_pool...")
             initialize_db_pool()
+            logging.info(">>> ЭТАП 6: Пул создан OK")
 
+            logging.info(">>> ЭТАП 7: sync_permissions...")
             sync_permissions_from_menu_spec()
+            logging.info(">>> ЭТАП 8: sync OK")
 
             splash.update_status("Передача настроек в модули...")
+            logging.info(">>> ЭТАП 9: set_db_pool для модулей...")
             modules_to_init = [
                 meals_module,
                 meals_reports_module,
@@ -1339,8 +1348,8 @@ if __name__ == "__main__":
                 Settings,
                 timesheet_module,
                 gpr_module,
-                 gpr_task_dialog,   
-                gpr_dictionaries, 
+                gpr_task_dialog,
+                gpr_dictionaries,
                 analytics_module,
                 employees_module,
                 timesheet_compare,
@@ -1351,23 +1360,27 @@ if __name__ == "__main__":
                 brigades_module,
             ]
             for module in modules_to_init:
+                mod_name = getattr(module, '__name__', '???')
+                logging.info(f"    set_db_pool -> {mod_name}")
                 if module and hasattr(module, "set_db_pool"):
                     module.set_db_pool(db_connection_pool)
+            logging.info(">>> ЭТАП 10: Все модули получили пул")
 
             splash.destroy()
             root.destroy()
-            
-            logging.debug("Инициализация успешна. Запускаем главный цикл приложения.")
+
+            logging.info(">>> ЭТАП 11: Запуск MainApp...")
             app = MainApp()
+            logging.info(">>> ЭТАП 12: MainApp создан, запуск mainloop")
             app.protocol("WM_DELETE_WINDOW", app.destroy)
             app.mainloop()
 
         except Exception as e:
-            logging.critical("Приложение не может быть запущено из-за ошибки инициализации.", exc_info=True)
+            logging.critical(f">>> КРИТИЧЕСКАЯ ОШИБКА: {e}", exc_info=True)
             splash.destroy()
-            messagebox.showerror("Критическая ошибка", f"Не удалось инициализировать приложение.\n\nОшибка: {e}\n\nПроверьте настройки и доступность БД.")
+            messagebox.showerror(
+                "Критическая ошибка",
+                f"Не удалось инициализировать приложение.\n\nОшибка: {e}\n\nПроверьте настройки и доступность БД."
+            )
             root.destroy()
             sys.exit(1)
-
-    root.after(100, start_application)
-    root.mainloop()
