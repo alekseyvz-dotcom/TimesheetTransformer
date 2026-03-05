@@ -8,6 +8,8 @@ from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Set
 from pathlib import Path
 
+from gpr_task_dialog import open_task_dialog, _EmployeeService
+
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 
@@ -1120,10 +1122,14 @@ class GprPage(tk.Frame):
         if not self.plan_id:
             messagebox.showinfo("ГПР", "Сначала откройте объект.", parent=self)
             return
-        dlg = TaskEditDialog(self, self.work_types, self.uoms, init={
-            "plan_start": self.range_from, "plan_finish": self.range_from})
-        if not dlg.result: return
-        t = dlg.result
+        uid = (self.app_ref.current_user or {}).get("id")
+        result = open_task_dialog(self, self.work_types, self.uoms,
+                                   init={"plan_start": self.range_from,
+                                         "plan_finish": self.range_from},
+                                   user_id=uid)
+        if not result:
+            return
+        t = result
         t["id"] = None
         t["work_type_name"] = next(
             (w["name"] for w in self.work_types if int(w["id"]) == int(t["work_type_id"])), "")
@@ -1134,15 +1140,29 @@ class GprPage(tk.Frame):
 
     def _edit_selected(self):
         idx = self._find_task_idx()
-        if idx is None: return
+        if idx is None:
+            return
         t0 = self.tasks[idx]
-        dlg = TaskEditDialog(self, self.work_types, self.uoms, init=t0)
-        if not dlg.result: return
-        upd = dlg.result
+        uid = (self.app_ref.current_user or {}).get("id")
+        result = open_task_dialog(self, self.work_types, self.uoms,
+                                   init=t0, user_id=uid)
+        if not result:
+            return
+        upd = result
         upd["id"] = t0.get("id")
         upd["sort_order"] = t0.get("sort_order", idx * 10)
         upd["work_type_name"] = next(
             (w["name"] for w in self.work_types if int(w["id"]) == int(upd["work_type_id"])), "")
+    
+        # Сохраняем назначения если задача уже в БД
+        task_id = t0.get("id")
+        assignments = upd.pop("_assignments", [])
+        if task_id and assignments is not None:
+            try:
+                _EmployeeService.save_task_assignments(task_id, assignments, uid)
+            except Exception as e:
+                logging.exception("Save assignments error")
+    
         self.tasks[idx] = upd
         self._apply_filter()
         self._update_summary()
