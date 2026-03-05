@@ -37,6 +37,7 @@ MENU_SPEC: List[MenuSection] = [
     label="Планирование (ГПР)",
         entries=[
             MenuEntry("page", "ГПР (Диаграмма Ганта)", key="gpr", perm="page.gpr", group="gpr", title="ГПР: Диаграмма Ганта"),
+            MenuEntry("page", "Справочники ГПР", key="gpr_dicts", perm="page.gpr_dicts", group="gpr", title="ГПР: Справочники"),
         ],
     ),
     MenuSection(
