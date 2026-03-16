@@ -99,6 +99,137 @@ class _DictEditDialog(simpledialog.Dialog):
     def apply(self):
         self.result = self._out
 
+class _TemplateTaskDialog(simpledialog.Dialog):
+    """Диалог добавления/редактирования задачи шаблона."""
+
+    def __init__(self, parent, work_types, uoms, parents=None, init=None):
+        self.work_types = work_types or []
+        self.uoms = uoms or []
+        self.parents = parents or []
+        self.init = init or {}
+        self.result = None
+        super().__init__(parent, title="Задача шаблона")
+
+    def body(self, master):
+        self.var_name = tk.StringVar(value=self.init.get("name", ""))
+        self.var_qty = tk.StringVar(value=_fmt_qty(self.init.get("default_qty")))
+        self.var_milestone = tk.BooleanVar(value=bool(self.init.get("is_milestone", False)))
+        self.var_sort = tk.StringVar(value=str(self.init.get("sort_order", 10)))
+
+        tk.Label(master, text="Тип работ *:").grid(row=0, column=0, sticky="e", padx=6, pady=4)
+        self.cmb_wt = ttk.Combobox(master, state="readonly", width=38,
+                                   values=[w["name"] for w in self.work_types])
+        self.cmb_wt.grid(row=0, column=1, sticky="w", padx=6, pady=4)
+
+        tk.Label(master, text="Наименование *:").grid(row=1, column=0, sticky="e", padx=6, pady=4)
+        self.ent_name = ttk.Entry(master, textvariable=self.var_name, width=40)
+        self.ent_name.grid(row=1, column=1, sticky="w", padx=6, pady=4)
+
+        tk.Label(master, text="Ед. изм.:").grid(row=2, column=0, sticky="e", padx=6, pady=4)
+        self.cmb_uom = ttk.Combobox(master, state="readonly", width=38,
+                                    values=["—"] + [f"{u['code']} — {u['name']}" for u in self.uoms])
+        self.cmb_uom.grid(row=2, column=1, sticky="w", padx=6, pady=4)
+
+        tk.Label(master, text="Объем по умолчанию:").grid(row=3, column=0, sticky="e", padx=6, pady=4)
+        self.ent_qty = ttk.Entry(master, textvariable=self.var_qty, width=18)
+        self.ent_qty.grid(row=3, column=1, sticky="w", padx=6, pady=4)
+
+        tk.Label(master, text="Родительская задача:").grid(row=4, column=0, sticky="e", padx=6, pady=4)
+        self.cmb_parent = ttk.Combobox(master, state="readonly", width=38)
+        parent_values = ["— Нет —"] + [p["name"] for p in self.parents]
+        self.cmb_parent["values"] = parent_values
+        self.cmb_parent.grid(row=4, column=1, sticky="w", padx=6, pady=4)
+
+        tk.Label(master, text="Порядок:").grid(row=5, column=0, sticky="e", padx=6, pady=4)
+        self.ent_sort = ttk.Entry(master, textvariable=self.var_sort, width=10)
+        self.ent_sort.grid(row=5, column=1, sticky="w", padx=6, pady=4)
+
+        ttk.Checkbutton(master, text="Веха", variable=self.var_milestone).grid(
+            row=6, column=1, sticky="w", padx=6, pady=6
+        )
+
+        # init: type
+        wt_id = self.init.get("work_type_id")
+        if wt_id:
+            for i, w in enumerate(self.work_types):
+                if int(w["id"]) == int(wt_id):
+                    self.cmb_wt.current(i)
+                    break
+        elif self.work_types:
+            self.cmb_wt.current(0)
+
+        # init: uom
+        uom_code = self.init.get("uom_code")
+        if uom_code:
+            found = False
+            for i, u in enumerate(self.uoms, start=1):
+                if u["code"] == uom_code:
+                    self.cmb_uom.current(i)
+                    found = True
+                    break
+            if not found:
+                self.cmb_uom.current(0)
+        else:
+            self.cmb_uom.current(0)
+
+        # init: parent
+        parent_id = self.init.get("parent_id")
+        if parent_id:
+            found = False
+            for i, p in enumerate(self.parents, start=1):
+                if int(p["id"]) == int(parent_id):
+                    self.cmb_parent.current(i)
+                    found = True
+                    break
+            if not found:
+                self.cmb_parent.current(0)
+        else:
+            self.cmb_parent.current(0)
+
+        return self.ent_name
+
+    def validate(self):
+        wi = self.cmb_wt.current()
+        if wi < 0:
+            messagebox.showwarning("Шаблон", "Выберите тип работ.", parent=self)
+            return False
+
+        name = self.var_name.get().strip()
+        if not name:
+            messagebox.showwarning("Шаблон", "Введите наименование задачи.", parent=self)
+            return False
+
+        qty = _safe_float(self.var_qty.get())
+        if self.var_qty.get().strip() and qty is None:
+            messagebox.showwarning("Шаблон", "Объем должен быть числом.", parent=self)
+            return False
+
+        try:
+            sort_order = int(self.var_sort.get().strip() or "0")
+        except ValueError:
+            messagebox.showwarning("Шаблон", "Порядок должен быть целым числом.", parent=self)
+            return False
+
+        uom_code = None
+        ui = self.cmb_uom.current()
+        if ui > 0:
+            uom_code = self.uoms[ui - 1]["code"]
+
+        parent_id = None
+        pi = self.cmb_parent.current()
+        if pi > 0:
+            parent_id = self.parents[pi - 1]["id"]
+
+        self.result = {
+            "work_type_id": self.work_types[wi]["id"],
+            "name": name,
+            "uom_code": uom_code,
+            "default_qty": qty,
+            "is_milestone": bool(self.var_milestone.get()),
+            "parent_id": parent_id,
+            "sort_order": sort_order,
+        }
+        return True
 
 # ═══════════════════════════════════════════════════════════════
 #  Главная страница справочников
@@ -589,10 +720,15 @@ class GprDictionariesPage(tk.Frame):
             conn = _conn()
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT tt.id, tt.work_type_id,
+                    SELECT tt.id,
+                           tt.work_type_id,
+                           tt.parent_id,
                            wt.name AS wt_name,
-                           tt.name, tt.uom_code, tt.default_qty,
-                           tt.is_milestone, tt.sort_order
+                           tt.name,
+                           tt.uom_code,
+                           tt.default_qty,
+                           tt.is_milestone,
+                           tt.sort_order
                     FROM public.gpr_template_tasks tt
                     JOIN public.gpr_work_types wt ON wt.id = tt.work_type_id
                     WHERE tt.template_id = %s
@@ -642,17 +778,19 @@ class GprDictionariesPage(tk.Frame):
         if not self._wt_cache or not self._uom_cache:
             self._tt_load()
     
-        r = open_task_dialog(
+        dlg = _TemplateTaskDialog(
             self,
-            self._wt_cache,
-            self._uom_cache,
+            work_types=self._wt_cache,
+            uoms=self._uom_cache,
+            parents=self._tt_data,
             init={
-                "plan_start": _today(),
-                "plan_finish": _today(),
+                "sort_order": len(self._tt_data) * 10 + 10,
             }
         )
-        if not r:
+        if not dlg.result:
             return
+    
+        r = dlg.result
     
         conn = None
         try:
@@ -660,17 +798,18 @@ class GprDictionariesPage(tk.Frame):
             with conn, conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO public.gpr_template_tasks
-                        (template_id, work_type_id, name, uom_code,
+                        (template_id, work_type_id, parent_id, name, uom_code,
                          default_qty, is_milestone, sort_order)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     tpl["id"],
                     r["work_type_id"],
+                    r.get("parent_id"),
                     r["name"],
                     r.get("uom_code"),
-                    r.get("plan_qty"),
+                    r.get("default_qty"),
                     r.get("is_milestone", False),
-                    len(self._tt_data) * 10 + 10,
+                    r.get("sort_order", len(self._tt_data) * 10 + 10),
                 ))
         except Exception as e:
             messagebox.showerror("Справочники", f"Ошибка:\n{e}", parent=self)
@@ -689,24 +828,27 @@ class GprDictionariesPage(tk.Frame):
         if not self._wt_cache or not self._uom_cache:
             self._tt_load()
     
-        init = {
-            "work_type_id": tt["work_type_id"],
-            "name": tt["name"],
-            "uom_code": tt.get("uom_code"),
-            "plan_qty": tt.get("default_qty"),
-            "plan_start": _today(),
-            "plan_finish": _today(),
-            "is_milestone": tt.get("is_milestone", False),
-        }
+        parents = [p for p in self._tt_data if p["id"] != tt["id"]]
     
-        r = open_task_dialog(
+        dlg = _TemplateTaskDialog(
             self,
-            self._wt_cache,
-            self._uom_cache,
-            init=init
+            work_types=self._wt_cache,
+            uoms=self._uom_cache,
+            parents=parents,
+            init={
+                "work_type_id": tt["work_type_id"],
+                "name": tt["name"],
+                "uom_code": tt.get("uom_code"),
+                "default_qty": tt.get("default_qty"),
+                "is_milestone": tt.get("is_milestone", False),
+                "parent_id": tt.get("parent_id"),
+                "sort_order": tt.get("sort_order", 0),
+            }
         )
-        if not r:
+        if not dlg.result:
             return
+    
+        r = dlg.result
     
         conn = None
         try:
@@ -714,15 +856,22 @@ class GprDictionariesPage(tk.Frame):
             with conn, conn.cursor() as cur:
                 cur.execute("""
                     UPDATE public.gpr_template_tasks
-                    SET work_type_id=%s, name=%s, uom_code=%s,
-                        default_qty=%s, is_milestone=%s
+                    SET work_type_id=%s,
+                        parent_id=%s,
+                        name=%s,
+                        uom_code=%s,
+                        default_qty=%s,
+                        is_milestone=%s,
+                        sort_order=%s
                     WHERE id=%s
                 """, (
                     r["work_type_id"],
+                    r.get("parent_id"),
                     r["name"],
                     r.get("uom_code"),
-                    r.get("plan_qty"),
+                    r.get("default_qty"),
                     r.get("is_milestone", False),
+                    r.get("sort_order", 0),
                     tt["id"],
                 ))
         except Exception as e:
