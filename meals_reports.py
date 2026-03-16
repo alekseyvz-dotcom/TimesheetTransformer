@@ -9,6 +9,7 @@ from tkinter import ttk, messagebox
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, Alignment, Border, Side
+from openpyxl.worksheet.page import PageMargins
 
 from psycopg2.extras import RealDictCursor
 
@@ -137,10 +138,6 @@ def _fetch_items_for_period(conn, date_from: date, date_to: date) -> List[Dict[s
 
 
 def search_employees_for_report(search_text: str, limit: int = 100) -> List[Dict[str, Any]]:
-    """
-    Поиск сотрудников для выбора в отчете.
-    Ищет и действующих, и уволенных.
-    """
     conn = None
     try:
         conn = get_db_connection()
@@ -293,14 +290,6 @@ def build_dept_employee_rows(
     date_from: date,
     date_to: date
 ) -> List[Dict[str, Any]]:
-    """
-    Одна строка на сотрудника.
-    В ячейках: список подразделений/бригад/объектов + суммы/кол-ва по комплексам.
-
-    department_id:
-      - None => все подразделения
-      - int  => фильтр по mo.department_id
-    """
     conn = None
     try:
         conn = get_db_connection()
@@ -403,12 +392,6 @@ def build_employee_dismissal_monthly_rows(
     date_from: date,
     date_to: date
 ) -> Dict[str, Any]:
-    """
-    Собирает данные по сотруднику для ведомости при увольнении:
-    - по месяцам
-    - с накоплением по объектам
-    - с итогом по комплексам за месяц
-    """
     conn = None
     try:
         conn = get_db_connection()
@@ -515,6 +498,35 @@ def build_employee_dismissal_monthly_rows(
             release_db_connection(conn)
 
 
+# ---------------- Excel print helpers ----------------
+
+def _set_print_setup_statement(ws, last_row: int):
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 1
+    ws.page_setup.horizontalDpi = 300
+    ws.page_setup.verticalDpi = 300
+
+    ws.page_margins = PageMargins(
+        left=0.25,
+        right=0.25,
+        top=0.35,
+        bottom=0.35,
+        header=0.15,
+        footer=0.15,
+    )
+
+    ws.print_options.horizontalCentered = True
+    ws.print_options.verticalCentered = False
+    ws.sheet_view.showGridLines = False
+
+    ws.print_title_rows = "$1:$13"
+    ws.print_area = f"$A$1:$L${last_row}"
+
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+
 # ---------------- Excel exports ----------------
 
 def export_dismissal_statement_excel(
@@ -537,11 +549,14 @@ def export_dismissal_statement_excel(
         statement_date = date.today()
 
     thin = Side(border_style="thin", color="000000")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    medium = Side(border_style="medium", color="000000")
+
+    border_thin = Border(left=thin, right=thin, top=thin, bottom=thin)
+    border_medium = Border(left=medium, right=medium, top=medium, bottom=medium)
 
     title_font = Font(name="Arial", size=12, bold=True)
     normal_font = Font(name="Arial", size=10)
-    header_font = Font(name="Arial", size=10, bold=True)
+    header_font = Font(name="Arial", size=9, bold=True)
 
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
     left = Alignment(horizontal="left", vertical="center", wrap_text=True)
@@ -563,26 +578,30 @@ def export_dismissal_statement_excel(
             sheet_name = f"{m:02d}.{y}"
         ws = wb.create_sheet(sheet_name)
 
-        for col_idx, width in {
-            1: 6,
-            2: 28,
-            3: 15,
-            4: 36,
-            5: 24,
-            6: 14,
-            7: 14,
-            8: 14,
-            9: 18,
-            10: 18,
-            11: 18,
-            12: 28,
-        }.items():
+        widths = {
+            1: 5,
+            2: 19,
+            3: 12,
+            4: 29,
+            5: 20,
+            6: 11,
+            7: 11,
+            8: 11,
+            9: 16,
+            10: 16,
+            11: 16,
+            12: 23,
+        }
+        for col_idx, width in widths.items():
             ws.column_dimensions[get_column_letter(col_idx)].width = width
 
         row = 1
+
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
-        ws.cell(row=row, column=1, value=f"ВЕДОМОСТЬ № {statement_no}").font = title_font
-        ws.cell(row=row, column=1).alignment = center
+        c = ws.cell(row=row, column=1, value=f"ВЕДОМОСТЬ № {statement_no}")
+        c.font = title_font
+        c.alignment = center
+        ws.row_dimensions[row].height = 20
         row += 2
 
         for text in [
@@ -592,38 +611,44 @@ def export_dismissal_statement_excel(
             f"за {MONTHS_RU[m]} {y} года",
         ]:
             ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
-            ws.cell(row=row, column=1, value=text).font = normal_font
-            ws.cell(row=row, column=1).alignment = center
+            c = ws.cell(row=row, column=1, value=text)
+            c.font = normal_font
+            c.alignment = center
+            ws.row_dimensions[row].height = 18
             row += 1
 
         row += 1
+
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
-        ws.cell(row=row, column=1, value=f"город {city}").alignment = left
+        c = ws.cell(row=row, column=1, value=f"город {city}")
+        c.font = normal_font
+        c.alignment = left
 
         ws.merge_cells(start_row=row, start_column=7, end_row=row, end_column=12)
-        ws.cell(
-            row=row,
-            column=7,
-            value=f"Дата составления {statement_date.strftime('%d.%m.%Y')}"
-        ).alignment = right
+        c = ws.cell(row=row, column=7, value=f"Дата составления {statement_date.strftime('%d.%m.%Y')}")
+        c.font = normal_font
+        c.alignment = right
+        ws.row_dimensions[row].height = 18
+
         row += 2
 
         header_row_1 = row
         header_row_2 = row + 1
+        nums_row = row + 2
 
         headers = [
             "№ п/п",
-            "Наименование подразделения",
-            "Табельный номер",
-            "Фамилия, имя, отчество работника",
-            "Наименование профессии/должности",
-            "Комплекс 1 (одноразовое питание)",
-            "Комплекс 2 (двухразовое питание)",
-            "Комплекс 3 (трехразовое питание)",
-            "Сумма расходов на питание Комплекс 1, руб.коп (с НДС)",
-            "Сумма расходов на питание Комплекс 2, руб.коп (с НДС)",
-            "Сумма расходов на питание Комплекс 3, руб.коп (с НДС)",
-            "Подпись работника, подтверждающая понесенные расходы",
+            "Наимено\nвание подразде\nления",
+            "Табель\nный\nномер",
+            "Фамилия,\nимя,\nотчество\nработника",
+            "Наимено\nвание профес\nсии/\nдолжности",
+            "Комплекс 1\n(одноразовое питание)",
+            "Комплекс 2\n(двухразовое питание)",
+            "Комплекс 3\n(трехразовое питание)",
+            "Сумма расходов на питание\nКомплекс 1, руб.коп\n(с НДС)",
+            "Сумма расходов на питание\nКомплекс 2, руб.коп\n(с НДС)",
+            "Сумма расходов на питание\nКомплекс 3, руб.коп\n(с НДС)",
+            "Подпись работника,\nподтверждающая\nпонесенные расходы",
         ]
 
         for i, text in enumerate(headers, start=1):
@@ -631,10 +656,20 @@ def export_dismissal_statement_excel(
             cell = ws.cell(row=header_row_1, column=i, value=text)
             cell.font = header_font
             cell.alignment = center
-            cell.border = border
-            ws.cell(row=header_row_2, column=i).border = border
+            cell.border = border_medium
+            ws.cell(row=header_row_2, column=i).border = border_medium
 
-        row = header_row_2 + 1
+        ws.row_dimensions[header_row_1].height = 44
+        ws.row_dimensions[header_row_2].height = 32
+
+        for i in range(1, 13):
+            c = ws.cell(row=nums_row, column=i, value=i)
+            c.font = normal_font
+            c.alignment = center
+            c.border = border_thin
+        ws.row_dimensions[nums_row].height = 18
+
+        row = nums_row + 1
 
         values = [
             1,
@@ -655,7 +690,9 @@ def export_dismissal_statement_excel(
             c = ws.cell(row=row, column=col_idx, value=val)
             c.font = normal_font
             c.alignment = center if col_idx not in (2, 4, 5, 12) else left
-            c.border = border
+            c.border = border_thin
+
+        ws.row_dimensions[row].height = 34
 
         for col_idx in (6, 7, 8):
             ws.cell(row=row, column=col_idx).number_format = "0"
@@ -663,53 +700,82 @@ def export_dismissal_statement_excel(
         for col_idx in (9, 10, 11):
             ws.cell(row=row, column=col_idx).number_format = '#,##0.00'
 
-        row += 3
+        blank_rows_count = 10
+        for blank_row in range(row + 1, row + 1 + blank_rows_count):
+            for col_idx in range(1, 13):
+                c = ws.cell(row=blank_row, column=col_idx, value="")
+                c.border = border_thin
+                c.alignment = center
+            ws.row_dimensions[blank_row].height = 18
+
+        row = row + 1 + blank_rows_count + 1
 
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
-        ws.cell(
+        c = ws.cell(
             row=row,
             column=1,
             value=f"Объекты за месяц: {month_data.get('object_list', '')}"
-        ).alignment = left
+        )
+        c.font = normal_font
+        c.alignment = left
+        ws.row_dimensions[row].height = 18
         row += 2
 
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
-        ws.cell(
+        c = ws.cell(
             row=row,
             column=1,
-            value="Руководитель РСУ _____________________________________________________________________________________________________________"
-        ).alignment = left
-        row += 3
+            value="Руководитель РСУ_____________________________________________________________________________________________________________"
+        )
+        c.font = normal_font
+        c.alignment = left
+        ws.row_dimensions[row].height = 18
+        row += 4
 
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
-        ws.cell(
+        c = ws.cell(
             row=row,
             column=1,
-            value="Начальник Хозяйственного отдела __________________________________________________________________________________________"
-        ).alignment = left
-        row += 3
+            value="Начальник Хозяйственного отдела___________________________________________________________________________"
+        )
+        c.font = normal_font
+        c.alignment = left
+        ws.row_dimensions[row].height = 18
+        row += 4
 
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
-        ws.cell(
+        c = ws.cell(
             row=row,
             column=1,
             value="Подпись ответственного работника за предоставление данных:"
-        ).alignment = left
+        )
+        c.font = normal_font
+        c.alignment = left
+        ws.row_dimensions[row].height = 18
         row += 1
 
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
-        ws.cell(
+        c = ws.cell(
             row=row,
             column=1,
-            value="Специалист по питанию на строительных объектах Хозяйственного отдела _________________________________________________"
-        ).alignment = left
+            value="Специалист по питанию на строительных объектах"
+        )
+        c.font = normal_font
+        c.alignment = left
+        ws.row_dimensions[row].height = 18
+        row += 1
 
-        ws.page_setup.orientation = "landscape"
-        ws.page_setup.fitToWidth = 1
-        ws.page_margins.left = 0.3
-        ws.page_margins.right = 0.3
-        ws.page_margins.top = 0.5
-        ws.page_margins.bottom = 0.5
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
+        c = ws.cell(
+            row=row,
+            column=1,
+            value="Хозяйственного отдела ____________________________________________________________________________________"
+        )
+        c.font = normal_font
+        c.alignment = left
+        ws.row_dimensions[row].height = 18
+
+        _set_print_setup_statement(ws, row)
 
     wb.save(out_path)
 
@@ -892,7 +958,7 @@ class MealsReportsPage(tk.Frame):
         super().__init__(master, bg="#f7f7f7")
         self.app_ref = app_ref
 
-        self.var_report_kind = tk.StringVar(value="daily")  # daily | monthly | dept_employee | dismissal_employee
+        self.var_report_kind = tk.StringVar(value="daily")
         self.var_month = tk.StringVar(value=date.today().strftime("%Y-%m"))
 
         self._dept_rows: List[Tuple[int, str]] = []
