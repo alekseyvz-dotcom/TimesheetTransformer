@@ -8,22 +8,28 @@ from tkinter import ttk, messagebox
 
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font, Alignment, Border, Side
 
 from psycopg2.extras import RealDictCursor
+
+from collections import defaultdict
 
 
 # ---------------- DB pool wiring ----------------
 
 db_connection_pool = None
 
+
 def set_db_pool(pool):
     global db_connection_pool
     db_connection_pool = pool
+
 
 def get_db_connection():
     if db_connection_pool is None:
         raise RuntimeError("Пул соединений не был установлен из главного приложения.")
     return db_connection_pool.getconn()
+
 
 def release_db_connection(conn):
     if db_connection_pool and conn:
@@ -43,6 +49,7 @@ def parse_date_any(s: str) -> Optional[date]:
             pass
     return None
 
+
 def exe_dir() -> str:
     import sys
     from pathlib import Path
@@ -50,8 +57,10 @@ def exe_dir() -> str:
         return str(Path(sys.executable).resolve().parent)
     return str(Path(__file__).resolve().parent)
 
+
 def _norm(s: str) -> str:
     return " ".join((s or "").strip().lower().split())
+
 
 def safe_filename(name: str) -> str:
     name = (name or "").strip()
@@ -69,6 +78,21 @@ COMPLEX_MAP = {
 }
 COMPLEX_ORDER = ["Комплекс 1", "Комплекс 2", "Комплекс 3"]
 
+MONTHS_RU = {
+    1: "январь",
+    2: "февраль",
+    3: "март",
+    4: "апрель",
+    5: "май",
+    6: "июнь",
+    7: "июль",
+    8: "август",
+    9: "сентябрь",
+    10: "октябрь",
+    11: "ноябрь",
+    12: "декабрь",
+}
+
 
 # ---------------- Data helpers ----------------
 
@@ -80,6 +104,7 @@ def _load_price_map(conn) -> Dict[str, float]:
             res[_norm(name)] = float(price or 0)
         return res
 
+
 def _complex_by_meal_type_name(meal_type_name: str) -> Optional[str]:
     mt = _norm(meal_type_name)
     if "однораз" in mt:
@@ -89,6 +114,7 @@ def _complex_by_meal_type_name(meal_type_name: str) -> Optional[str]:
     if "трехраз" in mt or "трёхраз" in mt:
         return "Комплекс 3"
     return None
+
 
 def _fetch_items_for_period(conn, date_from: date, date_to: date) -> List[Dict[str, Any]]:
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -108,6 +134,61 @@ def _fetch_items_for_period(conn, date_from: date, date_to: date) -> List[Dict[s
             (date_from, date_to),
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def search_employees_for_report(search_text: str, limit: int = 100) -> List[Dict[str, Any]]:
+    """
+    Поиск сотрудников для выбора в отчете.
+    Ищет и действующих, и уволенных.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        q = (search_text or "").strip()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if q:
+                pattern = f"%{q}%"
+                cur.execute(
+                    """
+                    SELECT
+                        e.id,
+                        e.fio,
+                        COALESCE(e.tbn, '') AS tbn,
+                        COALESCE(e.position, '') AS position,
+                        COALESCE(d.name, '') AS department_name,
+                        e.is_fired
+                    FROM employees e
+                    LEFT JOIN departments d ON d.id = e.department_id
+                    WHERE
+                        e.fio ILIKE %s
+                        OR COALESCE(e.tbn, '') ILIKE %s
+                        OR COALESCE(e.position, '') ILIKE %s
+                    ORDER BY e.fio
+                    LIMIT %s
+                    """,
+                    (pattern, pattern, pattern, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT
+                        e.id,
+                        e.fio,
+                        COALESCE(e.tbn, '') AS tbn,
+                        COALESCE(e.position, '') AS position,
+                        COALESCE(d.name, '') AS department_name,
+                        e.is_fired
+                    FROM employees e
+                    LEFT JOIN departments d ON d.id = e.department_id
+                    ORDER BY e.fio
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        if conn:
+            release_db_connection(conn)
 
 
 # ---------------- Report builders ----------------
@@ -147,6 +228,7 @@ def build_daily_rows(date_from: date, date_to: date) -> List[Dict[str, Any]]:
     finally:
         if conn:
             release_db_connection(conn)
+
 
 def build_monthly_rows(year: int, month: int) -> List[Dict[str, Any]]:
     if month < 1 or month > 12:
@@ -205,18 +287,19 @@ def build_monthly_rows(year: int, month: int) -> List[Dict[str, Any]]:
         if conn:
             release_db_connection(conn)
 
+
 def build_dept_employee_rows(
     department_id: Optional[int],
     date_from: date,
     date_to: date
 ) -> List[Dict[str, Any]]:
     """
-    Вариант B: одна строка на сотрудника.
-    В ячейках: список подразделений/бригад/объектов (уникальные значения) + суммы/кол-ва по комплексам.
+    Одна строка на сотрудника.
+    В ячейках: список подразделений/бригад/объектов + суммы/кол-ва по комплексам.
 
     department_id:
-      - None  => "Все подразделения" (не фильтруем)
-      - int   => фильтруем по mo.department_id
+      - None => все подразделения
+      - int  => фильтр по mo.department_id
     """
     conn = None
     try:
@@ -256,7 +339,6 @@ def build_dept_employee_rows(
             )
             items = [dict(r) for r in cur.fetchall()]
 
-        # key сотрудника
         agg_qty: Dict[Tuple[str, str, str], Dict[str, float]] = {}
         deps: Dict[Tuple[str, str, str], set[str]] = {}
         teams: Dict[Tuple[str, str, str], set[str]] = {}
@@ -316,8 +398,321 @@ def build_dept_employee_rows(
             release_db_connection(conn)
 
 
+def build_employee_dismissal_monthly_rows(
+    employee_id: int,
+    date_from: date,
+    date_to: date
+) -> Dict[str, Any]:
+    """
+    Собирает данные по сотруднику для ведомости при увольнении:
+    - по месяцам
+    - с накоплением по объектам
+    - с итогом по комплексам за месяц
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        price_map = _load_price_map(conn)
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    e.id AS employee_id,
+                    COALESCE(e.fio, moi.fio_text, '') AS fio,
+                    COALESCE(e.tbn, moi.tbn_text, '') AS tbn,
+                    COALESCE(e.position, moi.position_text, '') AS position_name,
+                    COALESCE(d.name, '') AS department_name,
+                    mo.date::date AS service_date,
+                    COALESCE(mo.team_name, '') AS team_name,
+                    COALESCE(mo.fact_address, o.address, '') AS object_address,
+                    COALESCE(mt.name, moi.meal_type_text, '') AS meal_type_name,
+                    COALESCE(moi.quantity, 1) AS qty
+                FROM meal_order_items moi
+                JOIN meal_orders mo ON mo.id = moi.order_id
+                LEFT JOIN employees e ON e.id = moi.employee_id
+                LEFT JOIN departments d ON d.id = COALESCE(mo.department_id, e.department_id)
+                LEFT JOIN objects o ON o.id = mo.object_id
+                LEFT JOIN meal_types mt ON mt.id = moi.meal_type_id
+                WHERE
+                    moi.employee_id = %s
+                    AND mo.date >= %s
+                    AND mo.date <= %s
+                ORDER BY mo.date, object_address
+                """,
+                (employee_id, date_from, date_to),
+            )
+            items = [dict(r) for r in cur.fetchall()]
+
+        if not items:
+            return {
+                "employee": None,
+                "months": []
+            }
+
+        first = items[0]
+        employee_info = {
+            "employee_id": employee_id,
+            "fio": (first.get("fio") or "").strip(),
+            "tbn": (first.get("tbn") or "").strip(),
+            "position": (first.get("position_name") or "").strip(),
+            "department": (first.get("department_name") or "").strip(),
+        }
+
+        monthly: Dict[Tuple[int, int], Dict[str, Any]] = {}
+
+        for it in items:
+            service_date = it["service_date"]
+            ym = (service_date.year, service_date.month)
+
+            m = monthly.setdefault(ym, {
+                "year": service_date.year,
+                "month": service_date.month,
+                "employee": employee_info,
+                "objects": defaultdict(lambda: {c: 0.0 for c in COMPLEX_ORDER}),
+                "totals_qty": {c: 0.0 for c in COMPLEX_ORDER},
+                "totals_amount": {c: 0.0 for c in COMPLEX_ORDER},
+                "grand_total": 0.0,
+                "teams": set(),
+                "object_list": set(),
+            })
+
+            team_name = (it.get("team_name") or "").strip()
+            if team_name:
+                m["teams"].add(team_name)
+
+            object_address = (it.get("object_address") or "").strip() or "(без адреса)"
+            m["object_list"].add(object_address)
+
+            cx = _complex_by_meal_type_name(it.get("meal_type_name") or "")
+            if not cx:
+                continue
+
+            qty = float(it.get("qty") or 0.0)
+            m["objects"][object_address][cx] += qty
+            m["totals_qty"][cx] += qty
+
+        for _, m in monthly.items():
+            grand_total = 0.0
+            for cx in COMPLEX_ORDER:
+                price = float(price_map.get(COMPLEX_MAP[cx], 0.0))
+                amount = float(m["totals_qty"][cx]) * price
+                m["totals_amount"][cx] = amount
+                grand_total += amount
+            m["grand_total"] = grand_total
+            m["teams"] = "; ".join(sorted(m["teams"]))
+            m["object_list"] = "; ".join(sorted(m["object_list"]))
+            m["objects"] = dict(sorted(m["objects"].items(), key=lambda x: x[0]))
+
+        months = [monthly[k] for k in sorted(monthly.keys())]
+        return {
+            "employee": employee_info,
+            "months": months,
+        }
+
+    finally:
+        if conn:
+            release_db_connection(conn)
+
 
 # ---------------- Excel exports ----------------
+
+def export_dismissal_statement_excel(
+    employee_id: int,
+    date_from: date,
+    date_to: date,
+    out_path: str,
+    statement_no: str = "",
+    statement_date: Optional[date] = None,
+    city: str = "Москва",
+):
+    data = build_employee_dismissal_monthly_rows(employee_id, date_from, date_to)
+    months = data.get("months") or []
+
+    wb = Workbook()
+    ws0 = wb.active
+    wb.remove(ws0)
+
+    if statement_date is None:
+        statement_date = date.today()
+
+    thin = Side(border_style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    title_font = Font(name="Arial", size=12, bold=True)
+    normal_font = Font(name="Arial", size=10)
+    header_font = Font(name="Arial", size=10, bold=True)
+
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    right = Alignment(horizontal="right", vertical="center", wrap_text=True)
+
+    if not months:
+        ws = wb.create_sheet("Нет данных")
+        ws["A1"] = "Нет данных по сотруднику за выбранный период"
+        wb.save(out_path)
+        return
+
+    for month_data in months:
+        y = month_data["year"]
+        m = month_data["month"]
+        emp = month_data["employee"]
+
+        sheet_name = f"{MONTHS_RU[m].capitalize()} {y}"
+        if len(sheet_name) > 31:
+            sheet_name = f"{m:02d}.{y}"
+        ws = wb.create_sheet(sheet_name)
+
+        for col_idx, width in {
+            1: 6,
+            2: 28,
+            3: 15,
+            4: 36,
+            5: 24,
+            6: 14,
+            7: 14,
+            8: 14,
+            9: 18,
+            10: 18,
+            11: 18,
+            12: 28,
+        }.items():
+            ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+        row = 1
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
+        ws.cell(row=row, column=1, value=f"ВЕДОМОСТЬ № {statement_no}").font = title_font
+        ws.cell(row=row, column=1).alignment = center
+        row += 2
+
+        for text in [
+            "учета оказания услуги по организации и предоставлению",
+            'комплексного питания работникам АНО "МЛСТ",',
+            "задействованных на организации и выполнении работ на строительных объектах",
+            f"за {MONTHS_RU[m]} {y} года",
+        ]:
+            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
+            ws.cell(row=row, column=1, value=text).font = normal_font
+            ws.cell(row=row, column=1).alignment = center
+            row += 1
+
+        row += 1
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+        ws.cell(row=row, column=1, value=f"город {city}").alignment = left
+
+        ws.merge_cells(start_row=row, start_column=7, end_row=row, end_column=12)
+        ws.cell(
+            row=row,
+            column=7,
+            value=f"Дата составления {statement_date.strftime('%d.%m.%Y')}"
+        ).alignment = right
+        row += 2
+
+        header_row_1 = row
+        header_row_2 = row + 1
+
+        headers = [
+            "№ п/п",
+            "Наименование подразделения",
+            "Табельный номер",
+            "Фамилия, имя, отчество работника",
+            "Наименование профессии/должности",
+            "Комплекс 1 (одноразовое питание)",
+            "Комплекс 2 (двухразовое питание)",
+            "Комплекс 3 (трехразовое питание)",
+            "Сумма расходов на питание Комплекс 1, руб.коп (с НДС)",
+            "Сумма расходов на питание Комплекс 2, руб.коп (с НДС)",
+            "Сумма расходов на питание Комплекс 3, руб.коп (с НДС)",
+            "Подпись работника, подтверждающая понесенные расходы",
+        ]
+
+        for i, text in enumerate(headers, start=1):
+            ws.merge_cells(start_row=header_row_1, start_column=i, end_row=header_row_2, end_column=i)
+            cell = ws.cell(row=header_row_1, column=i, value=text)
+            cell.font = header_font
+            cell.alignment = center
+            cell.border = border
+            ws.cell(row=header_row_2, column=i).border = border
+
+        row = header_row_2 + 1
+
+        values = [
+            1,
+            emp.get("department") or "",
+            emp.get("tbn") or "",
+            emp.get("fio") or "",
+            emp.get("position") or "",
+            month_data["totals_qty"].get("Комплекс 1", 0.0),
+            month_data["totals_qty"].get("Комплекс 2", 0.0),
+            month_data["totals_qty"].get("Комплекс 3", 0.0),
+            month_data["totals_amount"].get("Комплекс 1", 0.0),
+            month_data["totals_amount"].get("Комплекс 2", 0.0),
+            month_data["totals_amount"].get("Комплекс 3", 0.0),
+            "",
+        ]
+
+        for col_idx, val in enumerate(values, start=1):
+            c = ws.cell(row=row, column=col_idx, value=val)
+            c.font = normal_font
+            c.alignment = center if col_idx not in (2, 4, 5, 12) else left
+            c.border = border
+
+        for col_idx in (6, 7, 8):
+            ws.cell(row=row, column=col_idx).number_format = "0"
+
+        for col_idx in (9, 10, 11):
+            ws.cell(row=row, column=col_idx).number_format = '#,##0.00'
+
+        row += 3
+
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
+        ws.cell(
+            row=row,
+            column=1,
+            value=f"Объекты за месяц: {month_data.get('object_list', '')}"
+        ).alignment = left
+        row += 2
+
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
+        ws.cell(
+            row=row,
+            column=1,
+            value="Руководитель РСУ _____________________________________________________________________________________________________________"
+        ).alignment = left
+        row += 3
+
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
+        ws.cell(
+            row=row,
+            column=1,
+            value="Начальник Хозяйственного отдела __________________________________________________________________________________________"
+        ).alignment = left
+        row += 3
+
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
+        ws.cell(
+            row=row,
+            column=1,
+            value="Подпись ответственного работника за предоставление данных:"
+        ).alignment = left
+        row += 1
+
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=12)
+        ws.cell(
+            row=row,
+            column=1,
+            value="Специалист по питанию на строительных объектах Хозяйственного отдела _________________________________________________"
+        ).alignment = left
+
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.fitToWidth = 1
+        ws.page_margins.left = 0.3
+        ws.page_margins.right = 0.3
+        ws.page_margins.top = 0.5
+        ws.page_margins.bottom = 0.5
+
+    wb.save(out_path)
+
 
 def export_daily_excel(date_from: date, date_to: date, out_path: str):
     rows = build_daily_rows(date_from, date_to)
@@ -365,6 +760,7 @@ def export_daily_excel(date_from: date, date_to: date, out_path: str):
 
     wb.save(out_path)
 
+
 def export_monthly_excel(year: int, month: int, out_path: str):
     rows = build_monthly_rows(year, month)
 
@@ -411,6 +807,7 @@ def export_monthly_excel(year: int, month: int, out_path: str):
 
     wb.save(out_path)
 
+
 def export_dept_employee_excel(
     dept_name: str,
     department_id: Optional[int],
@@ -418,10 +815,6 @@ def export_dept_employee_excel(
     date_to: date,
     out_path: str
 ):
-    """
-    Экспорт отчета "по подразделению (сотрудники)".
-    В колонке "Наименование подразделения" выводим реальное(ые) подразделение(я) из данных.
-    """
     rows = build_dept_employee_rows(department_id, date_from, date_to)
 
     conn = None
@@ -491,17 +884,19 @@ def export_dept_employee_excel(
 
     wb.save(out_path)
 
-# ---------------- UI Page (no tables) ----------------
+
+# ---------------- UI Page ----------------
 
 class MealsReportsPage(tk.Frame):
     def __init__(self, master, app_ref=None):
         super().__init__(master, bg="#f7f7f7")
         self.app_ref = app_ref
 
-        self.var_report_kind = tk.StringVar(value="daily")  # daily | monthly | dept_employee
+        self.var_report_kind = tk.StringVar(value="daily")  # daily | monthly | dept_employee | dismissal_employee
         self.var_month = tk.StringVar(value=date.today().strftime("%Y-%m"))
 
         self._dept_rows: List[Tuple[int, str]] = []
+        self._employee_rows: List[Dict[str, Any]] = []
 
         self._build_ui()
         self._load_departments()
@@ -527,6 +922,11 @@ class MealsReportsPage(tk.Frame):
             top, text="По подразделению (сотрудники)", value="dept_employee",
             variable=self.var_report_kind, command=self._update_mode
         ).grid(row=0, column=3, sticky="w", padx=(0, 10))
+
+        ttk.Radiobutton(
+            top, text="Увольнение (ведомость сотрудника)", value="dismissal_employee",
+            variable=self.var_report_kind, command=self._update_mode
+        ).grid(row=0, column=4, sticky="w", padx=(0, 10))
 
         self.frm_daily = tk.Frame(top, bg="#f7f7f7")
         self.frm_daily.grid(row=1, column=0, columnspan=6, sticky="w", pady=(10, 0))
@@ -557,6 +957,20 @@ class MealsReportsPage(tk.Frame):
         self.cmb_dept = ttk.Combobox(self.frm_dept, state="readonly", width=45)
         self.cmb_dept.grid(row=0, column=1, sticky="w", padx=(6, 10))
 
+        self.frm_employee = tk.Frame(top, bg="#f7f7f7")
+        self.frm_employee.grid(row=4, column=0, columnspan=6, sticky="we", pady=(10, 0))
+
+        tk.Label(self.frm_employee, text="Сотрудник:", bg="#f7f7f7").grid(row=0, column=0, sticky="w")
+
+        self.var_emp_search = tk.StringVar()
+        self.ent_emp_search = ttk.Entry(self.frm_employee, textvariable=self.var_emp_search, width=40)
+        self.ent_emp_search.grid(row=0, column=1, sticky="w", padx=(6, 6))
+
+        ttk.Button(self.frm_employee, text="Найти", command=self._search_employees).grid(row=0, column=2, padx=(0, 10))
+
+        self.cmb_employee = ttk.Combobox(self.frm_employee, state="readonly", width=70)
+        self.cmb_employee.grid(row=0, column=3, sticky="w")
+
         btns = tk.Frame(self, bg="#f7f7f7")
         btns.pack(fill="x", padx=12, pady=(0, 12))
         ttk.Button(btns, text="Выгрузить в Excel", command=self._on_export).pack(side="left")
@@ -568,10 +982,10 @@ class MealsReportsPage(tk.Frame):
             with conn.cursor() as cur:
                 cur.execute("SELECT id, name FROM departments ORDER BY name")
                 rows = cur.fetchall()
-    
+
             self._dept_rows = [(0, "Все")] + [(int(r[0]), str(r[1])) for r in rows]
             self.cmb_dept["values"] = [name for _, name in self._dept_rows]
-            self.cmb_dept.current(0)  # "Все"
+            self.cmb_dept.current(0)
         except Exception as e:
             messagebox.showerror("Отчеты", f"Не удалось загрузить подразделения:\n{e}", parent=self)
             self._dept_rows = [(0, "Все")]
@@ -588,20 +1002,55 @@ class MealsReportsPage(tk.Frame):
                 return None if did == 0 else did
         return None
 
+    def _search_employees(self):
+        try:
+            rows = search_employees_for_report(self.var_emp_search.get(), limit=200)
+            self._employee_rows = rows
+
+            values = []
+            for r in rows:
+                fio = r.get("fio", "")
+                tbn = r.get("tbn", "")
+                pos = r.get("position", "")
+                dep = r.get("department_name", "")
+                fired = " [уволен]" if r.get("is_fired") else ""
+                values.append(f"{fio} | таб. {tbn} | {pos} | {dep}{fired}")
+
+            self.cmb_employee["values"] = values
+            if values:
+                self.cmb_employee.current(0)
+            else:
+                self.cmb_employee.set("")
+                messagebox.showinfo("Отчеты", "Сотрудники не найдены.", parent=self)
+        except Exception as e:
+            messagebox.showerror("Отчеты", f"Ошибка поиска сотрудника:\n{e}", parent=self)
+
+    def _selected_employee_id(self) -> Optional[int]:
+        idx = self.cmb_employee.current()
+        if idx < 0 or idx >= len(self._employee_rows):
+            return None
+        return int(self._employee_rows[idx]["id"])
+
     def _update_mode(self):
         kind = self.var_report_kind.get()
+
+        self.frm_daily.grid_remove()
+        self.frm_monthly.grid_remove()
+        self.frm_dept.grid_remove()
+        self.frm_employee.grid_remove()
+
         if kind == "daily":
             self.frm_daily.grid()
-            self.frm_monthly.grid_remove()
-            self.frm_dept.grid_remove()
         elif kind == "monthly":
             self.frm_monthly.grid()
-            self.frm_daily.grid_remove()
-            self.frm_dept.grid_remove()
-        else:
+        elif kind == "dept_employee":
             self.frm_daily.grid()
             self.frm_dept.grid()
-            self.frm_monthly.grid_remove()
+        elif kind == "dismissal_employee":
+            self.frm_daily.grid()
+            self.frm_employee.grid()
+            if not self._employee_rows:
+                self._search_employees()
 
     def _on_export(self):
         kind = self.var_report_kind.get()
@@ -621,7 +1070,10 @@ class MealsReportsPage(tk.Frame):
                     messagebox.showwarning("Отчеты", "Дата 'с' больше даты 'по'.", parent=self)
                     return
 
-                out_path = os.path.join(out_dir, f"Питание_ежедневный_{d_from:%Y%m%d}-{d_to:%Y%m%d}_{ts}.xlsx")
+                out_path = os.path.join(
+                    out_dir,
+                    f"Питание_ежедневный_{d_from:%Y%m%d}-{d_to:%Y%m%d}_{ts}.xlsx"
+                )
                 export_daily_excel(d_from, d_to, out_path)
 
             elif kind == "monthly":
@@ -630,13 +1082,20 @@ class MealsReportsPage(tk.Frame):
                     dt = datetime.strptime(m, "%Y-%m")
                     year, month = dt.year, dt.month
                 except Exception:
-                    messagebox.showwarning("Отчеты", "Месяц должен быть в формате YYYY-MM, например 2026-01.", parent=self)
+                    messagebox.showwarning(
+                        "Отчеты",
+                        "Месяц должен быть в формате YYYY-MM, например 2026-01.",
+                        parent=self
+                    )
                     return
 
-                out_path = os.path.join(out_dir, f"Питание_месячный_{year:04d}{month:02d}_{ts}.xlsx")
+                out_path = os.path.join(
+                    out_dir,
+                    f"Питание_месячный_{year:04d}{month:02d}_{ts}.xlsx"
+                )
                 export_monthly_excel(year, month, out_path)
 
-            else:
+            elif kind == "dept_employee":
                 d_from = parse_date_any(self.ent_from.get())
                 d_to = parse_date_any(self.ent_to.get())
                 if not d_from or not d_to:
@@ -645,13 +1104,53 @@ class MealsReportsPage(tk.Frame):
                 if d_from > d_to:
                     messagebox.showwarning("Отчеты", "Дата 'с' больше даты 'по'.", parent=self)
                     return
-                    
+
                 dept_id = self._selected_department_id()
                 dept_name = (self.cmb_dept.get() or "").strip() or "Все"
-                
+
                 dept_safe = safe_filename(dept_name)
-                out_path = os.path.join(out_dir, f"Питание_подразделение_{dept_safe}_{d_from:%Y%m%d}-{d_to:%Y%m%d}_{ts}.xlsx")
+                out_path = os.path.join(
+                    out_dir,
+                    f"Питание_подразделение_{dept_safe}_{d_from:%Y%m%d}-{d_to:%Y%m%d}_{ts}.xlsx"
+                )
                 export_dept_employee_excel(dept_name, dept_id, d_from, d_to, out_path)
+
+            elif kind == "dismissal_employee":
+                d_from = parse_date_any(self.ent_from.get())
+                d_to = parse_date_any(self.ent_to.get())
+                if not d_from or not d_to:
+                    messagebox.showwarning("Отчеты", "Укажите даты 'с' и 'по'.", parent=self)
+                    return
+                if d_from > d_to:
+                    messagebox.showwarning("Отчеты", "Дата 'с' больше даты 'по'.", parent=self)
+                    return
+
+                employee_id = self._selected_employee_id()
+                if not employee_id:
+                    messagebox.showwarning("Отчеты", "Выберите сотрудника.", parent=self)
+                    return
+
+                employee_caption = self.cmb_employee.get() or f"employee_{employee_id}"
+                employee_safe = safe_filename(employee_caption.split("|")[0].strip())
+
+                out_path = os.path.join(
+                    out_dir,
+                    f"Ведомость_увольнение_{employee_safe}_{d_from:%Y%m%d}-{d_to:%Y%m%d}_{ts}.xlsx"
+                )
+
+                export_dismissal_statement_excel(
+                    employee_id=employee_id,
+                    date_from=d_from,
+                    date_to=d_to,
+                    out_path=out_path,
+                    statement_no="",
+                    statement_date=date.today(),
+                    city="Москва",
+                )
+
+            else:
+                messagebox.showwarning("Отчеты", f"Неизвестный тип отчета: {kind}", parent=self)
+                return
 
             messagebox.showinfo("Отчеты", f"Файл сформирован:\n{out_path}", parent=self)
             try:
