@@ -638,12 +638,22 @@ class GprDictionariesPage(tk.Frame):
         if not tpl:
             messagebox.showinfo("Справочники", "Выберите шаблон.", parent=self)
             return
-        dlg = TaskEditDialog(self, self._wt_cache, self._uom_cache,
-                              init={"plan_start": _today(),
-                                    "plan_finish": _today()})
-        if not dlg.result:
+    
+        if not self._wt_cache or not self._uom_cache:
+            self._tt_load()
+    
+        r = open_task_dialog(
+            self,
+            self._wt_cache,
+            self._uom_cache,
+            init={
+                "plan_start": _today(),
+                "plan_finish": _today(),
+            }
+        )
+        if not r:
             return
-        r = dlg.result
+    
         conn = None
         try:
             conn = _conn()
@@ -667,25 +677,37 @@ class GprDictionariesPage(tk.Frame):
             return
         finally:
             _release(conn)
+    
         self._tt_load()
 
     def _tt_edit(self):
         tt = self._tt_sel()
         if not tt:
+            messagebox.showinfo("Справочники", "Выберите задачу шаблона.", parent=self)
             return
+    
+        if not self._wt_cache or not self._uom_cache:
+            self._tt_load()
+    
         init = {
             "work_type_id": tt["work_type_id"],
-            "name":         tt["name"],
-            "uom_code":     tt.get("uom_code"),
-            "plan_qty":     tt.get("default_qty"),
-            "plan_start":   _today(),
-            "plan_finish":  _today(),
+            "name": tt["name"],
+            "uom_code": tt.get("uom_code"),
+            "plan_qty": tt.get("default_qty"),
+            "plan_start": _today(),
+            "plan_finish": _today(),
             "is_milestone": tt.get("is_milestone", False),
         }
-        dlg = TaskEditDialog(self, self._wt_cache, self._uom_cache, init=init)
-        if not dlg.result:
+    
+        r = open_task_dialog(
+            self,
+            self._wt_cache,
+            self._uom_cache,
+            init=init
+        )
+        if not r:
             return
-        r = dlg.result
+    
         conn = None
         try:
             conn = _conn()
@@ -696,8 +718,11 @@ class GprDictionariesPage(tk.Frame):
                         default_qty=%s, is_milestone=%s
                     WHERE id=%s
                 """, (
-                    r["work_type_id"], r["name"], r.get("uom_code"),
-                    r.get("plan_qty"), r.get("is_milestone", False),
+                    r["work_type_id"],
+                    r["name"],
+                    r.get("uom_code"),
+                    r.get("plan_qty"),
+                    r.get("is_milestone", False),
                     tt["id"],
                 ))
         except Exception as e:
@@ -705,6 +730,7 @@ class GprDictionariesPage(tk.Frame):
             return
         finally:
             _release(conn)
+    
         self._tt_load()
 
     def _tt_del(self):
