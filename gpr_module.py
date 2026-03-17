@@ -8,8 +8,6 @@ from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Set
 from pathlib import Path
 
-from gpr_task_dialog import open_task_dialog, _EmployeeService
-
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 
@@ -1142,6 +1140,7 @@ class GprPage(tk.Frame):
             messagebox.showinfo("ГПР", "Сначала откройте объект.", parent=self)
             return
         uid = (self.app_ref.current_user or {}).get("id")
+        from gpr_task_dialog import open_task_dialog
         result = open_task_dialog(self, self.work_types, self.uoms,
                                    init={"plan_start": self.range_from,
                                          "plan_finish": self.range_from},
@@ -1158,6 +1157,7 @@ class GprPage(tk.Frame):
         self._update_summary()
 
     def _edit_selected(self):
+        from gpr_task_dialog import open_task_dialog, _EmployeeService
         idx = self._find_task_idx()
         if idx is None:
             return
