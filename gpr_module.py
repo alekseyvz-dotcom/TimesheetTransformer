@@ -41,7 +41,7 @@ from gpr_common import (
     validate_tasks,
 )
 from gpr_db import GprService, set_db_pool
-from gpr_dialogs import AutoFilterCombobox, DateRangeDialog, TemplateSelectDialog
+from gpr_dialogs import AutoCompleteCombobox, DateRangeDialog, TemplateSelectDialog
 from gpr_gantt import GanttCanvas
 from gpr_task_dialog import open_task_dialog
 
