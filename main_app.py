@@ -131,8 +131,9 @@ meals_reports_module = None
 employee_card_module = None
 payroll_module = None
 brigades_module = None
-gpr_page = None
-
+gpr_module = None
+gpr_task_dialog = None
+gpr_dictionaries = None
 
 def perform_heavy_imports():
     global BudgetAnalyzer, _assets_logo, _LOGO_BASE64, SpecialOrders, \
@@ -140,7 +141,7 @@ def perform_heavy_imports():
            analytics_module, timesheet_transformer, employees_module, \
            timesheet_compare, meals_employees_module, lodging_module, \
            meals_reports_module, employee_card_module, payroll_module, \
-           brigades_module, gpr_page, gpr_dictionaries
+           brigades_module, gpr_module, gpr_task_dialog, gpr_dictionaries
            
     import BudgetAnalyzer
     import assets_logo as _assets_logo
@@ -151,8 +152,9 @@ def perform_heavy_imports():
     import objects
     import settings_manager as Settings
     import timesheet_module
-    import gpr_page as gpr_page
-    import dictionaries_page as gpr_dictionaries
+    import gpr_module as gpr_module
+    import gpr_dictionaries as gpr_dictionaries
+    import gpr_task_dialog as gpr_task_dialog
     import analytics_module
     import employees as employees_module
     import timesheet_compare
@@ -1040,7 +1042,7 @@ class MainApp(tk.Tk):
             label="ГПР (Диаграмма Ганта)",
             command=lambda: self._show_page(
                 "gpr",
-                lambda p: gpr_page.create_gpr_page(p, self)
+                lambda p: gpr_module.create_gpr_page(p, self),
             ),
         )
         m_gpr.add_command(
@@ -1328,9 +1330,6 @@ if __name__ == "__main__":
             splash.update_status("Подключение к базе данных...")
             initialize_db_pool()
 
-            from gpr_db import set_db_pool
-            set_db_pool(db_connection_pool)
-
             sync_permissions_from_menu_spec()
 
             splash.update_status("Передача настроек в модули...")
@@ -1341,7 +1340,9 @@ if __name__ == "__main__":
                 objects,
                 Settings,
                 timesheet_module,
-                gpr_page, 
+                gpr_module,
+                gpr_task_dialog,   
+                gpr_dictionaries, 
                 analytics_module,
                 employees_module,
                 timesheet_compare,
