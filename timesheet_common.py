@@ -38,12 +38,15 @@ SPECIAL_CODES: dict[str, dict[str, Any]] = {
     "НВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Доп. выходной без оплаты"},
     "МО": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Междувахтовый отдых"},
     "ВМ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Вахта"},
+    "ДО": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отпуск без сохранения"},
+    "ОД": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отгул донорский"},
     "ОТ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отпуск"},
     "Б": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Больничный"},
     "О": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отсутствие"},
     "П": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Простой / прочее"},
     "В": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Выходной"},
     "К": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Командировка"},
+    "снег": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Снег"},
     # Для РВ логичнее учитывать часы как фактические часы работы.
     # При необходимости можно перенастроить.
     "РВ 8": {"hours": 8.0, "night_hours": 0.0, "counts_day": True, "description": "Работа в выходной 8 ч"},
