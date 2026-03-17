@@ -153,7 +153,7 @@ def perform_heavy_imports():
     import settings_manager as Settings
     import timesheet_module
     import gpr_page as gpr_page
-    import gpr_dictionaries as gpr_dictionaries
+    import dictionaries_page as gpr_dictionaries
     import analytics_module
     import employees as employees_module
     import timesheet_compare
