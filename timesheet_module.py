@@ -687,6 +687,14 @@ class TimesheetPage(tk.Frame):
 
         self._ts_btn(bar, "✖ Снять выделение", self.clear_selection, side="left", padx=4)
 
+        self._btn_export_ref = self._ts_btn(
+            bar,
+            "📊 Выгрузить в Excel",
+            self.export_current_timesheet_to_excel,
+            side="right",
+            padx=4,
+        )
+
         btn_save = tk.Button(
             bar,
             text="💾 СОХРАНИТЬ",
@@ -710,6 +718,8 @@ class TimesheetPage(tk.Frame):
 
         if self.read_only:
             for child in bar.winfo_children():
+                if child is getattr(self, "_btn_export_ref", None):
+                    continue
                 try:
                     child.configure(state="disabled")
                 except Exception:
@@ -1891,6 +1901,135 @@ class TimesheetPage(tk.Frame):
             logger.exception("Ошибка копирования из месяца")
             messagebox.showerror("Копирование", f"Ошибка при копировании из БД:\n{e}", parent=self)
 
+    def _get_brigadier_map_for_current_export(self) -> dict[str, str]:
+        """
+        Возвращает карту:
+            employee_tbn -> brigadier_fio
+
+        Приоритет:
+        1) если табель уже существует в БД и открыт по header_id — берём точную карту из БД;
+        2) иначе собираем по текущим назначениям бригадиров в подразделении.
+        """
+        if self._active_header_id:
+            try:
+                return load_brigadiers_map_for_header(int(self._active_header_id))
+            except Exception:
+                logger.exception("Не удалось загрузить карту бригадиров для текущего header_id")
+
+        result: dict[str, str] = {}
+        dep = normalize_spaces(self.cmb_department.get() or "")
+        if not dep or dep == "Все":
+            return result
+
+        try:
+            if not self._brig_assign or not self._brig_names:
+                self._reload_brigadier_filter_data()
+
+            for emp_tbn, brig_tbn in self._brig_assign.items():
+                emp_tbn_norm = normalize_tbn(emp_tbn)
+                brig_tbn_norm = normalize_tbn(brig_tbn)
+                if not emp_tbn_norm:
+                    continue
+
+                brig_fio = normalize_spaces(self._brig_names.get(brig_tbn_norm, "")) if brig_tbn_norm else ""
+                result[emp_tbn_norm] = brig_fio
+        except Exception:
+            logger.exception("Не удалось собрать карту бригадиров для экспорта текущего табеля")
+
+        return result
+
+    def export_current_timesheet_to_excel(self):
+        """
+        Выгружает текущий табель в Excel прямо из открытой страницы.
+
+        ВАЖНО:
+        - берутся текущие данные из self.model_rows_all;
+        - если пользователь изменил значения, но ещё не сохранил в БД,
+          в Excel попадут именно эти текущие изменения.
+        """
+        try:
+            if hasattr(self, "grid"):
+                self.grid.close_editor(commit=True)
+        except Exception:
+            pass
+
+        year, month = self.get_year_month()
+        addr = normalize_spaces(self.cmb_address.get() or "")
+        oid = normalize_spaces(self.cmb_object_id.get() or "")
+        dep = normalize_spaces(self.cmb_department.get() or "")
+
+        if not self.model_rows_all:
+            messagebox.showinfo("Выгрузка", "В табеле нет строк для выгрузки.", parent=self)
+            return
+
+        obj_part = oid or addr or "без_объекта"
+        dep_part = dep or "без_подразделения"
+
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Сохранить текущий табель в Excel",
+            defaultextension=".xlsx",
+            initialfile=f"Табель_{safe_filename(obj_part)}_{safe_filename(dep_part)}_{year}_{month:02d}.xlsx",
+            filetypes=[("Excel", "*.xlsx"), ("Все", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Текущий табель"
+
+            header = (
+                ["Год", "Месяц", "Адрес", "ID объекта", "Подразделение", "ФИО", "Табельный №", "ФИО бригадира"]
+                + [str(i) for i in range(1, 32)]
+                + ["Итого дней", "Итого часов", "В т.ч. ночных", "Переработка день", "Переработка ночь"]
+            )
+            ws.append(header)
+
+            widths = [6, 10, 40, 14, 22, 28, 12, 28] + [6] * 31 + [10, 12, 16, 16, 16]
+            for i, w in enumerate(widths, 1):
+                ws.column_dimensions[get_column_letter(i)].width = w
+
+            for cell in ws[1]:
+                cell.font = Font(bold=True)
+
+            brig_map = self._get_brigadier_map_for_current_export()
+
+            exported_rows = 0
+            for rec in self.model_rows_all:
+                norm = normalize_row_record(rec, year, month)
+                fio = normalize_spaces(norm.get("fio") or "")
+                tbn = normalize_tbn(norm.get("tbn"))
+                hours = normalize_hours_list(norm.get("hours"), year, month)
+                totals = norm.get("_totals") or calc_row_totals(hours, year, month)
+
+                brig_fio = brig_map.get(tbn, "") if tbn else ""
+
+                ws.append(
+                    [year, month, addr, oid, dep, fio, tbn, brig_fio]
+                    + hours
+                    + [
+                        totals.get("days"),
+                        totals.get("hours"),
+                        totals.get("night_hours"),
+                        totals.get("ot_day"),
+                        totals.get("ot_night"),
+                    ]
+                )
+                exported_rows += 1
+
+            wb.save(path)
+
+            messagebox.showinfo(
+                "Выгрузка",
+                f"Готово.\nСтрок: {exported_rows}\nФайл: {path}",
+                parent=self,
+            )
+        except Exception as e:
+            logger.exception("Ошибка выгрузки текущего табеля в Excel")
+            messagebox.showerror("Выгрузка", f"Ошибка выгрузки:\n{e}", parent=self)
+            
     # --------------------------------------------------------
     # Сохранение
     # --------------------------------------------------------
