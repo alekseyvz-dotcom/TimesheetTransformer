@@ -41,6 +41,7 @@ SPECIAL_CODES: dict[str, dict[str, Any]] = {
     "ДО": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отпуск без сохранения"},
     "ОД": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отгул донорский"},
     "ОТ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отпуск"},
+    "УВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Уволен"},
     "Б": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Больничный"},
     "О": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отсутствие"},
     "П": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Простой / прочее"},
