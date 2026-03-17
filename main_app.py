@@ -132,7 +132,6 @@ employee_card_module = None
 payroll_module = None
 brigades_module = None
 gpr_page = None
-gpr_task_dialog = None
 
 
 def perform_heavy_imports():
@@ -141,7 +140,7 @@ def perform_heavy_imports():
            analytics_module, timesheet_transformer, employees_module, \
            timesheet_compare, meals_employees_module, lodging_module, \
            meals_reports_module, employee_card_module, payroll_module, \
-           brigades_module, gpr_module, gpr_task_dialog, gpr_dictionaries
+           brigades_module, gpr_page, gpr_dictionaries
            
     import BudgetAnalyzer
     import assets_logo as _assets_logo
@@ -196,9 +195,6 @@ def initialize_db_pool():
         logging.exception("Критическая ошибка: не удалось создать пул соединений с БД.")
         db_connection_pool = None
         raise e
-
-from gpr_db import set_db_pool
-set_db_pool(db_connection_pool)
 
 def close_db_pool():
     """Закрывает все соединения в пуле. Вызывается при выходе из приложения."""
@@ -1332,6 +1328,9 @@ if __name__ == "__main__":
             splash.update_status("Подключение к базе данных...")
             initialize_db_pool()
 
+            from gpr_db import set_db_pool
+            set_db_pool(db_connection_pool)
+
             sync_permissions_from_menu_spec()
 
             splash.update_status("Передача настроек в модули...")
@@ -1342,8 +1341,7 @@ if __name__ == "__main__":
                 objects,
                 Settings,
                 timesheet_module,
-                gpr_page,
-                gpr_task_dialog,   
+                gpr_page, 
                 analytics_module,
                 employees_module,
                 timesheet_compare,
