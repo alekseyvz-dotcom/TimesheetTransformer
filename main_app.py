@@ -131,9 +131,9 @@ meals_reports_module = None
 employee_card_module = None
 payroll_module = None
 brigades_module = None
-gpr_module = None
+gpr_page = None
 gpr_task_dialog = None
-gpr_dictionaries = None
+
 
 def perform_heavy_imports():
     global BudgetAnalyzer, _assets_logo, _LOGO_BASE64, SpecialOrders, \
@@ -152,9 +152,8 @@ def perform_heavy_imports():
     import objects
     import settings_manager as Settings
     import timesheet_module
-    import gpr_module as gpr_module
+    import gpr_page as gpr_page
     import gpr_dictionaries as gpr_dictionaries
-    import gpr_task_dialog as gpr_task_dialog
     import analytics_module
     import employees as employees_module
     import timesheet_compare
@@ -197,6 +196,9 @@ def initialize_db_pool():
         logging.exception("Критическая ошибка: не удалось создать пул соединений с БД.")
         db_connection_pool = None
         raise e
+
+from gpr_db import set_db_pool
+set_db_pool(db_connection_pool)
 
 def close_db_pool():
     """Закрывает все соединения в пуле. Вызывается при выходе из приложения."""
@@ -1042,7 +1044,7 @@ class MainApp(tk.Tk):
             label="ГПР (Диаграмма Ганта)",
             command=lambda: self._show_page(
                 "gpr",
-                lambda p: gpr_module.create_gpr_page(p, self),
+                lambda p: gpr_page.create_gpr_page(p, self)
             ),
         )
         m_gpr.add_command(
@@ -1340,9 +1342,8 @@ if __name__ == "__main__":
                 objects,
                 Settings,
                 timesheet_module,
-                gpr_module,
-                 gpr_task_dialog,   
-                gpr_dictionaries, 
+                gpr_page,
+                gpr_task_dialog,   
                 analytics_module,
                 employees_module,
                 timesheet_compare,
