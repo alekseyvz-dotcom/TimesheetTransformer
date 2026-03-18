@@ -23,20 +23,6 @@ try:
 except ImportError:
     HAS_OPENPYXL = False
 
-# Проверяем наличие внешнего диалога задач
-try:
-    from gpr_task_dialog import open_task_dialog as _ext_open_task_dialog
-
-    HAS_EXT_DIALOG = True
-except ImportError:
-    HAS_EXT_DIALOG = False
-    _ext_open_task_dialog = None
-
-try:
-    from gpr_task_dialog import _EmployeeService as _ExtEmployeeService
-except ImportError:
-    _ExtEmployeeService = None
-
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════
@@ -1588,23 +1574,33 @@ class GprPage(tk.Frame):
 
     def _open_task_dialog(self, init=None):
         """Открыть диалог редактирования задачи.
-        Использует внешний модуль gpr_task_dialog если он есть,
-        иначе встроенный TaskEditDialog."""
+        Ленивый импорт gpr_task_dialog — чтобы избежать циклического импорта."""
         uid = (self.app_ref.current_user or {}).get("id")
 
-        if HAS_EXT_DIALOG and _ext_open_task_dialog is not None:
+        # Ленивый импорт — только при первом вызове
+        if not hasattr(self, '_ext_dialog_func'):
             try:
-                return _ext_open_task_dialog(
+                from gpr_task_dialog import open_task_dialog as _func
+                self._ext_dialog_func = _func
+                logger.info("gpr_task_dialog loaded successfully")
+            except ImportError as e:
+                logger.warning("gpr_task_dialog not available: %s", e)
+                self._ext_dialog_func = None
+
+        if self._ext_dialog_func is not None:
+            try:
+                result = self._ext_dialog_func(
                     self, self.work_types, self.uoms,
                     init=init, user_id=uid
                 )
+                return result
             except Exception as e:
-                logger.warning(
-                    "External task dialog failed, "
-                    "falling back to built-in: %s", e
+                logger.exception(
+                    "External task dialog error, falling back to built-in"
                 )
 
-        # Встроенный диалог
+        # Fallback на встроенный маленький диалог
+        logger.warning("Using built-in TaskEditDialog (no gpr_task_dialog)")
         dlg = TaskEditDialog(
             self, self.work_types, self.uoms, init=init
         )
@@ -1678,15 +1674,18 @@ class GprPage(tk.Frame):
         # Сохраняем назначения если задача уже в БД
         task_id = t0.get("id")
         assignments = upd.pop("_assignments", None)
-        if (
-            task_id
-            and assignments is not None
-            and _ExtEmployeeService is not None
-        ):
+        if task_id and assignments is not None:
             uid = (self.app_ref.current_user or {}).get("id")
             try:
-                _ExtEmployeeService.save_task_assignments(
+                # Ленивый импорт _EmployeeService
+                from gpr_task_dialog import _EmployeeService
+                _EmployeeService.save_task_assignments(
                     task_id, assignments, uid
+                )
+            except ImportError:
+                logger.warning(
+                    "gpr_task_dialog not available — "
+                    "assignments not saved"
                 )
             except Exception as e:
                 logger.exception("Save assignments error")
