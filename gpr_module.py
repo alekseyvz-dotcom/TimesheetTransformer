@@ -730,56 +730,181 @@ class TemplateSelectDialog(simpledialog.Dialog):
 #  GANTT CANVAS (optimized scroll performance)
 # ═══════════════════════════════════════════════════════════════
 class GanttCanvas(tk.Frame):
-    """Гант, синхронизированный с Treeview по позициям строк."""
 
-    MONTH_H = 20
-    DAY_H = 22
+    MONTH_H = 22
+    DAY_H = 24
     HEADER_H = MONTH_H + DAY_H
+
+    ROW_PAD_Y = 4
+    MIN_DAY_PX = 6
+    MAX_DAY_PX = 56
+    REDRAW_DEBOUNCE_MS = 40
 
     def __init__(self, master, *, day_px=20, linked_tree=None):
         super().__init__(master, bg=C["panel"])
-        self.day_px = day_px
-        self._tree = linked_tree
+
+        self.day_px = max(self.MIN_DAY_PX, min(self.MAX_DAY_PX, int(day_px)))
+
+        self._tree = None
+        self._tree_bound_ref = None
+
+        self._range: Tuple[date, date] = _quarter_range()
+        self._rows: List[Dict[str, Any]] = []
+        self._facts: Dict[Any, float] = {}
+
+        self._row_lookup_by_iid: Dict[str, int] = {}
+        self._task_index_by_key: Dict[str, int] = {}
+
+        self._header_cache_key = None
+        self._heavy_redraw_pending: Optional[str] = None
+        self._fast_redraw_pending = False
+        self._is_mapped = False
+
+        self._selected_task_key: Optional[str] = None
+        self._hover_task_key: Optional[str] = None
+
+        self._tooltip_win: Optional[tk.Toplevel] = None
+        self._tooltip_lbl: Optional[tk.Label] = None
 
         self.hdr = tk.Canvas(
-            self, height=self.HEADER_H, bg="#e8eaed", highlightthickness=0
+            self,
+            height=self.HEADER_H,
+            bg="#e8eaed",
+            highlightthickness=0,
         )
-        self.body = tk.Canvas(self, bg="#ffffff", highlightthickness=0)
+        self.body = tk.Canvas(
+            self,
+            bg="#ffffff",
+            highlightthickness=0,
+        )
         self.hsb = ttk.Scrollbar(
-            self, orient="horizontal", command=self._xview
+            self,
+            orient="horizontal",
+            command=self._xview,
         )
 
         self.hdr.grid(row=0, column=0, sticky="ew")
         self.body.grid(row=1, column=0, sticky="nsew")
         self.hsb.grid(row=2, column=0, sticky="ew")
+
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
         self.body.configure(xscrollcommand=self._on_xscroll)
 
-        self._range: Tuple[date, date] = _quarter_range()
-        self._rows: List[Dict[str, Any]] = []
-        self._facts: Dict[int, float] = {}
+        self.body.bind("<Configure>", self._on_configure, add="+")
+        self.body.bind("<MouseWheel>", self._wheel, add="+")
+        self.body.bind("<Button-4>", self._wheel, add="+")
+        self.body.bind("<Button-5>", self._wheel, add="+")
+        self.body.bind("<Shift-MouseWheel>", self._hwheel, add="+")
+        self.body.bind("<Motion>", self._on_motion, add="+")
+        self.body.bind("<Leave>", self._on_leave, add="+")
+        self.body.bind("<Button-1>", self._on_click, add="+")
 
-        # Debounce только для тяжёлых операций (resize, set_data)
-        self._heavy_redraw_pending: Optional[str] = None
-        self._is_mapped = False
+        self.hdr.bind("<MouseWheel>", self._wheel, add="+")
+        self.hdr.bind("<Button-4>", self._wheel, add="+")
+        self.hdr.bind("<Button-5>", self._wheel, add="+")
+        self.hdr.bind("<Shift-MouseWheel>", self._hwheel, add="+")
+        self.hdr.bind("<Control-MouseWheel>", self._zoom_wheel, add="+")
+        self.body.bind("<Control-MouseWheel>", self._zoom_wheel, add="+")
 
-        # Кэш: заголовок уже отрисован для текущего range/day_px?
+        self.bind("<Map>", self._on_map, add="+")
+
+        if linked_tree is not None:
+            self.set_tree(linked_tree)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def set_tree(self, tree):
+        self._tree = tree
+        if tree is not None and tree is not self._tree_bound_ref:
+            self._bind_tree_events(tree)
+            self._tree_bound_ref = tree
+        self._schedule_heavy_redraw()
+
+    def set_range(self, d0, d1):
+        if d1 < d0:
+            d0, d1 = d1, d0
+        self._range = (d0, d1)
         self._header_cache_key = None
+        self._schedule_heavy_redraw()
 
-        # Кэш: элементы body (id объектов canvas) для быстрого удаления
-        self._body_bar_ids: List[int] = []
-        self._body_grid_ids: List[int] = []
-        self._body_zebra_ids: List[int] = []
-        self._body_today_id: Optional[int] = None
+    def set_zoom(self, day_px: int):
+        new_px = max(self.MIN_DAY_PX, min(self.MAX_DAY_PX, int(day_px)))
+        if new_px == self.day_px:
+            return
+        self.day_px = new_px
+        self._header_cache_key = None
+        self._schedule_heavy_redraw()
 
-        self.body.bind("<Configure>", self._on_configure)
-        self.body.bind("<MouseWheel>", self._wheel)
-        self.body.bind("<Button-4>", self._wheel)
-        self.body.bind("<Button-5>", self._wheel)
-        self.body.bind("<Shift-MouseWheel>", self._hwheel)
-        self.bind("<Map>", self._on_map)
+    def zoom_in(self):
+        self.set_zoom(self.day_px + 2)
+
+    def zoom_out(self):
+        self.set_zoom(self.day_px - 2)
+
+    def set_data(self, rows, facts=None):
+        self._facts = facts or {}
+        self._rows = []
+        self._row_lookup_by_iid.clear()
+        self._task_index_by_key.clear()
+
+        for idx, src in enumerate(rows or []):
+            row = dict(src)
+
+            ps = _to_date(row.get("plan_start"))
+            pf = _to_date(row.get("plan_finish"))
+            if ps and pf and pf < ps:
+                ps, pf = pf, ps
+
+            row["_plan_start"] = ps
+            row["_plan_finish"] = pf
+            row["_task_key"] = self._make_task_key(row, idx)
+
+            self._rows.append(row)
+            self._task_index_by_key[row["_task_key"]] = idx
+
+            iid = row.get("iid") or row.get("_iid")
+            if iid is not None:
+                self._row_lookup_by_iid[str(iid)] = idx
+
+        self._schedule_heavy_redraw()
+
+    def redraw_bars_only(self):
+        if not self._is_mapped:
+            return
+        try:
+            self._draw_bars()
+        except Exception:
+            logger.exception("GanttCanvas.redraw_bars_only error")
+
+    def notify_tree_changed(self, *_):
+        """Вызывай этот метод из yscroll/scrollbar callback дерева."""
+        self._schedule_fast_redraw()
+
+    # ------------------------------------------------------------------
+    # Events / scheduling
+    # ------------------------------------------------------------------
+    def _bind_tree_events(self, tree):
+        for seq in (
+            "<<TreeviewOpen>>",
+            "<<TreeviewClose>>",
+            "<<TreeviewSelect>>",
+            "<Configure>",
+            "<ButtonRelease-1>",
+            "<KeyRelease>",
+            "<MouseWheel>",
+            "<Button-4>",
+            "<Button-5>",
+        ):
+            try:
+                tree.bind(seq, self._on_tree_event, add="+")
+            except tk.TclError:
+                pass
+
+    def _on_tree_event(self, _e=None):
+        self._schedule_fast_redraw()
 
     def _on_map(self, _e=None):
         self._is_mapped = True
@@ -788,29 +913,25 @@ class GanttCanvas(tk.Frame):
     def _on_configure(self, _e=None):
         self._schedule_heavy_redraw()
 
-    def set_tree(self, tree):
-        self._tree = tree
-
-    def set_range(self, d0, d1):
-        self._range = (d0, d1)
-        self._header_cache_key = None  # сбрасываем кэш заголовка
-        self._schedule_heavy_redraw()
-
-    def set_data(self, rows, facts=None):
-        self._rows = rows or []
-        self._facts = facts or {}
-        self._schedule_heavy_redraw()
-
-    # ── Debounce только для тяжёлых операций ──
     def _schedule_heavy_redraw(self):
         if self._heavy_redraw_pending:
             self.after_cancel(self._heavy_redraw_pending)
         self._heavy_redraw_pending = self.after(
-            40, self._full_redraw
+            self.REDRAW_DEBOUNCE_MS,
+            self._full_redraw,
         )
 
+    def _schedule_fast_redraw(self):
+        if self._fast_redraw_pending:
+            return
+        self._fast_redraw_pending = True
+        self.after_idle(self._flush_fast_redraw)
+
+    def _flush_fast_redraw(self):
+        self._fast_redraw_pending = False
+        self.redraw_bars_only()
+
     def _full_redraw(self):
-        """Полная перерисовка (заголовок + бары)."""
         self._heavy_redraw_pending = None
         if not self._is_mapped:
             return
@@ -820,32 +941,24 @@ class GanttCanvas(tk.Frame):
         except Exception:
             logger.exception("GanttCanvas._full_redraw error")
 
-    def redraw_bars_only(self):
-        """Быстрая перерисовка только баров (при скролле Treeview).
-        Заголовок не трогаем — он не меняется при вертикальном скролле."""
-        if not self._is_mapped:
-            return
-        try:
-            self._draw_bars()
-        except Exception:
-            logger.exception("GanttCanvas.redraw_bars_only error")
-
-    # ── Scroll handlers ──
-    def _xview(self, *a):
-        self.body.xview(*a)
-        self.hdr.xview(*a)
+    # ------------------------------------------------------------------
+    # Scroll
+    # ------------------------------------------------------------------
+    def _xview(self, *args):
+        self.body.xview(*args)
+        self.hdr.xview(*args)
 
     def _on_xscroll(self, f0, f1):
         self.hsb.set(f0, f1)
         self.hdr.xview_moveto(float(f0))
+        self._schedule_fast_redraw()
 
     def _wheel(self, e):
         if self._tree:
             d = _mouse_delta(e)
             if d:
                 self._tree.yview_scroll(d, "units")
-                # Мгновенная перерисовка баров — без debounce!
-                self.after_idle(self.redraw_bars_only)
+                self._schedule_fast_redraw()
         return "break"
 
     def _hwheel(self, e):
@@ -853,15 +966,64 @@ class GanttCanvas(tk.Frame):
         if d:
             self.body.xview_scroll(d, "units")
             self.hdr.xview_scroll(d, "units")
+            self._schedule_fast_redraw()
         return "break"
 
-    # ── Позиции строк из Treeview ──
-    def _get_tree_row_positions(self) -> List[Optional[Tuple[int, int]]]:
-        if not self._tree:
-            return []
+    def _zoom_wheel(self, e):
+        delta = 0
+        if getattr(e, "num", None) == 4:
+            delta = 1
+        elif getattr(e, "num", None) == 5:
+            delta = -1
+        else:
+            delta = 1 if getattr(e, "delta", 0) > 0 else -1
 
-        items = self._tree.get_children()
-        if not items:
+        if delta > 0:
+            self.zoom_in()
+        else:
+            self.zoom_out()
+        return "break"
+
+    # ------------------------------------------------------------------
+    # Geometry helpers
+    # ------------------------------------------------------------------
+    def _make_task_key(self, row: Dict[str, Any], idx: int) -> str:
+        if row.get("id") is not None:
+            return f"id:{row['id']}"
+        iid = row.get("iid") or row.get("_iid")
+        if iid is not None:
+            return f"iid:{iid}"
+        return f"row:{idx}"
+
+    def _visible_x_bounds(self) -> Tuple[int, int]:
+        x0 = max(0, int(self.body.canvasx(0)))
+        x1 = int(self.body.canvasx(max(1, self.body.winfo_width())))
+        if x1 <= x0:
+            x1 = x0 + max(1, self.body.winfo_width())
+        return x0, x1
+
+    def _visible_day_span(self, d0: date, days: int) -> Tuple[int, int]:
+        vx0, vx1 = self._visible_x_bounds()
+        day0 = max(0, int(vx0 // self.day_px) - 2)
+        day1 = min(days - 1, int(vx1 // self.day_px) + 2)
+        return day0, day1
+
+    def _estimate_tree_row_height(self) -> int:
+        if not self._tree:
+            return 24
+        try:
+            iid = self._tree.identify_row(0)
+            if iid:
+                bbox = self._tree.bbox(iid)
+                if bbox:
+                    return max(18, int(bbox[3]))
+        except tk.TclError:
+            pass
+        return 24
+
+    def _get_visible_tree_rows(self) -> List[Tuple[str, int, int]]:
+        """Возвращает только видимые строки дерева: [(iid, y0, y1), ...]."""
+        if not self._tree:
             return []
 
         try:
@@ -871,144 +1033,294 @@ class GanttCanvas(tk.Frame):
             return []
 
         offset = tree_top - canvas_top
-        positions: List[Optional[Tuple[int, int]]] = []
+        viewport_h = max(1, self.body.winfo_height())
+        row_h = self._estimate_tree_row_height()
 
-        # Оптимизация: если виджеты ещё не отрисованы
-        if tree_top == 0 and canvas_top == 0:
-            row_h = 24
-            for i in range(len(items)):
-                y_top = i * row_h
-                positions.append((y_top, y_top + row_h))
-            return positions
+        result: List[Tuple[str, int, int]] = []
+        seen = set()
+        y = 0
+        safety = 0
 
-        for iid in items:
+        while y <= viewport_h + row_h and safety < 10000:
+            safety += 1
+            try:
+                iid = self._tree.identify_row(y)
+            except tk.TclError:
+                break
+
+            if not iid or iid in seen:
+                y += row_h
+                continue
+
             try:
                 bbox = self._tree.bbox(iid)
-                if bbox:
-                    y_top = bbox[1] + offset
-                    positions.append((y_top, y_top + bbox[3]))
-                else:
-                    positions.append(None)
-            except (tk.TclError, Exception):
-                positions.append(None)
+            except tk.TclError:
+                bbox = None
 
-        return positions
+            if not bbox:
+                y += row_h
+                continue
 
-    # ── Рисование заголовка (кэшируется) ──
+            seen.add(iid)
+            y0 = bbox[1] + offset
+            y1 = y0 + bbox[3]
+            result.append((iid, y0, y1))
+
+            y = bbox[1] + bbox[3] + 1
+
+        return result
+
+    def _resolve_row_for_iid(self, iid: str, visible_index: int):
+        idx = self._row_lookup_by_iid.get(str(iid))
+        if idx is not None and 0 <= idx < len(self._rows):
+            return idx, self._rows[idx]
+
+        # fallback, если rows не содержат iid
+        if 0 <= visible_index < len(self._rows):
+            return visible_index, self._rows[visible_index]
+
+        return None, None
+
+    def _bar_vertical_bounds(self, y0: int, y1: int) -> Tuple[int, int]:
+        by0 = y0 + self.ROW_PAD_Y
+        by1 = y1 - self.ROW_PAD_Y
+        if by1 - by0 < 6:
+            by0 = y0 + 2
+            by1 = y1 - 2
+        return by0, by1
+
+    def _task_progress(self, task: Dict[str, Any]) -> float:
+        tid = task.get("id")
+        pq = max(0.0, _safe_float(task.get("plan_qty")))
+
+        if tid is not None and pq > 0:
+            fq = max(0.0, _safe_float(self._facts.get(tid, 0)))
+            return max(0.0, min(1.0, fq / pq))
+
+        raw = task.get("progress")
+        if raw is None:
+            return 0.0
+
+        p = _safe_float(raw)
+        if p > 1:
+            p /= 100.0
+        return max(0.0, min(1.0, p))
+
+    def _best_text_color(self, fill: str) -> str:
+        try:
+            r, g, b = self.winfo_rgb(fill)
+            # winfo_rgb -> 0..65535
+            luminance = ((r * 299) + (g * 587) + (b * 114)) / 1000 / 256
+            return "#ffffff" if luminance < 140 else "#202124"
+        except tk.TclError:
+            return "#202124"
+
+    def _fit_text(self, text: str, max_chars: int = 32) -> str:
+        s = " ".join(str(text or "").split())
+        if len(s) <= max_chars:
+            return s
+        return s[: max_chars - 1] + "…"
+
+    # ------------------------------------------------------------------
+    # Drawing
+    # ------------------------------------------------------------------
     def _draw_header(self):
         d0, d1 = self._range
         if d1 < d0:
             return
+
         days = (d1 - d0).days + 1
         tw = max(1, days * self.day_px)
 
         cache_key = (d0, d1, self.day_px)
         if self._header_cache_key == cache_key:
-            return  # заголовок не изменился
+            return
+
         self._header_cache_key = cache_key
 
         self.hdr.delete("all")
         self.hdr.configure(scrollregion=(0, 0, tw, self.HEADER_H))
 
-        # Месяцы
+        # Month bands
         cur = date(d0.year, d0.month, 1)
         while cur <= d1:
             mr = calendar.monthrange(cur.year, cur.month)[1]
             ms = max(cur, d0)
             me = min(date(cur.year, cur.month, mr), d1)
+
             x0 = (ms - d0).days * self.day_px
             x1 = ((me - d0).days + 1) * self.day_px
+
             self.hdr.create_rectangle(
-                x0, 0, x1, self.MONTH_H, fill="#d6dbe0", outline="#bbb"
+                x0, 0, x1, self.MONTH_H,
+                fill="#d6dbe0",
+                outline="#b8bdc3",
             )
-            if (x1 - x0) > 40:
+
+            if (x1 - x0) > 60:
                 self.hdr.create_text(
-                    (x0 + x1) / 2, self.MONTH_H / 2,
+                    (x0 + x1) / 2,
+                    self.MONTH_H / 2,
                     text=cur.strftime("%b %Y"),
-                    font=("Segoe UI", 8, "bold"), fill="#333"
+                    font=("Segoe UI", 8, "bold"),
+                    fill="#2f3133",
                 )
+
             if cur.month == 12:
                 cur = date(cur.year + 1, 1, 1)
             else:
                 cur = date(cur.year, cur.month + 1, 1)
 
-        # Дни
+        # Day row
         for i in range(days):
             x0 = i * self.day_px
             x1 = x0 + self.day_px
             d = d0 + timedelta(days=i)
-            fill = "#ffecec" if d.weekday() >= 5 else "#f3f4f6"
+
+            fill = "#f5f6f8" if d.weekday() >= 5 else "#fbfbfc"
             self.hdr.create_rectangle(
                 x0, self.MONTH_H, x1, self.HEADER_H,
-                fill=fill, outline="#d0d0d0"
+                fill=fill,
+                outline="#d9dde1",
             )
-            if self.day_px >= 14:
-                self.hdr.create_text(
-                    (x0 + x1) / 2, self.MONTH_H + self.DAY_H / 2,
-                    text=str(d.day), font=("Segoe UI", 7), fill="#555"
+
+            if d.day == 1:
+                self.hdr.create_line(
+                    x0, 0, x0, self.HEADER_H,
+                    fill="#9aa0a6",
+                    width=2,
+                )
+            elif d.weekday() == 0:
+                self.hdr.create_line(
+                    x0, self.MONTH_H, x0, self.HEADER_H,
+                    fill="#cfd4d9",
                 )
 
-        # Сегодня (в заголовке)
+            if self.day_px >= 26:
+                self.hdr.create_text(
+                    (x0 + x1) / 2,
+                    self.MONTH_H + 8,
+                    text=d.strftime("%a")[:2],
+                    font=("Segoe UI", 6),
+                    fill="#5f6368",
+                )
+                self.hdr.create_text(
+                    (x0 + x1) / 2,
+                    self.MONTH_H + 18,
+                    text=str(d.day),
+                    font=("Segoe UI", 7, "bold"),
+                    fill="#303134",
+                )
+            elif self.day_px >= 14:
+                self.hdr.create_text(
+                    (x0 + x1) / 2,
+                    self.MONTH_H + self.DAY_H / 2,
+                    text=str(d.day),
+                    font=("Segoe UI", 7),
+                    fill="#555",
+                )
+
         td = _today()
         if d0 <= td <= d1:
-            tx = (td - d0).days * self.day_px + self.day_px // 2
+            tx = (td - d0).days * self.day_px + self.day_px / 2
             self.hdr.create_line(
-                tx, 0, tx, self.HEADER_H, fill=C["error"], width=2
+                tx, 0, tx, self.HEADER_H,
+                fill=C["error"],
+                width=2,
             )
 
-    # ── Рисование баров (быстрое) ──
     def _draw_bars(self):
         d0, d1 = self._range
         if d1 < d0:
             return
+
         days = (d1 - d0).days + 1
         tw = max(1, days * self.day_px)
-        body_h = self.body.winfo_height()
-        if body_h < 10:
-            body_h = 600
+        viewport_h = max(1, self.body.winfo_height())
 
-        # Удаляем только бары, зебру, сетку — НЕ всё подряд
-        # (быстрее чем delete("all") + пересоздание scrollregion)
-        self.body.delete("all")
-        self.body.configure(scrollregion=(0, 0, tw, body_h))
+        self.body.configure(scrollregion=(0, 0, tw, viewport_h))
 
-        # Сегодня (вертикальная линия)
-        td = _today()
-        if d0 <= td <= d1:
-            tx = (td - d0).days * self.day_px + self.day_px // 2
+        # Удаляем только слои, а не весь canvas
+        for tag in ("bg", "grid", "today", "task", "label", "overlay"):
+            self.body.delete(tag)
+
+        vx0, vx1 = self._visible_x_bounds()
+        day0, day1 = self._visible_day_span(d0, days)
+
+        visible_rows = self._get_visible_tree_rows()
+
+        # Row stripes
+        for visible_idx, (iid, y0, y1) in enumerate(visible_rows):
+            row_idx, _task = self._resolve_row_for_iid(iid, visible_idx)
+            if row_idx is None:
+                row_idx = visible_idx
+
+            bg = "#ffffff" if (row_idx % 2 == 0) else "#fafbfc"
+            self.body.create_rectangle(
+                vx0, y0, vx1, y1,
+                fill=bg,
+                outline="",
+                tags=("bg",),
+            )
             self.body.create_line(
-                tx, 0, tx, body_h,
-                fill=C["error"], width=1, dash=(4, 2)
+                vx0, y1, vx1, y1,
+                fill="#edf0f2",
+                tags=("bg",),
             )
 
-        # Вертикальная сетка
-        step = 7 if self.day_px >= 10 else 14
-        for i in range(0, days, step):
-            x = i * self.day_px
-            self.body.create_line(x, 0, x, body_h, fill="#eeeeee")
+        # Calendar background / grid
+        for i in range(day0, day1 + 1):
+            x0 = i * self.day_px
+            x1 = x0 + self.day_px
+            d = d0 + timedelta(days=i)
 
-        # Позиции строк
-        positions = self._get_tree_row_positions()
-        if not positions:
-            return
+            if d.weekday() >= 5:
+                self.body.create_rectangle(
+                    x0, 0, x1, viewport_h,
+                    fill="#f6f7f8",
+                    outline="",
+                    tags=("bg",),
+                )
 
-        # Рисуем только видимые строки
-        for row_idx, t in enumerate(self._rows):
-            if row_idx >= len(positions) or positions[row_idx] is None:
+            if d.day == 1:
+                self.body.create_line(
+                    x0, 0, x0, viewport_h,
+                    fill="#b8bec6",
+                    width=2,
+                    tags=("grid",),
+                )
+            elif d.weekday() == 0:
+                self.body.create_line(
+                    x0, 0, x0, viewport_h,
+                    fill="#dfe3e7",
+                    tags=("grid",),
+                )
+            elif self.day_px >= 22:
+                self.body.create_line(
+                    x0, 0, x0, viewport_h,
+                    fill="#f0f2f4",
+                    tags=("grid",),
+                )
+
+        td = _today()
+        if d0 <= td <= d1:
+            tx = (td - d0).days * self.day_px + self.day_px / 2
+            self.body.create_line(
+                tx, 0, tx, viewport_h,
+                fill=C["error"],
+                width=1,
+                dash=(4, 2),
+                tags=("today",),
+            )
+
+        # Tasks
+        for visible_idx, (iid, y0, y1) in enumerate(visible_rows):
+            row_idx, task = self._resolve_row_for_iid(iid, visible_idx)
+            if task is None:
                 continue
 
-            y0, y1 = positions[row_idx]
-
-            # Отсекаем невидимые строки
-            if y1 < -5 or y0 > body_h + 5:
-                continue
-
-            # Зебра
-            bg = "#ffffff" if row_idx % 2 == 0 else "#f8f9fa"
-            self.body.create_rectangle(0, y0, tw, y1, fill=bg, outline="")
-
-            ts = _to_date(t.get("plan_start"))
-            tf = _to_date(t.get("plan_finish"))
+            ts = task.get("_plan_start")
+            tf = task.get("_plan_finish")
             if not ts or not tf:
                 continue
             if tf < d0 or ts > d1:
@@ -1016,55 +1328,248 @@ class GanttCanvas(tk.Frame):
 
             s2 = max(ts, d0)
             f2 = min(tf, d1)
+
             bx0 = (s2 - d0).days * self.day_px
             bx1 = ((f2 - d0).days + 1) * self.day_px
 
-            st = (t.get("status") or "planned").strip()
-            col, _, _ = STATUS_COLORS.get(st, ("#90caf9", "#555", ""))
+            if bx1 < vx0 - 20 or bx0 > vx1 + 20:
+                continue
 
-            by0 = y0 + 4
-            by1 = y1 - 4
-            if by1 - by0 < 4:
-                by0 = y0 + 2
-                by1 = y1 - 2
+            by0, by1 = self._bar_vertical_bounds(y0, y1)
+            cy = (y0 + y1) / 2
 
-            # Основной бар
-            self.body.create_rectangle(
-                bx0 + 1, by0, bx1 - 1, by1,
-                fill=col, outline="#5f6368"
+            status = (task.get("status") or "planned").strip()
+            fill, _, _ = STATUS_COLORS.get(status, ("#90caf9", "#555", ""))
+
+            progress = self._task_progress(task)
+            is_group = bool(
+                task.get("is_group")
+                or task.get("summary")
+                or task.get("type") == "group"
             )
+            is_milestone = bool(task.get("is_milestone"))
 
-            # Факт
-            tid = t.get("id")
-            pq = _safe_float(t.get("plan_qty"))
-            fq = self._facts.get(tid, 0) if tid else 0
-            if pq and pq > 0 and fq > 0:
-                pct = min(1.0, fq / pq)
-                fw = max(2, int((bx1 - bx0 - 2) * pct))
-                self.body.create_rectangle(
-                    bx0 + 1, by0, bx0 + 1 + fw, by1,
-                    fill="#388e3c", outline=""
-                )
+            task_key = task["_task_key"]
+            task_tag = f"task:{task_key}"
+            tags = ("task", task_tag)
 
-            # Веха
-            if t.get("is_milestone"):
-                cx = bx0 + 6
-                cy = (y0 + y1) / 2
+            if is_milestone:
+                mdate = f2
+                mx = (mdate - d0).days * self.day_px + self.day_px / 2
+                size = max(5, min(9, int((by1 - by0) / 2) + 1))
+
                 self.body.create_polygon(
-                    cx, cy, cx + 7, cy - 5,
-                    cx + 14, cy, cx + 7, cy + 5,
-                    fill="#1a73e8", outline=""
+                    mx, cy - size,
+                    mx + size, cy,
+                    mx, cy + size,
+                    mx - size, cy,
+                    fill=fill,
+                    outline="#5f6368",
+                    width=1,
+                    tags=tags,
+                )
+            elif is_group:
+                mid = (by0 + by1) / 2
+                self.body.create_polygon(
+                    bx0 + 1, mid,
+                    bx0 + 7, by0,
+                    bx1 - 7, by0,
+                    bx1 - 1, mid,
+                    bx1 - 7, by1,
+                    bx0 + 7, by1,
+                    fill=fill,
+                    outline="#4f575e",
+                    width=1,
+                    tags=tags,
+                )
+            else:
+                self.body.create_rectangle(
+                    bx0 + 1, by0, bx1 - 1, by1,
+                    fill=fill,
+                    outline="#5f6368",
+                    width=1,
+                    tags=tags,
                 )
 
-            # Текст на баре
-            bar_w = bx1 - bx0
-            if bar_w > 60:
-                nm = (t.get("name") or "")[:30]
+                if progress > 0:
+                    pw = max(2, int((bx1 - bx0 - 2) * progress))
+                    self.body.create_rectangle(
+                        bx0 + 1, by0 + 1, min(bx0 + 1 + pw, bx1 - 1), by1 - 1,
+                        fill="#2e7d32",
+                        outline="",
+                        tags=("overlay", task_tag),
+                    )
+
+            # Просрочка
+            if tf and _today() > tf and progress < 0.999:
+                if is_milestone:
+                    mdate = f2
+                    mx = (mdate - d0).days * self.day_px + self.day_px / 2
+                    size = max(6, min(10, int((by1 - by0) / 2) + 2))
+                    self.body.create_oval(
+                        mx - size, cy - size, mx + size, cy + size,
+                        outline="#d93025",
+                        width=2,
+                        tags=("overlay", task_tag),
+                    )
+                else:
+                    self.body.create_rectangle(
+                        bx0, by0, bx1, by1,
+                        outline="#d93025",
+                        width=2,
+                        dash=(4, 2),
+                        tags=("overlay", task_tag),
+                    )
+
+            # Selection
+            if self._selected_task_key == task_key:
+                if is_milestone:
+                    mdate = f2
+                    mx = (mdate - d0).days * self.day_px + self.day_px / 2
+                    size = max(8, min(12, int((by1 - by0) / 2) + 3))
+                    self.body.create_oval(
+                        mx - size, cy - size, mx + size, cy + size,
+                        outline="#1a73e8",
+                        width=2,
+                        tags=("overlay",),
+                    )
+                else:
+                    self.body.create_rectangle(
+                        max(bx0, vx0), y0 + 1, min(bx1, vx1), y1 - 1,
+                        outline="#1a73e8",
+                        width=2,
+                        tags=("overlay",),
+                    )
+
+            # Text
+            name = self._fit_text(task.get("name") or "", 34)
+            if name:
+                bar_w = bx1 - bx0
+                if not is_milestone and bar_w >= 80:
+                    tx = bx0 + 6
+                    tfill = self._best_text_color(fill)
+                else:
+                    tx = min(vx1 - 4, bx1 + 4)
+                    tfill = "#202124"
+
                 self.body.create_text(
-                    bx0 + 4, (y0 + y1) / 2,
-                    text=nm, anchor="w",
-                    font=("Segoe UI", 7), fill="#333"
+                    tx,
+                    cy,
+                    text=name,
+                    anchor="w",
+                    font=("Segoe UI", 8),
+                    fill=tfill,
+                    tags=("label", task_tag),
                 )
+
+        self.body.tag_raise("task")
+        self.body.tag_raise("label")
+        self.body.tag_raise("overlay")
+        self.body.tag_raise("today")
+
+    # ------------------------------------------------------------------
+    # Interaction
+    # ------------------------------------------------------------------
+    def _task_from_current(self) -> Optional[Dict[str, Any]]:
+        current = self.body.find_withtag("current")
+        if not current:
+            return None
+
+        tags = self.body.gettags(current[0])
+        for tag in tags:
+            if tag.startswith("task:"):
+                task_key = tag[5:]
+                idx = self._task_index_by_key.get(task_key)
+                if idx is not None and 0 <= idx < len(self._rows):
+                    return self._rows[idx]
+        return None
+
+    def _on_click(self, _e=None):
+        task = self._task_from_current()
+        if not task:
+            self._selected_task_key = None
+            self._schedule_fast_redraw()
+            return
+
+        self._selected_task_key = task["_task_key"]
+
+        iid = task.get("iid") or task.get("_iid")
+        if self._tree and iid:
+            try:
+                self._tree.selection_set(iid)
+                self._tree.focus(iid)
+                self._tree.see(iid)
+            except tk.TclError:
+                pass
+
+        self.event_generate("<<GanttTaskSelected>>", when="tail")
+        self._schedule_fast_redraw()
+
+    def _on_motion(self, e):
+        task = self._task_from_current()
+        if not task:
+            self.body.configure(cursor="")
+            self._hover_task_key = None
+            self._hide_tooltip()
+            return
+
+        self.body.configure(cursor="hand2")
+        self._hover_task_key = task["_task_key"]
+        self._show_tooltip(e.x_root, e.y_root, self._tooltip_text(task))
+
+    def _on_leave(self, _e=None):
+        self.body.configure(cursor="")
+        self._hover_task_key = None
+        self._hide_tooltip()
+
+    def _tooltip_text(self, task: Dict[str, Any]) -> str:
+        ps = task.get("_plan_start")
+        pf = task.get("_plan_finish")
+        progress = int(round(self._task_progress(task) * 100))
+
+        start_s = ps.strftime("%d.%m.%Y") if ps else "—"
+        finish_s = pf.strftime("%d.%m.%Y") if pf else "—"
+
+        return (
+            f"{task.get('name') or 'Без названия'}\n"
+            f"{start_s} → {finish_s}\n"
+            f"Статус: {task.get('status') or 'planned'}\n"
+            f"Выполнение: {progress}%"
+        )
+
+    def _show_tooltip(self, x_root: int, y_root: int, text: str):
+        if self._tooltip_win is None or not self._tooltip_win.winfo_exists():
+            self._tooltip_win = tk.Toplevel(self)
+            self._tooltip_win.withdraw()
+            self._tooltip_win.overrideredirect(True)
+            try:
+                self._tooltip_win.attributes("-topmost", True)
+            except tk.TclError:
+                pass
+
+            self._tooltip_lbl = tk.Label(
+                self._tooltip_win,
+                text="",
+                justify="left",
+                bg="#202124",
+                fg="#ffffff",
+                bd=1,
+                relief="solid",
+                padx=8,
+                pady=5,
+                font=("Segoe UI", 8),
+            )
+            self._tooltip_lbl.pack()
+
+        if self._tooltip_lbl is not None:
+            self._tooltip_lbl.config(text=text)
+
+        self._tooltip_win.geometry(f"+{x_root + 14}+{y_root + 14}")
+        self._tooltip_win.deiconify()
+
+    def _hide_tooltip(self):
+        if self._tooltip_win is not None and self._tooltip_win.winfo_exists():
+            self._tooltip_win.withdraw()
 # ═══════════════════════════════════════════════════════════════
 #  MAIN PAGE
 # ═══════════════════════════════════════════════════════════════
