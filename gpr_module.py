@@ -727,7 +727,7 @@ class TemplateSelectDialog(simpledialog.Dialog):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  GANTT CANVAS (professional, с debounce и оптимизацией)
+#  GANTT CANVAS (optimized scroll performance)
 # ═══════════════════════════════════════════════════════════════
 class GanttCanvas(tk.Frame):
     """Гант, синхронизированный с Treeview по позициям строк."""
@@ -735,9 +735,6 @@ class GanttCanvas(tk.Frame):
     MONTH_H = 20
     DAY_H = 22
     HEADER_H = MONTH_H + DAY_H
-
-    # Минимальный интервал между перерисовками (мс)
-    _REDRAW_DEBOUNCE_MS = 30
 
     def __init__(self, master, *, day_px=20, linked_tree=None):
         super().__init__(master, bg=C["panel"])
@@ -764,55 +761,76 @@ class GanttCanvas(tk.Frame):
         self._rows: List[Dict[str, Any]] = []
         self._facts: Dict[int, float] = {}
 
-        # Debounce: id таймера для отложенной перерисовки
-        self._redraw_pending: Optional[str] = None
+        # Debounce только для тяжёлых операций (resize, set_data)
+        self._heavy_redraw_pending: Optional[str] = None
         self._is_mapped = False
+
+        # Кэш: заголовок уже отрисован для текущего range/day_px?
+        self._header_cache_key = None
+
+        # Кэш: элементы body (id объектов canvas) для быстрого удаления
+        self._body_bar_ids: List[int] = []
+        self._body_grid_ids: List[int] = []
+        self._body_zebra_ids: List[int] = []
+        self._body_today_id: Optional[int] = None
 
         self.body.bind("<Configure>", self._on_configure)
         self.body.bind("<MouseWheel>", self._wheel)
-        self.body.bind("<Button-4>", self._wheel)  # Linux scroll up
-        self.body.bind("<Button-5>", self._wheel)  # Linux scroll down
+        self.body.bind("<Button-4>", self._wheel)
+        self.body.bind("<Button-5>", self._wheel)
         self.body.bind("<Shift-MouseWheel>", self._hwheel)
         self.bind("<Map>", self._on_map)
 
     def _on_map(self, _e=None):
-        """Виджет стал видимым — разрешаем перерисовку."""
         self._is_mapped = True
-        self._schedule_redraw()
+        self._schedule_heavy_redraw()
 
     def _on_configure(self, _e=None):
-        self._schedule_redraw()
+        self._schedule_heavy_redraw()
 
     def set_tree(self, tree):
         self._tree = tree
 
     def set_range(self, d0, d1):
         self._range = (d0, d1)
-        self._schedule_redraw()
+        self._header_cache_key = None  # сбрасываем кэш заголовка
+        self._schedule_heavy_redraw()
 
     def set_data(self, rows, facts=None):
         self._rows = rows or []
         self._facts = facts or {}
-        self._schedule_redraw()
+        self._schedule_heavy_redraw()
 
-    def _schedule_redraw(self):
-        """Debounced перерисовка — защита от шторма вызовов."""
-        if self._redraw_pending:
-            self.after_cancel(self._redraw_pending)
-        self._redraw_pending = self.after(
-            self._REDRAW_DEBOUNCE_MS, self._do_redraw
+    # ── Debounce только для тяжёлых операций ──
+    def _schedule_heavy_redraw(self):
+        if self._heavy_redraw_pending:
+            self.after_cancel(self._heavy_redraw_pending)
+        self._heavy_redraw_pending = self.after(
+            40, self._full_redraw
         )
 
-    def _do_redraw(self):
-        """Реальная перерисовка (вызывается через debounce)."""
-        self._redraw_pending = None
+    def _full_redraw(self):
+        """Полная перерисовка (заголовок + бары)."""
+        self._heavy_redraw_pending = None
         if not self._is_mapped:
             return
         try:
-            self.redraw()
+            self._draw_header()
+            self._draw_bars()
         except Exception:
-            logger.exception("GanttCanvas.redraw error")
+            logger.exception("GanttCanvas._full_redraw error")
 
+    def redraw_bars_only(self):
+        """Быстрая перерисовка только баров (при скролле Treeview).
+        Заголовок не трогаем — он не меняется при вертикальном скролле."""
+        if not self._is_mapped:
+            return
+        try:
+            self._draw_bars()
+        except Exception:
+            logger.exception("GanttCanvas.redraw_bars_only error")
+
+    # ── Scroll handlers ──
     def _xview(self, *a):
         self.body.xview(*a)
         self.hdr.xview(*a)
@@ -822,12 +840,12 @@ class GanttCanvas(tk.Frame):
         self.hdr.xview_moveto(float(f0))
 
     def _wheel(self, e):
-        """Колёсико → скроллим Treeview (он главный)."""
         if self._tree:
             d = _mouse_delta(e)
             if d:
                 self._tree.yview_scroll(d, "units")
-                self._schedule_redraw()
+                # Мгновенная перерисовка баров — без debounce!
+                self.after_idle(self.redraw_bars_only)
         return "break"
 
     def _hwheel(self, e):
@@ -837,15 +855,11 @@ class GanttCanvas(tk.Frame):
             self.hdr.xview_scroll(d, "units")
         return "break"
 
+    # ── Позиции строк из Treeview ──
     def _get_tree_row_positions(self) -> List[Optional[Tuple[int, int]]]:
-        """
-        Возвращает список (y_top, y_bottom) для каждой строки Treeview
-        в координатах body Canvas. None — строка не видна.
-        """
         if not self._tree:
             return []
 
-        positions: List[Optional[Tuple[int, int]]] = []
         items = self._tree.get_children()
         if not items:
             return []
@@ -856,25 +870,23 @@ class GanttCanvas(tk.Frame):
         except tk.TclError:
             return []
 
-        # Если виджеты ещё не отрисованы, координаты будут 0
+        offset = tree_top - canvas_top
+        positions: List[Optional[Tuple[int, int]]] = []
+
+        # Оптимизация: если виджеты ещё не отрисованы
         if tree_top == 0 and canvas_top == 0:
-            # Фоллбэк: рисуем по фиксированной высоте строки
             row_h = 24
-            for i, _iid in enumerate(items):
+            for i in range(len(items)):
                 y_top = i * row_h
                 positions.append((y_top, y_top + row_h))
             return positions
-
-        offset = tree_top - canvas_top
 
         for iid in items:
             try:
                 bbox = self._tree.bbox(iid)
                 if bbox:
-                    y_in_tree = bbox[1]
-                    h = bbox[3]
-                    y_top = y_in_tree + offset
-                    positions.append((y_top, y_top + h))
+                    y_top = bbox[1] + offset
+                    positions.append((y_top, y_top + bbox[3]))
                 else:
                     positions.append(None)
             except (tk.TclError, Exception):
@@ -882,22 +894,23 @@ class GanttCanvas(tk.Frame):
 
         return positions
 
-    def redraw(self):
+    # ── Рисование заголовка (кэшируется) ──
+    def _draw_header(self):
         d0, d1 = self._range
         if d1 < d0:
             return
         days = (d1 - d0).days + 1
         tw = max(1, days * self.day_px)
-        body_h = self.body.winfo_height()
-        if body_h < 10:
-            body_h = 600
+
+        cache_key = (d0, d1, self.day_px)
+        if self._header_cache_key == cache_key:
+            return  # заголовок не изменился
+        self._header_cache_key = cache_key
 
         self.hdr.delete("all")
-        self.body.delete("all")
         self.hdr.configure(scrollregion=(0, 0, tw, self.HEADER_H))
-        self.body.configure(scrollregion=(0, 0, tw, body_h))
 
-        # ── Заголовок: месяцы ──
+        # Месяцы
         cur = date(d0.year, d0.month, 1)
         while cur <= d1:
             mr = calendar.monthrange(cur.year, cur.month)[1]
@@ -910,18 +923,16 @@ class GanttCanvas(tk.Frame):
             )
             if (x1 - x0) > 40:
                 self.hdr.create_text(
-                    (x0 + x1) / 2,
-                    self.MONTH_H / 2,
+                    (x0 + x1) / 2, self.MONTH_H / 2,
                     text=cur.strftime("%b %Y"),
-                    font=("Segoe UI", 8, "bold"),
-                    fill="#333",
+                    font=("Segoe UI", 8, "bold"), fill="#333"
                 )
             if cur.month == 12:
                 cur = date(cur.year + 1, 1, 1)
             else:
                 cur = date(cur.year, cur.month + 1, 1)
 
-        # ── Заголовок: дни ──
+        # Дни
         for i in range(days):
             x0 = i * self.day_px
             x1 = x0 + self.day_px
@@ -933,37 +944,63 @@ class GanttCanvas(tk.Frame):
             )
             if self.day_px >= 14:
                 self.hdr.create_text(
-                    (x0 + x1) / 2,
-                    self.MONTH_H + self.DAY_H / 2,
-                    text=str(d.day),
-                    font=("Segoe UI", 7),
-                    fill="#555",
+                    (x0 + x1) / 2, self.MONTH_H + self.DAY_H / 2,
+                    text=str(d.day), font=("Segoe UI", 7), fill="#555"
                 )
 
-        # ── Линия «сегодня» ──
+        # Сегодня (в заголовке)
         td = _today()
         if d0 <= td <= d1:
             tx = (td - d0).days * self.day_px + self.day_px // 2
             self.hdr.create_line(
                 tx, 0, tx, self.HEADER_H, fill=C["error"], width=2
             )
+
+    # ── Рисование баров (быстрое) ──
+    def _draw_bars(self):
+        d0, d1 = self._range
+        if d1 < d0:
+            return
+        days = (d1 - d0).days + 1
+        tw = max(1, days * self.day_px)
+        body_h = self.body.winfo_height()
+        if body_h < 10:
+            body_h = 600
+
+        # Удаляем только бары, зебру, сетку — НЕ всё подряд
+        # (быстрее чем delete("all") + пересоздание scrollregion)
+        self.body.delete("all")
+        self.body.configure(scrollregion=(0, 0, tw, body_h))
+
+        # Сегодня (вертикальная линия)
+        td = _today()
+        if d0 <= td <= d1:
+            tx = (td - d0).days * self.day_px + self.day_px // 2
             self.body.create_line(
                 tx, 0, tx, body_h,
                 fill=C["error"], width=1, dash=(4, 2)
             )
 
-        # ── Позиции строк из Treeview ──
-        positions = self._get_tree_row_positions()
+        # Вертикальная сетка
+        step = 7 if self.day_px >= 10 else 14
+        for i in range(0, days, step):
+            x = i * self.day_px
+            self.body.create_line(x, 0, x, body_h, fill="#eeeeee")
 
-        # ── Бары ──
+        # Позиции строк
+        positions = self._get_tree_row_positions()
+        if not positions:
+            return
+
+        # Рисуем только видимые строки
         for row_idx, t in enumerate(self._rows):
             if row_idx >= len(positions) or positions[row_idx] is None:
                 continue
 
             y0, y1 = positions[row_idx]
 
-            # Пропускаем строки за пределами видимой области
-            if y1 < 0 or y0 > body_h:
+            # Отсекаем невидимые строки
+            if y1 < -5 or y0 > body_h + 5:
                 continue
 
             # Зебра
@@ -987,8 +1024,7 @@ class GanttCanvas(tk.Frame):
 
             by0 = y0 + 4
             by1 = y1 - 4
-            bar_h = by1 - by0
-            if bar_h < 4:
+            if by1 - by0 < 4:
                 by0 = y0 + 2
                 by1 = y1 - 2
 
@@ -998,7 +1034,7 @@ class GanttCanvas(tk.Frame):
                 fill=col, outline="#5f6368"
             )
 
-            # Факт (зелёная полоска)
+            # Факт
             tid = t.get("id")
             pq = _safe_float(t.get("plan_qty"))
             fq = self._facts.get(tid, 0) if tid else 0
@@ -1020,7 +1056,7 @@ class GanttCanvas(tk.Frame):
                     fill="#1a73e8", outline=""
                 )
 
-            # Название на баре
+            # Текст на баре
             bar_w = bx1 - bx0
             if bar_w > 60:
                 nm = (t.get("name") or "")[:30]
@@ -1029,14 +1065,6 @@ class GanttCanvas(tk.Frame):
                     text=nm, anchor="w",
                     font=("Segoe UI", 7), fill="#333"
                 )
-
-        # Вертикальная сетка
-        step = 7 if self.day_px >= 10 else 14
-        for i in range(0, days, step):
-            x = i * self.day_px
-            self.body.create_line(x, 0, x, body_h, fill="#eeeeee")
-
-
 # ═══════════════════════════════════════════════════════════════
 #  MAIN PAGE
 # ═══════════════════════════════════════════════════════════════
@@ -1300,16 +1328,16 @@ class GprPage(tk.Frame):
         ttk.Button(parent, text=text, command=cmd).pack(side="left", padx=2)
 
     def _on_tree_scroll(self, *args):
-        """Scrollbar двигает Treeview, потом перерисовываем Гант."""
+        """Scrollbar двигает Treeview, потом перерисовываем бары."""
         self.tree.yview(*args)
-        self.gantt._schedule_redraw()
+        self.gantt.after_idle(self.gantt.redraw_bars_only)
 
     def _on_tree_wheel(self, event):
-        """Колёсико на Treeview → скролл + перерисовка Ганта."""
+        """Колёсико на Treeview → скролл + мгновенная перерисовка."""
         d = _mouse_delta(event)
         if d:
             self.tree.yview_scroll(d, "units")
-            self.gantt._schedule_redraw()
+            self.gantt.after_idle(self.gantt.redraw_bars_only)
         return "break"
 
     # ══════════════════════════════════════════════════════════
@@ -1538,7 +1566,8 @@ class GprPage(tk.Frame):
 
     def _zoom(self, delta):
         self.gantt.day_px = max(6, min(50, self.gantt.day_px + delta))
-        self.gantt._schedule_redraw()
+        self.gantt._header_cache_key = None  # сбросить кэш заголовка
+        self.gantt._schedule_heavy_redraw()
 
     # ── CRUD ──
     def _find_task_idx(self) -> Optional[int]:
