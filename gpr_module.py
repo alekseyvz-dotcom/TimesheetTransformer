@@ -107,6 +107,28 @@ class _DBConn:
             self.conn = None
         return False  # не подавляем исключения
 
+# ═══════════════════════════════════════════════════════════════
+#  ОБРАТНАЯ СОВМЕСТИМОСТЬ: _conn / _release
+#  Используются в gpr_task_dialog.py, gpr_dictionaries.py и др.
+# ═══════════════════════════════════════════════════════════════
+def _conn():
+    """Получить соединение из пула (legacy API).
+    
+    ВНИМАНИЕ: вызывающий код ОБЯЗАН вызвать _release(conn)
+    в finally-блоке. Для нового кода используйте _DBConn().
+    """
+    if not db_connection_pool:
+        raise RuntimeError("DB pool not set (gpr_module.set_db_pool)")
+    return db_connection_pool.getconn()
+
+
+def _release(conn):
+    """Вернуть соединение в пул (legacy API)."""
+    if db_connection_pool and conn:
+        try:
+            db_connection_pool.putconn(conn)
+        except Exception:
+            logger.exception("Error releasing DB connection")
 
 # ═══════════════════════════════════════════════════════════════
 #  UTILITIES
