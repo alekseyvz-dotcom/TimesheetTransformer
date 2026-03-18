@@ -1,3 +1,14 @@
+# BudgetAnalyzer.py
+# Профессиональный анализатор смет:
+# - Режим Smeta.RU для листа «ЛОКАЛЬНАЯ СМЕТА»
+# - Общий режим XLSX/CSV
+# - Детализированные категории: ЗП, ЭМ, МР, НР, СП, НР и СП от ЗПМ
+# - Корректная работа с отрицательными значениями
+# - Поддержка дробных номеров позиций
+# - Расширенная диагностика
+# - Отчет анализа по кнопке
+# - НДС начисляется по ставке 22%
+
 import re
 import csv
 from pathlib import Path
@@ -7,8 +18,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 
 from openpyxl import Workbook, load_workbook
-
-MPL_AVAILABLE = False
 
 
 class ColumnMappingDialog(simpledialog.Dialog):
@@ -65,6 +74,8 @@ class ColumnMappingDialog(simpledialog.Dialog):
 
 
 class BudgetAnalysisPage(tk.Frame):
+    VAT_RATE = 0.22
+
     COST_KEYS = ["zp", "em", "mr", "nr", "sp", "nr_sp_zpm"]
     REFERENCE_KEYS = ["zpm_incl"]
 
@@ -88,6 +99,17 @@ class BudgetAnalysisPage(tk.Frame):
         "zpm_incl": "в т.ч. ЗПМ",
     }
 
+    MATERIAL_UNITS = [
+        "м3", "м2", "м", "т", "кг", "шт", "компл", "л",
+        "м³", "м²", "комплект", "п.м", "пм", "м.п", "уп", "пач", "пар", "рул"
+    ]
+    LABOR_UNITS_MARKERS = ["чел", "%", "маш.-ч", "машч", "маш/ч", "ч.-ч"]
+
+    EXCLUDE_MATERIAL_NAME_WORDS = [
+        "машинист", "слесар", "монтаж", "установк", "демонтаж", "разборк",
+        "разработка", "устройство", "укладка", "сварка", "бурение", "окраска"
+    ]
+
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
         self.file_path: Optional[Path] = None
@@ -108,6 +130,9 @@ class BudgetAnalysisPage(tk.Frame):
         self.stats: Dict[str, float] = self.stats_base.copy()
         self.breakdown_rows: List[Dict[str, Any]] = []
 
+        self.last_debug_report: str = "Отчет анализа пока не сформирован."
+        self.last_not_classified_rows: List[Dict[str, Any]] = []
+
         self.vat_enabled = tk.BooleanVar(value=False)
 
         header = tk.Frame(self, bg="#f7f7f7")
@@ -122,10 +147,12 @@ class BudgetAnalysisPage(tk.Frame):
         self.btn_map.pack(side="left", padx=(8, 0))
         self.btn_export = ttk.Button(ctrl, text="Сохранить свод", command=self._export_summary, state="disabled")
         self.btn_export.pack(side="left", padx=(8, 0))
+        self.btn_debug = ttk.Button(ctrl, text="Показать отчет анализа", command=self._show_debug_report, state="disabled")
+        self.btn_debug.pack(side="left", padx=(8, 0))
 
         self.chk_vat = ttk.Checkbutton(
             ctrl,
-            text="Начислить НДС 20%",
+            text=f"Начислить НДС {int(self.VAT_RATE * 100)}%",
             variable=self.vat_enabled,
             command=self._on_vat_toggle
         )
@@ -161,8 +188,8 @@ class BudgetAnalysisPage(tk.Frame):
         self._row_zpm_ref["label"].config(fg="#888888")
         row_idx += 1
 
-        self._row_vat = self._add_metric_row(grid, row_idx, "НДС 20%")
-        self._row_vat["label"].config(text="НДС 20%", bg="#ffffff", fg="#d32f2f")
+        self._row_vat = self._add_metric_row(grid, row_idx, f"НДС {int(self.VAT_RATE * 100)}%")
+        self._row_vat["label"].config(text=f"НДС {int(self.VAT_RATE * 100)}%", bg="#ffffff", fg="#d32f2f")
         self._row_vat["label"].grid(row=row_idx, column=0, sticky="w", pady=3)
         self._row_vat["label"].grid_remove()
         self._row_vat["val"].grid_remove()
@@ -183,8 +210,8 @@ class BudgetAnalysisPage(tk.Frame):
 
         hint_text = (
             "Smeta.RU: лист «ЛОКАЛЬНАЯ СМЕТА». Расчет ведется по детализированным статьям (ЗП, ЭМ, МР, НР, СП).\n"
-            "Эксплуатация машин (ЭМ) автоматически корректируется на сумму 'в т.ч. ЗПМ' для избежания двойного учета.\n"
-            "Поддержка отрицательных значений и дробных номеров позиций. Чекбокс «Начислить НДС 20%» увеличивает все суммы на 20%."
+            "Эксплуатация машин (ЭМ) корректируется на сумму 'в т.ч. ЗПМ' для исключения двойного учета.\n"
+            f"Чекбокс «Начислить НДС {int(self.VAT_RATE * 100)}%» увеличивает все суммы на соответствующую ставку."
         )
         hint = tk.Label(self, text=hint_text, fg="#666", bg="#f7f7f7", justify="left", wraplength=980)
         hint.pack(fill="x", padx=12, pady=(0, 10))
@@ -219,11 +246,11 @@ class BudgetAnalysisPage(tk.Frame):
         self.tree.heading("name", text="Наименование")
         self.tree.heading("amount", text="Сумма, руб.")
 
-        self.tree.column("pos_num", width=60, anchor="w")
-        self.tree.column("rate_code", width=140, anchor="w")
-        self.tree.column("category", width=180, anchor="w")
-        self.tree.column("name", stretch=True, minwidth=250, anchor="w")
-        self.tree.column("amount", width=120, anchor="e")
+        self.tree.column("pos_num", width=70, anchor="w")
+        self.tree.column("rate_code", width=160, anchor="w")
+        self.tree.column("category", width=190, anchor="w")
+        self.tree.column("name", stretch=True, minwidth=300, anchor="w")
+        self.tree.column("amount", width=130, anchor="e")
 
         yscroll = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=yscroll.set)
@@ -247,7 +274,7 @@ class BudgetAnalysisPage(tk.Frame):
         self._fill_breakdown_table()
 
     def _apply_vat(self):
-        multiplier = 1.2 if self.vat_enabled.get() else 1.0
+        multiplier = (1.0 + self.VAT_RATE) if self.vat_enabled.get() else 1.0
         self.stats = {}
 
         for key in self.COST_KEYS + self.REFERENCE_KEYS + ["total", "materials", "wages"]:
@@ -276,6 +303,7 @@ class BudgetAnalysisPage(tk.Frame):
         ok = self._load_file(self.file_path)
         self.btn_map.config(state=("normal" if (ok and self.mode == "generic") else "disabled"))
         self.btn_export.config(state=("normal" if ok else "disabled"))
+        self.btn_debug.config(state=("normal" if ok and self.mode == "smeta" else "disabled"))
 
         if not ok:
             messagebox.showwarning("Анализ смет", "Не удалось распознать структуру файла.")
@@ -288,7 +316,10 @@ class BudgetAnalysisPage(tk.Frame):
         self.smeta_name_col = None
         self.smeta_total_col = None
         self.smeta_data_rows = []
+        self.last_debug_report = "Отчет анализа пока не сформирован."
+        self.last_not_classified_rows = []
         self.lbl_sheet.config(text="")
+        self.btn_debug.config(state="disabled")
 
         ext = path.suffix.lower()
 
@@ -420,7 +451,6 @@ class BudgetAnalysisPage(tk.Frame):
             for idx, v in enumerate(vals_norm):
                 if ("наименование работ" in v and "затрат" in v) or ("наименование работ и затрат" in v):
                     local_name_col = idx
-
                 if "всего" in v and "затрат" in v and "текущ" in v:
                     local_total_col = idx
 
@@ -437,482 +467,7 @@ class BudgetAnalysisPage(tk.Frame):
                     continue
 
                 has_name = any(("наименование работ" in v and "затрат" in v) or ("наименование работ и затрат" in v) for v in vals_norm)
-                idx_current = [idx for idx, v in enumerate(vals_norm) if "всего" in v and "текущ" in v]
-
-                if has_name and idx_current:
-                    hdr_row_idx = i
-                    total_current_col = idx_current[0]
-                    try:
-                        name_col = vals_norm.index(
-                            next(v for v in vals_norm if ("наименование работ" in v and "затрат" in v) or ("наименование работ и затрат" in v))
-                        )
-                    except StopIteration:
-                        name_col = 2
-                    break
-
-        return hdr_row_idx, name_col, total_current_col
-
-    def _is_numbering_row(self, cells: List[Any]) -> bool:
-        vals = [str(v).strip() for v in cells if v is not None and str(v).strip() != ""]
-        if not vals:
-            return False
-        return self._is_sequential_digits_list(vals)
-
-    @staticmethod
-    def _is_sequential_digits_list(vals: List[str]) -> bool:
-        try:
-            nums = [int(v) for v in vals if v.isdigit()]
-        except Exception:
-            return False
-        if not nums:
-            return False
-        return nums == list(range(1, len(nums) + 1)) and len(nums) >= 5
-
-    def _is_summary_row(self, cells: List[Any], name_col: int) -> bool:
-        col0_empty = (len(cells) < 1) or (self._str(cells[0]) == "")
-        col1_empty = (len(cells) < 2) or (self._str(cells[1]) == "")
-        name = self._str(cells[name_col]) if name_col < len(cells) else ""
-        if not (col0_empty and col1_empty and name):
-            return False
-        return self._is_summary_name(name)
-
-    @staticmethod
-    def _is_summary_name(name: Any) -> bool:
-        s = re.sub(r"\s+", " ", str(name or "")).strip().lower()
-        if not s:
-            return False
-        if "по позиции" in s:
-            return False
-
-        patterns = [
-            "итого по локальной смете",
-            "итоги по смете",
-            "итоги по разделу",
-            "итоги по",
-            "итог по",
-            "итого прямые затраты",
-            "итого прямые",
-            "итого по смете",
-            "всего по смете",
-            "всего по разделу",
-            "всего по",
-            "справочно",
-            "ндс",
-            "итого с ндс",
-            "всего с ндс"
-        ]
-        return any(p in s for p in patterns)
-
-    @staticmethod
-    def _str(x: Any) -> str:
-        return str(x or "").strip()
-
-    @staticmethod
-    def _to_number(x: Any) -> Optional[float]:
-        if x is None:
-            return None
-
-        if isinstance(x, (int, float)):
-            return float(x)
-
-        s = str(x).strip()
-        if not s:
-            return None
-
-        s = s.replace("\u00A0", " ")
-        s = re.sub(r"[^0-9,.\-]", "", s)
-
-        if "," in s and "." in s:
-            s = s.replace(".", "").replace(",", ".")
-        elif "," in s:
-            s = s.replace(",", ".")
-
-        try:
-            return float(s)
-        except Exception:
-            return None
-
-    def _get_smeta_current_value(self, row: List[Any]) -> Optional[float]:
-        if self.smeta_total_col is None or self.smeta_total_col >= len(row):
-            return None
-        return self._to_number(row[self.smeta_total_col])
-
-    def _is_labor_or_percent_unit(self, unit: Any) -> bool:
-        if unit is None:
-            return False
-        u = str(unit).strip().lower()
-        if not u:
-            return False
-        if "%" in u:
-            return True
-        if "чел" in u:
-            return True
-        return False
-
-    def _has_numeric_position(self, cell: Any) -> bool:
-        if cell is None:
-            return False
-
-        s = str(cell).strip()
-        s = s.replace("\u00A0", "").replace("\xa0", "").replace(" ", "").replace("\t", "")
-
-        if not s:
-            return False
-
-        pattern = r"^\d+([.,]\d*)?$"
-        return bool(re.match(pattern, s))
-
-    def _classify_smeta_row(self, row: List[Any]) -> Tuple[Optional[str], Optional[float]]:
-        if self.smeta_name_col is None or self.smeta_total_col is None:
-            return None, None
-
-        if self._is_summary_row(row, self.smeta_name_col):
-            return None, None
-
-        name = self._str(row[self.smeta_name_col]) if self.smeta_name_col < len(row) else ""
-        n = re.sub(r"[^а-яa-z0-9]", "", name.lower())
-
-        val = self._get_smeta_current_value(row)
-        if not isinstance(val, float):
-            return None, None
-
-        for col_idx in [1, 2, 3]:
-            if len(row) > col_idx:
-                col_val = self._str(row[col_idx]).upper().strip()
-                if col_val in ["МР", "МРР"] or col_val.startswith("МР ") or col_val.startswith("МРР "):
-                    return "mr", val
-
-        pos_cell = row[0] if len(row) > 0 else None
-        pos_str = self._str(pos_cell)
-        is_subposition = bool(pos_str and re.match(r"^\d+[.,]\d+$", pos_str))
-
-        unit = row[3] if len(row) > 3 else ""
-        unit_str = self._str(unit).lower()
-
-        material_units = ["м3", "м2", "м", "т", "кг", "шт", "компл", "л", "м³", "м²", "комплект"]
-        is_material_unit = any(u in unit_str for u in material_units)
-
-        if is_subposition and is_material_unit:
-            return "mr", val
-
-        if "втчзпм" in n or "втомчислезпм" in n:
-            return "zpm_incl", val
-
-        if n == "зп" or n == "зпм" or "оплататруда" in n or "заработн" in n:
-            return "zp", val
-
-        if n.startswith("эм") and "зпм" not in n:
-            return "em_gross", val
-        if n.startswith("эмм") and "зпм" not in n:
-            return "em_gross", val
-        if "эксплуатациямашин" in n and "зпм" not in n:
-            return "em_gross", val
-
-        if "нриспотзпм" in n:
-            return "nr_sp_zpm", val
-
-        if n == "нр" or "нротзп" in n or "нротфот" in n or "накладные" in n:
-            return "nr", val
-
-        if n == "сп" or "спотзп" in n or "спотфот" in n or "сметнаяприбыль" in n:
-            return "sp", val
-
-        not_labor_unit = not self._is_labor_or_percent_unit(unit)
-
-        is_cost_line = True
-        if n.startswith("зп") or n.startswith("эм") or n.startswith("нр") or n.startswith("сп"):
-            is_cost_line = False
-        if n in ["зп", "эм", "нр", "сп", "зпм", "эмм"]:
-            is_cost_line = False
-
-        if self._has_numeric_position(pos_cell) and is_material_unit and is_cost_line:
-            return "mr", val
-
-        if self._has_numeric_position(pos_cell) and not_labor_unit and is_cost_line and name:
-            exclude_words = ["машинист", "слесар", "монтаж", "установк", "демонтаж", "разборк"]
-            name_lower = name.lower()
-            is_excluded = any(name_lower.startswith(word) or f" {word}" in name_lower for word in exclude_words)
-            if not is_excluded:
-                return "mr", val
-
-        return None, None
-
-    def _analyze_smeta(self):
-        if self.smeta_name_col is None or self.smeta_total_col is None:
-            raise RuntimeError("Не заданы индексы колонок для сметы.")
-
-        gross_stats: Dict[str, float] = {
-            k: 0.0 for k in self.COST_KEYS + self.REFERENCE_KEYS + ["em_gross"]
-        }
-        self.breakdown_rows = []
-
-        name_col_idx = self.smeta_name_col
-
-        not_classified_rows = []
-        classified_count = 0
-        total_rows = 0
-
-        for row in self.smeta_data_rows:
-            total_rows += 1
-            pos_num = self._str(row[0]) if len(row) > 0 else ""
-            rate_code = self._str(row[1]) if len(row) > 1 else ""
-            name = self._str(row[name_col_idx]) if name_col_idx < len(row) else ""
-
-            cat, val = self._classify_smeta_row(row)
-
-            if cat and isinstance(val, float):
-                classified_count += 1
-            else:
-                test_val = self._get_smeta_current_value(row)
-                if isinstance(test_val, float) and abs(test_val) > 0.01:
-                    not_classified_rows.append({
-                        "pos": pos_num,
-                        "code": rate_code,
-                        "name": name[:100],
-                        "val": test_val,
-                        "unit": self._str(row[3]) if len(row) > 3 else "",
-                        "is_summary": self._is_summary_row(row, name_col_idx)
-                    })
-
-            if not cat or not isinstance(val, float):
-                continue
-
-            gross_stats[cat] = gross_stats.get(cat, 0.0) + val
-
-            display_cat = self.DISPLAY_CATEGORIES_MAP.get(cat, cat)
-            self.breakdown_rows.append({
-                "pos_num": pos_num,
-                "rate_code": rate_code,
-                "category": display_cat,
-                "name": name,
-                "amount": val,
-                "amount_base": val
-            })
-
-        em_gross_total = gross_stats.pop("em_gross", 0.0)
-        zpm_incl_total = gross_stats.get("zpm_incl", 0.0)
-        em_net_total = em_gross_total - zpm_incl_total
-        zp_total = gross_stats.get("zp", 0.0) + zpm_incl_total
-
-        final_stats = {
-            "zp": zp_total,
-            "em": em_net_total,
-            "mr": gross_stats.get("mr", 0.0),
-            "nr": gross_stats.get("nr", 0.0),
-            "sp": gross_stats.get("sp", 0.0),
-            "nr_sp_zpm": gross_stats.get("nr_sp_zpm", 0.0),
-        }
-
-        total_cost = sum(final_stats.values())
-
-        self.stats_base.update(final_stats)
-        self.stats_base["total"] = total_cost
-        self.stats_base["zpm_incl"] = zpm_incl_total
-        self.stats_base["materials"] = self.stats_base["mr"]
-        self.stats_base["wages"] = self.stats_base["zp"]
-
-        debug_lines = []
-        debug_lines.append("СТАТИСТИКА АНАЛИЗА:")
-        debug_lines.append("=" * 80)
-        debug_lines.append(f"Лист: {self.smeta_sheet_name}")
-        debug_lines.append(f"Колонка текущей цены: {self.smeta_total_col + 1 if self.smeta_total_col is not None else '-'}")
-        debug_lines.append(f"Всего строк данных: {total_rows}")
-        debug_lines.append(f"Классифицировано: {classified_count}")
-        debug_lines.append(f"Не классифицировано с ценами: {len(not_classified_rows)}")
-        debug_lines.append("")
-        debug_lines.append("ИТОГИ ПО КАТЕГОРИЯМ:")
-        debug_lines.append(f"ЗП: {zp_total:,.2f}")
-        debug_lines.append(f"ЭМ (чистая): {em_net_total:,.2f}")
-        debug_lines.append(f"МР: {final_stats['mr']:,.2f}")
-        debug_lines.append(f"НР: {final_stats['nr']:,.2f}")
-        debug_lines.append(f"СП: {final_stats['sp']:,.2f}")
-        debug_lines.append(f"НР и СП от ЗПМ: {final_stats['nr_sp_zpm']:,.2f}")
-        debug_lines.append(f"в т.ч. ЗПМ (справочно): {zpm_incl_total:,.2f}")
-        debug_lines.append("")
-        debug_lines.append(f"Вычисленный итог: {total_cost:,.2f} руб.")
-        debug_lines.append("=" * 80)
-        debug_lines.append("")
-
-        if not_classified_rows:
-            total_missing = sum(r["val"] for r in not_classified_rows)
-            debug_lines.append("НЕРАСПОЗНАННЫЕ СТРОКИ С ЦЕНАМИ:")
-            debug_lines.append(f"Сумма нераспознанных: {total_missing:,.2f} руб.")
-            debug_lines.append("")
-            debug_lines.append("=" * 80)
-            debug_lines.append("")
-
-            for i, r in enumerate(not_classified_rows[:50], 1):
-                debug_lines.append(f"{i}. Поз: '{r['pos']}' | Шифр: '{r['code']}'")
-                debug_lines.append(f"   Наименование: {r['name']}")
-                debug_lines.append(f"   Ед.изм: {r['unit']} | Сумма: {r['val']:,.2f} руб.")
-                debug_lines.append(f"   Итоговая строка: {'ДА' if r['is_summary'] else 'НЕТ'}")
-                debug_lines.append("")
-
-            if len(not_classified_rows) > 50:
-                debug_lines.append(f"... и ещё {len(not_classified_rows) - 50} строк")
-        else:
-            debug_lines.append("Все строки с ценами успешно классифицированы!")
-
-        debug_win = tk.Toplevel(self)
-        debug_win.title("Отчёт анализа сметы")
-        debug_win.geometry("950x650")
-
-        text_frame = tk.Frame(debug_win)
-        text_frame.pack(fill="both", expand=True, padx=10, pady=10)
-
-        text_widget = tk.Text(text_frame, wrap="word", font=("Courier New", 9))
-        text_widget.pack(side="left", fill="both", expand=True)
-
-        scrollbar = ttk.Scrollbar(text_frame, command=text_widget.yview)
-        scrollbar.pack(side="right", fill="y")
-        text_widget.config(yscrollcommand=scrollbar.set)
-
-        text_widget.insert("1.0", "\n".join(debug_lines))
-        text_widget.config(state="disabled")
-
-        btn_frame = tk.Frame(debug_win)
-        btn_frame.pack(fill="x", padx=10, pady=(0, 10))
-
-        btn_close = ttk.Button(btn_frame, text="Закрыть", command=debug_win.destroy)
-        btn_close.pack(side="right")
-
-        def save_report():
-            try:
-                with open("smeta_analysis_report.txt", "w", encoding="utf-8") as f:
-                    f.write("\n".join(debug_lines))
-                messagebox.showinfo("Сохранено", "Отчёт сохранён в файл:\nsmeta_analysis_report.txt")
-            except Exception as e:
-                messagebox.showerror("Ошибка", f"Не удалось сохранить:\n{e}")
-
-        btn_save = ttk.Button(btn_frame, text="Сохранить отчёт в файл", command=save_report)
-        btn_save.pack(side="left")
-
-        self._apply_vat()
-        self._render_stats()
-        self._fill_breakdown_table()
-
-    def _parse_xlsx_generic(self, path: Path):
-        wb = load_workbook(path, read_only=True, data_only=True)
-        ws = wb.active
-
-        hdr_row_idx = None
-        for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
-            cells = [self._str(c) for c in row]
-            if sum(1 for c in cells if c) >= 2:
-                hdr_row_idx = i
-                self.headers = [self._norm_header(c) for c in cells]
-                break
-
-        if hdr_row_idx is None:
-            raise RuntimeError("Не найдена строка заголовков")
-
-        self.rows = [list(row) for row in ws.iter_rows(min_row=hdr_row_idx + 1, values_only=True)]
-        self.lbl_sheet.config(text=f"Лист: {ws.title} (общий режим)")
-
-    def _parse_csv_generic(self, path: Path):
-        with open(path, "r", encoding="utf-8-sig", newline="") as f:
-            sample = f.read(4096)
-            f.seek(0)
-            try:
-                sniffer = csv.Sniffer()
-                dialect = sniffer.sniff(sample, delimiters=";,")
-            except Exception:
-                class D:
-                    delimiter = ";"
-                dialect = D()
-
-            reader = csv.reader(f, dialect=dialect)
-            rows = list(reader)
-
-        if not rows:
-            raise RuntimeError("CSV пустой")
-
-        hdr_idx = next((i for i, row in enumerate(rows) if any((c or "").strip() for c in row)), None)
-        if hdr_idx is None:
-            raise RuntimeError("Не найдена строка заголовков")
-
-        self.headers = [self._norm_header(c) for c in rows[hdr_idx]]
-        self.rows = rows[hdr_idx + 1:]
-        self.lbl_sheet.config(text="CSV (общий режим)")
-
-    @staticmethod
-    def _norm_header(s: Any) -> str:
-        txt = str(s or "").strip()
-        txt = txt.replace("\n", " ").replace("\r", " ")
-        return re.sub(r"\s+", " ", txt)
-
-    def _detect_mapping(self, headers: List[str], rows: List[List[Any]]) -> Dict[str, Optional[int]]:
-        hlow = [h.lower() for h in headers]
-
-        def find_candidates(patterns: List[str]) -> List[int]:
-            return [i for i, h in enumerate(hlow) if any(p in h for p in patterns)]
-
-        def best_index(cands: List[int]) -> Optional[int]:
-            best_i, best_sum = None, -1.0
-            for idx in cands:
-                s = 0.0
-                for r in rows:
-                    if idx < len(r):
-                        v = self._to_number(r[idx])
-                        if isinstance(v, float):
-                            s += v
-                if s > best_sum:
-                    best_sum, best_i = s, idx
-            return best_i
-
-        return {
-            "total": best_index(find_candidates(["итого", "всего", "стоим", "смет", "общая стоимость"])),
-            "materials": best_index(find_candidates(["матер", "материа", "мр"])),
-            "wages": best_index(find_candidates(["зараб", "оплата труда", "з/п", "зп", "труд"])),
-        }
-
-    def _sum_column(self, idx: Optional[int]) -> float:
-        if idx is None:
-            return 0.0
-
-        s = 0.0
-        for r in self.rows:
-            if idx < len(r):
-                v = self._to_number(r[idx])
-                if isinstance(v, float):
-                    s += v
-        return s
-
-    def _analyze_generic(self):
-        total = self._sum_column(self.mapping.get("total"))
-        materials = self._sum_column(self.mapping.get("materials"))
-        wages = self._sum_column(self.mapping.get("wages"))
-
-        if total <= 0:
-            total = materials + wages
-        other = max(0.0, total - materials - wages)
-
-        self.stats_base = {
-            "total": total,
-            "materials": materials,
-            "wages": wages,
-            "other": other
-        }
-        self.stats_base.update({k: 0.0 for k in self.COST_KEYS + self.REFERENCE_KEYS})
-
-        self.breakdown_rows = []
-
-        self._apply_vat()
-        self._render_stats()
-        self._fill_breakdown_table()
-
-    @staticmethod
-    def _fmt_money(x: Optional[float]) -> str:
-        if x is None:
-            return "-"
-        try:
-            s = f"{float(x):,.2f}"
-            s = s.replace(",", " ").replace(".", ",")
-            return s
-        except Exception:
-            return str(x)
-
-    @staticmethod
+                idx_current = [idx for idx, v in enumerate(valsstaticmethod
     def _fmt_pct(x: Optional[float]) -> str:
         if x is None:
             return "-"
@@ -962,7 +517,7 @@ class BudgetAnalysisPage(tk.Frame):
             generic_vals = {
                 "mr": self.stats.get("materials", 0.0),
                 "zp": self.stats.get("wages", 0.0),
-                "nr": self.stats_base.get("other", 0.0) * (1.2 if self.vat_enabled.get() else 1.0)
+                "nr": self.stats_base.get("other", 0.0) * ((1.0 + self.VAT_RATE) if self.vat_enabled.get() else 1.0)
             }
 
             rows_list = list(self._metric_rows.values())
@@ -984,8 +539,8 @@ class BudgetAnalysisPage(tk.Frame):
 
         if self.vat_enabled.get():
             total_base = self.stats_base.get("total", 0.0)
-            vat_amount = total_base * 0.2
-            total_with_vat = total_base * 1.2
+            vat_amount = total_base * self.VAT_RATE
+            total_with_vat = total_base * (1.0 + self.VAT_RATE)
 
             self._row_vat["label"].grid()
             self._row_vat["val"].grid()
@@ -996,9 +551,9 @@ class BudgetAnalysisPage(tk.Frame):
             self._row_total_vat["pct"].grid()
 
             self._row_vat["val"].config(text=self._fmt_money(vat_amount))
-            self._row_vat["pct"].config(text="20%")
+            self._row_vat["pct"].config(text=f"{int(self.VAT_RATE * 100)}%")
             self._row_total_vat["val"].config(text=self._fmt_money(total_with_vat))
-            self._row_total_vat["pct"].config(text="120%")
+            self._row_total_vat["pct"].config(text=f"{int((1.0 + self.VAT_RATE) * 100)}%")
         else:
             self._row_vat["label"].grid_remove()
             self._row_vat["val"].grid_remove()
@@ -1041,7 +596,6 @@ class BudgetAnalysisPage(tk.Frame):
                 continue
 
             amt = float(row["amount"] or 0.0)
-
             self.tree.insert(
                 "",
                 "end",
@@ -1053,9 +607,6 @@ class BudgetAnalysisPage(tk.Frame):
                     self._fmt_money(amt)
                 )
             )
-
-    def _render_chart(self):
-        pass
 
     def _open_mapping(self):
         if not self.headers or self.mode != "generic":
@@ -1094,14 +645,12 @@ class BudgetAnalysisPage(tk.Frame):
                 val = self.stats.get(key, 0.0)
                 pct = self._fmt_pct(self._safe_pct(val))
                 export_metrics.append((title, val, pct))
-
             ref_zpm = self.stats.get("zpm_incl", 0.0)
             export_metrics.append(("в т.ч. ЗПМ (Справочно)", ref_zpm, "-"))
-
         else:
             mats = self.stats.get("materials", 0.0)
             wages = self.stats.get("wages", 0.0)
-            other = self.stats_base.get("other", 0.0) * (1.2 if self.vat_enabled.get() else 1.0)
+            other = self.stats_base.get("other", 0.0) * ((1.0 + self.VAT_RATE) if self.vat_enabled.get() else 1.0)
 
             export_metrics.append(("Материалы", mats, self._fmt_pct(self._safe_pct(mats))))
             export_metrics.append(("Заработная плата", wages, self._fmt_pct(self._safe_pct(wages))))
@@ -1109,10 +658,10 @@ class BudgetAnalysisPage(tk.Frame):
 
         if self.vat_enabled.get():
             total_base = self.stats_base.get("total", 0.0)
-            vat_amount = total_base * 0.2
-            total_with_vat = total_base * 1.2
-            export_metrics.append(("НДС 20%", vat_amount, "20%"))
-            export_metrics.append(("Всего с НДС", total_with_vat, "120%"))
+            vat_amount = total_base * self.VAT_RATE
+            total_with_vat = total_base * (1.0 + self.VAT_RATE)
+            export_metrics.append((f"НДС {int(self.VAT_RATE * 100)}%", vat_amount, f"{int(self.VAT_RATE * 100)}%"))
+            export_metrics.append(("Всего с НДС", total_with_vat, f"{int((1.0 + self.VAT_RATE) * 100)}%"))
 
         try:
             if out.suffix.lower() == ".csv":
@@ -1147,7 +696,6 @@ class BudgetAnalysisPage(tk.Frame):
                     ws.append([])
                     ws.append(["Расшифровка"])
                     ws.append(["Поз.", "Шифр расценки", "Категория", "Наименование", "Сумма, руб."])
-
                     for row in self.breakdown_rows:
                         ws.append([
                             row.get("pos_num", ""),
@@ -1158,9 +706,9 @@ class BudgetAnalysisPage(tk.Frame):
                         ])
 
                     ws.column_dimensions["A"].width = 10
-                    ws.column_dimensions["B"].width = 20
+                    ws.column_dimensions["B"].width = 22
                     ws.column_dimensions["C"].width = 36
-                    ws.column_dimensions["D"].width = 60
+                    ws.column_dimensions["D"].width = 70
                     ws.column_dimensions["E"].width = 18
 
                 wb.save(out)
@@ -1180,14 +728,14 @@ def open_budget_analyzer(parent=None):
     if parent is None:
         root = tk.Tk()
         root.title("Анализ смет")
-        root.geometry("1100x740")
+        root.geometry("1180x760")
         BudgetAnalysisPage(root).pack(fill="both", expand=True)
         root.mainloop()
         return root
 
     win = tk.Toplevel(parent)
     win.title("Анализ смет")
-    win.geometry("1100x740")
+    win.geometry("1180x760")
     BudgetAnalysisPage(win).pack(fill="both", expand=True)
     return win
 
