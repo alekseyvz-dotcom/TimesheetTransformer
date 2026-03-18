@@ -12,9 +12,11 @@ from psycopg2.extras import RealDictCursor
 
 from gpr_module import (
     _conn, _release, _today, _fmt_date, _parse_date,
-    _fmt_qty, _safe_float,
+    _fmt_qty, _safe_float, _to_date,
     C, STATUS_LABELS, STATUS_LIST, STATUS_COLORS,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -57,6 +59,9 @@ class _EmployeeService:
                         LIMIT %s
                     """, (limit,))
                 return [dict(r) for r in cur.fetchall()]
+        except Exception:
+            logger.exception("search_employees error")
+            raise
         finally:
             _release(conn)
 
@@ -81,12 +86,17 @@ class _EmployeeService:
                     ORDER BY a.role_in_task, e.fio
                 """, (task_id,))
                 return [dict(r) for r in cur.fetchall()]
+        except Exception:
+            logger.exception("load_task_assignments error")
+            raise
         finally:
             _release(conn)
 
     @staticmethod
     def save_task_assignments(task_id: int, assignments: List[Dict[str, Any]],
                                user_id: Optional[int] = None) -> None:
+        if not task_id:
+            return
         conn = None
         try:
             conn = _conn()
@@ -95,6 +105,9 @@ class _EmployeeService:
                     "DELETE FROM public.gpr_task_assignments WHERE task_id = %s",
                     (task_id,))
                 for a in assignments:
+                    emp_id = a.get("employee_id")
+                    if not emp_id:
+                        continue
                     cur.execute("""
                         INSERT INTO public.gpr_task_assignments
                             (task_id, employee_id, role_in_task, note, assigned_by)
@@ -104,11 +117,14 @@ class _EmployeeService:
                                 note = EXCLUDED.note
                     """, (
                         task_id,
-                        a["employee_id"],
+                        int(emp_id),
                         a.get("role_in_task", "executor"),
                         a.get("note") or None,
                         user_id,
                     ))
+        except Exception:
+            logger.exception("save_task_assignments error")
+            raise
         finally:
             _release(conn)
 
@@ -140,7 +156,6 @@ class TaskEditDialogPro(tk.Toplevel):
                  user_id: Optional[int] = None):
         super().__init__(parent)
         self.transient(parent)
-        self.grab_set()
 
         self.work_types = work_types
         self.uoms = uoms
@@ -151,6 +166,9 @@ class TaskEditDialogPro(tk.Toplevel):
         # Назначения (локальный список для редактирования)
         self._assignments: List[Dict[str, Any]] = []
         self._emp_search_results: List[Dict[str, Any]] = []
+
+        # Флаг: диалог уже закрыт (защита от двойного destroy)
+        self._destroyed = False
 
         # Заголовок окна
         task_name = self.init.get("name", "")
@@ -165,7 +183,15 @@ class TaskEditDialogPro(tk.Toplevel):
         self._build_ui()
         self._fill_init()
         self._load_assignments()
-        self._center()
+
+        # grab_set ПОСЛЕ построения UI — иначе может упасть на некоторых ОС
+        self.grab_set()
+
+        # Центрируем после полной отрисовки
+        self.after(10, self._center)
+
+        # Обработка закрытия крестиком
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
 
     # ══════════════════════════════════════════════════════
     #  BUILD UI
@@ -203,8 +229,8 @@ class TaskEditDialogPro(tk.Toplevel):
                            relief="flat", cursor="hand2", padx=20, pady=6,
                            command=self._on_ok)
         btn_ok.pack(side="right", padx=(0, 16))
-        btn_ok.bind("<Enter>", lambda e: btn_ok.config(bg="#0d47a1"))
-        btn_ok.bind("<Leave>", lambda e: btn_ok.config(bg=C["btn_bg"]))
+        btn_ok.bind("<Enter>", lambda _e: btn_ok.config(bg="#0d47a1"))
+        btn_ok.bind("<Leave>", lambda _e: btn_ok.config(bg=C["btn_bg"]))
 
         btn_cancel = tk.Button(bot, text="Отмена",
                                font=("Segoe UI", 9),
@@ -218,7 +244,8 @@ class TaskEditDialogPro(tk.Toplevel):
                                   fg=C["text3"], bg=C["bg"])
         self.lbl_info.pack(side="left", padx=16)
 
-        self.bind("<Escape>", lambda e: self._on_cancel())
+        self.bind("<Escape>", lambda _e: self._on_cancel())
+        self.bind("<Control-Return>", lambda _e: self._on_ok())
 
     # ── Вкладка: Основные данные ──
     def _build_main_tab(self, parent):
@@ -233,23 +260,26 @@ class TaskEditDialogPro(tk.Toplevel):
         r = 0
         # Тип работ
         tk.Label(grp1, text="Тип работ *:", bg=C["panel"],
-                 font=("Segoe UI", 9)).grid(row=r, column=0, sticky="e", padx=(0, 8), pady=4)
+                 font=("Segoe UI", 9)).grid(
+            row=r, column=0, sticky="e", padx=(0, 8), pady=4)
         wt_vals = [w["name"] for w in self.work_types]
-        self.cmb_wt = ttk.Combobox(grp1, state="readonly", width=44, values=wt_vals,
-                                    font=("Segoe UI", 9))
+        self.cmb_wt = ttk.Combobox(grp1, state="readonly", width=44,
+                                    values=wt_vals, font=("Segoe UI", 9))
         self.cmb_wt.grid(row=r, column=1, sticky="w", pady=4)
         r += 1
 
         # Вид работ
         tk.Label(grp1, text="Вид работ *:", bg=C["panel"],
-                 font=("Segoe UI", 9)).grid(row=r, column=0, sticky="e", padx=(0, 8), pady=4)
+                 font=("Segoe UI", 9)).grid(
+            row=r, column=0, sticky="e", padx=(0, 8), pady=4)
         self.ent_name = ttk.Entry(grp1, width=48, font=("Segoe UI", 9))
         self.ent_name.grid(row=r, column=1, sticky="ew", pady=4)
         r += 1
 
         # Ед. изм. + Объём (в одной строке)
         tk.Label(grp1, text="Ед. изм.:", bg=C["panel"],
-                 font=("Segoe UI", 9)).grid(row=r, column=0, sticky="e", padx=(0, 8), pady=4)
+                 font=("Segoe UI", 9)).grid(
+            row=r, column=0, sticky="e", padx=(0, 8), pady=4)
         uom_frame = tk.Frame(grp1, bg=C["panel"])
         uom_frame.grid(row=r, column=1, sticky="w", pady=4)
 
@@ -274,24 +304,26 @@ class TaskEditDialogPro(tk.Toplevel):
 
         r = 0
         tk.Label(grp2, text="Начало *:", bg=C["panel"],
-                 font=("Segoe UI", 9)).grid(row=r, column=0, sticky="e", padx=(0, 8), pady=4)
+                 font=("Segoe UI", 9)).grid(
+            row=r, column=0, sticky="e", padx=(0, 8), pady=4)
         date_frame = tk.Frame(grp2, bg=C["panel"])
         date_frame.grid(row=r, column=1, sticky="w", pady=4)
 
         self.ent_start = ttk.Entry(date_frame, width=12, font=("Segoe UI", 9))
         self.ent_start.pack(side="left")
-        self.ent_start.bind("<FocusOut>", lambda e: self._update_duration())
+        self.ent_start.bind("<FocusOut>", lambda _e: self._update_duration())
 
         tk.Label(date_frame, text="   Окончание *:", bg=C["panel"],
                  font=("Segoe UI", 9)).pack(side="left", padx=(16, 4))
         self.ent_finish = ttk.Entry(date_frame, width=12, font=("Segoe UI", 9))
         self.ent_finish.pack(side="left")
-        self.ent_finish.bind("<FocusOut>", lambda e: self._update_duration())
+        self.ent_finish.bind("<FocusOut>", lambda _e: self._update_duration())
 
         tk.Label(date_frame, text="   Длительность:", bg=C["panel"],
                  font=("Segoe UI", 9)).pack(side="left", padx=(16, 4))
         self.lbl_duration = tk.Label(date_frame, text="—", bg=C["panel"],
-                                      font=("Segoe UI", 9, "bold"), fg=C["accent"])
+                                      font=("Segoe UI", 9, "bold"),
+                                      fg=C["accent"])
         self.lbl_duration.pack(side="left")
         r += 1
 
@@ -310,20 +342,25 @@ class TaskEditDialogPro(tk.Toplevel):
 
         r = 0
         tk.Label(grp3, text="Статус:", bg=C["panel"],
-                 font=("Segoe UI", 9)).grid(row=r, column=0, sticky="e", padx=(0, 8), pady=4)
+                 font=("Segoe UI", 9)).grid(
+            row=r, column=0, sticky="e", padx=(0, 8), pady=4)
         status_frame = tk.Frame(grp3, bg=C["panel"])
         status_frame.grid(row=r, column=1, sticky="w", pady=4)
 
         st_vals = [STATUS_LABELS.get(s, s) for s in STATUS_LIST]
-        self.cmb_status = ttk.Combobox(status_frame, state="readonly", width=18,
-                                        values=st_vals, font=("Segoe UI", 9))
+        self.cmb_status = ttk.Combobox(status_frame, state="readonly",
+                                        width=18, values=st_vals,
+                                        font=("Segoe UI", 9))
         self.cmb_status.pack(side="left")
 
         # Цветной индикатор статуса
         self.cv_status = tk.Canvas(status_frame, width=16, height=16,
                                     bg=C["panel"], highlightthickness=0)
         self.cv_status.pack(side="left", padx=(8, 0))
-        self.cmb_status.bind("<<ComboboxSelected>>", lambda e: self._update_status_color())
+        self.cmb_status.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self._update_status_color()
+        )
         r += 1
 
         self.var_milestone = tk.BooleanVar(value=False)
@@ -334,10 +371,11 @@ class TaskEditDialogPro(tk.Toplevel):
     # ── Вкладка: Назначения работников ──
     def _build_assign_tab(self, parent):
         # Верхняя часть: поиск
-        search_frame = tk.LabelFrame(parent, text=" 🔍 Поиск работника ",
-                                      font=("Segoe UI", 9, "bold"),
-                                      bg=C["panel"], fg=C["accent"],
-                                      padx=10, pady=6)
+        search_frame = tk.LabelFrame(
+            parent, text=" 🔍 Поиск работника ",
+            font=("Segoe UI", 9, "bold"),
+            bg=C["panel"], fg=C["accent"],
+            padx=10, pady=6)
         search_frame.pack(fill="x", padx=12, pady=(10, 4))
 
         sf = tk.Frame(search_frame, bg=C["panel"])
@@ -346,67 +384,76 @@ class TaskEditDialogPro(tk.Toplevel):
         tk.Label(sf, text="ФИО / ТБН / Должность:", bg=C["panel"],
                  font=("Segoe UI", 9)).pack(side="left")
         self.var_emp_search = tk.StringVar()
-        self.ent_emp_search = ttk.Entry(sf, textvariable=self.var_emp_search,
-                                         width=32, font=("Segoe UI", 9))
+        self.ent_emp_search = ttk.Entry(
+            sf, textvariable=self.var_emp_search,
+            width=32, font=("Segoe UI", 9))
         self.ent_emp_search.pack(side="left", padx=(6, 8))
-        self.ent_emp_search.bind("<Return>", lambda e: self._search_employees())
+        self.ent_emp_search.bind(
+            "<Return>", lambda _e: self._search_employees())
 
-        ttk.Button(sf, text="Найти", command=self._search_employees).pack(side="left", padx=2)
+        ttk.Button(sf, text="Найти",
+                   command=self._search_employees).pack(side="left", padx=2)
 
         tk.Label(sf, text="  Роль:", bg=C["panel"],
                  font=("Segoe UI", 9)).pack(side="left", padx=(12, 4))
-        self.cmb_role = ttk.Combobox(sf, state="readonly", width=14,
-                                      values=TASK_ROLE_LABELS,
-                                      font=("Segoe UI", 9))
+        self.cmb_role = ttk.Combobox(
+            sf, state="readonly", width=14,
+            values=TASK_ROLE_LABELS, font=("Segoe UI", 9))
         self.cmb_role.pack(side="left")
         self.cmb_role.current(0)
 
         ttk.Button(sf, text="➕ Назначить выбранного",
-                   command=self._assign_selected).pack(side="left", padx=(12, 0))
+                   command=self._assign_selected).pack(
+            side="left", padx=(12, 0))
 
         # Результаты поиска
         src_frame = tk.Frame(search_frame, bg=C["panel"])
         src_frame.pack(fill="x", pady=(6, 0))
 
         cols_s = ("fio", "tbn", "position", "department")
-        self.emp_tree = ttk.Treeview(src_frame, columns=cols_s, show="headings",
-                                      selectmode="browse", height=5)
+        self.emp_tree = ttk.Treeview(
+            src_frame, columns=cols_s, show="headings",
+            selectmode="browse", height=5)
         for c, t, w in [
-            ("fio",        "ФИО",         200),
-            ("tbn",        "ТБН",         80),
-            ("position",   "Должность",   160),
-            ("department", "Подразделение",160),
+            ("fio",        "ФИО",          200),
+            ("tbn",        "ТБН",          80),
+            ("position",   "Должность",    160),
+            ("department", "Подразделение", 160),
         ]:
             self.emp_tree.heading(c, text=t)
             self.emp_tree.column(c, width=w, anchor="w")
 
-        vsb_e = ttk.Scrollbar(src_frame, orient="vertical", command=self.emp_tree.yview)
+        vsb_e = ttk.Scrollbar(src_frame, orient="vertical",
+                               command=self.emp_tree.yview)
         self.emp_tree.configure(yscrollcommand=vsb_e.set)
         self.emp_tree.pack(side="left", fill="x", expand=True)
         vsb_e.pack(side="right", fill="y")
 
-        self.emp_tree.bind("<Double-1>", lambda e: self._assign_selected())
+        self.emp_tree.bind("<Double-1>",
+                           lambda _e: self._assign_selected())
 
         # Нижняя часть: текущие назначения
-        assign_frame = tk.LabelFrame(parent, text=" 👷 Назначенные работники ",
-                                      font=("Segoe UI", 9, "bold"),
-                                      bg=C["panel"], fg=C["accent"],
-                                      padx=10, pady=6)
+        assign_frame = tk.LabelFrame(
+            parent, text=" 👷 Назначенные работники ",
+            font=("Segoe UI", 9, "bold"),
+            bg=C["panel"], fg=C["accent"],
+            padx=10, pady=6)
         assign_frame.pack(fill="both", expand=True, padx=12, pady=(4, 8))
 
         bar = tk.Frame(assign_frame, bg=C["panel"])
         bar.pack(fill="x")
         ttk.Button(bar, text="🗑 Снять назначение",
-                   command=self._remove_assignment).pack(side="left", padx=2)
-        self.lbl_assign_count = tk.Label(bar, text="Назначено: 0",
-                                          bg=C["panel"], font=("Segoe UI", 8),
-                                          fg=C["text2"])
+                   command=self._remove_assignment).pack(
+            side="left", padx=2)
+        self.lbl_assign_count = tk.Label(
+            bar, text="Назначено: 0",
+            bg=C["panel"], font=("Segoe UI", 8), fg=C["text2"])
         self.lbl_assign_count.pack(side="right", padx=8)
 
         cols_a = ("fio", "tbn", "position", "role", "department")
-        self.assign_tree = ttk.Treeview(assign_frame, columns=cols_a,
-                                         show="headings", selectmode="browse",
-                                         height=6)
+        self.assign_tree = ttk.Treeview(
+            assign_frame, columns=cols_a,
+            show="headings", selectmode="browse", height=6)
         for c, t, w in [
             ("fio",        "ФИО",          200),
             ("tbn",        "ТБН",          80),
@@ -420,7 +467,8 @@ class TaskEditDialogPro(tk.Toplevel):
         vsb_a = ttk.Scrollbar(assign_frame, orient="vertical",
                                command=self.assign_tree.yview)
         self.assign_tree.configure(yscrollcommand=vsb_a.set)
-        self.assign_tree.pack(side="left", fill="both", expand=True, pady=(4, 0))
+        self.assign_tree.pack(side="left", fill="both", expand=True,
+                              pady=(4, 0))
         vsb_a.pack(side="right", fill="y", pady=(4, 0))
 
         # Подкраска ролей
@@ -433,11 +481,15 @@ class TaskEditDialogPro(tk.Toplevel):
     def _fill_init(self):
         # Тип работ
         iw = self.init.get("work_type_id")
-        if iw:
+        if iw is not None:
             for i, w in enumerate(self.work_types):
                 if int(w["id"]) == int(iw):
                     self.cmb_wt.current(i)
                     break
+            else:
+                # work_type_id не найден в списке
+                if self.work_types:
+                    self.cmb_wt.current(0)
         elif self.work_types:
             self.cmb_wt.current(0)
 
@@ -447,10 +499,14 @@ class TaskEditDialogPro(tk.Toplevel):
         # Ед. изм.
         iu = self.init.get("uom_code")
         if iu:
-            for i, u in enumerate(self.uoms, 1):
+            found = False
+            for i, u in enumerate(self.uoms):
                 if u["code"] == iu:
-                    self.cmb_uom.current(i)
+                    self.cmb_uom.current(i + 1)  # +1 из-за "—"
+                    found = True
                     break
+            if not found:
+                self.cmb_uom.current(0)
         else:
             self.cmb_uom.current(0)
 
@@ -458,13 +514,9 @@ class TaskEditDialogPro(tk.Toplevel):
         if self.init.get("plan_qty") is not None:
             self.ent_qty.insert(0, _fmt_qty(self.init["plan_qty"]))
 
-        # Даты
-        d0 = self.init.get("plan_start") or _today()
-        d1 = self.init.get("plan_finish") or _today()
-        if isinstance(d0, str):
-            d0 = datetime.fromisoformat(d0).date()
-        if isinstance(d1, str):
-            d1 = datetime.fromisoformat(d1).date()
+        # Даты — используем безопасный _to_date
+        d0 = _to_date(self.init.get("plan_start")) or _today()
+        d1 = _to_date(self.init.get("plan_finish")) or _today()
         self.ent_start.insert(0, _fmt_date(d0))
         self.ent_finish.insert(0, _fmt_date(d1))
 
@@ -472,7 +524,7 @@ class TaskEditDialogPro(tk.Toplevel):
         ist = self.init.get("status", "planned")
         try:
             self.cmb_status.current(STATUS_LIST.index(ist))
-        except Exception:
+        except ValueError:
             self.cmb_status.current(0)
 
         # Веха
@@ -486,9 +538,11 @@ class TaskEditDialogPro(tk.Toplevel):
         task_id = self.init.get("id")
         if task_id:
             try:
-                self._assignments = _EmployeeService.load_task_assignments(task_id)
-            except Exception as e:
-                logging.exception("Load assignments error")
+                self._assignments = _EmployeeService.load_task_assignments(
+                    task_id)
+            except Exception:
+                logger.exception("Load assignments error for task %s",
+                                 task_id)
                 self._assignments = []
         self._render_assignments()
 
@@ -505,12 +559,12 @@ class TaskEditDialogPro(tk.Toplevel):
             else:
                 self.lbl_duration.config(
                     text=f"{dur} дн.", fg=C["accent"])
-        except Exception:
+        except (ValueError, AttributeError):
             self.lbl_duration.config(text="—", fg=C["text3"])
 
     def _update_status_color(self):
         si = self.cmb_status.current()
-        if si >= 0:
+        if 0 <= si < len(STATUS_LIST):
             code = STATUS_LIST[si]
             col, _, _ = STATUS_COLORS.get(code, ("#ccc", "#333", ""))
             self.cv_status.delete("all")
@@ -527,13 +581,34 @@ class TaskEditDialogPro(tk.Toplevel):
         self.update_idletasks()
         w = self.winfo_width()
         h = self.winfo_height()
-        pw = self.master.winfo_width()
-        ph = self.master.winfo_height()
-        px = self.master.winfo_rootx()
-        py = self.master.winfo_rooty()
-        x = px + (pw - w) // 2
-        y = py + (ph - h) // 2
-        self.geometry(f"+{max(0,x)}+{max(0,y)}")
+        if self.master and self.master.winfo_exists():
+            pw = self.master.winfo_width()
+            ph = self.master.winfo_height()
+            px = self.master.winfo_rootx()
+            py = self.master.winfo_rooty()
+            x = px + (pw - w) // 2
+            y = py + (ph - h) // 2
+        else:
+            # Центр экрана
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x = (sw - w) // 2
+            y = (sh - h) // 2
+        self.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def _safe_destroy(self):
+        """Безопасное закрытие — защита от двойного вызова."""
+        if self._destroyed:
+            return
+        self._destroyed = True
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
 
     # ══════════════════════════════════════════════════════
     #  РАБОТНИКИ: поиск и назначение
@@ -547,37 +622,61 @@ class TaskEditDialogPro(tk.Toplevel):
         except Exception as e:
             messagebox.showerror("Поиск", f"Ошибка:\n{e}", parent=self)
             return
+
+        if not self._emp_search_results:
+            # Показываем подсказку если ничего не найдено
+            self.emp_tree.insert("", "end", values=(
+                "Не найдено", "", "", ""))
+            return
+
         for emp in self._emp_search_results:
             self.emp_tree.insert("", "end", values=(
-                emp["fio"], emp.get("tbn") or "",
-                emp.get("position") or "", emp.get("department") or "",
+                emp.get("fio") or "",
+                emp.get("tbn") or "",
+                emp.get("position") or "",
+                emp.get("department") or "",
             ))
 
     def _assign_selected(self):
         sel = self.emp_tree.selection()
         if not sel:
-            messagebox.showinfo("Назначение",
-                "Выберите работника из результатов поиска.", parent=self)
+            messagebox.showinfo(
+                "Назначение",
+                "Выберите работника из результатов поиска.",
+                parent=self,
+            )
             return
-        idx = self.emp_tree.index(sel[0])
+
+        try:
+            idx = self.emp_tree.index(sel[0])
+        except tk.TclError:
+            return
+
         if idx < 0 or idx >= len(self._emp_search_results):
             return
+
         emp = self._emp_search_results[idx]
+        emp_id = emp.get("id")
+        if not emp_id:
+            return
 
         # Проверяем дубль
         for a in self._assignments:
-            if int(a["employee_id"]) == int(emp["id"]):
-                messagebox.showinfo("Назначение",
-                    f"{emp['fio']} уже назначен.", parent=self)
+            if int(a["employee_id"]) == int(emp_id):
+                messagebox.showinfo(
+                    "Назначение",
+                    f"{emp.get('fio', '')} уже назначен на эту задачу.",
+                    parent=self,
+                )
                 return
 
         # Роль
         ri = self.cmb_role.current()
-        role_code = TASK_ROLE_LIST[ri] if ri >= 0 else "executor"
+        role_code = TASK_ROLE_LIST[ri] if 0 <= ri < len(TASK_ROLE_LIST) else "executor"
 
         self._assignments.append({
-            "employee_id": emp["id"],
-            "fio": emp["fio"],
+            "employee_id": int(emp_id),
+            "fio": emp.get("fio") or "",
             "tbn": emp.get("tbn") or "",
             "position": emp.get("position") or "",
             "department": emp.get("department") or "",
@@ -589,18 +688,37 @@ class TaskEditDialogPro(tk.Toplevel):
     def _remove_assignment(self):
         sel = self.assign_tree.selection()
         if not sel:
+            messagebox.showinfo(
+                "Назначение",
+                "Выберите работника для снятия назначения.",
+                parent=self,
+            )
             return
-        idx = self.assign_tree.index(sel[0])
+        try:
+            idx = self.assign_tree.index(sel[0])
+        except tk.TclError:
+            return
+
         if 0 <= idx < len(self._assignments):
-            self._assignments.pop(idx)
+            removed = self._assignments.pop(idx)
+            logger.debug(
+                "Removed assignment: %s",
+                removed.get("fio", "?"),
+            )
             self._render_assignments()
 
     def _render_assignments(self):
         self.assign_tree.delete(*self.assign_tree.get_children())
         for a in self._assignments:
-            role_label = TASK_ROLES.get(a.get("role_in_task", ""), "?")
+            role_label = TASK_ROLES.get(
+                a.get("role_in_task", ""), "?"
+            )
             role_code = a.get("role_in_task", "executor")
-            tags = (role_code,) if role_code in ("foreman", "inspector") else ()
+            tags = (
+                (role_code,)
+                if role_code in ("foreman", "inspector")
+                else ()
+            )
             self.assign_tree.insert("", "end", values=(
                 a.get("fio") or "",
                 a.get("tbn") or "",
@@ -608,7 +726,9 @@ class TaskEditDialogPro(tk.Toplevel):
                 role_label,
                 a.get("department") or "",
             ), tags=tags)
-        self.lbl_assign_count.config(text=f"Назначено: {len(self._assignments)}")
+        self.lbl_assign_count.config(
+            text=f"Назначено: {len(self._assignments)}"
+        )
 
     # ══════════════════════════════════════════════════════
     #  OK / CANCEL
@@ -626,17 +746,22 @@ class TaskEditDialogPro(tk.Toplevel):
 
             uom = None
             ui = self.cmb_uom.current()
-            if ui > 0:
+            if ui > 0 and (ui - 1) < len(self.uoms):
                 uom = self.uoms[ui - 1]["code"]
 
             qty = _safe_float(self.ent_qty.get())
+
             ds = _parse_date(self.ent_start.get())
             df = _parse_date(self.ent_finish.get())
             if df < ds:
-                raise ValueError("Окончание раньше начала")
+                raise ValueError("Дата окончания раньше даты начала")
 
             si = self.cmb_status.current()
-            st = STATUS_LIST[si] if si >= 0 else "planned"
+            st = (
+                STATUS_LIST[si]
+                if 0 <= si < len(STATUS_LIST)
+                else "planned"
+            )
 
             self.result = {
                 "work_type_id": wt_id,
@@ -649,26 +774,45 @@ class TaskEditDialogPro(tk.Toplevel):
                 "is_milestone": bool(self.var_milestone.get()),
                 "_assignments": list(self._assignments),
             }
-            self.destroy()
+            self._safe_destroy()
 
-        except Exception as e:
+        except ValueError as e:
             messagebox.showwarning("Работа ГПР", str(e), parent=self)
-            self.nb.select(0)  # переключаемся на первую вкладку
+            # Переключаемся на первую вкладку где ошибка
+            try:
+                self.nb.select(0)
+            except tk.TclError:
+                pass
+        except Exception as e:
+            logger.exception("TaskEditDialogPro._on_ok unexpected error")
+            messagebox.showerror(
+                "Ошибка",
+                f"Непредвиденная ошибка:\n{e}",
+                parent=self,
+            )
 
     def _on_cancel(self):
         self.result = None
-        self.destroy()
+        self._safe_destroy()
 
 
 # ═══════════════════════════════════════════════════════════════
 #  API — фабрика для вызова из GprPage
 # ═══════════════════════════════════════════════════════════════
-def open_task_dialog(parent, work_types, uoms,
-                     init=None, user_id=None) -> Optional[Dict[str, Any]]:
+def open_task_dialog(
+    parent,
+    work_types,
+    uoms,
+    init=None,
+    user_id=None,
+) -> Optional[Dict[str, Any]]:
     """
     Открывает диалог, ждёт закрытия, возвращает result или None.
     """
-    dlg = TaskEditDialogPro(parent, work_types, uoms,
-                             init=init, user_id=user_id)
+    dlg = TaskEditDialogPro(
+        parent, work_types, uoms,
+        init=init, user_id=user_id,
+    )
     parent.wait_window(dlg)
     return dlg.result
+            
