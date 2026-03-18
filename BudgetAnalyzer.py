@@ -587,29 +587,31 @@ class BudgetAnalysisPage(tk.Frame):
     def _diagnose_unclassified_row(self, row: List[Any]) -> str:
         if self.smeta_name_col is None or self.smeta_total_col is None:
             return "Не заданы индексы колонок сметы"
-
+    
         if self._is_summary_row(row, self.smeta_name_col):
             return "Итоговая/сводная строка"
-
+    
         val = self._get_smeta_current_value(row)
         if not isinstance(val, float):
             return "Нет числового значения в колонке текущей цены"
-
+    
         name = self._str(row[self.smeta_name_col]) if self.smeta_name_col < len(row) else ""
         if not name:
             return "Пустое наименование"
-
+    
         pos_cell = row[0] if len(row) > 0 else None
         pos_str = self._str(pos_cell)
         unit = row[3] if len(row) > 3 else ""
         unit_str = self._str(unit).lower()
         n = re.sub(r"[^а-яa-z0-9]", "", name.lower())
-
+    
+        is_subpos = bool(pos_str and re.match(r"^\d+[.,]\d+$", pos_str))
+    
         parts = [
             f"Позиция='{pos_str}'",
             f"Ед.изм='{unit_str}'",
             f"numeric_pos={'да' if self._has_numeric_position(pos_cell) else 'нет'}",
-            f"subpos={'да' if bool(pos_str and re.match(r'^\\d+[.,]\\d+$', pos_str)) else 'нет'}",
+            f"subpos={'да' if is_subpos else 'нет'}",
             f"material_unit={'да' if self._is_material_unit(unit) else 'нет'}",
             f"labor_or_%={'да' if self._is_labor_or_percent_unit(unit) else 'нет'}",
             f"norm='{n[:60]}'"
