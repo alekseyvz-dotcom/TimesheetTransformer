@@ -114,6 +114,7 @@ def save_credentials(username: str, password: str, remember: bool):
 # --- ИМПОРТ ВСЕХ МОДУЛЕЙ ПРИЛОЖЕНИЯ ---
 
 BudgetAnalyzer = None
+EstimateResourceDecoder = None
 _assets_logo = None
 _LOGO_BASE64 = None
 SpecialOrders = None
@@ -134,9 +135,10 @@ brigades_module = None
 gpr_module = None
 gpr_task_dialog = None
 gpr_dictionaries = None
+EstimateResourceDecoder = None
 
 def perform_heavy_imports():
-    global BudgetAnalyzer, _assets_logo, _LOGO_BASE64, SpecialOrders, \
+    global BudgetAnalyzer, EstimateResourceDecoder, _assets_logo, _LOGO_BASE64, SpecialOrders, \
            meals_module, objects, Settings, timesheet_module, \
            analytics_module, timesheet_transformer, employees_module, \
            timesheet_compare, meals_employees_module, lodging_module, \
@@ -144,6 +146,7 @@ def perform_heavy_imports():
            brigades_module, gpr_module, gpr_task_dialog, gpr_dictionaries
            
     import BudgetAnalyzer
+    import estimate_resource_decoder as EstimateResourceDecoder
     import assets_logo as _assets_logo
     _LOGO_BASE64 = getattr(_assets_logo, "LOGO_BASE64", None)
     import SpecialOrders
@@ -1147,6 +1150,14 @@ class MainApp(tk.Tk):
             )
         if BudgetAnalyzer and hasattr(BudgetAnalyzer, "create_page"):
             m_tools.add_command(label="Анализ смет", command=lambda: self._show_page("budget", lambda p: BudgetAnalyzer.create_page(p)))
+        if EstimateResourceDecoder and hasattr(EstimateResourceDecoder, "create_page"):
+            m_tools.add_command(
+                label="Раскрытие ресурсов сметы",
+                command=lambda: self._show_page(
+                    "estimate_resource_decoder",
+                    lambda p: EstimateResourceDecoder.create_page(p)
+                )
+            )
         self._menubar.add_cascade(label="Инструменты", menu=m_tools)
         self._menu_tools = m_tools
         
@@ -1233,6 +1244,7 @@ class MainApp(tk.Tk):
             "objects_registry": ("Реестр объектов", ""),
             "employee_card": ("Сотрудники", "Карточка сотрудника (работа/питание/проживание)"),
             "budget": ("Анализ смет", ""),
+            "estimate_resource_decoder": ("Раскрытие ресурсов сметы", "Расшифровка расценок до конкретных ресурсов"),
             "login": ("Управление строительством", "Вход в систему"),
             "analytics_dashboard": (
                 "Операционная аналитика",
