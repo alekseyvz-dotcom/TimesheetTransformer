@@ -94,6 +94,7 @@ MENU_SPEC: List[MenuSection] = [
         label="Инструменты",
         entries=[
             MenuEntry("page", "Анализ смет", key="budget", perm="page.budget", group="tools", title="Инструменты: Анализ смет"),
+            MenuEntry("page", "Раскрытие ресурсов сметы", key="estimate_resource_decoder", perm="page.estimate_resource_decoder", group="tools", title="Инструменты: Раскрытие ресурсов сметы"),
         ],
     ),
 ]
