@@ -30,6 +30,7 @@ a = Analysis(
         ('timesheet_compare.py', '.'),
         ('employees.py', '.'),
         ('BudgetAnalyzer.py', '.'),
+        ('estimate_resource_decoder.py', '.'),
         ('timesheet_module.py', '.'),
         ('employee_card.py', '.'),
         ('analytics_module.py', '.'),
@@ -55,7 +56,8 @@ a = Analysis(
         'virtual_timesheet_grid',
         'employees',
         'BudgetAnalyzer',
-        'timesheet_module',     # <-- ИСПРАВЛЕНО (у вас было timesheet_modyle)
+        'estimate_resource_decoder',
+        'timesheet_module',   
         'employee_card',
         'payroll_module',
         'brigades_module',
