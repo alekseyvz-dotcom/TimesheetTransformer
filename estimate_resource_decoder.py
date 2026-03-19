@@ -426,6 +426,9 @@ class EstimateResourceDecoderPage(tk.Frame):
                 unit = self._s(row[3] if len(row) > 3 else "")
                 qty = self._f(row[4] if len(row) > 4 else None)
 
+                if code == "2" and name == "3" and self._s(row[3] if len(row) > 3 else "") == "4":
+                    continue
+
                 if not name:
                     continue
                 if name.lower().startswith("итого"):
@@ -505,52 +508,68 @@ class EstimateResourceDecoderPage(tk.Frame):
         return result
 
     def _build_code_to_rate_map(self) -> Dict[str, List[int]]:
-        code_map: Dict[str, List[int]] = {}
 
+        code_map: Dict[str, List[int]] = {}
+    
+        def add_pair(code: str, rate_id: int):
+            if not code or rate_id is None:
+                return
+            code_map.setdefault(code, [])
+            if rate_id not in code_map[code]:
+                code_map[code].append(rate_id)
+    
+        # --- 1. Пытаемся разобрать Source ---
         if self.source_sheet_name:
             ws = self.workbook[self.source_sheet_name]
+    
             for row in ws.iter_rows(values_only=True):
                 vals = list(row)
                 if not any(v is not None and str(v).strip() for v in vals):
                     continue
-
-                rate_id = None
-                code = None
-
-                for v in vals:
-                    s = self._s(v)
-                    if rate_id is None:
-                        rate_id = self._try_parse_int(v)
-                    if code is None and self._looks_like_rate_code(s):
-                        code = s
-
-                if rate_id is not None and code:
-                    code_map.setdefault(code, [])
-                    if rate_id not in code_map[code]:
-                        code_map[code].append(rate_id)
-
-        if code_map:
-            return code_map
-
-        for sheet_name in [self.etalon_sheet_name, self.smtres_sheet_name]:
-            if not sheet_name:
-                continue
-            ws = self.workbook[sheet_name]
-            for row in ws.iter_rows(values_only=True):
-                vals = list(row)
-                if not any(v is not None and str(v).strip() for v in vals):
+    
+                # все похожие на шифр значения в строке
+                codes = [self._s(v) for v in vals if self._looks_like_rate_code(self._s(v))]
+                if not codes:
                     continue
-
-                rate_id = self._try_parse_int(vals[0] if len(vals) > 0 else None)
-                if rate_id is None:
+    
+                # кандидаты на rate_id только среди первых колонок
+                rate_candidates = []
+                for i in range(min(6, len(vals))):
+                    rid = self._try_parse_int(vals[i])
+                    if rid is not None and rid > 0:
+                        rate_candidates.append(rid)
+    
+                if not rate_candidates:
                     continue
-
-                found_codes = [self._s(v) for v in vals if self._looks_like_rate_code(self._s(v))]
-                for code in found_codes:
-                    code_map.setdefault(code, [])
-                    if rate_id not in code_map[code]:
-                        code_map[code].append(rate_id)
-
+    
+                # берем максимальный/наиболее "похожий на внутренний id"
+                # обычно internal id больше мелких служебных значений
+                rate_id = max(rate_candidates)
+    
+                for code in codes:
+                    add_pair(code, rate_id)
+    
+        # --- 2. fallback через EtalonRes / SmtRes ---
+        if not code_map:
+            for sheet_name in [self.etalon_sheet_name, self.smtres_sheet_name]:
+                if not sheet_name:
+                    continue
+    
+                ws = self.workbook[sheet_name]
+    
+                for row in ws.iter_rows(values_only=True):
+                    vals = list(row)
+                    if not any(v is not None and str(v).strip() for v in vals):
+                        continue
+    
+                    rate_id = self._try_parse_int(vals[0] if len(vals) > 0 else None)
+                    if rate_id is None or rate_id <= 0:
+                        continue
+    
+                    codes = [self._s(v) for v in vals if self._looks_like_rate_code(self._s(v))]
+                    for code in codes:
+                        add_pair(code, rate_id)
+    
         return code_map
 
     def _decode_rows(self) -> List[Dict[str, Any]]:
@@ -633,55 +652,65 @@ class EstimateResourceDecoderPage(tk.Frame):
     def _choose_best_rate_id(self, work: Dict[str, Any], rate_ids: List[int]) -> int:
         """
         Выбор лучшего rate_id:
-        приоритет — минимальная дельта по ЭМ.
+        сравниваем локальные ЗП/ЭМ/МР с раскрытыми.
+        Чем меньше ошибка, тем лучше кандидат.
         """
         if not rate_ids:
             raise RuntimeError("Пустой список rate_id")
-
+    
         if len(rate_ids) == 1:
             return rate_ids[0]
-
+    
         local_qty = work.get("qty") or 0.0
-        local_em = work.get("em_base")
         local_zp = work.get("zp_base")
+        local_em = work.get("em_base")
         local_mr = work.get("mr_base")
-
+    
         best_rate_id = rate_ids[0]
         best_score = None
-
+    
         for rid in rate_ids:
             resources = self.rate_resources.get(rid, [])
             if not resources:
                 continue
-
-            em_sum = 0.0
+    
             zp_sum = 0.0
+            em_sum = 0.0
             mr_sum = 0.0
-
+    
             for res in resources:
                 price = res.get("price")
                 if price is None:
                     continue
+    
                 cost = (res.get("norm_qty") or 0.0) * local_qty * price
-                if res["resource_type"] == "ЭМ":
-                    em_sum += cost
-                elif res["resource_type"] == "ЗП":
+    
+                if res["resource_type"] == "ЗП":
                     zp_sum += cost
+                elif res["resource_type"] == "ЭМ":
+                    em_sum += cost
                 elif res["resource_type"] == "МР":
                     mr_sum += cost
-
+    
             score = 0.0
+    
+            # ЭМ обычно самый показательный для подбора машинных расценок
             if local_em is not None:
-                score += abs(local_em - em_sum) * 10
+                score += abs(local_em - em_sum) * 100.0
+    
             if local_zp is not None:
-                score += abs(local_zp - zp_sum)
+                score += abs(local_zp - zp_sum) * 10.0
+    
             if local_mr is not None:
-                score += abs(local_mr - mr_sum)
-
+                score += abs(local_mr - mr_sum) * 10.0
+    
+            # легкий бонус за наличие ресурсов
+            score -= min(len(resources), 20) * 0.01
+    
             if best_score is None or score < best_score:
                 best_score = score
                 best_rate_id = rid
-
+    
         return best_rate_id
 
     def _build_reconciliation(self) -> List[Dict[str, Any]]:
