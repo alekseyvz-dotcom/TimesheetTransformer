@@ -203,18 +203,39 @@ def get_meals_next_day_deadline() -> Optional[datetime.time]:
     return None
 
 def get_object_id(cur, excel_id: str, address: str) -> Optional[int]:
-
     excel_id = (excel_id or "").strip()
     address = (address or "").strip()
 
+    if excel_id and address:
+        cur.execute(
+            """
+            SELECT id
+            FROM objects
+            WHERE excel_id = %s
+              AND address = %s
+            LIMIT 1
+            """,
+            (excel_id, address),
+        )
+        row = cur.fetchone()
+        if row:
+            return row[0]
+        return None
+
     if excel_id:
-        cur.execute("SELECT id FROM objects WHERE excel_id = %s", (excel_id,))
+        cur.execute(
+            "SELECT id FROM objects WHERE excel_id = %s LIMIT 1",
+            (excel_id,),
+        )
         row = cur.fetchone()
         if row:
             return row[0]
 
     if address:
-        cur.execute("SELECT id FROM objects WHERE address = %s", (address,))
+        cur.execute(
+            "SELECT id FROM objects WHERE address = %s LIMIT 1",
+            (address,),
+        )
         row = cur.fetchone()
         if row:
             return row[0]
@@ -222,23 +243,7 @@ def get_object_id(cur, excel_id: str, address: str) -> Optional[int]:
     return None
 
 def get_or_create_object_by_excel_id(cur, excel_id: str, address: str) -> int:
-
-    excel_id = (excel_id or "").strip()
-    address = (address or "").strip()
-
-    if not excel_id:
-        raise ValueError("excel_id is required to create object")
-
-    cur.execute("SELECT id FROM objects WHERE excel_id = %s", (excel_id,))
-    row = cur.fetchone()
-    if row:
-        return row[0]
-
-    cur.execute(
-        "INSERT INTO objects (excel_id, address) VALUES (%s, %s) RETURNING id",
-        (excel_id, address),
-    )
-    return cur.fetchone()[0]
+    raise RuntimeError("Создание объектов из модуля питания запрещено.")
 
 def get_or_create_meal_type(cur, name: str):
     name = (name or "").strip()
@@ -381,12 +386,10 @@ def save_order_to_db(data: dict) -> int:
 
                 object_id = get_object_id(cur, obj_excel_id, obj_address)
                 if object_id is None:
-                    if obj_excel_id:
-                        object_id = get_or_create_object_by_excel_id(cur, obj_excel_id, obj_address)
-                    else:
-                        raise ValueError(
-                            "Не удаётся сохранить заявку: не найден объект для указанного адреса и ID."
-                        )
+                    raise ValueError(
+                        "Объект не найден в реестре. "
+                        "Выберите объект из списка, а не вводите адрес вручную."
+                    )
 
                 created_at = datetime.strptime(data["created_at"], "%Y-%m-%dT%H:%M:%S")
                 order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
@@ -2072,7 +2075,7 @@ class MealOrderPage(tk.Frame):
             if self.cmb_object_id.get() not in ids:
                 self.cmb_object_id.set(ids[0])
         else:
-            self.cmb_object_id.config(state="normal", values=[])
+            self.cmb_object_id.config(state="readonly", values=[])
             self.cmb_object_id.set("")
 
         # Авто-заполнение фактического адреса, если пустой
@@ -2213,25 +2216,23 @@ class MealOrderPage(tk.Frame):
         core["created_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         return core
 
-    # ════════════════════════════════════════════════════════════
-    #  Валидация
-    # ════════════════════════════════════════════════════════════
-
     def _validate_form(self) -> bool:
-        req   = parse_date_any(self.ent_date.get())
+        req = parse_date_any(self.ent_date.get())
         today = date.today()
         tomorrow = today + timedelta(days=1)
-
+    
         if req is None:
-            messagebox.showwarning("Заявка",
-                                   "Укажите корректную дату заявки.")
+            messagebox.showwarning(
+                "Заявка",
+                "Укажите корректную дату заявки."
+            )
             self.ent_date.focus_set()
             return False
-
+    
         limit_next_day_only = get_meals_limit_next_day_only()
-        deadline_time       = get_meals_next_day_deadline()
+        deadline_time = get_meals_next_day_deadline()
         now = datetime.now()
-
+    
         if limit_next_day_only:
             if req != tomorrow:
                 messagebox.showwarning(
@@ -2256,34 +2257,59 @@ class MealOrderPage(tk.Frame):
                     f"({today.strftime('%d.%m.%Y')})."
                 )
                 return False
-
+    
         if not (self.cmb_dep.get() or "").strip():
             messagebox.showwarning("Заявка", "Выберите Подразделение.")
             return False
-
-        if not (self.cmb_address.get() or "").strip():
+    
+        addr = (self.cmb_address.get() or "").strip()
+        if not addr:
             messagebox.showwarning("Заявка", "Укажите Адрес объекта.")
             self.cmb_address.focus_set()
             return False
-
-        if not (self.cmb_object_id.get() or "").strip():
+    
+        oid = (self.cmb_object_id.get() or "").strip()
+        if not oid:
             messagebox.showwarning(
                 "Заявка",
                 "Не выбран ID объекта.\n"
                 "Выберите адрес из списка — ID подставится автоматически."
             )
             return False
-
+    
+        # Жёсткая проверка: адрес должен существовать в реестре
+        if addr not in self.addr_to_ids:
+            messagebox.showwarning(
+                "Заявка",
+                "Адрес объекта не найден в реестре.\n"
+                "Выберите адрес из выпадающего списка, а не вводите его вручную."
+            )
+            self.cmb_address.focus_set()
+            return False
+    
+        # Жёсткая проверка: ID должен принадлежать выбранному адресу
+        valid_ids = self.addr_to_ids.get(addr, [])
+        if oid not in valid_ids:
+            messagebox.showwarning(
+                "Заявка",
+                "ID объекта не соответствует выбранному адресу.\n"
+                "Повторно выберите адрес из списка."
+            )
+            self.cmb_address.focus_set()
+            return False
+    
         if not (self.ent_team.get() or "").strip():
             messagebox.showwarning("Заявка", "Укажите Наименование бригады.")
             self.ent_team.focus_set()
             return False
-
+    
         if not self.emp_rows:
-            messagebox.showwarning("Заявка",
-                                   "Добавьте хотя бы одного сотрудника.")
+            messagebox.showwarning(
+                "Заявка",
+                "Добавьте хотя бы одного сотрудника."
+            )
             return False
-
+    
         all_ok = all(r.validate() for r in self.emp_rows)
         if not all_ok:
             messagebox.showwarning(
@@ -2292,9 +2318,8 @@ class MealOrderPage(tk.Frame):
                 "(ФИО и Тип питания обязательны для каждого сотрудника)"
             )
             return False
-
+    
         return True
-
     # ════════════════════════════════════════════════════════════
     #  Сохранение, очистка, вспомогательные действия
     # (логика save_order НЕ изменяется — только UI)
@@ -2367,13 +2392,10 @@ class MealOrderPage(tk.Frame):
 
                         object_id = get_object_id(cur, obj_excel_id, obj_address)
                         if object_id is None:
-                            if obj_excel_id:
-                                object_id = get_or_create_object_by_excel_id(
-                                    cur, obj_excel_id, obj_address)
-                            else:
-                                raise ValueError(
-                                    "Не найден объект. Обратитесь к администратору."
-                                )
+                            raise ValueError(
+                                "Не найден объект в реестре.\n"
+                                "Выберите адрес из списка, а не вводите его вручную."
+                            )
 
                         order_date   = datetime.strptime(data["date"], "%Y-%m-%d").date()
                         team_name    = (data.get("team_name") or "").strip()
