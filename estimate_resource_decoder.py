@@ -1,7 +1,7 @@
 import csv
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -17,6 +17,8 @@ class EstimateResourceDecoderPage(tk.Frame):
     }
 
     DELTA_TOLERANCE = 0.05
+    DELTA_WARN = 1.0
+    DELTA_BAD = 10.0
 
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
@@ -39,6 +41,8 @@ class EstimateResourceDecoderPage(tk.Frame):
         self.last_report: str = "Отчет пока не сформирован."
 
         self._build_ui()
+
+    # ========================= UI =========================
 
     def _build_ui(self):
         header = tk.Frame(self, bg="#f7f7f7")
@@ -115,6 +119,7 @@ class EstimateResourceDecoderPage(tk.Frame):
 
         self.tree_resources = ttk.Treeview(wrap, columns=cols, show="headings")
         self.tree_resources.pack(side="left", fill="both", expand=True)
+        self.tree_resources.bind("<Double-1>", self._on_resource_double_click)
 
         headers = {
             "work_num": "Поз.",
@@ -148,7 +153,11 @@ class EstimateResourceDecoderPage(tk.Frame):
 
         for c in cols:
             self.tree_resources.heading(c, text=headers[c])
-            self.tree_resources.column(c, width=widths[c], anchor="w" if c not in ("norm_qty", "work_qty", "res_qty", "price", "base_cost") else "e")
+            self.tree_resources.column(
+                c,
+                width=widths[c],
+                anchor="w" if c not in ("norm_qty", "work_qty", "res_qty", "price", "base_cost") else "e"
+            )
 
         yscroll = ttk.Scrollbar(wrap, orient="vertical", command=self.tree_resources.yview)
         self.tree_resources.configure(yscrollcommand=yscroll.set)
@@ -178,7 +187,7 @@ class EstimateResourceDecoderPage(tk.Frame):
 
         hint = tk.Label(
             top,
-            text="Двойной клик по строке — показать ресурсы только по этой позиции",
+            text="Двойной клик по строке — карточка позиции и фильтр ресурсов",
             bg="#f7f7f7",
             fg="#666"
         )
@@ -238,11 +247,14 @@ class EstimateResourceDecoderPage(tk.Frame):
             self.tree_recon.column(c, width=widths[c], anchor="e" if c not in ("pos_num", "work_code", "rate_id", "status") else "w")
 
         self.tree_recon.tag_configure("ok", background="#edf7ed")
-        self.tree_recon.tag_configure("delta", background="#fff4e5")
+        self.tree_recon.tag_configure("warn", background="#fff8e1")
+        self.tree_recon.tag_configure("bad", background="#fdecea")
 
         yscroll = ttk.Scrollbar(wrap, orient="vertical", command=self.tree_recon.yview)
         self.tree_recon.configure(yscrollcommand=yscroll.set)
         yscroll.pack(side="right", fill="y")
+
+    # ========================= FILE =========================
 
     def _open_file(self):
         try:
@@ -291,11 +303,13 @@ class EstimateResourceDecoderPage(tk.Frame):
 
         info = [
             f"Локальная смета: {self.local_sheet_name or 'не найдено'}",
-            f"Sourse: {self.source_sheet_name or 'не найдено'}",
+            f"Source: {self.source_sheet_name or 'не найдено'}",
             f"EtalonRes: {self.etalon_sheet_name or 'не найдено'}",
             f"SmtRes: {self.smtres_sheet_name or 'не найдено'}",
         ]
         self.lbl_sheets.config(text="\n".join(info))
+
+    # ========================= DETECT / HELPERS =========================
 
     def _detect_local_sheet(self, names: List[str]) -> Optional[str]:
         for name in names:
@@ -356,6 +370,19 @@ class EstimateResourceDecoderPage(tk.Frame):
             return None
 
     @staticmethod
+    def _try_parse_int(v: Any) -> Optional[int]:
+        if v is None:
+            return None
+        if isinstance(v, int):
+            return v
+        if isinstance(v, float) and float(v).is_integer():
+            return int(v)
+        s = str(v).strip()
+        if re.fullmatch(r"\d+", s):
+            return int(s)
+        return None
+
+    @staticmethod
     def _is_main_pos(v: Any) -> bool:
         if isinstance(v, int):
             return True
@@ -363,6 +390,54 @@ class EstimateResourceDecoderPage(tk.Frame):
             return True
         s = str(v or "").strip()
         return bool(re.fullmatch(r"\d+", s))
+
+    @staticmethod
+    def _looks_like_rate_code(s: str) -> bool:
+        s = (s or "").strip()
+        return bool(re.fullmatch(r"\d+\.\d+(?:-\d+)+", s))
+
+    @staticmethod
+    def _sort_pos(v: Any):
+        s = str(v or "")
+        try:
+            return (0, float(s.replace(",", ".")))
+        except Exception:
+            return (1, s)
+
+    @staticmethod
+    def _fmt_num(v: Any) -> str:
+        if v is None:
+            return ""
+        try:
+            return f"{float(v):,.2f}".replace(",", " ").replace(".", ",")
+        except Exception:
+            return str(v)
+
+    def _extract_unit(self, vals: List[Any]) -> str:
+        for i in [14, 15, 13, 16]:
+            if i < len(vals):
+                s = self._s(vals[i])
+                if s and len(s) <= 20:
+                    return s
+        return ""
+
+    def _extract_norm_qty(self, vals: List[Any]) -> Optional[float]:
+        for i in [23, 24, 22, 34]:
+            if i < len(vals):
+                f = self._f(vals[i])
+                if f is not None:
+                    return f
+        return None
+
+    def _extract_price(self, vals: List[Any]) -> Optional[float]:
+        for i in [25, 26, 27]:
+            if i < len(vals):
+                f = self._f(vals[i])
+                if f is not None and f >= 0:
+                    return f
+        return None
+
+    # ========================= CORE =========================
 
     def _decode_all(self):
         if not self.workbook:
@@ -426,12 +501,15 @@ class EstimateResourceDecoderPage(tk.Frame):
                 unit = self._s(row[3] if len(row) > 3 else "")
                 qty = self._f(row[4] if len(row) > 4 else None)
 
+                # строка нумерации колонок
                 if code == "2" and name == "3" and self._s(row[3] if len(row) > 3 else "") == "4":
                     continue
 
                 if not name:
                     continue
                 if name.lower().startswith("итого"):
+                    continue
+                if name.lower().startswith("вес "):
                     continue
 
                 current_work = {
@@ -508,68 +586,73 @@ class EstimateResourceDecoderPage(tk.Frame):
         return result
 
     def _build_code_to_rate_map(self) -> Dict[str, List[int]]:
-
         code_map: Dict[str, List[int]] = {}
-    
+
         def add_pair(code: str, rate_id: int):
             if not code or rate_id is None:
                 return
             code_map.setdefault(code, [])
             if rate_id not in code_map[code]:
                 code_map[code].append(rate_id)
-    
-        # --- 1. Пытаемся разобрать Source ---
+
+        # 1) Source
         if self.source_sheet_name:
             ws = self.workbook[self.source_sheet_name]
-    
+
             for row in ws.iter_rows(values_only=True):
                 vals = list(row)
                 if not any(v is not None and str(v).strip() for v in vals):
                     continue
-    
-                # все похожие на шифр значения в строке
+
                 codes = [self._s(v) for v in vals if self._looks_like_rate_code(self._s(v))]
                 if not codes:
                     continue
-    
-                # кандидаты на rate_id только среди первых колонок
+
                 rate_candidates = []
-                for i in range(min(6, len(vals))):
+                for i in range(min(8, len(vals))):
                     rid = self._try_parse_int(vals[i])
                     if rid is not None and rid > 0:
                         rate_candidates.append(rid)
-    
+
                 if not rate_candidates:
                     continue
-    
-                # берем максимальный/наиболее "похожий на внутренний id"
-                # обычно internal id больше мелких служебных значений
-                rate_id = max(rate_candidates)
-    
+
+                # чуть более осторожный выбор
+                # сначала ищем кандидатов > 100, потом > 10, потом max
+                big = [x for x in rate_candidates if x >= 100]
+                mid = [x for x in rate_candidates if x >= 10]
+
+                if big:
+                    rate_id = max(big)
+                elif mid:
+                    rate_id = max(mid)
+                else:
+                    rate_id = max(rate_candidates)
+
                 for code in codes:
                     add_pair(code, rate_id)
-    
-        # --- 2. fallback через EtalonRes / SmtRes ---
+
+        # 2) fallback
         if not code_map:
             for sheet_name in [self.etalon_sheet_name, self.smtres_sheet_name]:
                 if not sheet_name:
                     continue
-    
+
                 ws = self.workbook[sheet_name]
-    
+
                 for row in ws.iter_rows(values_only=True):
                     vals = list(row)
                     if not any(v is not None and str(v).strip() for v in vals):
                         continue
-    
+
                     rate_id = self._try_parse_int(vals[0] if len(vals) > 0 else None)
                     if rate_id is None or rate_id <= 0:
                         continue
-    
+
                     codes = [self._s(v) for v in vals if self._looks_like_rate_code(self._s(v))]
                     for code in codes:
                         add_pair(code, rate_id)
-    
+
         return code_map
 
     def _decode_rows(self) -> List[Dict[str, Any]]:
@@ -582,6 +665,10 @@ class EstimateResourceDecoderPage(tk.Frame):
         report_lines.append(f"Source лист: {self.source_sheet_name}")
         report_lines.append(f"EtalonRes лист: {self.etalon_sheet_name}")
         report_lines.append(f"SmtRes лист: {self.smtres_sheet_name}")
+        report_lines.append("")
+        report_lines.append("КАРТА code -> rate_ids")
+        for code in sorted(self.code_to_rate_ids.keys()):
+            report_lines.append(f"  {code} -> {self.code_to_rate_ids[code]}")
         report_lines.append("")
 
         matched = 0
@@ -650,72 +737,62 @@ class EstimateResourceDecoderPage(tk.Frame):
         return rows
 
     def _choose_best_rate_id(self, work: Dict[str, Any], rate_ids: List[int]) -> int:
-        """
-        Выбор лучшего rate_id:
-        сравниваем локальные ЗП/ЭМ/МР с раскрытыми.
-        Чем меньше ошибка, тем лучше кандидат.
-        """
         if not rate_ids:
             raise RuntimeError("Пустой список rate_id")
-    
+
         if len(rate_ids) == 1:
             return rate_ids[0]
-    
+
         local_qty = work.get("qty") or 0.0
         local_zp = work.get("zp_base")
         local_em = work.get("em_base")
         local_mr = work.get("mr_base")
-    
+
         best_rate_id = rate_ids[0]
         best_score = None
-    
+
         for rid in rate_ids:
             resources = self.rate_resources.get(rid, [])
             if not resources:
                 continue
-    
+
             zp_sum = 0.0
             em_sum = 0.0
             mr_sum = 0.0
-    
+
             for res in resources:
                 price = res.get("price")
                 if price is None:
                     continue
-    
+
                 cost = (res.get("norm_qty") or 0.0) * local_qty * price
-    
+
                 if res["resource_type"] == "ЗП":
                     zp_sum += cost
                 elif res["resource_type"] == "ЭМ":
                     em_sum += cost
                 elif res["resource_type"] == "МР":
                     mr_sum += cost
-    
+
             score = 0.0
-    
-            # ЭМ обычно самый показательный для подбора машинных расценок
+
             if local_em is not None:
                 score += abs(local_em - em_sum) * 100.0
-    
             if local_zp is not None:
                 score += abs(local_zp - zp_sum) * 10.0
-    
             if local_mr is not None:
                 score += abs(local_mr - mr_sum) * 10.0
-    
-            # легкий бонус за наличие ресурсов
+
             score -= min(len(resources), 20) * 0.01
-    
+
             if best_score is None or score < best_score:
                 best_score = score
                 best_rate_id = rid
-    
+
         return best_rate_id
 
     def _build_reconciliation(self) -> List[Dict[str, Any]]:
         by_pos: Dict[str, Dict[str, Any]] = {}
-
         works_by_pos = {w["pos_num"]: w for w in self.local_works}
 
         for row in self.decoded_rows:
@@ -759,11 +836,17 @@ class EstimateResourceDecoderPage(tk.Frame):
             em_delta = em_local - rec["em_res"]
             mr_delta = mr_local - rec["mr_res"]
 
-            ok = (
-                abs(zp_delta) <= self.DELTA_TOLERANCE and
-                abs(em_delta) <= self.DELTA_TOLERANCE and
-                abs(mr_delta) <= self.DELTA_TOLERANCE
-            )
+            max_abs = max(abs(zp_delta), abs(em_delta), abs(mr_delta))
+
+            if max_abs <= self.DELTA_TOLERANCE:
+                status = "OK"
+                severity = "ok"
+            elif max_abs <= self.DELTA_WARN:
+                status = "Δ"
+                severity = "warn"
+            else:
+                status = "Δ"
+                severity = "bad"
 
             result.append({
                 "pos_num": pos,
@@ -780,7 +863,8 @@ class EstimateResourceDecoderPage(tk.Frame):
                 "mr_res": rec["mr_res"],
                 "mr_delta": mr_delta,
                 "zpm_local": zpm_local,
-                "status": "OK" if ok else "Δ",
+                "status": status,
+                "severity": severity,
             })
 
         result.sort(key=lambda x: self._sort_pos(x["pos_num"]))
@@ -799,16 +883,18 @@ class EstimateResourceDecoderPage(tk.Frame):
         lines.append("")
 
         bad_rows = [r for r in rows if r["status"] != "OK"]
-        for r in bad_rows[:100]:
+        for r in bad_rows[:150]:
             lines.append(
                 f"Поз. {r['pos_num']} | {r['work_code']} | rate_id={r['rate_id']} | "
                 f"ΔЗП={r['zp_delta']:.2f} | ΔЭМ={r['em_delta']:.2f} | ΔМР={r['mr_delta']:.2f}"
             )
 
-        if len(bad_rows) > 100:
-            lines.append(f"... и еще {len(bad_rows) - 100} строк с отклонениями")
+        if len(bad_rows) > 150:
+            lines.append(f"... и еще {len(bad_rows) - 150} строк с отклонениями")
 
         self.last_report = "\n".join(lines)
+
+    # ========================= TREES =========================
 
     def _fill_resource_tree(self):
         for item in self.tree_resources.get_children():
@@ -861,7 +947,7 @@ class EstimateResourceDecoderPage(tk.Frame):
             if status_filter != "Все" and row["status"] != status_filter:
                 continue
 
-            tag = "ok" if row["status"] == "OK" else "delta"
+            tag = row.get("severity", "bad")
 
             self.tree_recon.insert(
                 "",
@@ -885,6 +971,8 @@ class EstimateResourceDecoderPage(tk.Frame):
                 tags=(tag,)
             )
 
+    # ========================= DETAILS =========================
+
     def _on_recon_double_click(self, event):
         item = self.tree_recon.focus()
         if not item:
@@ -896,6 +984,125 @@ class EstimateResourceDecoderPage(tk.Frame):
         pos_num = str(vals[0])
         self.var_pos_filter.set(pos_num)
         self._fill_resource_tree()
+        self._open_position_card(pos_num)
+
+    def _on_resource_double_click(self, event):
+        item = self.tree_resources.focus()
+        if not item:
+            return
+        vals = self.tree_resources.item(item, "values")
+        if not vals:
+            return
+        pos_num = str(vals[0])
+        self._open_position_card(pos_num)
+
+    def _open_position_card(self, pos_num: str):
+        work = next((w for w in self.local_works if str(w["pos_num"]) == str(pos_num)), None)
+        recon = next((r for r in self.reconciliation_rows if str(r["pos_num"]) == str(pos_num)), None)
+        resources = [r for r in self.decoded_rows if str(r["work_num"]) == str(pos_num)]
+
+        if not work:
+            return
+
+        win = tk.Toplevel(self)
+        win.title(f"Карточка позиции {pos_num}")
+        win.geometry("1300x800")
+
+        top = tk.Frame(win, bg="#f7f7f7")
+        top.pack(fill="x", padx=10, pady=10)
+
+        title = f"Позиция {work['pos_num']} | {work.get('work_code', '')}"
+        tk.Label(top, text=title, font=("Segoe UI", 14, "bold"), bg="#f7f7f7").pack(anchor="w")
+        tk.Label(top, text=work.get("name", ""), font=("Segoe UI", 10), bg="#f7f7f7", wraplength=1200, justify="left").pack(anchor="w", pady=(4, 0))
+        tk.Label(top, text=f"Ед.: {work.get('unit', '')}    Кол-во: {self._fmt_num(work.get('qty'))}    Раздел: {work.get('section', '')}", bg="#f7f7f7", fg="#555").pack(anchor="w", pady=(4, 0))
+
+        card = tk.Frame(win, bg="#ffffff", bd=1, relief="solid")
+        card.pack(fill="x", padx=10, pady=(0, 10))
+
+        grid = tk.Frame(card, bg="#ffffff")
+        grid.pack(fill="x", padx=10, pady=10)
+
+        tk.Label(grid, text="Показатель", bg="#ffffff", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w", padx=4, pady=4)
+        tk.Label(grid, text="Локалка", bg="#ffffff", font=("Segoe UI", 10, "bold")).grid(row=0, column=1, sticky="e", padx=4, pady=4)
+        tk.Label(grid, text="Раскрыто", bg="#ffffff", font=("Segoe UI", 10, "bold")).grid(row=0, column=2, sticky="e", padx=4, pady=4)
+        tk.Label(grid, text="Δ", bg="#ffffff", font=("Segoe UI", 10, "bold")).grid(row=0, column=3, sticky="e", padx=4, pady=4)
+
+        rows = []
+        if recon:
+            rows = [
+                ("ЗП", recon["zp_local"], recon["zp_res"], recon["zp_delta"]),
+                ("ЭМ", recon["em_local"], recon["em_res"], recon["em_delta"]),
+                ("МР", recon["mr_local"], recon["mr_res"], recon["mr_delta"]),
+            ]
+        else:
+            rows = [
+                ("ЗП", work.get("zp_base") or 0.0, 0.0, work.get("zp_base") or 0.0),
+                ("ЭМ", work.get("em_base") or 0.0, 0.0, work.get("em_base") or 0.0),
+                ("МР", work.get("mr_base") or 0.0, 0.0, work.get("mr_base") or 0.0),
+            ]
+
+        for i, (label, local_v, res_v, delta_v) in enumerate(rows, start=1):
+            fg = "#2e7d32" if abs(delta_v) <= self.DELTA_TOLERANCE else ("#ef6c00" if abs(delta_v) <= self.DELTA_WARN else "#c62828")
+            tk.Label(grid, text=label, bg="#ffffff").grid(row=i, column=0, sticky="w", padx=4, pady=4)
+            tk.Label(grid, text=self._fmt_num(local_v), bg="#ffffff").grid(row=i, column=1, sticky="e", padx=4, pady=4)
+            tk.Label(grid, text=self._fmt_num(res_v), bg="#ffffff").grid(row=i, column=2, sticky="e", padx=4, pady=4)
+            tk.Label(grid, text=self._fmt_num(delta_v), bg="#ffffff", fg=fg, font=("Segoe UI", 10, "bold")).grid(row=i, column=3, sticky="e", padx=4, pady=4)
+
+        tk.Label(grid, text="ЗПМ (лок., справочно)", bg="#ffffff").grid(row=4, column=0, sticky="w", padx=4, pady=4)
+        tk.Label(grid, text=self._fmt_num(work.get("zpm_base") or 0.0), bg="#ffffff").grid(row=4, column=1, sticky="e", padx=4, pady=4)
+
+        wrap = tk.Frame(win)
+        wrap.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        cols = ("type", "code", "name", "unit", "norm", "qty", "price", "cost")
+        tree = ttk.Treeview(wrap, columns=cols, show="headings")
+        tree.pack(side="left", fill="both", expand=True)
+
+        headers = {
+            "type": "Тип",
+            "code": "Код",
+            "name": "Наименование",
+            "unit": "Ед.",
+            "norm": "Норма",
+            "qty": "Расход",
+            "price": "Цена",
+            "cost": "Стоимость",
+        }
+        widths = {
+            "type": 60, "code": 120, "name": 540, "unit": 70,
+            "norm": 90, "qty": 90, "price": 90, "cost": 110,
+        }
+
+        for c in cols:
+            tree.heading(c, text=headers[c])
+            tree.column(c, width=widths[c], anchor="w" if c in ("type", "code", "name", "unit") else "e")
+
+        tree.tag_configure("ЗП", background="#eef7ff")
+        tree.tag_configure("ЭМ", background="#fff8e1")
+        tree.tag_configure("МР", background="#edf7ed")
+
+        for r in resources:
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    r["resource_type"],
+                    r["resource_code"],
+                    r["resource_name"],
+                    r["unit"],
+                    self._fmt_num(r["norm_qty"]),
+                    self._fmt_num(r["resource_qty"]),
+                    self._fmt_num(r["price"]),
+                    self._fmt_num(r["base_cost"]),
+                ),
+                tags=(r["resource_type"],)
+            )
+
+        yscroll = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=yscroll.set)
+        yscroll.pack(side="right", fill="y")
+
+    # ========================= REPORT / EXPORT =========================
 
     def _show_report(self):
         win = tk.Toplevel(self)
@@ -1023,65 +1230,6 @@ class EstimateResourceDecoderPage(tk.Frame):
 
         except Exception as e:
             messagebox.showerror("Экспорт", f"Ошибка сохранения:\n{e}")
-
-    @staticmethod
-    def _fmt_num(v: Any) -> str:
-        if v is None:
-            return ""
-        try:
-            return f"{float(v):,.2f}".replace(",", " ").replace(".", ",")
-        except Exception:
-            return str(v)
-
-    @staticmethod
-    def _try_parse_int(v: Any) -> Optional[int]:
-        if v is None:
-            return None
-        if isinstance(v, int):
-            return v
-        if isinstance(v, float) and float(v).is_integer():
-            return int(v)
-        s = str(v).strip()
-        if re.fullmatch(r"\d+", s):
-            return int(s)
-        return None
-
-    @staticmethod
-    def _looks_like_rate_code(s: str) -> bool:
-        s = (s or "").strip()
-        return bool(re.fullmatch(r"\d+\.\d+(?:-\d+)+", s))
-
-    def _extract_unit(self, vals: List[Any]) -> str:
-        for i in [14, 15, 13, 16]:
-            if i < len(vals):
-                s = self._s(vals[i])
-                if s and len(s) <= 20:
-                    return s
-        return ""
-
-    def _extract_norm_qty(self, vals: List[Any]) -> Optional[float]:
-        for i in [23, 24, 22, 34]:
-            if i < len(vals):
-                f = self._f(vals[i])
-                if f is not None:
-                    return f
-        return None
-
-    def _extract_price(self, vals: List[Any]) -> Optional[float]:
-        for i in [25, 26, 27]:
-            if i < len(vals):
-                f = self._f(vals[i])
-                if f is not None and f >= 0:
-                    return f
-        return None
-
-    @staticmethod
-    def _sort_pos(v: Any):
-        s = str(v or "")
-        try:
-            return (0, float(s.replace(",", ".")))
-        except Exception:
-            return (1, s)
 
 
 def create_page(parent) -> tk.Frame:
