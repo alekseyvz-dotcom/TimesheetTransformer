@@ -1,7 +1,7 @@
 import csv
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -252,11 +252,6 @@ class EstimateResourceDecoderPage(tk.Frame):
         s = str(v or "").strip()
         return bool(re.fullmatch(r"\d+", s))
 
-    @staticmethod
-    def _is_subresource_pos(v: Any) -> bool:
-        s = str(v or "").strip()
-        return bool(re.fullmatch(r"\d+,\d+", s))
-
     def _decode_all(self):
         if not self.workbook:
             return
@@ -287,11 +282,9 @@ class EstimateResourceDecoderPage(tk.Frame):
         works: List[Dict[str, Any]] = []
         current_section = ""
         current_work: Optional[Dict[str, Any]] = None
-
-        rows = list(ws.iter_rows(values_only=True))
         header_found = False
 
-        for row in rows:
+        for row in ws.iter_rows(values_only=True):
             row = list(row)
 
             if not any(v is not None and str(v).strip() for v in row):
@@ -300,7 +293,7 @@ class EstimateResourceDecoderPage(tk.Frame):
             first = self._s(row[0]) if len(row) > 0 else ""
             third = self._s(row[2]) if len(row) > 2 else ""
 
-            if third == "Наименование работ и затрат" or first == "№ п/п":
+            if first == "№ п/п" or third == "Наименование работ и затрат":
                 header_found = True
                 continue
 
@@ -318,9 +311,7 @@ class EstimateResourceDecoderPage(tk.Frame):
                 unit = self._s(row[3] if len(row) > 3 else "")
                 qty = self._f(row[4] if len(row) > 4 else None)
 
-                if not name:
-                    continue
-                if name.lower().startswith("итого"):
+                if not name or name.lower().startswith("итого"):
                     continue
 
                 current_work = {
@@ -328,7 +319,7 @@ class EstimateResourceDecoderPage(tk.Frame):
                     "work_code": code,
                     "name": name,
                     "unit": unit,
-                    "qty": qty,
+                    "qty": qty or 0.0,
                     "section": current_section,
                     "zp_base": None,
                     "em_base": None,
@@ -376,14 +367,14 @@ class EstimateResourceDecoderPage(tk.Frame):
             norm_qty = self._extract_norm_qty(vals)
             price = self._extract_price(vals)
 
-            if not resource_code and not resource_name:
-                continue
             if resource_type not in (1, 2, 3):
+                continue
+            if not resource_code and not resource_name:
                 continue
             if norm_qty is None:
                 continue
 
-            item = {
+            result.setdefault(rate_id, []).append({
                 "rate_id": rate_id,
                 "resource_type_id": resource_type,
                 "resource_type": self.RESOURCE_TYPE_MAP.get(resource_type, str(resource_type)),
@@ -392,19 +383,11 @@ class EstimateResourceDecoderPage(tk.Frame):
                 "unit": unit,
                 "norm_qty": norm_qty,
                 "price": price,
-            }
-            result.setdefault(rate_id, []).append(item)
+            })
 
         return result
 
     def _build_code_to_rate_map(self) -> Dict[str, List[int]]:
-        """
-        Пытаемся вытащить соответствие:
-        шифр расценки -> внутренние rate_id
-
-        Сначала из source-листа.
-        Если не получается, пробуем по etalon/smtres через встречающиеся коды.
-        """
         code_map: Dict[str, List[int]] = {}
 
         if self.source_sheet_name:
@@ -417,7 +400,7 @@ class EstimateResourceDecoderPage(tk.Frame):
                 rate_id = None
                 code = None
 
-                for i, v in enumerate(vals):
+                for v in vals:
                     s = self._s(v)
                     if rate_id is None:
                         rate_id = self._try_parse_int(v)
@@ -432,7 +415,6 @@ class EstimateResourceDecoderPage(tk.Frame):
         if code_map:
             return code_map
 
-        # fallback: пытаемся вытащить прямо из etalon/smtres
         for sheet_name in [self.etalon_sheet_name, self.smtres_sheet_name]:
             if not sheet_name:
                 continue
@@ -460,11 +442,6 @@ class EstimateResourceDecoderPage(tk.Frame):
 
         report_lines.append("ОТЧЕТ ПО РАСКРЫТИЮ РЕСУРСОВ")
         report_lines.append("=" * 100)
-        report_lines.append(f"Локальный лист: {self.local_sheet_name}")
-        report_lines.append(f"Source лист: {self.source_sheet_name}")
-        report_lines.append(f"EtalonRes лист: {self.etalon_sheet_name}")
-        report_lines.append(f"SmtRes лист: {self.smtres_sheet_name}")
-        report_lines.append("")
 
         matched = 0
         unmatched = 0
@@ -475,7 +452,6 @@ class EstimateResourceDecoderPage(tk.Frame):
 
             if not code:
                 unmatched += 1
-                report_lines.append(f"[NO CODE] Поз. {work['pos_num']} | {work['name']}")
                 continue
 
             rate_ids = self.code_to_rate_ids.get(code, [])
@@ -484,9 +460,8 @@ class EstimateResourceDecoderPage(tk.Frame):
                 report_lines.append(f"[NO RATE_ID] Поз. {work['pos_num']} | {code} | {work['name']}")
                 continue
 
-            rate_id = self._choose_best_rate_id(rate_ids)
+            rate_id = rate_ids[0]
             resources = self.rate_resources.get(rate_id, [])
-
             if not resources:
                 unmatched += 1
                 report_lines.append(f"[NO RESOURCES] Поз. {work['pos_num']} | {code} | rate_id={rate_id}")
@@ -508,7 +483,6 @@ class EstimateResourceDecoderPage(tk.Frame):
                     "work_qty": qty,
                     "rate_id": rate_id,
                     "resource_type": res["resource_type"],
-                    "resource_type_id": res["resource_type_id"],
                     "resource_code": res["resource_code"],
                     "resource_name": res["resource_name"],
                     "unit": res["unit"],
@@ -516,11 +490,6 @@ class EstimateResourceDecoderPage(tk.Frame):
                     "resource_qty": res_qty,
                     "price": price,
                     "base_cost": base_cost,
-                    "section": work.get("section", ""),
-                    "zp_base": work.get("zp_base"),
-                    "em_base": work.get("em_base"),
-                    "mr_base": work.get("mr_base"),
-                    "zpm_base": work.get("zpm_base"),
                 })
 
         report_lines.append("")
@@ -530,15 +499,6 @@ class EstimateResourceDecoderPage(tk.Frame):
 
         self.last_report = "\n".join(report_lines)
         return rows
-
-    def _choose_best_rate_id(self, rate_ids: List[int]) -> int:
-        """
-        Пока простая стратегия: берем первый.
-        Если нужно — можно заменить на выбор rate_id с самым полным составом ресурсов.
-        """
-        if not rate_ids:
-            raise RuntimeError("Пустой список rate_id")
-        return rate_ids[0]
 
     def _fill_tree(self):
         for item in self.tree.get_children():
@@ -617,8 +577,7 @@ class EstimateResourceDecoderPage(tk.Frame):
         headers = [
             "Поз.", "Шифр расценки", "Наименование работы", "Кол-во позиции",
             "Rate ID", "Тип ресурса", "Код ресурса", "Наименование ресурса",
-            "Ед.", "Норма", "Расход по позиции", "Цена", "Базовая стоимость",
-            "Раздел", "ЗП базы", "ЭМ базы", "МР базы", "ЗПМ базы"
+            "Ед.", "Норма", "Расход по позиции", "Цена", "Базовая стоимость"
         ]
 
         try:
@@ -628,24 +587,9 @@ class EstimateResourceDecoderPage(tk.Frame):
                     w.writerow(headers)
                     for r in self.decoded_rows:
                         w.writerow([
-                            r["work_num"],
-                            r["work_code"],
-                            r["work_name"],
-                            r["work_qty"],
-                            r["rate_id"],
-                            r["resource_type"],
-                            r["resource_code"],
-                            r["resource_name"],
-                            r["unit"],
-                            r["norm_qty"],
-                            r["resource_qty"],
-                            r["price"],
-                            r["base_cost"],
-                            r["section"],
-                            r["zp_base"],
-                            r["em_base"],
-                            r["mr_base"],
-                            r["zpm_base"],
+                            r["work_num"], r["work_code"], r["work_name"], r["work_qty"],
+                            r["rate_id"], r["resource_type"], r["resource_code"], r["resource_name"],
+                            r["unit"], r["norm_qty"], r["resource_qty"], r["price"], r["base_cost"]
                         ])
             else:
                 wb = Workbook()
@@ -655,33 +599,10 @@ class EstimateResourceDecoderPage(tk.Frame):
 
                 for r in self.decoded_rows:
                     ws.append([
-                        r["work_num"],
-                        r["work_code"],
-                        r["work_name"],
-                        r["work_qty"],
-                        r["rate_id"],
-                        r["resource_type"],
-                        r["resource_code"],
-                        r["resource_name"],
-                        r["unit"],
-                        r["norm_qty"],
-                        r["resource_qty"],
-                        r["price"],
-                        r["base_cost"],
-                        r["section"],
-                        r["zp_base"],
-                        r["em_base"],
-                        r["mr_base"],
-                        r["zpm_base"],
+                        r["work_num"], r["work_code"], r["work_name"], r["work_qty"],
+                        r["rate_id"], r["resource_type"], r["resource_code"], r["resource_name"],
+                        r["unit"], r["norm_qty"], r["resource_qty"], r["price"], r["base_cost"]
                     ])
-
-                widths = {
-                    "A": 8, "B": 16, "C": 60, "D": 14, "E": 10, "F": 12,
-                    "G": 16, "H": 60, "I": 10, "J": 12, "K": 16, "L": 12,
-                    "M": 16, "N": 30, "O": 12, "P": 12, "Q": 12, "R": 12
-                }
-                for col, width in widths.items():
-                    ws.column_dimensions[col].width = width
 
                 wb.save(out)
 
@@ -708,10 +629,7 @@ class EstimateResourceDecoderPage(tk.Frame):
             return int(v)
         s = str(v).strip()
         if re.fullmatch(r"\d+", s):
-            try:
-                return int(s)
-            except Exception:
-                return None
+            return int(s)
         return None
 
     @staticmethod
@@ -728,22 +646,20 @@ class EstimateResourceDecoderPage(tk.Frame):
         return ""
 
     def _extract_norm_qty(self, vals: List[Any]) -> Optional[float]:
-        candidates = []
         for i in [23, 24, 22, 34]:
             if i < len(vals):
                 f = self._f(vals[i])
                 if f is not None:
-                    candidates.append(f)
-        return candidates[0] if candidates else None
+                    return f
+        return None
 
     def _extract_price(self, vals: List[Any]) -> Optional[float]:
-        candidates = []
         for i in [25, 26, 27]:
             if i < len(vals):
                 f = self._f(vals[i])
                 if f is not None and f >= 0:
-                    candidates.append(f)
-        return candidates[0] if candidates else None
+                    return f
+        return None
 
 
 def create_page(parent) -> tk.Frame:
