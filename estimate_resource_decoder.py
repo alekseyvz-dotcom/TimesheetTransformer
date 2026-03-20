@@ -311,6 +311,15 @@ class EstimateResourceDecoderPage(tk.Frame):
 
     # ========================= DETECT / HELPERS =========================
 
+    def _normalize_rate_code(self, raw: Any) -> str:
+        s = self._s(raw)
+        if not s:
+            return ""
+        s = s.replace("\r", "\n")
+        first = s.split("\n")[0].strip()
+        m = re.search(r"\d+\.\d+(?:-\d+)+", first)
+        return m.group(0) if m else first
+
     def _detect_local_sheet(self, names: List[str]) -> Optional[str]:
         for name in names:
             ws = self.workbook[name]
@@ -496,7 +505,7 @@ class EstimateResourceDecoderPage(tk.Frame):
 
             if self._is_main_pos(row[0] if len(row) > 0 else None):
                 pos_num = self._s(row[0])
-                code = self._s(row[1] if len(row) > 1 else "")
+                code = self._normalize_rate_code(row[1] if len(row) > 1 else "")
                 name = self._s(row[2] if len(row) > 2 else "")
                 unit = self._s(row[3] if len(row) > 3 else "")
                 qty = self._f(row[4] if len(row) > 4 else None)
@@ -604,7 +613,11 @@ class EstimateResourceDecoderPage(tk.Frame):
                 if not any(v is not None and str(v).strip() for v in vals):
                     continue
 
-                codes = [self._s(v) for v in vals if self._looks_like_rate_code(self._s(v))]
+                codes = []
+                for v in vals:
+                    code = self._normalize_rate_code(v)
+                    if self._looks_like_rate_code(code):
+                        codes.append(code)
                 if not codes:
                     continue
 
@@ -649,7 +662,11 @@ class EstimateResourceDecoderPage(tk.Frame):
                     if rate_id is None or rate_id <= 0:
                         continue
 
-                    codes = [self._s(v) for v in vals if self._looks_like_rate_code(self._s(v))]
+                    codes = []
+                    for v in vals:
+                        code = self._normalize_rate_code(v)
+                        if self._looks_like_rate_code(code):
+                            codes.append(code)
                     for code in codes:
                         add_pair(code, rate_id)
 
