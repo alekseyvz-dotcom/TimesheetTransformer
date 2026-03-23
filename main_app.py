@@ -249,7 +249,7 @@ def setup_ttk_styles(root):
     style.configure(
         "Main.TNotebook.Tab",
         font=("Segoe UI", 9),
-        padding=(12, 6),
+        padding=(10, 4),
         background=UI["tab_bg"],
         foreground=UI["text"],
         borderwidth=1,
@@ -518,10 +518,10 @@ class NavButton(tk.Frame):
             text=text,
             bg=bg,
             fg=fg,
-            font=FONT_BODY,
+            font=("Segoe UI", 8),
             anchor="w",
-            padx=10 + level * 10,
-            pady=6,
+            padx=8 + level * 8,
+            pady=3,
         )
         self.lbl.pack(fill="x")
 
@@ -1009,7 +1009,7 @@ class MainApp(tk.Tk):
     #  Каркас
     # ------------------------------------------------------------------ #
     def _build_shell(self):
-        self.topbar = tk.Frame(self, bg=UI["panel"], height=38, highlightbackground=UI["line"], highlightthickness=1)
+        self.topbar = tk.Frame(self, bg=UI["panel"], height=34, highlightbackground=UI["line"], highlightthickness=1)
         self.topbar.pack(fill="x")
         self.topbar.pack_propagate(False)
 
@@ -1078,7 +1078,7 @@ class MainApp(tk.Tk):
         body = tk.Frame(self, bg=UI["bg"])
         body.pack(fill="both", expand=True)
 
-        self.sidebar = tk.Frame(body, bg=UI["sidebar"], width=260, highlightbackground=UI["line"], highlightthickness=1)
+        self.sidebar = tk.Frame(body, bg=UI["sidebar"], width=220, highlightbackground=UI["line"], highlightthickness=1)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
 
@@ -1172,13 +1172,13 @@ class MainApp(tk.Tk):
         tk.Label(
             parent,
             text=text,
-            font=FONT_H2,
-            fg=UI["text"],
+            font=("Segoe UI", 8, "bold"),
+            fg=UI["muted"],
             bg=UI["panel2"],
             anchor="w",
-            padx=10,
-            pady=7,
-        ).pack(fill="x", pady=(0, 4))
+            padx=8,
+            pady=4,
+        ).pack(fill="x", pady=(0, 2))
 
     def _rebuild_sidebar(self):
         from menu_spec import TOP_LEVEL
@@ -1209,7 +1209,7 @@ class MainApp(tk.Tk):
                 enabled=(key == "home" or self.is_authenticated),
                 command=lambda kk=key: self.show_home() if kk == "home" else self._open_known_page(kk),
             )
-            btn.pack(fill="x", pady=2, padx=6)
+            btn.pack(fill="x", pady=1, padx=4)
 
         if self.is_authenticated:
             visible_sections = self._visible_menu_sections()
@@ -1226,7 +1226,7 @@ class MainApp(tk.Tk):
                         level=1,
                         command=lambda kk=entry.key: self._open_known_page(kk),
                     )
-                    btn.pack(fill="x", pady=2, padx=6)
+                    btn.pack(fill="x", pady=1, padx=4)
 
             self._section_label(self.sidebar_inner, "Служебные")
 
@@ -1245,14 +1245,24 @@ class MainApp(tk.Tk):
                 btn_settings.pack(fill="x", pady=2, padx=6)
 
             tools = tk.Frame(self.sidebar_inner, bg=UI["sidebar"])
-            tools.pack(fill="x", padx=6, pady=(8, 4))
-
+            tools.pack(fill="x", padx=6, pady=(6, 4))
+            
+            row = tk.Frame(tools, bg=UI["sidebar"])
+            row.pack(fill="x")
+            
             ttk.Button(
-                tools,
-                text="Добавить текущую в избранное",
+                row,
+                text="В избранное",
                 style="App.TButton",
                 command=self.add_current_to_favorites,
-            ).pack(fill="x", pady=2)
+            ).pack(side="left", fill="x", expand=True, padx=(0, 2))
+            
+            ttk.Button(
+                row,
+                text="Убрать",
+                style="App.TButton",
+                command=self.remove_current_from_favorites,
+            ).pack(side="left", fill="x", expand=True, padx=(2, 0))
 
             ttk.Button(
                 tools,
@@ -1318,6 +1328,25 @@ class MainApp(tk.Tk):
             logging.exception("Не удалось загрузить права пользователя")
             messagebox.showerror("Права", f"Не удалось загрузить права пользователя:\n{e}")
             return
+    
+        # закрываем вкладку логина, если она существует
+        login_frame = self._tab_frames.get("login")
+        if login_frame:
+            try:
+                idx = self.notebook.index(login_frame)
+                self.notebook.forget(idx)
+            except Exception:
+                pass
+            self._tab_frames.pop("login", None)
+            self._tab_builders.pop("login", None)
+            self._tab_titles.pop("login", None)
+            self._pages.pop("login", None)
+    
+        self._history_back = [k for k in self._history_back if k != "login"]
+        self._history_forward = [k for k in self._history_forward if k != "login"]
+        if self._current_key == "login":
+            self._current_key = None
+    
         self._set_user(user)
         self.show_home()
 
