@@ -128,6 +128,130 @@ class _EmployeeService:
         finally:
             _release(conn)
 
+class _TaskFactService:
+    """Работа с фактом выполнения по задаче."""
+
+    @staticmethod
+    def load_task_facts(task_id: int) -> List[Dict[str, Any]]:
+        if not task_id:
+            return []
+
+        conn = None
+        try:
+            conn = _conn()
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT f.id,
+                           f.task_id,
+                           f.fact_date,
+                           f.period_type,
+                           f.fact_qty,
+                           COALESCE(f.comment, '') AS comment,
+                           f.created_at,
+                           COALESCE(u.full_name, '') AS creator_name
+                    FROM public.gpr_task_facts f
+                    LEFT JOIN public.app_users u ON u.id = f.created_by
+                    WHERE f.task_id = %s
+                    ORDER BY f.fact_date, f.period_type, f.id
+                    """,
+                    (task_id,),
+                )
+                rows = []
+                for r in cur.fetchall():
+                    d = dict(r)
+                    d["fact_date"] = _to_date(d.get("fact_date"))
+                    rows.append(d)
+                return rows
+        except Exception:
+            logger.exception("load_task_facts error")
+            raise
+        finally:
+            _release(conn)
+
+    @staticmethod
+    def save_task_facts(
+        task_id: int,
+        facts: List[Dict[str, Any]],
+        user_id: Optional[int] = None,
+    ) -> None:
+        """Сохраняет весь список фактов задачи:
+        - новые/изменённые: upsert по (task_id, fact_date, period_type)
+        - удалённые из списка: удаляются из БД
+        """
+        if not task_id:
+            return
+
+        conn = None
+        try:
+            conn = _conn()
+            with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM public.gpr_task_facts
+                    WHERE task_id = %s
+                    """,
+                    (task_id,),
+                )
+                existing_ids = {int(r["id"]) for r in cur.fetchall()}
+                kept_ids = set()
+
+                for f in facts:
+                    fact_date = _to_date(f.get("fact_date"))
+                    if not fact_date:
+                        raise ValueError("Не указана дата факта")
+
+                    period_type = (f.get("period_type") or "day").strip()
+                    if period_type not in ("day", "week"):
+                        period_type = "day"
+
+                    fact_qty = _safe_float(f.get("fact_qty"))
+                    if fact_qty is None or fact_qty <= 0:
+                        raise ValueError("Объём факта должен быть больше 0")
+
+                    comment = (f.get("comment") or "").strip() or None
+
+                    cur.execute(
+                        """
+                        INSERT INTO public.gpr_task_facts
+                            (task_id, fact_date, period_type, fact_qty, comment, created_by)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (task_id, fact_date, period_type)
+                        DO UPDATE SET
+                            fact_qty = EXCLUDED.fact_qty,
+                            comment = EXCLUDED.comment
+                        RETURNING id
+                        """,
+                        (
+                            task_id,
+                            fact_date,
+                            period_type,
+                            fact_qty,
+                            comment,
+                            user_id,
+                        ),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        kept_ids.add(int(row["id"]))
+
+                ids_to_delete = list(existing_ids - kept_ids)
+                if ids_to_delete:
+                    cur.execute(
+                        """
+                        DELETE FROM public.gpr_task_facts
+                        WHERE task_id = %s
+                          AND id = ANY(%s)
+                        """,
+                        (task_id, ids_to_delete),
+                    )
+
+        except Exception:
+            logger.exception("save_task_facts error")
+            raise
+        finally:
+            _release(conn)
 
 # ═══════════════════════════════════════════════════════════════
 #  Роли на задаче
@@ -139,6 +263,14 @@ TASK_ROLES = {
 }
 TASK_ROLE_LIST = list(TASK_ROLES.keys())
 TASK_ROLE_LABELS = list(TASK_ROLES.values())
+
+FACT_PERIODS = {
+    "day": "За день",
+    "week": "За неделю",
+}
+FACT_PERIOD_LIST = list(FACT_PERIODS.keys())
+FACT_PERIOD_LABELS = [FACT_PERIODS[x] for x in FACT_PERIOD_LIST]
+FACT_PERIOD_FROM_LABEL = {v: k for k, v in FACT_PERIODS.items()}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -167,6 +299,12 @@ class TaskEditDialogPro(tk.Toplevel):
         self._assignments: List[Dict[str, Any]] = []
         self._emp_search_results: List[Dict[str, Any]] = []
 
+        # Факт выполнения
+        self._facts: List[Dict[str, Any]] = []
+        self._fact_edit_idx: Optional[int] = None
+        self._facts_changed: bool = False
+        self._has_fact_tab: bool = False
+
         # Флаг: диалог уже закрыт (защита от двойного destroy)
         self._destroyed = False
 
@@ -183,6 +321,7 @@ class TaskEditDialogPro(tk.Toplevel):
         self._build_ui()
         self._fill_init()
         self._load_assignments()
+        self._load_facts()
 
         # grab_set ПОСЛЕ построения UI — иначе может упасть на некоторых ОС
         self.grab_set()
@@ -217,6 +356,11 @@ class TaskEditDialogPro(tk.Toplevel):
         tab_assign = tk.Frame(self.nb, bg=C["panel"])
         self.nb.add(tab_assign, text="  👷 Назначения работников  ")
         self._build_assign_tab(tab_assign)
+
+        # Вкладка 3: Факт выполнения
+        tab_fact = tk.Frame(self.nb, bg=C["panel"])
+        self.nb.add(tab_fact, text="  📈 Факт выполнения  ")
+        self._build_fact_tab(tab_fact)
 
         # Кнопки внизу
         bot = tk.Frame(self, bg=C["bg"], pady=8)
@@ -474,6 +618,360 @@ class TaskEditDialogPro(tk.Toplevel):
         # Подкраска ролей
         self.assign_tree.tag_configure("foreman", background="#e3f2fd")
         self.assign_tree.tag_configure("inspector", background="#fff3e0")
+
+    # ── Вкладка: Факт выполнения ──
+    def _build_fact_tab(self, parent):
+        task_id = self.init.get("id")
+        if not task_id:
+            tk.Label(
+                parent,
+                text=(
+                    "Факт выполнения можно вносить только для уже сохранённой задачи.\n"
+                    "Сначала сохраните задачу в ГПР, затем откройте её повторно."
+                ),
+                bg=C["panel"],
+                fg=C["text2"],
+                font=("Segoe UI", 10),
+                justify="left",
+                padx=20,
+                pady=20,
+            ).pack(anchor="nw")
+            self._has_fact_tab = False
+            return
+
+        self._has_fact_tab = True
+
+        form = tk.LabelFrame(
+            parent,
+            text=" ➕ Добавить / изменить факт ",
+            font=("Segoe UI", 9, "bold"),
+            bg=C["panel"], fg=C["accent"],
+            padx=10, pady=8,
+        )
+        form.pack(fill="x", padx=12, pady=(10, 4))
+
+        row1 = tk.Frame(form, bg=C["panel"])
+        row1.pack(fill="x", pady=2)
+
+        tk.Label(row1, text="Дата:", bg=C["panel"], font=("Segoe UI", 9)).pack(side="left")
+        self.ent_fact_date = ttk.Entry(row1, width=12, font=("Segoe UI", 9))
+        self.ent_fact_date.pack(side="left", padx=(4, 10))
+        self.ent_fact_date.insert(0, _fmt_date(_today()))
+
+        ttk.Button(row1, text="Сегодня", command=self._fact_set_today).pack(side="left", padx=(0, 12))
+
+        tk.Label(row1, text="Период:", bg=C["panel"], font=("Segoe UI", 9)).pack(side="left")
+        self.cmb_fact_period = ttk.Combobox(
+            row1, state="readonly", width=14,
+            values=FACT_PERIOD_LABELS, font=("Segoe UI", 9)
+        )
+        self.cmb_fact_period.pack(side="left", padx=(4, 12))
+        self.cmb_fact_period.current(0)
+
+        tk.Label(row1, text="Объём:", bg=C["panel"], font=("Segoe UI", 9)).pack(side="left")
+        self.ent_fact_qty = ttk.Entry(row1, width=14, font=("Segoe UI", 9))
+        self.ent_fact_qty.pack(side="left", padx=(4, 12))
+
+        ttk.Button(row1, text="Остаток", command=self._fact_fill_remaining).pack(side="left")
+
+        row2 = tk.Frame(form, bg=C["panel"])
+        row2.pack(fill="x", pady=(8, 2))
+
+        tk.Label(row2, text="Комментарий:", bg=C["panel"], font=("Segoe UI", 9)).pack(side="left")
+        self.ent_fact_comment = ttk.Entry(row2, width=60, font=("Segoe UI", 9))
+        self.ent_fact_comment.pack(side="left", padx=(4, 8), fill="x", expand=True)
+
+        btns = tk.Frame(form, bg=C["panel"])
+        btns.pack(fill="x", pady=(8, 0))
+
+        self.btn_fact_add = ttk.Button(btns, text="Добавить факт", command=self._fact_add_or_update)
+        self.btn_fact_add.pack(side="left", padx=2)
+
+        ttk.Button(btns, text="Очистить", command=self._fact_clear_form).pack(side="left", padx=2)
+        ttk.Button(btns, text="Удалить выбранный", command=self._fact_remove_selected).pack(side="left", padx=12)
+
+        self.lbl_fact_summary = tk.Label(
+            btns, text="",
+            bg=C["panel"], fg=C["text2"], font=("Segoe UI", 8)
+        )
+        self.lbl_fact_summary.pack(side="right", padx=4)
+
+        list_frame = tk.LabelFrame(
+            parent,
+            text=" 📚 Внесённый факт ",
+            font=("Segoe UI", 9, "bold"),
+            bg=C["panel"], fg=C["accent"],
+            padx=10, pady=6,
+        )
+        list_frame.pack(fill="both", expand=True, padx=12, pady=(4, 8))
+
+        cols = ("date", "period", "qty", "comment", "creator")
+        self.fact_tree = ttk.Treeview(
+            list_frame, columns=cols, show="headings",
+            selectmode="browse", height=8
+        )
+
+        for c, t, w, a in [
+            ("date", "Дата", 90, "center"),
+            ("period", "Период", 110, "center"),
+            ("qty", "Объём", 90, "e"),
+            ("comment", "Комментарий", 240, "w"),
+            ("creator", "Кто внёс", 140, "w"),
+        ]:
+            self.fact_tree.heading(c, text=t)
+            self.fact_tree.column(c, width=w, anchor=a)
+
+        vsb = ttk.Scrollbar(list_frame, orient="vertical", command=self.fact_tree.yview)
+        self.fact_tree.configure(yscrollcommand=vsb.set)
+        self.fact_tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        self.fact_tree.bind("<<TreeviewSelect>>", lambda _e: self._fact_pick_selected())
+        self.fact_tree.bind("<Double-1>", lambda _e: self._fact_pick_selected())
+
+    def _load_facts(self):
+        if not self._has_fact_tab:
+            return
+
+        task_id = self.init.get("id")
+        if not task_id:
+            self._facts = []
+            return
+
+        try:
+            self._facts = _TaskFactService.load_task_facts(int(task_id))
+        except Exception:
+            logger.exception("Load facts error for task %s", task_id)
+            self._facts = []
+
+        self._render_facts()
+        self._fact_clear_form()
+
+    def _fact_set_today(self):
+        if not self._has_fact_tab:
+            return
+        self.ent_fact_date.delete(0, "end")
+        self.ent_fact_date.insert(0, _fmt_date(_today()))
+
+    def _fact_fill_remaining(self):
+        if not self._has_fact_tab:
+            return
+
+        plan_qty = _safe_float(self.ent_qty.get())
+        if plan_qty is None:
+            plan_qty = _safe_float(self.init.get("plan_qty"))
+
+        if plan_qty is None or plan_qty <= 0:
+            messagebox.showinfo(
+                "Факт",
+                "Невозможно рассчитать остаток: не задан плановый объём.",
+                parent=self,
+            )
+            return
+
+        total_fact = sum(_safe_float(x.get("fact_qty")) or 0 for x in self._facts)
+        remain = max(0.0, plan_qty - total_fact)
+
+        self.ent_fact_qty.delete(0, "end")
+        self.ent_fact_qty.insert(0, _fmt_qty(remain))
+
+    def _fact_clear_form(self):
+        if not self._has_fact_tab:
+            return
+
+        self._fact_edit_idx = None
+        self.ent_fact_date.delete(0, "end")
+        self.ent_fact_date.insert(0, _fmt_date(_today()))
+
+        self.ent_fact_qty.delete(0, "end")
+        self.ent_fact_comment.delete(0, "end")
+
+        if self.cmb_fact_period["values"]:
+            self.cmb_fact_period.current(0)
+
+        self.btn_fact_add.config(text="Добавить факт")
+
+        try:
+            self.fact_tree.selection_remove(self.fact_tree.selection())
+        except tk.TclError:
+            pass
+
+    def _fact_pick_selected(self):
+        if not self._has_fact_tab:
+            return
+
+        sel = self.fact_tree.selection()
+        if not sel:
+            return
+
+        try:
+            idx = self.fact_tree.index(sel[0])
+        except tk.TclError:
+            return
+
+        if not (0 <= idx < len(self._facts)):
+            return
+
+        self._fact_edit_idx = idx
+        row = self._facts[idx]
+
+        self.ent_fact_date.delete(0, "end")
+        self.ent_fact_date.insert(0, _fmt_date(row.get("fact_date")))
+
+        period_code = (row.get("period_type") or "day").strip()
+        period_label = FACT_PERIODS.get(period_code, FACT_PERIODS["day"])
+        try:
+            self.cmb_fact_period.current(FACT_PERIOD_LABELS.index(period_label))
+        except ValueError:
+            self.cmb_fact_period.current(0)
+
+        self.ent_fact_qty.delete(0, "end")
+        self.ent_fact_qty.insert(0, _fmt_qty(row.get("fact_qty")))
+
+        self.ent_fact_comment.delete(0, "end")
+        self.ent_fact_comment.insert(0, row.get("comment") or "")
+
+        self.btn_fact_add.config(text="Обновить факт")
+
+    def _fact_add_or_update(self):
+        if not self._has_fact_tab:
+            return
+
+        try:
+            fact_date = _parse_date(self.ent_fact_date.get())
+
+            period_label = (self.cmb_fact_period.get() or "").strip()
+            period_type = FACT_PERIOD_FROM_LABEL.get(period_label, "day")
+
+            fact_qty = _safe_float(self.ent_fact_qty.get())
+            if fact_qty is None or fact_qty <= 0:
+                raise ValueError("Введите корректный объём факта больше 0")
+
+            comment = (self.ent_fact_comment.get() or "").strip()
+
+            # Проверка дубля (task_id + fact_date + period_type)
+            duplicate_idx = None
+            for i, row in enumerate(self._facts):
+                if i == self._fact_edit_idx:
+                    continue
+                if _to_date(row.get("fact_date")) == fact_date and \
+                   (row.get("period_type") or "day").strip() == period_type:
+                    duplicate_idx = i
+                    break
+
+            if duplicate_idx is not None:
+                if not messagebox.askyesno(
+                    "Факт",
+                    "На эту дату и период уже есть запись. Заменить её?",
+                    parent=self,
+                ):
+                    return
+                self._fact_edit_idx = duplicate_idx
+
+            row = {
+                "fact_date": fact_date,
+                "period_type": period_type,
+                "fact_qty": fact_qty,
+                "comment": comment,
+                "creator_name": self.init.get("creator_name", "") or "",
+            }
+
+            if self._fact_edit_idx is None:
+                self._facts.append(row)
+            else:
+                old = self._facts[self._fact_edit_idx]
+                if old.get("id"):
+                    row["id"] = old["id"]
+                if old.get("created_at"):
+                    row["created_at"] = old["created_at"]
+                if old.get("creator_name"):
+                    row["creator_name"] = old["creator_name"]
+                self._facts[self._fact_edit_idx] = row
+
+            self._facts.sort(
+                key=lambda x: (
+                    _to_date(x.get("fact_date")) or _today(),
+                    0 if (x.get("period_type") or "day") == "day" else 1,
+                )
+            )
+
+            self._facts_changed = True
+            self._render_facts()
+            self._fact_clear_form()
+
+        except Exception as e:
+            messagebox.showwarning("Факт", str(e), parent=self)
+
+    def _fact_remove_selected(self):
+        if not self._has_fact_tab:
+            return
+
+        sel = self.fact_tree.selection()
+        if not sel:
+            messagebox.showinfo("Факт", "Выберите запись факта.", parent=self)
+            return
+
+        try:
+            idx = self.fact_tree.index(sel[0])
+        except tk.TclError:
+            return
+
+        if not (0 <= idx < len(self._facts)):
+            return
+
+        row = self._facts[idx]
+        if not messagebox.askyesno(
+            "Факт",
+            f"Удалить запись факта от {_fmt_date(row.get('fact_date'))}?",
+            parent=self,
+        ):
+            return
+
+        self._facts.pop(idx)
+        self._facts_changed = True
+        self._render_facts()
+        self._fact_clear_form()
+
+    def _render_facts(self):
+        if not self._has_fact_tab:
+            return
+
+        self.fact_tree.delete(*self.fact_tree.get_children())
+
+        for row in self._facts:
+            period_code = (row.get("period_type") or "day").strip()
+            period_label = FACT_PERIODS.get(period_code, period_code)
+
+            self.fact_tree.insert(
+                "",
+                "end",
+                values=(
+                    _fmt_date(row.get("fact_date")),
+                    period_label,
+                    _fmt_qty(row.get("fact_qty")),
+                    row.get("comment") or "",
+                    row.get("creator_name") or "",
+                ),
+            )
+
+        self._update_fact_summary()
+
+    def _update_fact_summary(self):
+        if not self._has_fact_tab:
+            return
+
+        total_fact = sum(_safe_float(x.get("fact_qty")) or 0 for x in self._facts)
+        plan_qty = _safe_float(self.ent_qty.get())
+        if plan_qty is None:
+            plan_qty = _safe_float(self.init.get("plan_qty"))
+
+        if plan_qty and plan_qty > 0:
+            pct = min(100.0, total_fact / plan_qty * 100.0)
+            text = f"Накопительный факт: {_fmt_qty(total_fact)}  |  Выполнение: {pct:.1f}%"
+        else:
+            text = f"Накопительный факт: {_fmt_qty(total_fact)}"
+
+        self.lbl_fact_summary.config(text=text)
 
     # ══════════════════════════════════════════════════════
     #  FILL / INIT
@@ -773,6 +1271,8 @@ class TaskEditDialogPro(tk.Toplevel):
                 "status": st,
                 "is_milestone": bool(self.var_milestone.get()),
                 "_assignments": list(self._assignments),
+                "_facts": list(self._facts),
+                "_facts_changed": bool(self._facts_changed),
             }
             self._safe_destroy()
 
