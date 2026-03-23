@@ -276,7 +276,9 @@ def setup_ttk_styles(root):
     )
 
 
-# --- УТИЛИТЫ ---
+# ================================================================== #
+#  УТИЛИТЫ
+# ================================================================== #
 
 def initialize_db_pool():
     global db_connection_pool
@@ -496,7 +498,7 @@ def embedded_logo_image(parent, max_w=360, max_h=160):
 # ================================================================== #
 
 class NavButton(tk.Frame):
-    def __init__(self, master, text: str, command=None, active=False, enabled=True):
+    def __init__(self, master, text: str, command=None, active=False, enabled=True, level: int = 0):
         bg = UI["sidebar_active"] if active else UI["sidebar"]
         fg = UI["text"] if enabled else UI["soft"]
         super().__init__(
@@ -518,7 +520,7 @@ class NavButton(tk.Frame):
             fg=fg,
             font=FONT_BODY,
             anchor="w",
-            padx=10,
+            padx=10 + level * 10,
             pady=6,
         )
         self.lbl.pack(fill="x")
@@ -574,7 +576,7 @@ class CompactInfoBox(tk.Frame):
 
 
 # ================================================================== #
-#  HomePage
+#  HOME
 # ================================================================== #
 
 class HomePage(tk.Frame):
@@ -707,8 +709,8 @@ class HomePage(tk.Frame):
         notes = [
             "Используйте вкладки для быстрого переключения между разделами.",
             "Кнопки Назад и Вперёд позволяют вернуться к предыдущим страницам.",
-            "Левая панель используется для открытия основных разделов.",
-            "Часто используемые разделы можно закрепить в избранном.",
+            "Левая панель построена по всем разделам системы.",
+            "Настройки доступны только пользователям с соответствующим правом.",
         ]
         for note in notes:
             tk.Label(
@@ -745,7 +747,7 @@ class HomePage(tk.Frame):
 
 
 # ================================================================== #
-#  LoginPage — безопасная по высоте версия
+#  LOGIN
 # ================================================================== #
 
 class LoginPage(tk.Frame):
@@ -772,7 +774,6 @@ class LoginPage(tk.Frame):
         )
         card.pack()
 
-        # Шапка
         head = tk.Frame(card, bg=UI["panel"])
         head.pack(fill="x")
         tk.Label(
@@ -967,27 +968,14 @@ class SplashScreen(tk.Toplevel):
 
 
 # ================================================================== #
-#  MainApp
+#  MAIN APP
 # ================================================================== #
 
 class MainApp(tk.Tk):
-    SIDEBAR_ITEMS = [
-        ("Главная", "home"),
-        ("Создать табель", "timesheet"),
-        ("Мои табели", "my_timesheets"),
-        ("Транспорт", "transport"),
-        ("Питание", "meals_order"),
-        ("Объекты", "objects_registry"),
-        ("Проживание", "lodging_registry"),
-        ("Сотрудники", "employee_card"),
-        ("Реестр табелей", "timesheet_registry"),
-        ("Аналитика", "analytics_dashboard"),
-    ]
-
     FAVORITES_DEFAULT = [
-        ("Мои табели", "my_timesheets"),
-        ("Транспорт", "transport"),
-        ("Питание", "meals_order"),
+        "my_timesheets",
+        "transport",
+        "meals_order",
     ]
 
     def __init__(self, current_user: Optional[Dict[str, Any]] = None):
@@ -1010,7 +998,7 @@ class MainApp(tk.Tk):
         self._history_back: List[str] = []
         self._history_forward: List[str] = []
         self._current_key: Optional[str] = None
-        self._favorite_keys = [key for _, key in self.FAVORITES_DEFAULT]
+        self._favorite_keys = list(self.FAVORITES_DEFAULT)
 
         self._build_shell()
 
@@ -1090,7 +1078,7 @@ class MainApp(tk.Tk):
         body = tk.Frame(self, bg=UI["bg"])
         body.pack(fill="both", expand=True)
 
-        self.sidebar = tk.Frame(body, bg=UI["sidebar"], width=230, highlightbackground=UI["line"], highlightthickness=1)
+        self.sidebar = tk.Frame(body, bg=UI["sidebar"], width=260, highlightbackground=UI["line"], highlightthickness=1)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
 
@@ -1149,6 +1137,37 @@ class MainApp(tk.Tk):
             bg=UI["panel2"],
         ).pack(side="right", padx=8)
 
+    # ------------------------------------------------------------------ #
+    #  Menu spec helpers
+    # ------------------------------------------------------------------ #
+    def _has_access_to_entry(self, entry) -> bool:
+        if not self.is_authenticated:
+            return False
+        if not entry.perm:
+            return True
+        return self.has_perm(entry.perm)
+
+    def _visible_menu_sections(self):
+        from menu_spec import MENU_SPEC
+        visible = []
+        for sec in MENU_SPEC:
+            visible_entries = [
+                e for e in sec.entries
+                if e.kind == "page" and self._has_access_to_entry(e)
+            ]
+            if visible_entries:
+                visible.append((sec, visible_entries))
+        return visible
+
+    def _favorites_titles(self) -> Dict[str, str]:
+        from menu_spec import MENU_SPEC
+        result = {"home": "Главная"}
+        for sec in MENU_SPEC:
+            for e in sec.entries:
+                if e.kind == "page" and e.key:
+                    result[e.key] = e.label
+        return result
+
     def _section_label(self, parent, text):
         tk.Label(
             parent,
@@ -1162,56 +1181,72 @@ class MainApp(tk.Tk):
         ).pack(fill="x", pady=(0, 4))
 
     def _rebuild_sidebar(self):
+        from menu_spec import TOP_LEVEL
+
         for w in self.sidebar_inner.winfo_children():
             w.destroy()
 
         active_key = self._current_key or "home"
+        titles_map = self._favorites_titles()
 
         self._section_label(self.sidebar_inner, "Избранное")
-        for title, key in self.SIDEBAR_ITEMS:
-            if key not in self._favorite_keys:
+
+        fav_items = [("Главная", "home")]
+        for key in self._favorite_keys:
+            if key == "home":
                 continue
-            if key != "home":
-                required = self._perm_for_key(key)
-                if required and not self.has_perm(required):
-                    continue
+            title = titles_map.get(key, key)
+            required = self._perm_for_key(key)
+            if required and not self.has_perm(required):
+                continue
+            fav_items.append((title, key))
+
+        for title, key in fav_items:
             btn = NavButton(
                 self.sidebar_inner,
                 text=title,
                 active=(key == active_key),
-                enabled=True,
+                enabled=(key == "home" or self.is_authenticated),
                 command=lambda kk=key: self.show_home() if kk == "home" else self._open_known_page(kk),
             )
             btn.pack(fill="x", pady=2, padx=6)
-
-        self._section_label(self.sidebar_inner, "Разделы")
-        for title, key in self.SIDEBAR_ITEMS:
-            if key in self._favorite_keys:
-                continue
-            if key != "home":
-                required = self._perm_for_key(key)
-                if required and not self.has_perm(required):
-                    continue
-            btn = NavButton(
-                self.sidebar_inner,
-                text=title,
-                active=(key == active_key),
-                enabled=True,
-                command=lambda kk=key: self.show_home() if kk == "home" else self._open_known_page(kk),
-            )
-            btn.pack(fill="x", pady=2, padx=6)
-
-        tools = tk.Frame(self.sidebar_inner, bg=UI["sidebar"])
-        tools.pack(fill="x", padx=6, pady=(10, 4))
-
-        ttk.Button(
-            tools,
-            text="Настройки",
-            style="App.TButton",
-            command=lambda: Settings.open_settings_window(self),
-        ).pack(fill="x", pady=2)
 
         if self.is_authenticated:
+            visible_sections = self._visible_menu_sections()
+            for sec, entries in visible_sections:
+                self._section_label(self.sidebar_inner, sec.label)
+                for entry in entries:
+                    if not entry.key:
+                        continue
+                    btn = NavButton(
+                        self.sidebar_inner,
+                        text=entry.label,
+                        active=(entry.key == active_key),
+                        enabled=True,
+                        level=1,
+                        command=lambda kk=entry.key: self._open_known_page(kk),
+                    )
+                    btn.pack(fill="x", pady=2, padx=6)
+
+            self._section_label(self.sidebar_inner, "Служебные")
+
+            settings_allowed = any(
+                e.label == "Настройки" and self._has_access_to_entry(e)
+                for e in TOP_LEVEL
+            )
+            if settings_allowed:
+                btn_settings = NavButton(
+                    self.sidebar_inner,
+                    text="Настройки",
+                    active=False,
+                    enabled=True,
+                    command=lambda: Settings.open_settings_window(self),
+                )
+                btn_settings.pack(fill="x", pady=2, padx=6)
+
+            tools = tk.Frame(self.sidebar_inner, bg=UI["sidebar"])
+            tools.pack(fill="x", padx=6, pady=(8, 4))
+
             ttk.Button(
                 tools,
                 text="Добавить текущую в избранное",
@@ -1284,7 +1319,6 @@ class MainApp(tk.Tk):
             messagebox.showerror("Права", f"Не удалось загрузить права пользователя:\n{e}")
             return
         self._set_user(user)
-        self._apply_permissions_visibility()
         self.show_home()
 
     def has_perm(self, perm_code: str) -> bool:
@@ -1307,30 +1341,30 @@ class MainApp(tk.Tk):
             "home": ("Главная", "Рабочий стол"),
             "timesheet": ("Создать табель", ""),
             "my_timesheets": ("Мои табели", ""),
-            "timesheet_registry": ("Реестр табелей", ""),
             "brigades": ("Бригады", "Назначение бригадиров"),
+            "timesheet_registry": ("Реестр табелей", ""),
             "workers": ("Работники", "Поиск по сотрудникам"),
-            "timesheet_compare": ("Сравнение табелей", "Объектный vs 1С"),
+            "timesheet_compare": ("Сравнение с 1С", "Объектный vs 1С"),
             "gpr": ("ГПР", "Диаграмма Ганта"),
             "gpr_dicts": ("Справочники ГПР", ""),
-            "transport": ("Транспорт", "Заявка на спецтехнику"),
-            "my_transport_orders": ("Мои заявки", "Транспорт"),
-            "planning": ("Планирование", "Транспорт"),
-            "transport_registry": ("Реестр транспорта", ""),
-            "meals_order": ("Питание", "Заказ питания"),
+            "transport": ("Создать заявку", "Автотранспорт"),
+            "my_transport_orders": ("Мои заявки", "Автотранспорт"),
+            "planning": ("Планирование", "Автотранспорт"),
+            "transport_registry": ("Реестр", "Автотранспорт"),
+            "meals_order": ("Создать заявку", "Питание"),
             "my_meals_orders": ("Мои заявки", "Питание"),
             "meals_planning": ("Планирование", "Питание"),
-            "meals_registry": ("Реестр питания", ""),
-            "meals_reports": ("Отчеты по питанию", ""),
+            "meals_registry": ("Реестр", "Питание"),
+            "meals_reports": ("Отчеты", "Питание"),
             "meals_workers": ("Работники (питание)", ""),
-            "meals_settings": ("Настройки питания", ""),
-            "lodging_registry": ("Проживание", ""),
+            "meals_settings": ("Настройки", "Питание"),
+            "lodging_registry": ("Реестр проживаний", ""),
             "lodging_dorms": ("Общежития и комнаты", ""),
-            "lodging_rates": ("Тарифы проживания", ""),
-            "object_create": ("Объекты", "Создание/Редактирование"),
-            "objects_registry": ("Реестр объектов", ""),
+            "lodging_rates": ("Тарифы (цена за сутки)", ""),
+            "object_create": ("Создать/Редактировать", "Объекты"),
+            "objects_registry": ("Реестр", "Объекты"),
             "employee_card": ("Карточка сотрудника", ""),
-            "analytics_dashboard": ("Аналитика", ""),
+            "analytics_dashboard": ("Операционная аналитика", ""),
             "payroll": ("Затраты (ФОТ)", ""),
             "budget": ("Анализ смет", ""),
             "estimate_resource_decoder": ("Раскрытие ресурсов сметы", ""),
@@ -1488,16 +1522,19 @@ class MainApp(tk.Tk):
         mapping = {
             "timesheet": lambda p: timesheet_module.create_timesheet_page(p, self),
             "my_timesheets": lambda p: timesheet_module.create_my_timesheets_page(p, self),
-            "timesheet_registry": lambda p: timesheet_module.create_timesheet_registry_page(p, self),
             "brigades": lambda p: brigades_module.create_brigades_page(p, self),
+            "timesheet_registry": lambda p: timesheet_module.create_timesheet_registry_page(p, self),
             "workers": lambda p: employees_module.create_workers_page(p, self),
             "timesheet_compare": lambda p: timesheet_compare.create_timesheet_compare_page(p, self),
+
             "gpr": lambda p: gpr_module.create_gpr_page(p, self),
             "gpr_dicts": lambda p: gpr_dictionaries.create_gpr_dicts_page(p, self),
+
             "transport": lambda p: SpecialOrders.create_page(p, self),
             "my_transport_orders": lambda p: SpecialOrders.create_my_transport_orders_page(p, self),
             "planning": lambda p: SpecialOrders.create_planning_page(p),
             "transport_registry": lambda p: SpecialOrders.create_transport_registry_page(p),
+
             "meals_order": lambda p: meals_module.create_meals_order_page(p, self),
             "my_meals_orders": lambda p: meals_module.create_my_meals_orders_page(p, self),
             "meals_planning": lambda p: meals_module.create_meals_planning_page(p, self),
@@ -1505,14 +1542,19 @@ class MainApp(tk.Tk):
             "meals_reports": lambda p: meals_reports_module.create_meals_reports_page(p, self),
             "meals_workers": lambda p: meals_employees_module.create_meals_workers_page(p, self),
             "meals_settings": lambda p: meals_module.create_meals_settings_page(p, self.current_user.get("role")),
+
             "lodging_registry": lambda p: lodging_module.create_lodging_registry_page(p, self),
             "lodging_dorms": lambda p: lodging_module.create_dorms_page(p, self),
             "lodging_rates": lambda p: lodging_module.create_rates_page(p, self),
+
             "object_create": lambda p: objects.ObjectCreatePage(p, self),
             "objects_registry": lambda p: objects.ObjectsRegistryPage(p, self),
+
+            "employee_card": lambda p: employee_card_module.create_employee_card_page(p, self),
+
             "analytics_dashboard": lambda p: analytics_module.AnalyticsPage(p, self),
             "payroll": lambda p: payroll_module.create_payroll_page(p, self),
-            "employee_card": lambda p: employee_card_module.create_employee_card_page(p, self),
+
             "budget": lambda p: BudgetAnalyzer.create_page(p),
             "estimate_resource_decoder": lambda p: EstimateResourceDecoder.create_page(p),
         }
@@ -1556,13 +1598,6 @@ class MainApp(tk.Tk):
 
     def _show_page(self, key: str, builder):
         self.open_page_in_tab(key, builder)
-
-    # ------------------------------------------------------------------ #
-    #  Права меню (сохраняем совместимость с menu_spec)
-    # ------------------------------------------------------------------ #
-    def _apply_permissions_visibility(self):
-        # Верхнего меню больше нет, но метод оставлен ради совместимости
-        pass
 
     def destroy(self):
         logging.info("Приложение закрывается. Закрываем пул соединений.")
