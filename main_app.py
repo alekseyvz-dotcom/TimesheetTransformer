@@ -28,7 +28,6 @@ except ImportError:
 
 
 # --- FALLBACK-ЛОГО ---
-# 1x1 png base64, чтобы приложение не падало, если внешний logo не загружен
 TINY_PNG_BASE64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
     "/x8AAusB9Wn2XxwAAAAASUVORK5CYII="
@@ -185,42 +184,41 @@ def perform_heavy_imports():
 
 # --- КОНСТАНТЫ И ГЛОБАЛЬНЫЕ НАСТРОЙКИ ---
 APP_NAME = "Управление строительством (Главное меню)"
-
 db_connection_pool = None
 
 
 # ================================================================== #
-#  ТЕМА / СТИЛИ
+#  ERP/1C ПАЛИТРА И СТИЛИ
 # ================================================================== #
 
-COLORS = {
-    "bg_app": "#eef2f7",
-    "bg_page": "#f5f7fb",
-    "bg_card": "#ffffff",
-    "bg_card_soft": "#f8fafc",
-    "bg_header": "#ffffff",
-    "bg_dark": "#0f172a",
-    "bg_dark_2": "#172554",
-    "text": "#0f172a",
-    "text_muted": "#64748b",
-    "text_soft": "#94a3b8",
-    "line": "#e2e8f0",
-    "line_dark": "#cbd5e1",
-    "primary": "#2563eb",
-    "primary_hover": "#1d4ed8",
-    "success": "#16a34a",
-    "warning": "#d97706",
-    "danger": "#e11d48",
-    "violet": "#7c3aed",
-    "cyan": "#0891b2",
+ERP = {
+    "bg": "#f2f4f7",
+    "panel": "#e9edf2",
+    "panel2": "#dde4ec",
+    "card": "#ffffff",
+    "line": "#cfd7e3",
+    "line_dark": "#b8c3d1",
+    "text": "#1f2937",
+    "muted": "#5f6b7a",
+    "soft": "#7b8794",
+    "blue": "#2f74c0",
+    "blue_dark": "#215b9a",
+    "blue_soft": "#e8f1fb",
+    "green": "#2f855a",
+    "orange": "#c97a20",
+    "red": "#c05656",
+    "sidebar": "#e6ebf1",
+    "sidebar_active": "#d6e4f5",
+    "header": "#f8fafc",
+    "login_bg": "#eef2f6",
 }
 
-FONT_H1 = ("Segoe UI", 20, "bold")
-FONT_H2 = ("Segoe UI", 14, "bold")
-FONT_H3 = ("Segoe UI", 11, "bold")
-FONT_BODY = ("Segoe UI", 10)
-FONT_SMALL = ("Segoe UI", 9)
-FONT_TINY = ("Segoe UI", 8)
+FONT_H1 = ("Segoe UI", 15, "bold")
+FONT_H2 = ("Segoe UI", 12, "bold")
+FONT_H3 = ("Segoe UI", 10, "bold")
+FONT_BODY = ("Segoe UI", 9)
+FONT_SMALL = ("Segoe UI", 8)
+FONT_MONO = ("Consolas", 9)
 
 
 def setup_ttk_styles(root):
@@ -231,55 +229,74 @@ def setup_ttk_styles(root):
         pass
 
     style.configure(
-        "App.TButton",
-        font=("Segoe UI", 10),
-        padding=(10, 7),
-    )
-    style.configure(
-        "Primary.TButton",
-        font=("Segoe UI", 10, "bold"),
-        padding=(12, 8),
-        foreground="#ffffff",
-        background=COLORS["primary"],
-        borderwidth=0,
-    )
-    style.map(
-        "Primary.TButton",
-        background=[("active", COLORS["primary_hover"])],
-        foreground=[("disabled", "#dbeafe")],
+        "ERP.TButton",
+        font=("Segoe UI", 9),
+        padding=(10, 6),
     )
 
     style.configure(
-        "Soft.TButton",
-        font=("Segoe UI", 10),
-        padding=(10, 8),
-        foreground=COLORS["text"],
-        background="#e8eefc",
-        borderwidth=0,
+        "ERPPrimary.TButton",
+        font=("Segoe UI", 9, "bold"),
+        padding=(10, 6),
+        foreground="white",
+        background=ERP["blue"],
+        borderwidth=1,
+        relief="flat",
     )
     style.map(
-        "Soft.TButton",
-        background=[("active", "#dbe7ff")],
+        "ERPPrimary.TButton",
+        background=[("active", ERP["blue_dark"])],
     )
 
     style.configure(
-        "App.TEntry",
+        "ERPTool.TButton",
+        font=("Segoe UI", 8),
+        padding=(8, 4),
+        background="#f4f7fa",
+    )
+
+    style.configure(
+        "ERP.TEntry",
+        padding=5,
+    )
+
+    style.configure(
+        "ERP.Treeview",
+        font=("Segoe UI", 9),
+        rowheight=24,
+        fieldbackground="white",
+        background="white",
+        foreground=ERP["text"],
+        bordercolor=ERP["line"],
+        lightcolor=ERP["line"],
+        darkcolor=ERP["line"],
+    )
+    style.configure(
+        "ERP.Treeview.Heading",
+        font=("Segoe UI", 9, "bold"),
+        background=ERP["panel"],
+        foreground=ERP["text"],
+        relief="flat",
         padding=6,
+    )
+    style.map(
+        "ERP.Treeview.Heading",
+        background=[("active", ERP["panel2"])],
+    )
+
+    style.configure(
+        "ERP.Horizontal.TProgressbar",
+        troughcolor="#e5e7eb",
+        background=ERP["blue"],
+        bordercolor="#d1d5db",
+        lightcolor=ERP["blue"],
+        darkcolor=ERP["blue"],
     )
 
     style.configure(
         "TCheckbutton",
-        background=COLORS["bg_page"],
+        background=ERP["login_bg"],
         font=("Segoe UI", 9),
-    )
-
-    style.configure(
-        "App.Horizontal.TProgressbar",
-        troughcolor="#e5e7eb",
-        background=COLORS["primary"],
-        bordercolor="#e5e7eb",
-        lightcolor=COLORS["primary"],
-        darkcolor=COLORS["primary"],
     )
 
 
@@ -435,12 +452,6 @@ def load_user_permissions(user_id: int) -> set[str]:
 # ================================================================== #
 
 def _load_home_stats() -> Dict[str, Any]:
-    """
-    Загружает краткую сводку для главной страницы.
-    Возвращает словарь с ключами:
-      employees_count, objects_count, timesheets_month,
-      transport_today, meals_today
-    """
     stats: Dict[str, Any] = {
         "employees_count": 0,
         "objects_count": 0,
@@ -487,8 +498,6 @@ def _load_home_stats() -> Dict[str, Any]:
     return stats
 
 
-# --- ГРАФИЧЕСКИЙ ИНТЕРФЕЙС ---
-
 def embedded_logo_image(parent, max_w=360, max_h=160):
     b64 = _LOGO_BASE64 or TINY_PNG_BASE64
 
@@ -515,350 +524,190 @@ def embedded_logo_image(parent, max_w=360, max_h=160):
 
 
 # ================================================================== #
-#  UI-виджеты
+#  ERP ВИДЖЕТЫ
 # ================================================================== #
 
-class Card(tk.Frame):
-    """Универсальная карточка."""
-    def __init__(self, master, bg=None, border="#e2e8f0", pad=1, radius_like=False, **kw):
-        outer_bg = "#dfe5ef"
-        super().__init__(master, bg=outer_bg, **kw)
-        self.inner = tk.Frame(self, bg=bg or COLORS["bg_card"])
-        self.inner.pack(fill="both", expand=True, padx=pad, pady=pad)
-        self._bg = bg or COLORS["bg_card"]
-        self._border = border
-
-    @property
-    def body(self):
-        return self.inner
+class ERPPanel(tk.Frame):
+    def __init__(self, master, bg=None, border=True, **kw):
+        super().__init__(
+            master,
+            bg=bg or ERP["card"],
+            highlightbackground=ERP["line"],
+            highlightthickness=1 if border else 0,
+            bd=0,
+            **kw,
+        )
 
 
-class SectionTitle(tk.Frame):
-    def __init__(self, master, title: str, subtitle: str = "", **kw):
-        super().__init__(master, bg=master.cget("bg"), **kw)
+class ERPSectionHeader(tk.Frame):
+    def __init__(self, master, title: str, toolbar: Optional[list] = None, **kw):
+        super().__init__(master, bg=ERP["panel"], height=32, **kw)
+        self.pack_propagate(False)
+
         tk.Label(
             self,
             text=title,
-            font=FONT_H2,
-            fg=COLORS["text"],
-            bg=self.cget("bg"),
-            anchor="w",
-        ).pack(fill="x")
-        if subtitle:
-            tk.Label(
-                self,
-                text=subtitle,
-                font=FONT_SMALL,
-                fg=COLORS["text_muted"],
-                bg=self.cget("bg"),
-                anchor="w",
-            ).pack(fill="x", pady=(2, 0))
-
-
-class HeroBanner(tk.Frame):
-    def __init__(self, master, app_ref: "MainApp", **kw):
-        super().__init__(master, bg=COLORS["bg_page"], **kw)
-        self.app_ref = app_ref
-        self.logo_img = None
-        self._build()
-
-    def _build(self):
-        card = Card(self, bg=COLORS["bg_dark"], pad=1)
-        card.pack(fill="x")
-        body = card.body
-        body.configure(bg=COLORS["bg_dark"])
-
-        content = tk.Frame(body, bg=COLORS["bg_dark"])
-        content.pack(fill="x", padx=26, pady=24)
-
-        left = tk.Frame(content, bg=COLORS["bg_dark"])
-        left.pack(side="left", fill="both", expand=True)
-
-        right = tk.Frame(content, bg=COLORS["bg_dark"])
-        right.pack(side="right", anchor="ne", padx=(20, 0))
-
-        self.logo_img = embedded_logo_image(right, max_w=180, max_h=70)
-        if self.logo_img:
-            tk.Label(right, image=self.logo_img, bg=COLORS["bg_dark"]).pack(anchor="e", pady=(0, 8))
-
-        name = ""
-        role = ""
-        if self.app_ref and self.app_ref.current_user:
-            name = self.app_ref.current_user.get("full_name") or self.app_ref.current_user.get("username") or ""
-            role = self.app_ref.current_user.get("role") or ""
-
-        now = datetime.now()
-        wd_map = {
-            "Monday": "понедельник",
-            "Tuesday": "вторник",
-            "Wednesday": "среда",
-            "Thursday": "четверг",
-            "Friday": "пятница",
-            "Saturday": "суббота",
-            "Sunday": "воскресенье",
-        }
-        wd = wd_map.get(now.strftime("%A"), "")
-
-        tk.Label(
-            left,
-            text=f"Здравствуйте, {name}!" if name else "Здравствуйте!",
-            font=FONT_H1,
-            fg="#ffffff",
-            bg=COLORS["bg_dark"],
-            anchor="w",
-        ).pack(fill="x")
-
-        tk.Label(
-            left,
-            text=f"Сегодня {now.strftime('%d.%m.%Y')} • {wd}",
-            font=FONT_BODY,
-            fg="#cbd5e1",
-            bg=COLORS["bg_dark"],
-            anchor="w",
-        ).pack(fill="x", pady=(6, 0))
-
-        role_text = f"Роль: {role}" if role else "Авторизованный пользователь"
-        tk.Label(
-            left,
-            text=role_text,
-            font=FONT_SMALL,
-            fg="#93c5fd",
-            bg=COLORS["bg_dark"],
-            anchor="w",
-        ).pack(fill="x", pady=(10, 0))
-
-        info_bar = tk.Frame(left, bg=COLORS["bg_dark"])
-        info_bar.pack(fill="x", pady=(16, 0))
-
-        badge1 = tk.Label(
-            info_bar,
-            text="● Система готова к работе",
-            font=FONT_SMALL,
-            fg="#86efac",
-            bg=COLORS["bg_dark"],
-            padx=10,
-            pady=5,
-        )
-        badge1.pack(side="left")
-
-        badge2 = tk.Label(
-            info_bar,
-            text="Единое окно управления строительством",
-            font=FONT_SMALL,
-            fg="#e2e8f0",
-            bg="#1e293b",
-            padx=10,
-            pady=5,
-        )
-        badge2.pack(side="left", padx=(8, 0))
-
-
-class MetricTile(tk.Frame):
-    def __init__(self, master, value, label: str, accent="#2563EB", on_click=None, **kw):
-        super().__init__(master, bg=COLORS["bg_page"], **kw)
-        self._on_click = on_click
-        self._accent = accent
-
-        self.card = Card(self, bg=COLORS["bg_card"], pad=1)
-        self.card.pack(fill="both", expand=True)
-
-        body = self.card.body
-        body.configure(bg=COLORS["bg_card"], cursor="hand2" if on_click else "")
-
-        top = tk.Frame(body, bg=COLORS["bg_card"], height=4)
-        top.pack(fill="x")
-        tk.Frame(top, bg=accent, height=4).pack(fill="x")
-
-        wrap = tk.Frame(body, bg=COLORS["bg_card"])
-        wrap.pack(fill="both", expand=True, padx=16, pady=14)
-
-        tk.Label(
-            wrap,
-            text=str(value),
-            font=("Segoe UI", 22, "bold"),
-            fg=COLORS["text"],
-            bg=COLORS["bg_card"],
-            anchor="w",
-        ).pack(fill="x")
-
-        tk.Label(
-            wrap,
-            text=label,
-            font=FONT_SMALL,
-            fg=COLORS["text_muted"],
-            bg=COLORS["bg_card"],
-            anchor="w",
-        ).pack(fill="x", pady=(3, 0))
-
-        if on_click:
-            self._bind_recursive(body)
-
-    def _bind_recursive(self, widget):
-        widget.bind("<Button-1>", lambda e: self._on_click() if self._on_click else None)
-        widget.bind("<Enter>", self._on_enter)
-        widget.bind("<Leave>", self._on_leave)
-        for child in widget.winfo_children():
-            self._bind_recursive(child)
-
-    def _on_enter(self, _e=None):
-        self.card.configure(bg="#cfd8e8")
-
-    def _on_leave(self, _e=None):
-        self.card.configure(bg="#dfe5ef")
-
-
-class ActionCard(tk.Frame):
-    def __init__(self, master, icon: str, title: str, subtitle: str, command=None, enabled: bool = True, **kw):
-        super().__init__(master, bg=COLORS["bg_page"], **kw)
-        self._enabled = enabled
-        self._command = command
-
-        self.normal_card = "#dfe5ef"
-        self.hover_card = "#c7d7ff"
-
-        self.card = Card(self, bg=COLORS["bg_card"] if enabled else "#f3f4f6", pad=1)
-        self.card.pack(fill="both", expand=True)
-
-        body = self.card.body
-        body.configure(
-            bg=COLORS["bg_card"] if enabled else "#f3f4f6",
-            cursor="hand2" if enabled else "",
-        )
-
-        fg_icon = COLORS["primary"] if enabled else "#cbd5e1"
-        fg_title = COLORS["text"] if enabled else "#94a3b8"
-        fg_sub = COLORS["text_muted"] if enabled else "#cbd5e1"
-
-        wrap = tk.Frame(body, bg=body.cget("bg"))
-        wrap.pack(fill="both", expand=True, padx=16, pady=14)
-
-        tk.Label(
-            wrap,
-            text=icon,
-            font=("Segoe UI Emoji", 28),
-            bg=body.cget("bg"),
-            fg=fg_icon,
-            anchor="w",
-        ).pack(anchor="w", pady=(0, 8))
-
-        tk.Label(
-            wrap,
-            text=title,
             font=FONT_H3,
-            bg=body.cget("bg"),
-            fg=fg_title,
+            fg=ERP["text"],
+            bg=ERP["panel"],
             anchor="w",
-        ).pack(fill="x")
+        ).pack(side="left", padx=10)
 
-        tk.Label(
-            wrap,
-            text=subtitle,
-            font=FONT_SMALL,
-            bg=body.cget("bg"),
-            fg=fg_sub,
+        if toolbar:
+            btns = tk.Frame(self, bg=ERP["panel"])
+            btns.pack(side="right", padx=6)
+            for text, cmd in toolbar:
+                ttk.Button(
+                    btns,
+                    text=text,
+                    command=cmd,
+                    style="ERPTool.TButton",
+                ).pack(side="left", padx=2, pady=3)
+
+
+class ERPSidebarButton(tk.Frame):
+    def __init__(self, master, text: str, command=None, active=False, enabled=True, **kw):
+        bg = ERP["sidebar_active"] if active else ERP["sidebar"]
+        fg = ERP["text"] if enabled else ERP["soft"]
+        super().__init__(
+            master,
+            bg=bg,
+            highlightbackground=ERP["line"],
+            highlightthickness=1,
+            cursor="hand2" if enabled else "",
+            **kw,
+        )
+        self.command = command
+        self.enabled = enabled
+        self._normal_bg = bg
+        self._hover_bg = "#dbe7f5" if enabled else bg
+
+        self.label = tk.Label(
+            self,
+            text=text,
+            font=FONT_BODY,
+            fg=fg,
+            bg=bg,
             anchor="w",
-            justify="left",
-            wraplength=230,
-        ).pack(fill="x", pady=(4, 0))
-
-        bottom = tk.Frame(wrap, bg=body.cget("bg"))
-        bottom.pack(fill="x", pady=(10, 0))
-
-        tk.Label(
-            bottom,
-            text="Открыть →" if enabled else "Недоступно",
-            font=FONT_SMALL,
-            bg=body.cget("bg"),
-            fg=COLORS["primary"] if enabled else "#cbd5e1",
-            anchor="w",
-        ).pack(side="left")
+            padx=10,
+            pady=7,
+        )
+        self.label.pack(fill="x")
 
         if enabled:
-            self._bind_recursive(body)
-
-    def _bind_recursive(self, widget):
-        widget.bind("<Button-1>", self._on_click)
-        widget.bind("<Enter>", self._on_enter)
-        widget.bind("<Leave>", self._on_leave)
-        for child in widget.winfo_children():
-            self._bind_recursive(child)
+            self.bind("<Enter>", self._on_enter)
+            self.bind("<Leave>", self._on_leave)
+            self.bind("<Button-1>", self._on_click)
+            self.label.bind("<Enter>", self._on_enter)
+            self.label.bind("<Leave>", self._on_leave)
+            self.label.bind("<Button-1>", self._on_click)
 
     def _on_enter(self, _e=None):
-        if self._enabled:
-            self.card.configure(bg=self.hover_card)
+        self.configure(bg=self._hover_bg)
+        self.label.configure(bg=self._hover_bg)
 
     def _on_leave(self, _e=None):
-        if self._enabled:
-            self.card.configure(bg=self.normal_card)
+        self.configure(bg=self._normal_bg)
+        self.label.configure(bg=self._normal_bg)
 
     def _on_click(self, _e=None):
-        if self._enabled and self._command:
-            self._command()
+        if self.command and self.enabled:
+            self.command()
 
 
-class InfoPanel(tk.Frame):
-    def __init__(self, master, title: str, lines: List[str], accent="#2563eb", **kw):
-        super().__init__(master, bg=COLORS["bg_page"], **kw)
-        card = Card(self, bg=COLORS["bg_card"], pad=1)
-        card.pack(fill="both", expand=True)
-        body = card.body
+class ERPStatBox(tk.Frame):
+    def __init__(self, master, title: str, value: Any, accent="#2f74c0", command=None, **kw):
+        super().__init__(
+            master,
+            bg=ERP["card"],
+            highlightbackground=ERP["line"],
+            highlightthickness=1,
+            cursor="hand2" if command else "",
+            **kw,
+        )
+        self.command = command
+        self._normal_bg = ERP["card"]
+        self._hover_bg = "#f6f9fd"
 
-        head = tk.Frame(body, bg=COLORS["bg_card"])
-        head.pack(fill="x", padx=16, pady=(14, 8))
+        top = tk.Frame(self, bg=accent, height=4)
+        top.pack(fill="x")
 
-        tk.Frame(head, bg=accent, width=6, height=24).pack(side="left", padx=(0, 10))
-        tk.Label(
-            head,
+        body = tk.Frame(self, bg=ERP["card"])
+        body.pack(fill="both", expand=True, padx=10, pady=10)
+
+        self.lbl_title = tk.Label(
+            body,
             text=title,
-            font=FONT_H3,
-            fg=COLORS["text"],
-            bg=COLORS["bg_card"],
-        ).pack(side="left")
+            font=FONT_SMALL,
+            fg=ERP["muted"],
+            bg=ERP["card"],
+            anchor="w",
+        )
+        self.lbl_title.pack(fill="x")
 
-        content = tk.Frame(body, bg=COLORS["bg_card"])
-        content.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+        self.lbl_value = tk.Label(
+            body,
+            text=str(value),
+            font=("Segoe UI", 16, "bold"),
+            fg=ERP["text"],
+            bg=ERP["card"],
+            anchor="w",
+        )
+        self.lbl_value.pack(fill="x", pady=(6, 0))
 
-        for line in lines:
-            tk.Label(
-                content,
-                text=f"• {line}",
-                font=FONT_SMALL,
-                fg=COLORS["text_muted"],
-                bg=COLORS["bg_card"],
-                anchor="w",
-                justify="left",
-                wraplength=340,
-            ).pack(fill="x", pady=2)
+        if command:
+            for w in (self, top, body, self.lbl_title, self.lbl_value):
+                w.bind("<Enter>", self._on_enter)
+                w.bind("<Leave>", self._on_leave)
+                w.bind("<Button-1>", self._on_click)
+
+    def _set_bg(self, color):
+        self.configure(bg=color)
+        for child in self.winfo_children():
+            try:
+                child.configure(bg=color)
+            except Exception:
+                pass
+            for sub in child.winfo_children():
+                try:
+                    sub.configure(bg=color)
+                except Exception:
+                    pass
+
+    def _on_enter(self, _e=None):
+        self._set_bg(self._hover_bg)
+
+    def _on_leave(self, _e=None):
+        self._set_bg(self._normal_bg)
+
+    def _on_click(self, _e=None):
+        if self.command:
+            self.command()
 
 
 # ================================================================== #
-#  HomePage — обновлённый dashboard
+#  HomePage — 1C/ERP стиль
 # ================================================================== #
 
 class HomePage(tk.Frame):
     """
-    Главная страница — современная информационная панель.
-    Показывает:
-    - приветствие,
-    - KPI/метрики,
-    - быстрые действия,
-    - подсказки по работе.
+    Главная страница в стиле 1С/ERP:
+    - слева: разделы и быстрые переходы
+    - справа: рабочий стол, показатели, служебная информация
     """
 
-    ACTIONS_PRIMARY = [
-        ("📋", "Создать табель", "Заполнить табель рабочего времени", "timesheet", None),
-        ("📑", "Мои табели", "Просмотр и редактирование ваших табелей", "my_timesheets", None),
-        ("🚛", "Заявка на транспорт", "Оформить заявку на спецтехнику", "transport", None),
-        ("🍽️", "Заказ питания", "Подать заявку на питание бригады", "meals_order", None),
-    ]
-
-    ACTIONS_EXTENDED = [
-        ("📊", "Аналитика", "Сводные показатели и метрики по работе", "analytics_dashboard", None),
-        ("🏗️", "Реестр объектов", "Список и состояние объектов компании", "objects_registry", None),
-        ("🏠", "Проживание", "Реестр заселений, комнат и общежитий", "lodging_registry", None),
-        ("👤", "Карточка сотрудника", "Работа, питание и проживание сотрудника", "employee_card", None),
-        ("📂", "Реестр табелей", "Общий реестр табелей всех пользователей", "timesheet_registry", None),
-        ("🚚", "Реестр транспорта", "Все заявки на транспорт и спецтехнику", "transport_registry", None),
+    NAV_ITEMS = [
+        ("Главная", "home"),
+        ("Создать табель", "timesheet"),
+        ("Мои табели", "my_timesheets"),
+        ("Заявка на транспорт", "transport"),
+        ("Заказ питания", "meals_order"),
+        ("Реестр объектов", "objects_registry"),
+        ("Проживание", "lodging_registry"),
+        ("Карточка сотрудника", "employee_card"),
+        ("Реестр табелей", "timesheet_registry"),
+        ("Реестр транспорта", "transport_registry"),
+        ("Аналитика", "analytics_dashboard"),
     ]
 
     PAGE_BUILDERS = {
@@ -875,165 +724,310 @@ class HomePage(tk.Frame):
     }
 
     def __init__(self, master, app_ref: "MainApp" = None):
-        super().__init__(master, bg=COLORS["bg_page"])
+        super().__init__(master, bg=ERP["bg"])
         self._app_ref = app_ref
-
-        self._canvas = tk.Canvas(self, bg=COLORS["bg_page"], highlightthickness=0)
-        self._vsb = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
-        self._inner = tk.Frame(self._canvas, bg=COLORS["bg_page"])
-
-        self._inner_id = self._canvas.create_window((0, 0), window=self._inner, anchor="nw")
-        self._inner.bind("<Configure>", lambda e: self._canvas.configure(scrollregion=self._canvas.bbox("all")))
-        self._canvas.bind("<Configure>", self._on_canvas_resize)
-        self._canvas.configure(yscrollcommand=self._vsb.set)
-
-        self._canvas.pack(side="left", fill="both", expand=True)
-        self._vsb.pack(side="right", fill="y")
-
-        self.bind("<Map>", self._bind_mousewheel_safe)
+        self.logo_img = None
         self._build()
 
-    def _bind_mousewheel_safe(self, _event=None):
-        self._canvas.bind_all("<MouseWheel>", self._on_mousewheel_windows)
-        self._canvas.bind_all("<Button-4>", self._on_mousewheel_linux_up)
-        self._canvas.bind_all("<Button-5>", self._on_mousewheel_linux_down)
-
-    def _on_mousewheel_windows(self, event):
-        self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-    def _on_mousewheel_linux_up(self, event):
-        self._canvas.yview_scroll(-1, "units")
-
-    def _on_mousewheel_linux_down(self, event):
-        self._canvas.yview_scroll(1, "units")
-
-    def _on_canvas_resize(self, event):
-        self._canvas.itemconfig(self._inner_id, width=event.width)
-
     def _build(self):
-        c = self._inner
-        now = datetime.now()
-        stats = _load_home_stats()
+        root = tk.Frame(self, bg=ERP["bg"])
+        root.pack(fill="both", expand=True, padx=8, pady=8)
 
-        outer = tk.Frame(c, bg=COLORS["bg_page"])
-        outer.pack(fill="both", expand=True, padx=28, pady=22)
+        root.columnconfigure(1, weight=1)
+        root.rowconfigure(0, weight=1)
 
-        # HERO
-        HeroBanner(outer, self._app_ref).pack(fill="x", pady=(0, 18))
+        # --- ЛЕВАЯ ПАНЕЛЬ ---
+        sidebar = ERPPanel(root, bg=ERP["sidebar"], width=250)
+        sidebar.grid(row=0, column=0, sticky="nsw", padx=(0, 8))
+        sidebar.pack_propagate(False)
 
-        # Метрики
-        SectionTitle(
-            outer,
-            "Оперативная сводка",
-            "Ключевые показатели на текущий момент",
-        ).pack(fill="x", pady=(0, 10))
-
-        metrics = tk.Frame(outer, bg=COLORS["bg_page"])
-        metrics.pack(fill="x")
-
-        metrics_cfg = [
-            (stats["employees_count"], "Сотрудников", COLORS["cyan"], None),
-            (stats["objects_count"], "Объектов", COLORS["warning"], "objects_registry"),
-            (stats["timesheets_month"], f"Табелей за {now.strftime('%m.%Y')}", COLORS["success"], "my_timesheets"),
-            (stats["transport_today"], "Транспорт сегодня", COLORS["violet"], "transport"),
-            (stats["meals_today"], "Питание сегодня", COLORS["danger"], "meals_order"),
-        ]
-
-        for i, (val, lbl, accent, page_key) in enumerate(metrics_cfg):
-            cmd = (lambda k=page_key: self._go(k)) if page_key else None
-            tile = MetricTile(metrics, val, lbl, accent=accent, on_click=cmd)
-            tile.grid(row=0, column=i, padx=6, pady=4, sticky="nsew")
-            metrics.columnconfigure(i, weight=1)
-
-        # Две колонки: действия + панель задач
-        mid = tk.Frame(outer, bg=COLORS["bg_page"])
-        mid.pack(fill="x", pady=(20, 0))
-        mid.columnconfigure(0, weight=3)
-        mid.columnconfigure(1, weight=2)
-
-        left = tk.Frame(mid, bg=COLORS["bg_page"])
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-
-        right = tk.Frame(mid, bg=COLORS["bg_page"])
-        right.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
-
-        # Быстрые действия
-        SectionTitle(
-            left,
-            "Быстрые действия",
-            "Самые востребованные операции для ежедневной работы",
-        ).pack(fill="x", pady=(0, 10))
-
-        primary_grid = tk.Frame(left, bg=COLORS["bg_page"])
-        primary_grid.pack(fill="x")
-
-        self._build_actions_grid(primary_grid, self.ACTIONS_PRIMARY, max_cols=2)
-
-        visible_extended = [a for a in self.ACTIONS_EXTENDED if self._has_access(a[3], a[4])]
-        if visible_extended:
-            SectionTitle(
-                left,
-                "Управление и отчёты",
-                "Разделы управления, контроля и аналитики",
-            ).pack(fill="x", pady=(18, 10))
-            ext_grid = tk.Frame(left, bg=COLORS["bg_page"])
-            ext_grid.pack(fill="x")
-            self._build_actions_grid(ext_grid, visible_extended, max_cols=2)
-
-        # Правая панель
-        SectionTitle(
-            right,
-            "Что сделать сегодня",
-            "Короткие ориентиры для пользователя",
-        ).pack(fill="x", pady=(0, 10))
-
-        tips = [
-            "Проверьте, созданы ли табели за текущий месяц.",
-            "Если требуется техника — оформите заявку заранее.",
-            "Сверьте заказы на питание на текущую дату.",
-            "Используйте верхнее меню для перехода в специализированные разделы.",
-        ]
-        InfoPanel(right, "Рекомендации", tips, accent=COLORS["primary"]).pack(fill="x", pady=(0, 12))
-
-        user_name = ""
-        if self._app_ref and self._app_ref.current_user:
-            user_name = self._app_ref.current_user.get("full_name") or self._app_ref.current_user.get("username") or ""
-
-        personal_lines = [
-            f"Пользователь: {user_name or '—'}",
-            f"Дата входа: {now.strftime('%d.%m.%Y %H:%M')}",
-            "Для полного набора функций используйте верхнее меню.",
-        ]
-        InfoPanel(right, "Текущая сессия", personal_lines, accent=COLORS["success"]).pack(fill="x")
+        side_head = tk.Frame(sidebar, bg=ERP["panel"])
+        side_head.pack(fill="x")
 
         tk.Label(
-            outer,
-            text="Главная панель разработана для быстрого старта: метрики сверху, действия по центру, рекомендации справа.",
-            font=FONT_TINY,
-            fg=COLORS["text_soft"],
-            bg=COLORS["bg_page"],
-        ).pack(anchor="w", pady=(18, 6))
+            side_head,
+            text="Разделы системы",
+            font=FONT_H3,
+            fg=ERP["text"],
+            bg=ERP["panel"],
+            anchor="w",
+            padx=10,
+            pady=8,
+        ).pack(fill="x")
 
-    def _build_actions_grid(self, parent, actions: list, max_cols: int = 2):
-        col, row = 0, 0
-        for icon, ttl, sub, page_key, perm in actions:
-            enabled = self._has_access(page_key, perm)
-            card = ActionCard(
-                parent,
-                icon=icon,
-                title=ttl,
-                subtitle=sub,
-                command=(lambda k=page_key: self._go(k)) if enabled else None,
-                enabled=enabled,
+        side_body = tk.Frame(sidebar, bg=ERP["sidebar"])
+        side_body.pack(fill="both", expand=True, padx=6, pady=6)
+
+        for title, key in self.NAV_ITEMS:
+            if key != "home" and not self._has_access(key):
+                continue
+            btn = ERPSidebarButton(
+                side_body,
+                text=title,
+                active=(key == "home"),
+                enabled=True,
+                command=(lambda k=key: self._go(k)),
             )
-            card.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
-            parent.columnconfigure(col, weight=1)
-            col += 1
-            if col >= max_cols:
-                col = 0
-                row += 1
+            btn.pack(fill="x", pady=2)
+
+        side_sep = tk.Frame(sidebar, bg=ERP["line"], height=1)
+        side_sep.pack(fill="x", padx=6, pady=6)
+
+        user_name = ""
+        role = ""
+        if self._app_ref and self._app_ref.current_user:
+            user_name = self._app_ref.current_user.get("full_name") or self._app_ref.current_user.get("username") or ""
+            role = self._app_ref.current_user.get("role") or ""
+
+        user_box = tk.Frame(sidebar, bg=ERP["sidebar"])
+        user_box.pack(fill="x", padx=10, pady=(0, 10))
+
+        tk.Label(
+            user_box,
+            text="Текущий пользователь",
+            font=FONT_SMALL,
+            fg=ERP["muted"],
+            bg=ERP["sidebar"],
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            user_box,
+            text=user_name or "-",
+            font=FONT_BODY,
+            fg=ERP["text"],
+            bg=ERP["sidebar"],
+            anchor="w",
+        ).pack(fill="x", pady=(2, 0))
+        tk.Label(
+            user_box,
+            text=f"Роль: {role or '-'}",
+            font=FONT_SMALL,
+            fg=ERP["soft"],
+            bg=ERP["sidebar"],
+            anchor="w",
+        ).pack(fill="x", pady=(2, 0))
+
+        # --- ПРАВАЯ РАБОЧАЯ ОБЛАСТЬ ---
+        work = tk.Frame(root, bg=ERP["bg"])
+        work.grid(row=0, column=1, sticky="nsew")
+        work.rowconfigure(3, weight=1)
+        work.columnconfigure(0, weight=1)
+
+        # Верхняя информационная полоса
+        info = ERPPanel(work, bg=ERP["card"])
+        info.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+
+        info_inner = tk.Frame(info, bg=ERP["card"])
+        info_inner.pack(fill="x", padx=12, pady=10)
+
+        left = tk.Frame(info_inner, bg=ERP["card"])
+        left.pack(side="left", fill="x", expand=True)
+
+        self.logo_img = embedded_logo_image(info_inner, max_w=160, max_h=52)
+        if self.logo_img:
+            tk.Label(info_inner, image=self.logo_img, bg=ERP["card"]).pack(side="right", padx=(12, 0))
+
+        now = datetime.now()
+        wd_map = {
+            "Monday": "понедельник",
+            "Tuesday": "вторник",
+            "Wednesday": "среда",
+            "Thursday": "четверг",
+            "Friday": "пятница",
+            "Saturday": "суббота",
+            "Sunday": "воскресенье",
+        }
+
+        tk.Label(
+            left,
+            text="Рабочий стол системы управления строительством",
+            font=FONT_H1,
+            fg=ERP["text"],
+            bg=ERP["card"],
+            anchor="w",
+        ).pack(fill="x")
+
+        tk.Label(
+            left,
+            text=f"Текущая дата: {now.strftime('%d.%m.%Y')}  |  {wd_map.get(now.strftime('%A'), '')}",
+            font=FONT_BODY,
+            fg=ERP["muted"],
+            bg=ERP["card"],
+            anchor="w",
+        ).pack(fill="x", pady=(4, 0))
+
+        # Показатели
+        stats = _load_home_stats()
+
+        stats_panel = tk.Frame(work, bg=ERP["bg"])
+        stats_panel.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+        stats_cfg = [
+            ("Сотрудники", stats["employees_count"], ERP["blue"], None),
+            ("Объекты", stats["objects_count"], ERP["orange"], "objects_registry"),
+            ("Табели за месяц", stats["timesheets_month"], ERP["green"], "my_timesheets"),
+            ("Транспорт на сегодня", stats["transport_today"], "#7b61c9", "transport"),
+            ("Питание на сегодня", stats["meals_today"], ERP["red"], "meals_order"),
+        ]
+
+        for i, (title, value, accent, key) in enumerate(stats_cfg):
+            box = ERPStatBox(
+                stats_panel,
+                title=title,
+                value=value,
+                accent=accent,
+                command=(lambda k=key: self._go(k)) if key else None,
+            )
+            box.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 6, 0))
+            stats_panel.columnconfigure(i, weight=1)
+
+        # Средняя зона: рабочие области
+        center = tk.Frame(work, bg=ERP["bg"])
+        center.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
+        center.columnconfigure(0, weight=3)
+        center.columnconfigure(1, weight=2)
+
+        # Быстрые операции
+        quick_wrap = ERPPanel(center, bg=ERP["card"])
+        quick_wrap.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+
+        ERPSectionHeader(quick_wrap, "Быстрые операции").pack(fill="x")
+
+        quick_body = tk.Frame(quick_wrap, bg=ERP["card"])
+        quick_body.pack(fill="both", expand=True, padx=8, pady=8)
+
+        operations = [
+            ("Создать табель", "timesheet"),
+            ("Открыть мои табели", "my_timesheets"),
+            ("Создать заявку на транспорт", "transport"),
+            ("Создать заявку на питание", "meals_order"),
+            ("Открыть реестр объектов", "objects_registry"),
+            ("Открыть проживание", "lodging_registry"),
+            ("Открыть карточку сотрудника", "employee_card"),
+            ("Открыть аналитику", "analytics_dashboard"),
+        ]
+
+        visible_ops = [(title, key) for title, key in operations if self._has_access(key)]
+
+        for i, (title, key) in enumerate(visible_ops):
+            r = i // 2
+            c = i % 2
+            btn = ttk.Button(
+                quick_body,
+                text=title,
+                style="ERP.TButton",
+                command=lambda k=key: self._go(k),
+            )
+            btn.grid(row=r, column=c, sticky="ew", padx=4, pady=4)
+            quick_body.columnconfigure(c, weight=1)
+
+        # Информация / поручения
+        note_wrap = ERPPanel(center, bg=ERP["card"])
+        note_wrap.grid(row=0, column=1, sticky="nsew")
+
+        ERPSectionHeader(note_wrap, "Служебная информация").pack(fill="x")
+
+        note_body = tk.Frame(note_wrap, bg=ERP["card"])
+        note_body.pack(fill="both", expand=True, padx=10, pady=10)
+
+        lines = [
+            "Проверьте полноту заполнения табелей за текущий месяц.",
+            "Оформляйте заявки на транспорт и питание заранее.",
+            "Для доступа к полному функционалу используйте верхнее меню.",
+            "При отсутствии доступа к разделу обратитесь к администратору системы.",
+        ]
+        for line in lines:
+            tk.Label(
+                note_body,
+                text="• " + line,
+                font=FONT_BODY,
+                fg=ERP["muted"],
+                bg=ERP["card"],
+                anchor="w",
+                justify="left",
+                wraplength=320,
+            ).pack(fill="x", pady=3)
+
+        # Нижняя зона: список возможностей
+        bottom = ERPPanel(work, bg=ERP["card"])
+        bottom.grid(row=3, column=0, sticky="nsew")
+
+        ERPSectionHeader(
+            bottom,
+            "Доступные разделы",
+            toolbar=[
+                ("Обновить", self._refresh_home),
+                ("Главная", lambda: self._go("home")),
+            ],
+        ).pack(fill="x")
+
+        table_wrap = tk.Frame(bottom, bg=ERP["card"])
+        table_wrap.pack(fill="both", expand=True, padx=8, pady=8)
+
+        columns = ("section", "status", "description")
+        tree = ttk.Treeview(table_wrap, columns=columns, show="headings", style="ERP.Treeview")
+        tree.heading("section", text="Раздел")
+        tree.heading("status", text="Доступ")
+        tree.heading("description", text="Описание")
+        tree.column("section", width=220, anchor="w")
+        tree.column("status", width=90, anchor="center")
+        tree.column("description", width=520, anchor="w")
+
+        ysb = ttk.Scrollbar(table_wrap, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=ysb.set)
+
+        tree.pack(side="left", fill="both", expand=True)
+        ysb.pack(side="right", fill="y")
+
+        descriptions = {
+            "timesheet": "Создание и заполнение объектного табеля.",
+            "my_timesheets": "Просмотр и редактирование личных табелей.",
+            "transport": "Формирование заявок на транспорт и спецтехнику.",
+            "meals_order": "Формирование заявок на питание.",
+            "objects_registry": "Работа с объектами строительства.",
+            "lodging_registry": "Учет проживания и заселения работников.",
+            "employee_card": "Сводная карточка по сотруднику.",
+            "timesheet_registry": "Общий реестр табелей.",
+            "transport_registry": "Общий реестр транспортных заявок.",
+            "analytics_dashboard": "Сводные управленческие показатели.",
+        }
+
+        for title, key in self.NAV_ITEMS:
+            if key == "home":
+                continue
+            allowed = self._has_access(key)
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    title,
+                    "Да" if allowed else "Нет",
+                    descriptions.get(key, ""),
+                ),
+            )
+
+        tree.bind("<Double-1>", lambda e: self._on_tree_open(tree))
+
+    def _refresh_home(self):
+        self._app_ref.show_home()
+
+    def _on_tree_open(self, tree: ttk.Treeview):
+        item = tree.focus()
+        if not item:
+            return
+        values = tree.item(item, "values")
+        if not values:
+            return
+        section_title = values[0]
+
+        mapping = {title: key for title, key in self.NAV_ITEMS}
+        key = mapping.get(section_title)
+        if key and key != "home" and self._has_access(key):
+            self._go(key)
 
     def _has_access(self, page_key: str, perm: Optional[str] = None) -> bool:
+        if page_key == "home":
+            return True
         if not self._app_ref:
             return True
         if perm:
@@ -1046,6 +1040,9 @@ class HomePage(tk.Frame):
     def _go(self, page_key: str):
         if not self._app_ref:
             return
+        if page_key == "home":
+            self._app_ref.show_home()
+            return
         builder_fn = self.PAGE_BUILDERS.get(page_key)
         if builder_fn:
             app = self._app_ref
@@ -1056,124 +1053,106 @@ class HomePage(tk.Frame):
 
 
 # ================================================================== #
-#  LoginPage — обновлённый экран входа
+#  LoginPage — строгий ERP стиль
 # ================================================================== #
 
 class LoginPage(tk.Frame):
-    """Страница входа в систему с современным оформлением и сохранением учётных данных."""
+    """Страница входа в строгом ERP-стиле."""
     def __init__(self, master, app_ref: "MainApp"):
-        super().__init__(master, bg=COLORS["bg_page"])
+        super().__init__(master, bg=ERP["login_bg"])
         self.app_ref = app_ref
         self._show_pass = False
         self.logo_img = None
-
         self._build()
         self.bind_all("<Return>", self._on_enter)
 
     def _build(self):
-        layout = tk.Frame(self, bg=COLORS["bg_page"])
-        layout.place(relx=0.5, rely=0.5, anchor="center")
+        center = tk.Frame(self, bg=ERP["login_bg"])
+        center.place(relx=0.5, rely=0.5, anchor="center")
 
-        card = Card(layout, bg=COLORS["bg_card"], pad=1)
+        card = ERPPanel(center, bg=ERP["card"], width=440, height=320)
         card.pack()
-        body = card.body
-        body.configure(bg=COLORS["bg_card"])
+        card.pack_propagate(False)
 
-        wrap = tk.Frame(body, bg=COLORS["bg_card"])
-        wrap.pack(padx=28, pady=26)
+        top = tk.Frame(card, bg=ERP["panel"])
+        top.pack(fill="x")
 
-        self.logo_img = embedded_logo_image(wrap, max_w=220, max_h=72)
+        tk.Label(
+            top,
+            text="Авторизация",
+            font=FONT_H2,
+            fg=ERP["text"],
+            bg=ERP["panel"],
+            anchor="w",
+            padx=12,
+            pady=8,
+        ).pack(fill="x")
+
+        body = tk.Frame(card, bg=ERP["card"])
+        body.pack(fill="both", expand=True, padx=18, pady=16)
+
+        self.logo_img = embedded_logo_image(body, max_w=180, max_h=56)
         if self.logo_img:
-            tk.Label(wrap, image=self.logo_img, bg=COLORS["bg_card"]).grid(
-                row=0, column=0, columnspan=2, pady=(0, 12)
+            tk.Label(body, image=self.logo_img, bg=ERP["card"]).grid(
+                row=0, column=0, columnspan=3, pady=(0, 8)
             )
 
         tk.Label(
-            wrap,
-            text="Управление строительством",
-            font=("Segoe UI", 18, "bold"),
-            fg=COLORS["text"],
-            bg=COLORS["bg_card"],
-        ).grid(row=1, column=0, columnspan=2, pady=(0, 4))
+            body,
+            text="Система управления строительством",
+            font=FONT_H3,
+            fg=ERP["text"],
+            bg=ERP["card"],
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 12))
 
-        tk.Label(
-            wrap,
-            text="Вход в систему",
-            font=("Segoe UI", 10),
-            fg=COLORS["text_muted"],
-            bg=COLORS["bg_card"],
-        ).grid(row=2, column=0, columnspan=2, pady=(0, 18))
+        tk.Label(body, text="Логин", font=FONT_BODY, fg=ERP["text"], bg=ERP["card"]).grid(
+            row=2, column=0, sticky="w", pady=(0, 4)
+        )
+        self.ent_login = ttk.Entry(body, width=34, style="ERP.TEntry")
+        self.ent_login.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 10), ipady=2)
 
-        tk.Label(
-            wrap,
-            text="Логин",
-            font=FONT_SMALL,
-            fg=COLORS["text"],
-            bg=COLORS["bg_card"],
-            anchor="w",
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        tk.Label(body, text="Пароль", font=FONT_BODY, fg=ERP["text"], bg=ERP["card"]).grid(
+            row=4, column=0, sticky="w", pady=(0, 4)
+        )
 
-        self.ent_login = ttk.Entry(wrap, width=34, style="App.TEntry")
-        self.ent_login.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 12), ipady=3)
-
-        tk.Label(
-            wrap,
-            text="Пароль",
-            font=FONT_SMALL,
-            fg=COLORS["text"],
-            bg=COLORS["bg_card"],
-            anchor="w",
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 4))
-
-        pass_frame = tk.Frame(wrap, bg=COLORS["bg_card"])
-        pass_frame.grid(row=6, column=0, columnspan=2, sticky="ew")
-        pass_frame.columnconfigure(0, weight=1)
-
-        self.ent_pass = ttk.Entry(pass_frame, width=30, show="*", style="App.TEntry")
-        self.ent_pass.grid(row=0, column=0, sticky="ew", ipady=3)
+        self.ent_pass = ttk.Entry(body, width=30, show="*", style="ERP.TEntry")
+        self.ent_pass.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 10), ipady=2)
 
         self.btn_eye = ttk.Button(
-            pass_frame,
-            text="👁",
-            width=3,
+            body,
+            text="Показать",
+            width=10,
             command=self._toggle_password,
-            style="Soft.TButton",
+            style="ERP.TButton",
         )
-        self.btn_eye.grid(row=0, column=1, padx=(6, 0))
+        self.btn_eye.grid(row=5, column=2, sticky="e", padx=(6, 0))
 
         self.var_remember = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            wrap,
-            text="Запомнить меня",
+            body,
+            text="Запомнить учетные данные",
             variable=self.var_remember,
-        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 14))
 
-        btns = tk.Frame(wrap, bg=COLORS["bg_card"])
-        btns.grid(row=8, column=0, columnspan=2, pady=(18, 0), sticky="ew")
-        btns.columnconfigure(0, weight=1)
-        btns.columnconfigure(1, weight=1)
+        btns = tk.Frame(body, bg=ERP["card"])
+        btns.grid(row=7, column=0, columnspan=3, sticky="e")
 
         ttk.Button(
             btns,
             text="Войти",
             command=self._on_login,
-            style="Primary.TButton",
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+            style="ERPPrimary.TButton",
+        ).pack(side="left", padx=(0, 6))
 
         ttk.Button(
             btns,
             text="Выход",
             command=self._on_exit,
-            style="App.TButton",
-        ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+            style="ERP.TButton",
+        ).pack(side="left")
 
-        tk.Label(
-            wrap,
-            text="Используйте корпоративные учётные данные для входа в систему.",
-            font=FONT_TINY,
-            fg=COLORS["text_soft"],
-            bg=COLORS["bg_card"],
-        ).grid(row=9, column=0, columnspan=2, pady=(14, 0))
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
 
         saved_user, saved_pass, remember = load_saved_credentials()
         if remember:
@@ -1189,7 +1168,7 @@ class LoginPage(tk.Frame):
     def _toggle_password(self):
         self._show_pass = not self._show_pass
         self.ent_pass.configure(show="" if self._show_pass else "*")
-        self.btn_eye.configure(text="🔒" if self._show_pass else "👁")
+        self.btn_eye.configure(text="Скрыть" if self._show_pass else "Показать")
 
     def _on_enter(self, event):
         if self.winfo_ismapped():
@@ -1226,8 +1205,8 @@ class SplashScreen(tk.Toplevel):
         self.title("Загрузка...")
         self.overrideredirect(True)
 
-        width = 480
-        height = 260
+        width = 460
+        height = 220
 
         screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
@@ -1235,43 +1214,43 @@ class SplashScreen(tk.Toplevel):
         y = (screen_height // 2) - (height // 2)
         self.geometry(f"{width}x{height}+{x}+{y}")
 
-        self.config(bg=COLORS["bg_card"], relief="solid", borderwidth=1)
+        self.config(bg=ERP["card"], relief="solid", borderwidth=1)
 
-        container = tk.Frame(self, bg=COLORS["bg_card"])
-        container.pack(fill="both", expand=True, padx=24, pady=24)
+        container = tk.Frame(self, bg=ERP["card"])
+        container.pack(fill="both", expand=True, padx=20, pady=20)
 
         tk.Label(
             container,
             text="Управление строительством",
-            font=("Segoe UI", 18, "bold"),
-            fg=COLORS["text"],
-            bg=COLORS["bg_card"],
-        ).pack(pady=(24, 8))
+            font=FONT_H2,
+            fg=ERP["text"],
+            bg=ERP["card"],
+        ).pack(pady=(24, 10))
 
         tk.Label(
             container,
-            text="Пожалуйста, подождите...",
+            text="Идет запуск системы...",
             font=FONT_BODY,
-            fg=COLORS["text_muted"],
-            bg=COLORS["bg_card"],
+            fg=ERP["muted"],
+            bg=ERP["card"],
         ).pack()
 
         self.progress = ttk.Progressbar(
             container,
             mode="indeterminate",
-            style="App.Horizontal.TProgressbar",
+            style="ERP.Horizontal.TProgressbar",
         )
-        self.progress.pack(pady=24, fill="x")
+        self.progress.pack(pady=20, padx=20, fill="x")
         self.progress.start(10)
 
         self.status_label = tk.Label(
             container,
             text="Инициализация...",
             font=FONT_SMALL,
-            fg=COLORS["text_muted"],
-            bg=COLORS["bg_card"],
+            fg=ERP["muted"],
+            bg=ERP["card"],
         )
-        self.status_label.pack(side="bottom", fill="x", ipady=8)
+        self.status_label.pack(side="bottom", fill="x", ipady=6)
 
     def update_status(self, text):
         self.status_label.config(text=text)
@@ -1289,78 +1268,81 @@ class MainApp(tk.Tk):
         self.is_authenticated: bool = bool(current_user)
 
         self.title(APP_NAME)
-        self.geometry("1220x820")
-        self.minsize(1020, 680)
-        self.configure(bg=COLORS["bg_app"])
+        self.geometry("1280x820")
+        self.minsize(1080, 700)
+        self.configure(bg=ERP["bg"])
 
         self._pages: Dict[str, tk.Widget] = {}
         self._build_menu()
 
-        # Верхний header
-        self.header = tk.Frame(self, bg=COLORS["bg_header"])
+        # --- Верхняя служебная панель ---
+        self.header = tk.Frame(self, bg=ERP["header"])
         self.header.pack(fill="x")
 
-        self.header_inner = tk.Frame(self.header, bg=COLORS["bg_header"])
-        self.header_inner.pack(fill="x", padx=16, pady=10)
+        top_line = tk.Frame(self.header, bg=ERP["panel"], height=1)
+        top_line.pack(fill="x", side="top")
 
-        header_left = tk.Frame(self.header_inner, bg=COLORS["bg_header"])
+        self.header_inner = tk.Frame(self.header, bg=ERP["header"])
+        self.header_inner.pack(fill="x", padx=12, pady=8)
+
+        header_left = tk.Frame(self.header_inner, bg=ERP["header"])
         header_left.pack(side="left", fill="x", expand=True)
 
         self.lbl_header_title = tk.Label(
             header_left,
             text="",
-            font=("Segoe UI", 15, "bold"),
-            fg=COLORS["text"],
-            bg=COLORS["bg_header"],
+            font=FONT_H1,
+            fg=ERP["text"],
+            bg=ERP["header"],
         )
         self.lbl_header_title.pack(side="left")
 
         self.lbl_header_hint = tk.Label(
             header_left,
             text="",
-            font=FONT_SMALL,
-            fg=COLORS["text_muted"],
-            bg=COLORS["bg_header"],
+            font=FONT_BODY,
+            fg=ERP["muted"],
+            bg=ERP["header"],
         )
         self.lbl_header_hint.pack(side="left", padx=(12, 0))
 
-        header_right = tk.Frame(self.header_inner, bg=COLORS["bg_header"])
+        header_right = tk.Frame(self.header_inner, bg=ERP["header"])
         header_right.pack(side="right")
 
         self.lbl_user_info = tk.Label(
             header_right,
             text="",
-            font=FONT_SMALL,
-            fg=COLORS["text_muted"],
-            bg=COLORS["bg_header"],
+            font=FONT_BODY,
+            fg=ERP["muted"],
+            bg=ERP["header"],
         )
         self.lbl_user_info.pack(side="left", padx=(0, 10))
 
         self.btn_logout = ttk.Button(
             header_right,
-            text="Выйти",
-            width=10,
+            text="Выход из системы",
+            width=16,
             command=self._on_logout,
-            style="App.TButton",
+            style="ERP.TButton",
         )
         self.btn_logout.pack(side="left")
         self.btn_logout.pack_forget()
 
-        tk.Frame(self, height=1, bg=COLORS["line"]).pack(fill="x")
+        tk.Frame(self, height=1, bg=ERP["line"]).pack(fill="x")
 
-        self.content = tk.Frame(self, bg=COLORS["bg_page"])
+        self.content = tk.Frame(self, bg=ERP["bg"])
         self.content.pack(fill="both", expand=True)
 
-        footer = tk.Frame(self, bg="#fafbfc")
+        footer = tk.Frame(self, bg=ERP["panel"])
         footer.pack(fill="x")
-        tk.Frame(footer, height=1, bg=COLORS["line"]).pack(fill="x")
+        tk.Frame(footer, height=1, bg=ERP["line"]).pack(fill="x", side="top")
         tk.Label(
             footer,
             text="Разработал Алексей Зезюкин, 2025",
-            font=FONT_TINY,
-            fg=COLORS["text_soft"],
-            bg="#fafbfc",
-        ).pack(side="right", padx=12, pady=5)
+            font=FONT_SMALL,
+            fg=ERP["muted"],
+            bg=ERP["panel"],
+        ).pack(side="right", padx=12, pady=4)
 
         self._set_user(None)
         self.show_login()
@@ -1369,7 +1351,6 @@ class MainApp(tk.Tk):
     #  Выход из аккаунта
     # ------------------------------------------------------------------ #
     def _on_logout(self):
-        """Выход из учётной записи — возврат на страницу логина."""
         self.show_login()
 
     def _perm_for_key(self, key: str) -> Optional[str]:
@@ -1614,7 +1595,7 @@ class MainApp(tk.Tk):
         if user:
             name = user.get("full_name") or user.get("username") or ""
             caption = f" — {name}"
-            self.lbl_user_info.config(text=f"👤 {name}")
+            self.lbl_user_info.config(text=f"Пользователь: {name}")
             self.btn_logout.pack(side="left")
         else:
             self.lbl_user_info.config(text="")
@@ -1658,14 +1639,14 @@ class MainApp(tk.Tk):
             return
 
         headers = {
-            "home": ("Управление строительством", "Единая стартовая панель и быстрый доступ к основным разделам"),
+            "home": ("Рабочий стол", "Главная страница системы"),
             "timesheet": ("Объектный табель", ""),
             "my_timesheets": ("Мои табели", ""),
             "timesheet_registry": ("Реестр табелей", ""),
             "brigades": ("Бригады", "Назначение бригадиров по подразделениям"),
             "workers": ("Работники", "Поиск по сотруднику и его объектам"),
             "timesheet_compare": ("Сравнение табелей", "Объектный vs Кадровый (1С)"),
-            "gpr": ("ГПР (Диаграмма Ганта)", "План работ по объекту (диапазон дат)"),
+            "gpr": ("ГПР (Диаграмма Ганта)", "План работ по объекту"),
             "transport": ("Заявка на спецтехнику", ""),
             "my_transport_orders": ("Мои заявки на транспорт", ""),
             "planning": ("Планирование транспорта", ""),
@@ -1674,26 +1655,27 @@ class MainApp(tk.Tk):
             "my_meals_orders": ("Мои заявки на питание", ""),
             "meals_planning": ("Планирование питания", ""),
             "meals_registry": ("Реестр заявок на питание", ""),
-            "meals_reports": ("Отчеты по питанию", "Дневной и месячный свод по комплексам"),
+            "meals_reports": ("Отчеты по питанию", "Дневной и месячный свод"),
             "meals_workers": ("Работники (питание)", "История питания по сотруднику"),
             "meals_settings": ("Настройки питания", ""),
             "lodging_registry": ("Проживание", "Реестр заселений/выселений"),
             "lodging_dorms": ("Проживание", "Общежития и комнаты"),
-            "lodging_rates": ("Проживание", "Тарифы (цена за сутки)"),
+            "lodging_rates": ("Проживание", "Тарифы проживания"),
             "object_create": ("Объекты: Создание/Редактирование", ""),
             "payroll": ("Затраты (ФОТ)", "Загрузка начислений и распределение по объектам"),
             "objects_registry": ("Реестр объектов", ""),
-            "employee_card": ("Сотрудники", "Карточка сотрудника (работа/питание/проживание)"),
+            "employee_card": ("Сотрудники", "Карточка сотрудника"),
             "budget": ("Анализ смет", ""),
-            "estimate_resource_decoder": ("Раскрытие ресурсов сметы", "Расшифровка расценок до конкретных ресурсов"),
-            "login": ("Управление строительством", "Вход в систему"),
-            "analytics_dashboard": ("Операционная аналитика", "Сводные показатели по ключевым метрикам"),
+            "estimate_resource_decoder": ("Раскрытие ресурсов сметы", "Расшифровка ресурсов"),
+            "login": ("Авторизация", "Вход в систему"),
+            "analytics_dashboard": ("Операционная аналитика", "Сводные показатели"),
         }
         title, hint = headers.get(key, (key.replace("_", " ").title(), ""))
         self._set_header(title, hint)
 
         for w in self.content.winfo_children():
             w.destroy()
+
         try:
             page = builder(self.content)
             page.pack(fill="both", expand=True)
