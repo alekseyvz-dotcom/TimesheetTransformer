@@ -26,12 +26,22 @@ try:
 except ImportError:
     Image = ImageTk = None
 
+
+# --- FALLBACK-ЛОГО ---
+# 1x1 png base64, чтобы приложение не падало, если внешний logo не загружен
+TINY_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+    "/x8AAusB9Wn2XxwAAAAASUVORK5CYII="
+)
+
+
 # --- НАСТРОЙКИ ЛОГИРОВАНИЯ ---
 def exe_dir() -> Path:
     """Определяет директорию запущенного .exe или .py файла."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
+
 
 LOG_FILE = exe_dir() / "main_app_log.txt"
 SETTINGS_FILE = exe_dir() / "settings.dat"
@@ -71,7 +81,7 @@ def _save_local_settings(data: dict):
 
 def _obfuscate(text: str) -> str:
     """
-    Простая обфускация (base64).  НЕ является криптостойким шифрованием,
+    Простая обфускация (base64). НЕ является криптостойким шифрованием,
     но не хранит пароль в открытом виде в файле.
     """
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
@@ -137,6 +147,7 @@ gpr_task_dialog = None
 gpr_dictionaries = None
 EstimateResourceDecoder = None
 
+
 def perform_heavy_imports():
     global BudgetAnalyzer, EstimateResourceDecoder, _assets_logo, _LOGO_BASE64, SpecialOrders, \
            meals_module, objects, Settings, timesheet_module, \
@@ -144,7 +155,7 @@ def perform_heavy_imports():
            timesheet_compare, meals_employees_module, lodging_module, \
            meals_reports_module, employee_card_module, payroll_module, \
            brigades_module, gpr_module, gpr_task_dialog, gpr_dictionaries
-           
+
     import BudgetAnalyzer
     import estimate_resource_decoder as EstimateResourceDecoder
     import assets_logo as _assets_logo
@@ -171,28 +182,131 @@ def perform_heavy_imports():
     except ImportError:
         timesheet_transformer = None
 
+
 # --- КОНСТАНТЫ И ГЛОБАЛЬНЫЕ НАСТРОЙКИ ---
 APP_NAME = "Управление строительством (Главное меню)"
 
 db_connection_pool = None
+
+
+# ================================================================== #
+#  ТЕМА / СТИЛИ
+# ================================================================== #
+
+COLORS = {
+    "bg_app": "#eef2f7",
+    "bg_page": "#f5f7fb",
+    "bg_card": "#ffffff",
+    "bg_card_soft": "#f8fafc",
+    "bg_header": "#ffffff",
+    "bg_dark": "#0f172a",
+    "bg_dark_2": "#172554",
+    "text": "#0f172a",
+    "text_muted": "#64748b",
+    "text_soft": "#94a3b8",
+    "line": "#e2e8f0",
+    "line_dark": "#cbd5e1",
+    "primary": "#2563eb",
+    "primary_hover": "#1d4ed8",
+    "success": "#16a34a",
+    "warning": "#d97706",
+    "danger": "#e11d48",
+    "violet": "#7c3aed",
+    "cyan": "#0891b2",
+}
+
+FONT_H1 = ("Segoe UI", 20, "bold")
+FONT_H2 = ("Segoe UI", 14, "bold")
+FONT_H3 = ("Segoe UI", 11, "bold")
+FONT_BODY = ("Segoe UI", 10)
+FONT_SMALL = ("Segoe UI", 9)
+FONT_TINY = ("Segoe UI", 8)
+
+
+def setup_ttk_styles(root):
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except Exception:
+        pass
+
+    style.configure(
+        "App.TButton",
+        font=("Segoe UI", 10),
+        padding=(10, 7),
+    )
+    style.configure(
+        "Primary.TButton",
+        font=("Segoe UI", 10, "bold"),
+        padding=(12, 8),
+        foreground="#ffffff",
+        background=COLORS["primary"],
+        borderwidth=0,
+    )
+    style.map(
+        "Primary.TButton",
+        background=[("active", COLORS["primary_hover"])],
+        foreground=[("disabled", "#dbeafe")],
+    )
+
+    style.configure(
+        "Soft.TButton",
+        font=("Segoe UI", 10),
+        padding=(10, 8),
+        foreground=COLORS["text"],
+        background="#e8eefc",
+        borderwidth=0,
+    )
+    style.map(
+        "Soft.TButton",
+        background=[("active", "#dbe7ff")],
+    )
+
+    style.configure(
+        "App.TEntry",
+        padding=6,
+    )
+
+    style.configure(
+        "TCheckbutton",
+        background=COLORS["bg_page"],
+        font=("Segoe UI", 9),
+    )
+
+    style.configure(
+        "App.Horizontal.TProgressbar",
+        troughcolor="#e5e7eb",
+        background=COLORS["primary"],
+        bordercolor="#e5e7eb",
+        lightcolor=COLORS["primary"],
+        darkcolor=COLORS["primary"],
+    )
+
 
 # --- ГЛАВНЫЕ УТИЛИТЫ ПРИЛОЖЕНИЯ ---
 
 def initialize_db_pool():
     """Создает пул соединений с БД. Вызывается один раз при старте приложения."""
     global db_connection_pool
-    if db_connection_pool: return
+    if db_connection_pool:
+        return
     try:
         provider = Settings.get_db_provider().strip().lower()
-        if provider != "postgres": raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
+        if provider != "postgres":
+            raise RuntimeError(f"Ожидался provider=postgres, а в настройках: {provider!r}")
         db_url = Settings.get_database_url().strip()
-        if not db_url: raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
+        if not db_url:
+            raise RuntimeError("В настройках не указана строка подключения (DATABASE_URL)")
 
         url = urlparse(db_url)
         db_connection_pool = pool.SimpleConnectionPool(
-            minconn=1, maxconn=10,
-            host=url.hostname or "localhost", port=url.port or 5432,
-            dbname=url.path.lstrip("/"), user=url.username, password=url.password,
+            minconn=1,
+            maxconn=10,
+            host=url.hostname or "localhost",
+            port=url.port or 5432,
+            dbname=url.path.lstrip("/"),
+            user=url.username,
+            password=url.password,
             sslmode=(parse_qs(url.query).get("sslmode", [Settings.get_db_sslmode()])[0] or "require"),
         )
         logging.info("Пул соединений с БД успешно инициализирован.")
@@ -201,6 +315,7 @@ def initialize_db_pool():
         db_connection_pool = None
         raise e
 
+
 def close_db_pool():
     """Закрывает все соединения в пуле. Вызывается при выходе из приложения."""
     global db_connection_pool
@@ -208,6 +323,7 @@ def close_db_pool():
         logging.info("Закрытие пула соединений с БД...")
         db_connection_pool.closeall()
         db_connection_pool = None
+
 
 def sync_permissions_from_menu_spec():
     from menu_spec import MENU_SPEC, TOP_LEVEL
@@ -251,6 +367,7 @@ def sync_permissions_from_menu_spec():
         if conn and db_connection_pool:
             db_connection_pool.putconn(conn)
 
+
 # --- АУТЕНТИФИКАЦИЯ ---
 
 def _hash_password(password: str, salt: Optional[bytes] = None) -> str:
@@ -259,6 +376,7 @@ def _hash_password(password: str, salt: Optional[bytes] = None) -> str:
     iterations = 260000
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
     return f"pbkdf2_sha256${iterations}${salt.hex()}${dk.hex()}"
+
 
 def _verify_password(password: str, stored_hash: str) -> bool:
     try:
@@ -272,20 +390,28 @@ def _verify_password(password: str, stored_hash: str) -> bool:
     except Exception:
         return False
 
+
 def authenticate_user(username: str, password: str) -> Optional[Dict[str, Any]]:
     conn = None
     try:
-        if not db_connection_pool: raise RuntimeError("Пул соединений недоступен.")
+        if not db_connection_pool:
+            raise RuntimeError("Пул соединений недоступен.")
         conn = db_connection_pool.getconn()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT id, username, password_hash, is_active, full_name, role FROM app_users WHERE username = %s", (username,))
+            cur.execute(
+                "SELECT id, username, password_hash, is_active, full_name, role "
+                "FROM app_users WHERE username = %s",
+                (username,),
+            )
             row = cur.fetchone()
             if not row or not row["is_active"] or not _verify_password(password, row["password_hash"]):
                 return None
             row.pop("password_hash", None)
             return dict(row)
     finally:
-        if conn and db_connection_pool: db_connection_pool.putconn(conn)
+        if conn and db_connection_pool:
+            db_connection_pool.putconn(conn)
+
 
 def load_user_permissions(user_id: int) -> set[str]:
     conn = None
@@ -324,19 +450,17 @@ def _load_home_stats() -> Dict[str, Any]:
     }
     if not db_connection_pool:
         return stats
+
     conn = None
     try:
         conn = db_connection_pool.getconn()
         with conn.cursor() as cur:
-            # Сотрудники (не уволенные)
             cur.execute("SELECT count(*) FROM employees WHERE NOT is_fired")
             stats["employees_count"] = cur.fetchone()[0]
 
-            # Объекты
             cur.execute("SELECT count(*) FROM objects")
             stats["objects_count"] = cur.fetchone()[0]
 
-            # Табели за текущий месяц
             now = datetime.now()
             cur.execute(
                 "SELECT count(*) FROM timesheet_headers WHERE year=%s AND month=%s",
@@ -344,14 +468,12 @@ def _load_home_stats() -> Dict[str, Any]:
             )
             stats["timesheets_month"] = cur.fetchone()[0]
 
-            # Заявки на транспорт сегодня
             cur.execute(
                 "SELECT count(*) FROM transport_orders WHERE date=%s",
                 (now.date(),),
             )
             stats["transport_today"] = cur.fetchone()[0]
 
-            # Заявки на питание сегодня
             cur.execute(
                 "SELECT count(*) FROM meal_orders WHERE date=%s",
                 (now.date(),),
@@ -368,7 +490,7 @@ def _load_home_stats() -> Dict[str, Any]:
 # --- ГРАФИЧЕСКИЙ ИНТЕРФЕЙС ---
 
 def embedded_logo_image(parent, max_w=360, max_h=160):
-    b64 = _LOGO_BASE64 or TINY_PNG_BASE64 
+    b64 = _LOGO_BASE64 or TINY_PNG_BASE64
 
     if Image and ImageTk:
         try:
@@ -391,341 +513,521 @@ def embedded_logo_image(parent, max_w=360, max_h=160):
         logging.error(f"Критическая ошибка загрузки логотипа через tkinter: {e}")
         return None
 
+
 # ================================================================== #
-#  HomePage — профессиональный дашборд v3
+#  UI-виджеты
 # ================================================================== #
 
-class _RoundedCard(tk.Frame):
-    """Базовая карточка с тенью-имитацией (двойная рамка)."""
-    def __init__(self, master, bg="#ffffff", **kw):
-        # Внешняя «тень»
-        super().__init__(master, bg="#d8d8d8", **kw)
-        self._inner = tk.Frame(self, bg=bg, padx=1, pady=1)
-        self._inner.pack(fill="both", expand=True, padx=1, pady=1)
+class Card(tk.Frame):
+    """Универсальная карточка."""
+    def __init__(self, master, bg=None, border="#e2e8f0", pad=1, radius_like=False, **kw):
+        outer_bg = "#dfe5ef"
+        super().__init__(master, bg=outer_bg, **kw)
+        self.inner = tk.Frame(self, bg=bg or COLORS["bg_card"])
+        self.inner.pack(fill="both", expand=True, padx=pad, pady=pad)
+        self._bg = bg or COLORS["bg_card"]
+        self._border = border
 
     @property
     def body(self):
-        return self._inner
+        return self.inner
 
 
-class _MetricTile(tk.Frame):
-    """
-    Компактная плитка метрики для верхней полосы.
-    Показывает число + подпись, без крупных иконок.
-    """
-    def __init__(self, master, value, label: str,
-                 accent="#2563EB", on_click=None, **kw):
-        super().__init__(master, bg="#ffffff", cursor="hand2" if on_click else "", **kw)
+class SectionTitle(tk.Frame):
+    def __init__(self, master, title: str, subtitle: str = "", **kw):
+        super().__init__(master, bg=master.cget("bg"), **kw)
+        tk.Label(
+            self,
+            text=title,
+            font=FONT_H2,
+            fg=COLORS["text"],
+            bg=self.cget("bg"),
+            anchor="w",
+        ).pack(fill="x")
+        if subtitle:
+            tk.Label(
+                self,
+                text=subtitle,
+                font=FONT_SMALL,
+                fg=COLORS["text_muted"],
+                bg=self.cget("bg"),
+                anchor="w",
+            ).pack(fill="x", pady=(2, 0))
+
+
+class HeroBanner(tk.Frame):
+    def __init__(self, master, app_ref: "MainApp", **kw):
+        super().__init__(master, bg=COLORS["bg_page"], **kw)
+        self.app_ref = app_ref
+        self.logo_img = None
+        self._build()
+
+    def _build(self):
+        card = Card(self, bg=COLORS["bg_dark"], pad=1)
+        card.pack(fill="x")
+        body = card.body
+        body.configure(bg=COLORS["bg_dark"])
+
+        content = tk.Frame(body, bg=COLORS["bg_dark"])
+        content.pack(fill="x", padx=26, pady=24)
+
+        left = tk.Frame(content, bg=COLORS["bg_dark"])
+        left.pack(side="left", fill="both", expand=True)
+
+        right = tk.Frame(content, bg=COLORS["bg_dark"])
+        right.pack(side="right", anchor="ne", padx=(20, 0))
+
+        self.logo_img = embedded_logo_image(right, max_w=180, max_h=70)
+        if self.logo_img:
+            tk.Label(right, image=self.logo_img, bg=COLORS["bg_dark"]).pack(anchor="e", pady=(0, 8))
+
+        name = ""
+        role = ""
+        if self.app_ref and self.app_ref.current_user:
+            name = self.app_ref.current_user.get("full_name") or self.app_ref.current_user.get("username") or ""
+            role = self.app_ref.current_user.get("role") or ""
+
+        now = datetime.now()
+        wd_map = {
+            "Monday": "понедельник",
+            "Tuesday": "вторник",
+            "Wednesday": "среда",
+            "Thursday": "четверг",
+            "Friday": "пятница",
+            "Saturday": "суббота",
+            "Sunday": "воскресенье",
+        }
+        wd = wd_map.get(now.strftime("%A"), "")
+
+        tk.Label(
+            left,
+            text=f"Здравствуйте, {name}!" if name else "Здравствуйте!",
+            font=FONT_H1,
+            fg="#ffffff",
+            bg=COLORS["bg_dark"],
+            anchor="w",
+        ).pack(fill="x")
+
+        tk.Label(
+            left,
+            text=f"Сегодня {now.strftime('%d.%m.%Y')} • {wd}",
+            font=FONT_BODY,
+            fg="#cbd5e1",
+            bg=COLORS["bg_dark"],
+            anchor="w",
+        ).pack(fill="x", pady=(6, 0))
+
+        role_text = f"Роль: {role}" if role else "Авторизованный пользователь"
+        tk.Label(
+            left,
+            text=role_text,
+            font=FONT_SMALL,
+            fg="#93c5fd",
+            bg=COLORS["bg_dark"],
+            anchor="w",
+        ).pack(fill="x", pady=(10, 0))
+
+        info_bar = tk.Frame(left, bg=COLORS["bg_dark"])
+        info_bar.pack(fill="x", pady=(16, 0))
+
+        badge1 = tk.Label(
+            info_bar,
+            text="● Система готова к работе",
+            font=FONT_SMALL,
+            fg="#86efac",
+            bg=COLORS["bg_dark"],
+            padx=10,
+            pady=5,
+        )
+        badge1.pack(side="left")
+
+        badge2 = tk.Label(
+            info_bar,
+            text="Единое окно управления строительством",
+            font=FONT_SMALL,
+            fg="#e2e8f0",
+            bg="#1e293b",
+            padx=10,
+            pady=5,
+        )
+        badge2.pack(side="left", padx=(8, 0))
+
+
+class MetricTile(tk.Frame):
+    def __init__(self, master, value, label: str, accent="#2563EB", on_click=None, **kw):
+        super().__init__(master, bg=COLORS["bg_page"], **kw)
         self._on_click = on_click
-        self.configure(padx=16, pady=10)
+        self._accent = accent
 
-        # Цветная полоска-индикатор слева
-        bar = tk.Frame(self, bg=accent, width=4)
-        bar.pack(side="left", fill="y", padx=(0, 12))
+        self.card = Card(self, bg=COLORS["bg_card"], pad=1)
+        self.card.pack(fill="both", expand=True)
 
-        text_frame = tk.Frame(self, bg="#ffffff")
-        text_frame.pack(side="left", fill="both", expand=True)
+        body = self.card.body
+        body.configure(bg=COLORS["bg_card"], cursor="hand2" if on_click else "")
+
+        top = tk.Frame(body, bg=COLORS["bg_card"], height=4)
+        top.pack(fill="x")
+        tk.Frame(top, bg=accent, height=4).pack(fill="x")
+
+        wrap = tk.Frame(body, bg=COLORS["bg_card"])
+        wrap.pack(fill="both", expand=True, padx=16, pady=14)
 
         tk.Label(
-            text_frame, text=str(value),
-            font=("Segoe UI", 20, "bold"), bg="#ffffff", fg="#111", anchor="w",
+            wrap,
+            text=str(value),
+            font=("Segoe UI", 22, "bold"),
+            fg=COLORS["text"],
+            bg=COLORS["bg_card"],
+            anchor="w",
         ).pack(fill="x")
 
         tk.Label(
-            text_frame, text=label,
-            font=("Segoe UI", 8), bg="#ffffff", fg="#888", anchor="w",
-        ).pack(fill="x")
+            wrap,
+            text=label,
+            font=FONT_SMALL,
+            fg=COLORS["text_muted"],
+            bg=COLORS["bg_card"],
+            anchor="w",
+        ).pack(fill="x", pady=(3, 0))
 
         if on_click:
-            self.bind("<Button-1>", lambda e: on_click())
-            for w in self.winfo_children():
-                w.bind("<Button-1>", lambda e: on_click())
-                for c in w.winfo_children():
-                    c.bind("<Button-1>", lambda e: on_click())
+            self._bind_recursive(body)
+
+    def _bind_recursive(self, widget):
+        widget.bind("<Button-1>", lambda e: self._on_click() if self._on_click else None)
+        widget.bind("<Enter>", self._on_enter)
+        widget.bind("<Leave>", self._on_leave)
+        for child in widget.winfo_children():
+            self._bind_recursive(child)
+
+    def _on_enter(self, _e=None):
+        self.card.configure(bg="#cfd8e8")
+
+    def _on_leave(self, _e=None):
+        self.card.configure(bg="#dfe5ef")
 
 
-class _ActionCard(tk.Frame):
-    """
-    Кнопка-карточка быстрого действия.
-    Иконка сверху, заголовок, подпись.
-    Hover-эффект + состояние disabled.
-    """
-    def __init__(self, master, icon: str, title: str, subtitle: str,
-                 command=None, enabled: bool = True, **kw):
+class ActionCard(tk.Frame):
+    def __init__(self, master, icon: str, title: str, subtitle: str, command=None, enabled: bool = True, **kw):
+        super().__init__(master, bg=COLORS["bg_page"], **kw)
         self._enabled = enabled
-        bg = "#ffffff" if enabled else "#f5f5f5"
-        self._bg_normal = bg
-        self._bg_hover = "#f0f4ff" if enabled else bg
-
-        super().__init__(
-            master, bg=bg,
-            highlightbackground="#e0e0e0" if enabled else "#eee",
-            highlightthickness=1,
-            cursor="hand2" if enabled else "",
-            **kw,
-        )
         self._command = command
-        self.configure(padx=16, pady=14)
 
-        fg_icon = "#2563EB" if enabled else "#ccc"
-        fg_title = "#222" if enabled else "#aaa"
-        fg_sub = "#777" if enabled else "#c0c0c0"
+        self.normal_card = "#dfe5ef"
+        self.hover_card = "#c7d7ff"
 
-        # Иконка
-        self._lbl_icon = tk.Label(
-            self, text=icon, font=("Segoe UI Emoji", 28),
-            bg=bg, fg=fg_icon, anchor="w",
+        self.card = Card(self, bg=COLORS["bg_card"] if enabled else "#f3f4f6", pad=1)
+        self.card.pack(fill="both", expand=True)
+
+        body = self.card.body
+        body.configure(
+            bg=COLORS["bg_card"] if enabled else "#f3f4f6",
+            cursor="hand2" if enabled else "",
         )
-        self._lbl_icon.pack(anchor="w", pady=(0, 6))
 
-        # Заголовок
-        self._lbl_title = tk.Label(
-            self, text=title, font=("Segoe UI", 11, "bold"),
-            bg=bg, fg=fg_title, anchor="w",
-        )
-        self._lbl_title.pack(fill="x")
+        fg_icon = COLORS["primary"] if enabled else "#cbd5e1"
+        fg_title = COLORS["text"] if enabled else "#94a3b8"
+        fg_sub = COLORS["text_muted"] if enabled else "#cbd5e1"
 
-        # Подпись
-        self._lbl_sub = tk.Label(
-            self, text=subtitle, font=("Segoe UI", 8),
-            bg=bg, fg=fg_sub, anchor="w", wraplength=180, justify="left",
-        )
-        self._lbl_sub.pack(fill="x", pady=(2, 0))
+        wrap = tk.Frame(body, bg=body.cget("bg"))
+        wrap.pack(fill="both", expand=True, padx=16, pady=14)
 
-        # Стрелка «→» справа внизу для enabled
+        tk.Label(
+            wrap,
+            text=icon,
+            font=("Segoe UI Emoji", 28),
+            bg=body.cget("bg"),
+            fg=fg_icon,
+            anchor="w",
+        ).pack(anchor="w", pady=(0, 8))
+
+        tk.Label(
+            wrap,
+            text=title,
+            font=FONT_H3,
+            bg=body.cget("bg"),
+            fg=fg_title,
+            anchor="w",
+        ).pack(fill="x")
+
+        tk.Label(
+            wrap,
+            text=subtitle,
+            font=FONT_SMALL,
+            bg=body.cget("bg"),
+            fg=fg_sub,
+            anchor="w",
+            justify="left",
+            wraplength=230,
+        ).pack(fill="x", pady=(4, 0))
+
+        bottom = tk.Frame(wrap, bg=body.cget("bg"))
+        bottom.pack(fill="x", pady=(10, 0))
+
+        tk.Label(
+            bottom,
+            text="Открыть →" if enabled else "Недоступно",
+            font=FONT_SMALL,
+            bg=body.cget("bg"),
+            fg=COLORS["primary"] if enabled else "#cbd5e1",
+            anchor="w",
+        ).pack(side="left")
+
         if enabled:
-            tk.Label(
-                self, text="→", font=("Segoe UI", 12),
-                bg=bg, fg="#bbb", anchor="e",
-            ).pack(fill="x", pady=(6, 0))
+            self._bind_recursive(body)
 
-        # Привязка событий
-        if enabled:
-            all_widgets = [self, self._lbl_icon, self._lbl_title, self._lbl_sub]
-            # собираем всех детей рекурсивно
-            for w in self.winfo_children():
-                all_widgets.append(w)
-            for w in all_widgets:
-                w.bind("<Enter>", self._on_enter)
-                w.bind("<Leave>", self._on_leave)
-                w.bind("<Button-1>", self._on_click)
-
-    def _set_bg(self, color):
-        self.configure(bg=color)
-        for w in self.winfo_children():
-            try:
-                w.configure(bg=color)
-            except tk.TclError:
-                pass
+    def _bind_recursive(self, widget):
+        widget.bind("<Button-1>", self._on_click)
+        widget.bind("<Enter>", self._on_enter)
+        widget.bind("<Leave>", self._on_leave)
+        for child in widget.winfo_children():
+            self._bind_recursive(child)
 
     def _on_enter(self, _e=None):
         if self._enabled:
-            self._set_bg(self._bg_hover)
-            self.configure(highlightbackground="#a0b4ff", highlightthickness=2)
+            self.card.configure(bg=self.hover_card)
 
     def _on_leave(self, _e=None):
         if self._enabled:
-            self._set_bg(self._bg_normal)
-            self.configure(highlightbackground="#e0e0e0", highlightthickness=1)
+            self.card.configure(bg=self.normal_card)
 
     def _on_click(self, _e=None):
-        if self._command:
+        if self._enabled and self._command:
             self._command()
 
 
+class InfoPanel(tk.Frame):
+    def __init__(self, master, title: str, lines: List[str], accent="#2563eb", **kw):
+        super().__init__(master, bg=COLORS["bg_page"], **kw)
+        card = Card(self, bg=COLORS["bg_card"], pad=1)
+        card.pack(fill="both", expand=True)
+        body = card.body
+
+        head = tk.Frame(body, bg=COLORS["bg_card"])
+        head.pack(fill="x", padx=16, pady=(14, 8))
+
+        tk.Frame(head, bg=accent, width=6, height=24).pack(side="left", padx=(0, 10))
+        tk.Label(
+            head,
+            text=title,
+            font=FONT_H3,
+            fg=COLORS["text"],
+            bg=COLORS["bg_card"],
+        ).pack(side="left")
+
+        content = tk.Frame(body, bg=COLORS["bg_card"])
+        content.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+
+        for line in lines:
+            tk.Label(
+                content,
+                text=f"• {line}",
+                font=FONT_SMALL,
+                fg=COLORS["text_muted"],
+                bg=COLORS["bg_card"],
+                anchor="w",
+                justify="left",
+                wraplength=340,
+            ).pack(fill="x", pady=2)
+
+
+# ================================================================== #
+#  HomePage — обновлённый dashboard
+# ================================================================== #
+
 class HomePage(tk.Frame):
     """
-    Главная страница — информационная панель.
-    Адаптируется под роль: рядовой сотрудник видит свои действия,
-    руководитель — расширенный набор + статистику.
+    Главная страница — современная информационная панель.
+    Показывает:
+    - приветствие,
+    - KPI/метрики,
+    - быстрые действия,
+    - подсказки по работе.
     """
 
-    # ── Быстрые действия (доступны всем, фильтруются по правам) ──
-    #  (icon, title, subtitle, page_key, explicit_perm_or_None)
     ACTIONS_PRIMARY = [
-        ("📋", "Создать табель",       "Заполнить табель\nрабочего времени",      "timesheet",       None),
-        ("📑", "Мои табели",            "Просмотр и редактирование\nмоих табелей", "my_timesheets",   None),
-        ("🚛", "Заявка на транспорт",   "Оформить заявку\nна спецтехнику",        "transport",       None),
-        ("🍽️", "Заказ питания",         "Заявка на питание\nбригады",             "meals_order",     None),
+        ("📋", "Создать табель", "Заполнить табель рабочего времени", "timesheet", None),
+        ("📑", "Мои табели", "Просмотр и редактирование ваших табелей", "my_timesheets", None),
+        ("🚛", "Заявка на транспорт", "Оформить заявку на спецтехнику", "transport", None),
+        ("🍽️", "Заказ питания", "Подать заявку на питание бригады", "meals_order", None),
     ]
 
     ACTIONS_EXTENDED = [
-        ("📊", "Аналитика",            "Сводные показатели\nи метрики",            "analytics_dashboard", None),
-        ("🏗️", "Реестр объектов",       "Все объекты\nкомпании",                   "objects_registry",    None),
-        ("🏠", "Проживание",            "Реестр заселений\nи выселений",            "lodging_registry",    None),
-        ("👤", "Карточка сотрудника",    "Работа, питание,\nпроживание",            "employee_card",       None),
-        ("📂", "Реестр табелей",         "Все табели\nвсех пользователей",          "timesheet_registry",  None),
-        ("🚚", "Реестр транспорта",      "Все заявки\nна транспорт",               "transport_registry",  None),
+        ("📊", "Аналитика", "Сводные показатели и метрики по работе", "analytics_dashboard", None),
+        ("🏗️", "Реестр объектов", "Список и состояние объектов компании", "objects_registry", None),
+        ("🏠", "Проживание", "Реестр заселений, комнат и общежитий", "lodging_registry", None),
+        ("👤", "Карточка сотрудника", "Работа, питание и проживание сотрудника", "employee_card", None),
+        ("📂", "Реестр табелей", "Общий реестр табелей всех пользователей", "timesheet_registry", None),
+        ("🚚", "Реестр транспорта", "Все заявки на транспорт и спецтехнику", "transport_registry", None),
     ]
 
     PAGE_BUILDERS = {
-        "timesheet":            lambda p, app: timesheet_module.create_timesheet_page(p, app),
-        "my_timesheets":        lambda p, app: timesheet_module.create_my_timesheets_page(p, app),
-        "transport":            lambda p, app: SpecialOrders.create_page(p, app),
-        "meals_order":          lambda p, app: meals_module.create_meals_order_page(p, app),
-        "analytics_dashboard":  lambda p, app: analytics_module.AnalyticsPage(p, app),
-        "objects_registry":     lambda p, app: objects.ObjectsRegistryPage(p, app),
-        "lodging_registry":     lambda p, app: lodging_module.create_lodging_registry_page(p, app),
-        "employee_card":        lambda p, app: employee_card_module.create_employee_card_page(p, app),
-        "timesheet_registry":   lambda p, app: timesheet_module.create_timesheet_registry_page(p, app),
-        "transport_registry":   lambda p, app: SpecialOrders.create_transport_registry_page(p),
+        "timesheet": lambda p, app: timesheet_module.create_timesheet_page(p, app),
+        "my_timesheets": lambda p, app: timesheet_module.create_my_timesheets_page(p, app),
+        "transport": lambda p, app: SpecialOrders.create_page(p, app),
+        "meals_order": lambda p, app: meals_module.create_meals_order_page(p, app),
+        "analytics_dashboard": lambda p, app: analytics_module.AnalyticsPage(p, app),
+        "objects_registry": lambda p, app: objects.ObjectsRegistryPage(p, app),
+        "lodging_registry": lambda p, app: lodging_module.create_lodging_registry_page(p, app),
+        "employee_card": lambda p, app: employee_card_module.create_employee_card_page(p, app),
+        "timesheet_registry": lambda p, app: timesheet_module.create_timesheet_registry_page(p, app),
+        "transport_registry": lambda p, app: SpecialOrders.create_transport_registry_page(p),
     }
 
     def __init__(self, master, app_ref: "MainApp" = None):
-        super().__init__(master, bg="#eef1f5")
+        super().__init__(master, bg=COLORS["bg_page"])
         self._app_ref = app_ref
 
-        # ── Скроллируемая область ──
-        self._canvas = tk.Canvas(self, bg="#eef1f5", highlightthickness=0)
-        vsb = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
-        self._inner = tk.Frame(self._canvas, bg="#eef1f5")
+        self._canvas = tk.Canvas(self, bg=COLORS["bg_page"], highlightthickness=0)
+        self._vsb = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
+        self._inner = tk.Frame(self._canvas, bg=COLORS["bg_page"])
 
         self._inner_id = self._canvas.create_window((0, 0), window=self._inner, anchor="nw")
-        self._inner.bind("<Configure>",
-                         lambda e: self._canvas.configure(scrollregion=self._canvas.bbox("all")))
+        self._inner.bind("<Configure>", lambda e: self._canvas.configure(scrollregion=self._canvas.bbox("all")))
         self._canvas.bind("<Configure>", self._on_canvas_resize)
-        self._canvas.configure(yscrollcommand=vsb.set)
+        self._canvas.configure(yscrollcommand=self._vsb.set)
 
         self._canvas.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
+        self._vsb.pack(side="right", fill="y")
 
-        # Скролл колёсиком
-        self._canvas.bind_all("<MouseWheel>",
-                              lambda e: self._canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
-
+        self.bind("<Map>", self._bind_mousewheel_safe)
         self._build()
+
+    def _bind_mousewheel_safe(self, _event=None):
+        self._canvas.bind_all("<MouseWheel>", self._on_mousewheel_windows)
+        self._canvas.bind_all("<Button-4>", self._on_mousewheel_linux_up)
+        self._canvas.bind_all("<Button-5>", self._on_mousewheel_linux_down)
+
+    def _on_mousewheel_windows(self, event):
+        self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _on_mousewheel_linux_up(self, event):
+        self._canvas.yview_scroll(-1, "units")
+
+    def _on_mousewheel_linux_down(self, event):
+        self._canvas.yview_scroll(1, "units")
 
     def _on_canvas_resize(self, event):
         self._canvas.itemconfig(self._inner_id, width=event.width)
 
-    # ══════════════════════════════════════════════════════════════
     def _build(self):
         c = self._inner
         now = datetime.now()
-
-        # ── 1. ШАПКА (белая полоса) ──────────────────────────────
-        hdr = tk.Frame(c, bg="#ffffff")
-        hdr.pack(fill="x")
-
-        hdr_pad = tk.Frame(hdr, bg="#ffffff")
-        hdr_pad.pack(fill="x", padx=40, pady=(24, 20))
-
-        # Лого
-        self.logo_img = embedded_logo_image(hdr_pad, max_w=180, max_h=64)
-        if self.logo_img:
-            tk.Label(hdr_pad, image=self.logo_img, bg="#ffffff").pack(
-                side="left", padx=(0, 28))
-
-        # Приветствие + дата
-        greet_frame = tk.Frame(hdr_pad, bg="#ffffff")
-        greet_frame.pack(side="left", fill="x", expand=True)
-
-        name = ""
-        if self._app_ref and self._app_ref.current_user:
-            name = (self._app_ref.current_user.get("full_name")
-                    or self._app_ref.current_user.get("username") or "")
-        greeting = f"Здравствуйте, {name}!" if name else "Здравствуйте!"
-
-        tk.Label(greet_frame, text=greeting,
-                 font=("Segoe UI", 17, "bold"), bg="#ffffff", fg="#1a1a2e",
-                 anchor="w").pack(fill="x")
-
-        _wd = {"Monday": "понедельник", "Tuesday": "вторник", "Wednesday": "среда",
-               "Thursday": "четверг", "Friday": "пятница",
-               "Saturday": "суббота", "Sunday": "воскресенье"}
-        wd = _wd.get(now.strftime("%A"), "")
-        tk.Label(greet_frame,
-                 text=f"Сегодня {now.strftime('%d.%m.%Y')}, {wd}",
-                 font=("Segoe UI", 9), bg="#ffffff", fg="#999",
-                 anchor="w").pack(fill="x", pady=(2, 0))
-
-        # ── 2. МЕТРИКИ (горизонтальная полоса) ────────────────────
-        tk.Frame(c, height=1, bg="#dde1e6").pack(fill="x")
-
-        metrics_bar = tk.Frame(c, bg="#f7f8fa")
-        metrics_bar.pack(fill="x")
-
-        metrics_inner = tk.Frame(metrics_bar, bg="#f7f8fa")
-        metrics_inner.pack(fill="x", padx=40, pady=(12, 12))
-
         stats = _load_home_stats()
 
+        outer = tk.Frame(c, bg=COLORS["bg_page"])
+        outer.pack(fill="both", expand=True, padx=28, pady=22)
+
+        # HERO
+        HeroBanner(outer, self._app_ref).pack(fill="x", pady=(0, 18))
+
+        # Метрики
+        SectionTitle(
+            outer,
+            "Оперативная сводка",
+            "Ключевые показатели на текущий момент",
+        ).pack(fill="x", pady=(0, 10))
+
+        metrics = tk.Frame(outer, bg=COLORS["bg_page"])
+        metrics.pack(fill="x")
+
         metrics_cfg = [
-            (stats["employees_count"], "Сотрудников",                "#0284C7", None),
-            (stats["objects_count"],   "Объектов",                    "#D97706", "objects_registry"),
-            (stats["timesheets_month"], f"Табелей ({now.strftime('%m.%Y')})", "#16A34A", "my_timesheets"),
-            (stats["transport_today"], "Транспорт сегодня",           "#7C3AED", "transport"),
-            (stats["meals_today"],     "Питание сегодня",             "#E11D48", "meals_order"),
+            (stats["employees_count"], "Сотрудников", COLORS["cyan"], None),
+            (stats["objects_count"], "Объектов", COLORS["warning"], "objects_registry"),
+            (stats["timesheets_month"], f"Табелей за {now.strftime('%m.%Y')}", COLORS["success"], "my_timesheets"),
+            (stats["transport_today"], "Транспорт сегодня", COLORS["violet"], "transport"),
+            (stats["meals_today"], "Питание сегодня", COLORS["danger"], "meals_order"),
         ]
 
         for i, (val, lbl, accent, page_key) in enumerate(metrics_cfg):
             cmd = (lambda k=page_key: self._go(k)) if page_key else None
-            tile = _MetricTile(metrics_inner, val, lbl, accent=accent, on_click=cmd)
-            tile.grid(row=0, column=i, padx=6, pady=2, sticky="nsew")
-            metrics_inner.columnconfigure(i, weight=1)
+            tile = MetricTile(metrics, val, lbl, accent=accent, on_click=cmd)
+            tile.grid(row=0, column=i, padx=6, pady=4, sticky="nsew")
+            metrics.columnconfigure(i, weight=1)
 
-        tk.Frame(c, height=1, bg="#dde1e6").pack(fill="x")
+        # Две колонки: действия + панель задач
+        mid = tk.Frame(outer, bg=COLORS["bg_page"])
+        mid.pack(fill="x", pady=(20, 0))
+        mid.columnconfigure(0, weight=3)
+        mid.columnconfigure(1, weight=2)
 
-        # ── 3. ОСНОВНОЙ КОНТЕНТ ──────────────────────────────────
-        body = tk.Frame(c, bg="#eef1f5")
-        body.pack(fill="both", expand=True, padx=40, pady=(24, 16))
+        left = tk.Frame(mid, bg=COLORS["bg_page"])
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
 
-        # ── 3a. Мои действия (видны всем авторизованным) ──────
-        self._build_section(
-            body,
-            title="Мои действия",
-            actions=self.ACTIONS_PRIMARY,
-            max_cols=4,
-        )
+        right = tk.Frame(mid, bg=COLORS["bg_page"])
+        right.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
 
-        # ── 3b. Управление (расширенный набор — фильтруется по правам) ──
-        visible_extended = [
-            a for a in self.ACTIONS_EXTENDED
-            if self._has_access(a[3], a[4])
-        ]
-
-        if visible_extended:
-            self._build_section(
-                body,
-                title="Управление и отчёты",
-                actions=visible_extended,
-                max_cols=4,
-                top_pad=20,
-            )
-
-        # ── 4. Подвал ────────────────────────────────────────────
-        tk.Label(
-            c, text="Используйте верхнее меню для доступа ко всем разделам.",
-            font=("Segoe UI", 8), fg="#bbb", bg="#eef1f5",
-        ).pack(pady=(16, 24))
-
-    # ── Вспомогательные методы ────────────────────────────────────
-
-    def _build_section(self, parent, title: str,
-                       actions: list, max_cols: int = 4,
-                       top_pad: int = 0):
-        """Создаёт секцию с заголовком и сеткой карточек."""
-        frame = tk.Frame(parent, bg="#eef1f5")
-        frame.pack(fill="x", pady=(top_pad, 0))
-
-        tk.Label(
-            frame, text=title, font=("Segoe UI", 11, "bold"),
-            bg="#eef1f5", fg="#444", anchor="w",
+        # Быстрые действия
+        SectionTitle(
+            left,
+            "Быстрые действия",
+            "Самые востребованные операции для ежедневной работы",
         ).pack(fill="x", pady=(0, 10))
 
-        grid = tk.Frame(frame, bg="#eef1f5")
-        grid.pack(fill="x")
+        primary_grid = tk.Frame(left, bg=COLORS["bg_page"])
+        primary_grid.pack(fill="x")
 
+        self._build_actions_grid(primary_grid, self.ACTIONS_PRIMARY, max_cols=2)
+
+        visible_extended = [a for a in self.ACTIONS_EXTENDED if self._has_access(a[3], a[4])]
+        if visible_extended:
+            SectionTitle(
+                left,
+                "Управление и отчёты",
+                "Разделы управления, контроля и аналитики",
+            ).pack(fill="x", pady=(18, 10))
+            ext_grid = tk.Frame(left, bg=COLORS["bg_page"])
+            ext_grid.pack(fill="x")
+            self._build_actions_grid(ext_grid, visible_extended, max_cols=2)
+
+        # Правая панель
+        SectionTitle(
+            right,
+            "Что сделать сегодня",
+            "Короткие ориентиры для пользователя",
+        ).pack(fill="x", pady=(0, 10))
+
+        tips = [
+            "Проверьте, созданы ли табели за текущий месяц.",
+            "Если требуется техника — оформите заявку заранее.",
+            "Сверьте заказы на питание на текущую дату.",
+            "Используйте верхнее меню для перехода в специализированные разделы.",
+        ]
+        InfoPanel(right, "Рекомендации", tips, accent=COLORS["primary"]).pack(fill="x", pady=(0, 12))
+
+        user_name = ""
+        if self._app_ref and self._app_ref.current_user:
+            user_name = self._app_ref.current_user.get("full_name") or self._app_ref.current_user.get("username") or ""
+
+        personal_lines = [
+            f"Пользователь: {user_name or '—'}",
+            f"Дата входа: {now.strftime('%d.%m.%Y %H:%M')}",
+            "Для полного набора функций используйте верхнее меню.",
+        ]
+        InfoPanel(right, "Текущая сессия", personal_lines, accent=COLORS["success"]).pack(fill="x")
+
+        tk.Label(
+            outer,
+            text="Главная панель разработана для быстрого старта: метрики сверху, действия по центру, рекомендации справа.",
+            font=FONT_TINY,
+            fg=COLORS["text_soft"],
+            bg=COLORS["bg_page"],
+        ).pack(anchor="w", pady=(18, 6))
+
+    def _build_actions_grid(self, parent, actions: list, max_cols: int = 2):
         col, row = 0, 0
         for icon, ttl, sub, page_key, perm in actions:
             enabled = self._has_access(page_key, perm)
-            card = _ActionCard(
-                grid, icon=icon, title=ttl, subtitle=sub,
+            card = ActionCard(
+                parent,
+                icon=icon,
+                title=ttl,
+                subtitle=sub,
                 command=(lambda k=page_key: self._go(k)) if enabled else None,
                 enabled=enabled,
             )
             card.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
-            grid.columnconfigure(col, weight=1)
+            parent.columnconfigure(col, weight=1)
             col += 1
             if col >= max_cols:
                 col = 0
@@ -752,84 +1054,139 @@ class HomePage(tk.Frame):
                 lambda p, _fn=builder_fn, _app=app: _fn(p, _app),
             )
 
+
 # ================================================================== #
-#  LoginPage — с галочкой «Запомнить меня»
+#  LoginPage — обновлённый экран входа
 # ================================================================== #
 
 class LoginPage(tk.Frame):
-    """Страница входа в систему с возможностью сохранить учётные данные."""
+    """Страница входа в систему с современным оформлением и сохранением учётных данных."""
     def __init__(self, master, app_ref: "MainApp"):
-        super().__init__(master, bg="#f7f7f7")
+        super().__init__(master, bg=COLORS["bg_page"])
         self.app_ref = app_ref
-
-        center = tk.Frame(self, bg="#f7f7f7")
-        center.place(relx=0.5, rely=0.5, anchor="center")
-
-        # --- Заголовок ---
-        tk.Label(
-            center, text="Управление строительством",
-            font=("Segoe UI", 16, "bold"), bg="#f7f7f7",
-        ).grid(row=0, column=0, columnspan=2, pady=(0, 4))
-
-        tk.Label(
-            center, text="Вход в систему",
-            font=("Segoe UI", 11), fg="#555", bg="#f7f7f7",
-        ).grid(row=1, column=0, columnspan=2, pady=(0, 15))
-
-        # --- Логин ---
-        tk.Label(center, text="Логин:", bg="#f7f7f7").grid(
-            row=2, column=0, sticky="e", padx=(0, 6), pady=4)
-        self.ent_login = ttk.Entry(center, width=28)
-        self.ent_login.grid(row=2, column=1, sticky="w", pady=4)
-
-        # --- Пароль ---
-        tk.Label(center, text="Пароль:", bg="#f7f7f7").grid(
-            row=3, column=0, sticky="e", padx=(0, 6), pady=4)
-
-        pass_frame = tk.Frame(center, bg="#f7f7f7")
-        pass_frame.grid(row=3, column=1, sticky="w", pady=4)
-
-        self.ent_pass = ttk.Entry(pass_frame, width=22, show="*")
-        self.ent_pass.pack(side="left")
-
         self._show_pass = False
-        self.btn_eye = ttk.Button(pass_frame, text="👁", width=3, command=self._toggle_password)
-        self.btn_eye.pack(side="left", padx=(4, 0))
+        self.logo_img = None
 
-        # --- Запомнить меня ---
-        self.var_remember = tk.BooleanVar(value=False)
-        chk = ttk.Checkbutton(
-            center, text="Запомнить меня",
-            variable=self.var_remember,
+        self._build()
+        self.bind_all("<Return>", self._on_enter)
+
+    def _build(self):
+        layout = tk.Frame(self, bg=COLORS["bg_page"])
+        layout.place(relx=0.5, rely=0.5, anchor="center")
+
+        card = Card(layout, bg=COLORS["bg_card"], pad=1)
+        card.pack()
+        body = card.body
+        body.configure(bg=COLORS["bg_card"])
+
+        wrap = tk.Frame(body, bg=COLORS["bg_card"])
+        wrap.pack(padx=28, pady=26)
+
+        self.logo_img = embedded_logo_image(wrap, max_w=220, max_h=72)
+        if self.logo_img:
+            tk.Label(wrap, image=self.logo_img, bg=COLORS["bg_card"]).grid(
+                row=0, column=0, columnspan=2, pady=(0, 12)
+            )
+
+        tk.Label(
+            wrap,
+            text="Управление строительством",
+            font=("Segoe UI", 18, "bold"),
+            fg=COLORS["text"],
+            bg=COLORS["bg_card"],
+        ).grid(row=1, column=0, columnspan=2, pady=(0, 4))
+
+        tk.Label(
+            wrap,
+            text="Вход в систему",
+            font=("Segoe UI", 10),
+            fg=COLORS["text_muted"],
+            bg=COLORS["bg_card"],
+        ).grid(row=2, column=0, columnspan=2, pady=(0, 18))
+
+        tk.Label(
+            wrap,
+            text="Логин",
+            font=FONT_SMALL,
+            fg=COLORS["text"],
+            bg=COLORS["bg_card"],
+            anchor="w",
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 4))
+
+        self.ent_login = ttk.Entry(wrap, width=34, style="App.TEntry")
+        self.ent_login.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 12), ipady=3)
+
+        tk.Label(
+            wrap,
+            text="Пароль",
+            font=FONT_SMALL,
+            fg=COLORS["text"],
+            bg=COLORS["bg_card"],
+            anchor="w",
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 4))
+
+        pass_frame = tk.Frame(wrap, bg=COLORS["bg_card"])
+        pass_frame.grid(row=6, column=0, columnspan=2, sticky="ew")
+        pass_frame.columnconfigure(0, weight=1)
+
+        self.ent_pass = ttk.Entry(pass_frame, width=30, show="*", style="App.TEntry")
+        self.ent_pass.grid(row=0, column=0, sticky="ew", ipady=3)
+
+        self.btn_eye = ttk.Button(
+            pass_frame,
+            text="👁",
+            width=3,
+            command=self._toggle_password,
+            style="Soft.TButton",
         )
-        chk.grid(row=4, column=1, sticky="w", pady=(4, 0))
+        self.btn_eye.grid(row=0, column=1, padx=(6, 0))
 
-        # --- Кнопки ---
-        btns = tk.Frame(center, bg="#f7f7f7")
-        btns.grid(row=5, column=0, columnspan=2, pady=(14, 0))
+        self.var_remember = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            wrap,
+            text="Запомнить меня",
+            variable=self.var_remember,
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
-        ttk.Button(btns, text="Войти", width=14, command=self._on_login).pack(
-            side="left", padx=6)
-        ttk.Button(btns, text="Выход", width=10, command=self._on_exit).pack(
-            side="left", padx=6)
+        btns = tk.Frame(wrap, bg=COLORS["bg_card"])
+        btns.grid(row=8, column=0, columnspan=2, pady=(18, 0), sticky="ew")
+        btns.columnconfigure(0, weight=1)
+        btns.columnconfigure(1, weight=1)
 
-        # --- Загрузка сохранённых данных ---
+        ttk.Button(
+            btns,
+            text="Войти",
+            command=self._on_login,
+            style="Primary.TButton",
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+        ttk.Button(
+            btns,
+            text="Выход",
+            command=self._on_exit,
+            style="App.TButton",
+        ).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        tk.Label(
+            wrap,
+            text="Используйте корпоративные учётные данные для входа в систему.",
+            font=FONT_TINY,
+            fg=COLORS["text_soft"],
+            bg=COLORS["bg_card"],
+        ).grid(row=9, column=0, columnspan=2, pady=(14, 0))
+
         saved_user, saved_pass, remember = load_saved_credentials()
         if remember:
             self.ent_login.insert(0, saved_user)
             self.ent_pass.insert(0, saved_pass)
             self.var_remember.set(True)
 
-        # Фокус
         if saved_user:
             self.ent_pass.focus_set()
         else:
             self.ent_login.focus_set()
 
-        self.bind_all("<Return>", self._on_enter)
-
     def _toggle_password(self):
-        """Показать/скрыть пароль."""
         self._show_pass = not self._show_pass
         self.ent_pass.configure(show="" if self._show_pass else "*")
         self.btn_eye.configure(text="🔒" if self._show_pass else "👁")
@@ -856,9 +1213,7 @@ class LoginPage(tk.Frame):
             messagebox.showerror("Вход", "Неверный логин или пароль.", parent=self)
             return
 
-        # --- Сохраняем / удаляем учётные данные ---
         save_credentials(username, password, self.var_remember.get())
-
         self.app_ref.on_login_success(user)
 
     def _on_exit(self):
@@ -870,37 +1225,53 @@ class SplashScreen(tk.Toplevel):
         super().__init__(parent)
         self.title("Загрузка...")
         self.overrideredirect(True)
-        
-        width = 450
-        height = 250
+
+        width = 480
+        height = 260
 
         screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
         x = (screen_width // 2) - (width // 2)
         y = (screen_height // 2) - (height // 2)
-        self.geometry(f'{width}x{height}+{x}+{y}')
+        self.geometry(f"{width}x{height}+{x}+{y}")
 
-        self.config(bg="#f0f0f0", relief="solid", borderwidth=1)
-        
-        tk.Label(
-            self, text="Управление строительством", 
-            font=("Segoe UI", 16, "bold"), bg="#f0f0f0"
-        ).pack(pady=(40, 10))
+        self.config(bg=COLORS["bg_card"], relief="solid", borderwidth=1)
+
+        container = tk.Frame(self, bg=COLORS["bg_card"])
+        container.pack(fill="both", expand=True, padx=24, pady=24)
 
         tk.Label(
-            self, text="Пожалуйста, подождите...", 
-            font=("Segoe UI", 10), bg="#f0f0f0"
+            container,
+            text="Управление строительством",
+            font=("Segoe UI", 18, "bold"),
+            fg=COLORS["text"],
+            bg=COLORS["bg_card"],
+        ).pack(pady=(24, 8))
+
+        tk.Label(
+            container,
+            text="Пожалуйста, подождите...",
+            font=FONT_BODY,
+            fg=COLORS["text_muted"],
+            bg=COLORS["bg_card"],
         ).pack()
 
-        self.status_label = tk.Label(
-            self, text="Инициализация...", 
-            font=("Segoe UI", 9), fg="#555", bg="#f0f0f0"
+        self.progress = ttk.Progressbar(
+            container,
+            mode="indeterminate",
+            style="App.Horizontal.TProgressbar",
         )
-        self.status_label.pack(side="bottom", fill="x", ipady=10)
-
-        self.progress = ttk.Progressbar(self, mode='indeterminate')
-        self.progress.pack(pady=20, padx=40, fill="x")
+        self.progress.pack(pady=24, fill="x")
         self.progress.start(10)
+
+        self.status_label = tk.Label(
+            container,
+            text="Инициализация...",
+            font=FONT_SMALL,
+            fg=COLORS["text_muted"],
+            bg=COLORS["bg_card"],
+        )
+        self.status_label.pack(side="bottom", fill="x", ipady=8)
 
     def update_status(self, text):
         self.status_label.config(text=text)
@@ -911,62 +1282,85 @@ class MainApp(tk.Tk):
     """Главный класс приложения (каркас)."""
     def __init__(self, current_user: Optional[Dict[str, Any]] = None):
         super().__init__()
-    
+
+        setup_ttk_styles(self)
+
         self.current_user: Dict[str, Any] = current_user or {}
         self.is_authenticated: bool = bool(current_user)
+
         self.title(APP_NAME)
-        self.geometry("1100x768")
-        self.minsize(980, 640)
-        
+        self.geometry("1220x820")
+        self.minsize(1020, 680)
+        self.configure(bg=COLORS["bg_app"])
+
         self._pages: Dict[str, tk.Widget] = {}
         self._build_menu()
 
-        # --- Основная компоновка окна ---
-        # Верхний хедер с заголовком и информацией о пользователе
-        self.header = tk.Frame(self, bg="#ffffff", relief="flat")
-        self.header.pack(fill="x", padx=0, pady=0)
+        # Верхний header
+        self.header = tk.Frame(self, bg=COLORS["bg_header"])
+        self.header.pack(fill="x")
 
-        # Левая часть — заголовок
-        header_left = tk.Frame(self.header, bg="#ffffff")
-        header_left.pack(side="left", padx=12, pady=8)
+        self.header_inner = tk.Frame(self.header, bg=COLORS["bg_header"])
+        self.header_inner.pack(fill="x", padx=16, pady=10)
+
+        header_left = tk.Frame(self.header_inner, bg=COLORS["bg_header"])
+        header_left.pack(side="left", fill="x", expand=True)
+
         self.lbl_header_title = tk.Label(
-            header_left, text="", font=("Segoe UI", 14, "bold"), bg="#ffffff",
+            header_left,
+            text="",
+            font=("Segoe UI", 15, "bold"),
+            fg=COLORS["text"],
+            bg=COLORS["bg_header"],
         )
         self.lbl_header_title.pack(side="left")
+
         self.lbl_header_hint = tk.Label(
-            header_left, text="", font=("Segoe UI", 9), fg="#888", bg="#ffffff",
+            header_left,
+            text="",
+            font=FONT_SMALL,
+            fg=COLORS["text_muted"],
+            bg=COLORS["bg_header"],
         )
         self.lbl_header_hint.pack(side="left", padx=(12, 0))
 
-        # Правая часть — пользователь + выход
-        header_right = tk.Frame(self.header, bg="#ffffff")
-        header_right.pack(side="right", padx=12, pady=8)
+        header_right = tk.Frame(self.header_inner, bg=COLORS["bg_header"])
+        header_right.pack(side="right")
+
         self.lbl_user_info = tk.Label(
-            header_right, text="", font=("Segoe UI", 9), fg="#555", bg="#ffffff",
+            header_right,
+            text="",
+            font=FONT_SMALL,
+            fg=COLORS["text_muted"],
+            bg=COLORS["bg_header"],
         )
-        self.lbl_user_info.pack(side="left", padx=(0, 8))
+        self.lbl_user_info.pack(side="left", padx=(0, 10))
+
         self.btn_logout = ttk.Button(
-            header_right, text="⏻ Выйти", width=10, command=self._on_logout,
+            header_right,
+            text="Выйти",
+            width=10,
+            command=self._on_logout,
+            style="App.TButton",
         )
         self.btn_logout.pack(side="left")
-        self.btn_logout.pack_forget()  # скрыт до авторизации
+        self.btn_logout.pack_forget()
 
-        # Тонкая линия-разделитель
-        sep = tk.Frame(self, height=1, bg="#ddd")
-        sep.pack(fill="x")
+        tk.Frame(self, height=1, bg=COLORS["line"]).pack(fill="x")
 
-        self.content = tk.Frame(self, bg="#f7f7f7")
+        self.content = tk.Frame(self, bg=COLORS["bg_page"])
         self.content.pack(fill="both", expand=True)
 
-        # Футер
-        footer = tk.Frame(self, bg="#fafafa", relief="flat")
-        footer.pack(fill="x", padx=0, pady=0)
-        sep2 = tk.Frame(footer, height=1, bg="#eee")
-        sep2.pack(fill="x")
+        footer = tk.Frame(self, bg="#fafbfc")
+        footer.pack(fill="x")
+        tk.Frame(footer, height=1, bg=COLORS["line"]).pack(fill="x")
         tk.Label(
-            footer, text="Разработал Алексей Зезюкин, 2025",
-            font=("Segoe UI", 8), fg="#999", bg="#fafafa",
-        ).pack(side="right", padx=12, pady=4)
+            footer,
+            text="Разработал Алексей Зезюкин, 2025",
+            font=FONT_TINY,
+            fg=COLORS["text_soft"],
+            bg="#fafbfc",
+        ).pack(side="right", padx=12, pady=5)
 
         self._set_user(None)
         self.show_login()
@@ -989,7 +1383,7 @@ class MainApp(tk.Tk):
     def _build_menu(self):
         self._menubar = tk.Menu(self)
         self.config(menu=self._menubar)
-        
+
         self._menubar.add_command(label="Главная", command=self.show_home)
 
         # === Объектный табель ===
@@ -1060,25 +1454,58 @@ class MainApp(tk.Tk):
 
         # === Автотранспорт ===
         m_transport = tk.Menu(self._menubar, tearoff=0)
-        m_transport.add_command(label="Создать заявку", command=lambda: self._show_page("transport", lambda p: SpecialOrders.create_page(p, self)))
-        m_transport.add_command(label="Мои заявки", command=lambda: self._show_page("my_transport_orders", lambda p: SpecialOrders.create_my_transport_orders_page(p, self)))
+        m_transport.add_command(
+            label="Создать заявку",
+            command=lambda: self._show_page("transport", lambda p: SpecialOrders.create_page(p, self)),
+        )
+        m_transport.add_command(
+            label="Мои заявки",
+            command=lambda: self._show_page("my_transport_orders", lambda p: SpecialOrders.create_my_transport_orders_page(p, self)),
+        )
         self._menu_transport_planning_index = m_transport.index("end")
-        m_transport.add_command(label="Планирование", command=lambda: self._show_page("planning", lambda p: SpecialOrders.create_planning_page(p)))
+        m_transport.add_command(
+            label="Планирование",
+            command=lambda: self._show_page("planning", lambda p: SpecialOrders.create_planning_page(p)),
+        )
         self._menu_transport_registry_index = m_transport.index("end")
-        m_transport.add_command(label="Реестр", command=lambda: self._show_page("transport_registry", lambda p: SpecialOrders.create_transport_registry_page(p)))
+        m_transport.add_command(
+            label="Реестр",
+            command=lambda: self._show_page("transport_registry", lambda p: SpecialOrders.create_transport_registry_page(p)),
+        )
         self._menubar.add_cascade(label="Автотранспорт", menu=m_transport)
         self._menu_transport = m_transport
 
         # === Питание ===
         m_meals = tk.Menu(self._menubar, tearoff=0)
-        m_meals.add_command(label="Создать заявку", command=lambda: self._show_page("meals_order", lambda p: meals_module.create_meals_order_page(p, self)))
-        m_meals.add_command(label="Мои заявки", command=lambda: self._show_page("my_meals_orders", lambda p: meals_module.create_my_meals_orders_page(p, self)))
-        m_meals.add_command(label="Планирование", command=lambda: self._show_page("meals_planning", lambda p: meals_module.create_meals_planning_page(p, self)))
-        m_meals.add_command(label="Реестр", command=lambda: self._show_page("meals_registry", lambda p: meals_module.create_all_meals_orders_page(p, self)))
-        m_meals.add_command(label="Отчеты", command=lambda: self._show_page("meals_reports", lambda p: meals_reports_module.create_meals_reports_page(p, self)))
-        m_meals.add_command(label="Работники (питание)", command=lambda: self._show_page("meals_workers", lambda p: meals_employees_module.create_meals_workers_page(p, self)))
+        m_meals.add_command(
+            label="Создать заявку",
+            command=lambda: self._show_page("meals_order", lambda p: meals_module.create_meals_order_page(p, self)),
+        )
+        m_meals.add_command(
+            label="Мои заявки",
+            command=lambda: self._show_page("my_meals_orders", lambda p: meals_module.create_my_meals_orders_page(p, self)),
+        )
+        m_meals.add_command(
+            label="Планирование",
+            command=lambda: self._show_page("meals_planning", lambda p: meals_module.create_meals_planning_page(p, self)),
+        )
+        m_meals.add_command(
+            label="Реестр",
+            command=lambda: self._show_page("meals_registry", lambda p: meals_module.create_all_meals_orders_page(p, self)),
+        )
+        m_meals.add_command(
+            label="Отчеты",
+            command=lambda: self._show_page("meals_reports", lambda p: meals_reports_module.create_meals_reports_page(p, self)),
+        )
+        m_meals.add_command(
+            label="Работники (питание)",
+            command=lambda: self._show_page("meals_workers", lambda p: meals_employees_module.create_meals_workers_page(p, self)),
+        )
         self._menu_meals_settings_index = m_meals.index("end")
-        m_meals.add_command(label="Настройки", command=lambda: self._show_page("meals_settings", lambda p: meals_module.create_meals_settings_page(p, self.current_user.get('role'))))
+        m_meals.add_command(
+            label="Настройки",
+            command=lambda: self._show_page("meals_settings", lambda p: meals_module.create_meals_settings_page(p, self.current_user.get("role"))),
+        )
         self._menubar.add_cascade(label="Питание", menu=m_meals)
         self._menu_meals = m_meals
 
@@ -1101,7 +1528,7 @@ class MainApp(tk.Tk):
             label="Тарифы (цена за сутки)",
             command=lambda: self._show_page(
                 "lodging_rates",
-                lambda p: lodging_module.create_rates_page(p, self)
+                lambda p: lodging_module.create_rates_page(p, self),
             ),
         )
         self._menubar.add_cascade(label="Проживание", menu=m_lodging)
@@ -1109,8 +1536,14 @@ class MainApp(tk.Tk):
 
         # === Объекты ===
         m_objects = tk.Menu(self._menubar, tearoff=0)
-        m_objects.add_command(label="Создать/Редактировать", command=lambda: self._show_page("object_create", lambda p: objects.ObjectCreatePage(p, self)))
-        m_objects.add_command(label="Реестр", command=lambda: self._show_page("objects_registry", lambda p: objects.ObjectsRegistryPage(p, self)))
+        m_objects.add_command(
+            label="Создать/Редактировать",
+            command=lambda: self._show_page("object_create", lambda p: objects.ObjectCreatePage(p, self)),
+        )
+        m_objects.add_command(
+            label="Реестр",
+            command=lambda: self._show_page("objects_registry", lambda p: objects.ObjectsRegistryPage(p, self)),
+        )
         self._menubar.add_cascade(label="Объекты", menu=m_objects)
         self._menu_objects = m_objects
 
@@ -1133,11 +1566,14 @@ class MainApp(tk.Tk):
         self._menubar.add_cascade(label="Аналитика", menu=m_analytics)
         self._menu_analytics = m_analytics
 
-
         m_emp = tk.Menu(self._menubar, tearoff=0)
-        m_emp.add_command(label="Карточка сотрудника",
-                          command=lambda: self._show_page("employee_card",
-                              lambda p: employee_card_module.create_employee_card_page(p, self)))
+        m_emp.add_command(
+            label="Карточка сотрудника",
+            command=lambda: self._show_page(
+                "employee_card",
+                lambda p: employee_card_module.create_employee_card_page(p, self),
+            ),
+        )
         self._menubar.add_cascade(label="Сотрудники", menu=m_emp)
         self._menu_employees_card = m_emp
 
@@ -1149,18 +1585,21 @@ class MainApp(tk.Tk):
                 command=lambda: timesheet_transformer.open_converter(self),
             )
         if BudgetAnalyzer and hasattr(BudgetAnalyzer, "create_page"):
-            m_tools.add_command(label="Анализ смет", command=lambda: self._show_page("budget", lambda p: BudgetAnalyzer.create_page(p)))
+            m_tools.add_command(
+                label="Анализ смет",
+                command=lambda: self._show_page("budget", lambda p: BudgetAnalyzer.create_page(p)),
+            )
         if EstimateResourceDecoder and hasattr(EstimateResourceDecoder, "create_page"):
             m_tools.add_command(
                 label="Раскрытие ресурсов сметы",
                 command=lambda: self._show_page(
                     "estimate_resource_decoder",
-                    lambda p: EstimateResourceDecoder.create_page(p)
-                )
+                    lambda p: EstimateResourceDecoder.create_page(p),
+                ),
             )
         self._menubar.add_cascade(label="Инструменты", menu=m_tools)
         self._menu_tools = m_tools
-        
+
         self._menu_settings_index = self._menubar.index("end")
         self._menubar.add_command(label="Настройки", command=lambda: Settings.open_settings_window(self))
 
@@ -1170,15 +1609,17 @@ class MainApp(tk.Tk):
     def _set_user(self, user: Optional[Dict[str, Any]]):
         self.current_user = user or {}
         self.is_authenticated = bool(user)
+
         caption = ""
         if user:
-            name = user.get('full_name') or user.get('username') or ""
+            name = user.get("full_name") or user.get("username") or ""
             caption = f" — {name}"
             self.lbl_user_info.config(text=f"👤 {name}")
             self.btn_logout.pack(side="left")
         else:
             self.lbl_user_info.config(text="")
             self.btn_logout.pack_forget()
+
         self.title(APP_NAME + caption)
         self._apply_permissions_visibility()
 
@@ -1217,7 +1658,7 @@ class MainApp(tk.Tk):
             return
 
         headers = {
-            "home": ("Управление строительством", "Выберите раздел в верхнем меню"),
+            "home": ("Управление строительством", "Единая стартовая панель и быстрый доступ к основным разделам"),
             "timesheet": ("Объектный табель", ""),
             "my_timesheets": ("Мои табели", ""),
             "timesheet_registry": ("Реестр табелей", ""),
@@ -1246,10 +1687,7 @@ class MainApp(tk.Tk):
             "budget": ("Анализ смет", ""),
             "estimate_resource_decoder": ("Раскрытие ресурсов сметы", "Расшифровка расценок до конкретных ресурсов"),
             "login": ("Управление строительством", "Вход в систему"),
-            "analytics_dashboard": (
-                "Операционная аналитика",
-                "Сводные показатели по ключевым метрикам",
-            ),
+            "analytics_dashboard": ("Операционная аналитика", "Сводные показатели по ключевым метрикам"),
         }
         title, hint = headers.get(key, (key.replace("_", " ").title(), ""))
         self._set_header(title, hint)
@@ -1267,14 +1705,14 @@ class MainApp(tk.Tk):
                 self.show_home()
             else:
                 self.show_login()
-            
+
     def _set_header(self, title: str, hint: str = ""):
         self.lbl_header_title.config(text=title)
         self.lbl_header_hint.config(text=hint or "")
 
     def _apply_permissions_visibility(self):
         from menu_spec import MENU_SPEC, TOP_LEVEL
-    
+
         def set_state(menu: tk.Menu, label_text: str, allowed: bool):
             if not menu:
                 return
@@ -1283,7 +1721,7 @@ class MainApp(tk.Tk):
                 menu.entryconfig(idx, state="normal" if allowed else "disabled")
             except tk.TclError:
                 pass
-    
+
         menus_by_section = {
             "Объектный табель": getattr(self, "_menu_timesheets", None),
             "Автотранспорт": getattr(self, "_menu_transport", None),
@@ -1294,7 +1732,7 @@ class MainApp(tk.Tk):
             "Аналитика": getattr(self, "_menu_analytics", None),
             "Инструменты": getattr(self, "_menu_tools", None),
         }
-    
+
         for sec in MENU_SPEC:
             menu = menus_by_section.get(sec.label)
             for e in sec.entries:
@@ -1302,16 +1740,16 @@ class MainApp(tk.Tk):
                     continue
                 allowed = True if not e.perm else self.has_perm(e.perm)
                 set_state(menu, e.label, allowed)
-    
+
         set_state(self._menubar, "Главная", True)
-    
+
         for sec in MENU_SPEC:
             any_allowed = any(
                 (e.kind == "page") and ((not e.perm) or self.has_perm(e.perm))
                 for e in sec.entries
             )
             set_state(self._menubar, sec.label, any_allowed)
-    
+
         for e in TOP_LEVEL:
             allowed = True if not e.perm else self.has_perm(e.perm)
             set_state(self._menubar, e.label, allowed)
@@ -1329,13 +1767,15 @@ if __name__ == "__main__":
     root = tk.Tk()
     root.withdraw()
 
+    setup_ttk_styles(root)
+
     splash = SplashScreen(root)
-    
+
     def start_application():
         try:
             splash.update_status("Загрузка модулей приложения...")
             perform_heavy_imports()
-            
+
             splash.update_status("Проверка конфигурации...")
             Settings.ensure_config()
 
@@ -1353,8 +1793,8 @@ if __name__ == "__main__":
                 Settings,
                 timesheet_module,
                 gpr_module,
-                gpr_task_dialog,   
-                gpr_dictionaries, 
+                gpr_task_dialog,
+                gpr_dictionaries,
                 analytics_module,
                 employees_module,
                 timesheet_compare,
@@ -1370,7 +1810,7 @@ if __name__ == "__main__":
 
             splash.destroy()
             root.destroy()
-            
+
             logging.debug("Инициализация успешна. Запускаем главный цикл приложения.")
             app = MainApp()
             app.protocol("WM_DELETE_WINDOW", app.destroy)
@@ -1379,7 +1819,10 @@ if __name__ == "__main__":
         except Exception as e:
             logging.critical("Приложение не может быть запущено из-за ошибки инициализации.", exc_info=True)
             splash.destroy()
-            messagebox.showerror("Критическая ошибка", f"Не удалось инициализировать приложение.\n\nОшибка: {e}\n\nПроверьте настройки и доступность БД.")
+            messagebox.showerror(
+                "Критическая ошибка",
+                f"Не удалось инициализировать приложение.\n\nОшибка: {e}\n\nПроверьте настройки и доступность БД.",
+            )
             root.destroy()
             sys.exit(1)
 
