@@ -84,11 +84,9 @@ except Exception:
     get_selected_department_from_config = None
     set_selected_department_in_config = None
 
-
 # ============================================================
 # Основная страница табеля
 # ============================================================
-
 
 class TimesheetPage(tk.Frame):
     COLPX = {"fio": 220, "tbn": 100, "day": 36, "days": 52, "hours": 58, "del": 66}
@@ -432,14 +430,6 @@ class TimesheetPage(tk.Frame):
             self._employee_display_to_data[display] = (fio, tbn, pos, dep)
 
         self.allowed_fio_names = {normalize_spaces(fio) for fio, _, _, _ in allowed if normalize_spaces(fio)}
-        display_values = sorted(self._employee_display_to_data.keys())
-        self.cmb_fio.set_completion_list(display_values)
-
-        cur = normalize_spaces(self.fio_var.get() or "")
-        if cur and cur not in self._employee_display_to_data:
-            self.fio_var.set("")
-            self.ent_tbn.delete(0, "end")
-            self.pos_var.set("")
 
     # --------------------------------------------------------
     # UI
@@ -466,7 +456,7 @@ class TimesheetPage(tk.Frame):
         ).grid(row=row, column=col, sticky="e", padx=(0, 6), pady=3, **grid_kw)
 
     def _build_ts_header(self):
-        hdr = tk.Frame(self, bg=TS_COLORS["accent"], pady=6)
+        hdr = tk.Frame(self, bg=TS_COLORS["accent"], pady=4)
         hdr.pack(fill="x")
 
         title = "👁 Просмотр табеля" if self.read_only else "📋 Объектный табель"
@@ -592,32 +582,30 @@ class TimesheetPage(tk.Frame):
     def _build_ts_toolbar(self):
         bar = tk.Frame(self, bg=TS_COLORS["accent_light"], relief="flat")
         bar.pack(fill="x", padx=10, pady=(4, 0))
-    
+
         top_row = tk.Frame(bar, bg=TS_COLORS["accent_light"])
         top_row.pack(fill="x", pady=(4, 2))
-    
+
         bottom_row = tk.Frame(bar, bg=TS_COLORS["accent_light"])
         bottom_row.pack(fill="x", pady=(0, 4))
-    
-        # ---------- Верхний ряд ----------
+
         self._ts_btn(top_row, "Подразделение: все", self.add_department_all, side="left", padx=(4, 3))
         self._ts_btn(top_row, "Выбрать сотрудников…", self.add_department_partial, side="left", padx=3)
-    
+
         tk.Frame(top_row, bg=TS_COLORS["border"], width=1, height=24).pack(side="left", padx=6, fill="y")
-    
+
         self._ts_btn(top_row, "Время выбранным", self.fill_time_selected, side="left", padx=3)
         self._ts_btn(top_row, "Часы всем", self.fill_hours_all, side="left", padx=3)
         self._ts_btn(top_row, "Очистить часы", self.clear_all_rows, side="left", padx=3)
-    
-        # ---------- Нижний ряд ----------
+
         self._ts_btn(bottom_row, "Импорт Excel", self.import_from_excel, side="left", padx=(4, 3))
         self._ts_btn(bottom_row, "Копировать из месяца…", self.copy_from_month, side="left", padx=3)
         self._ts_btn(bottom_row, "Загрузить СКУД…", self.import_from_skud, side="left", padx=3)
-    
+
         tk.Frame(bottom_row, bg=TS_COLORS["border"], width=1, height=24).pack(side="left", padx=6, fill="y")
-    
+
         self._ts_btn(bottom_row, "Снять выделение", self.clear_selection, side="left", padx=3)
-    
+
         self._btn_export_ref = self._ts_btn(
             bottom_row,
             "Выгрузить Excel",
@@ -625,7 +613,7 @@ class TimesheetPage(tk.Frame):
             side="right",
             padx=4,
         )
-    
+
         btn_save = tk.Button(
             bottom_row,
             text="Сохранить",
@@ -643,10 +631,10 @@ class TimesheetPage(tk.Frame):
         btn_save.pack(side="right", padx=(4, 8))
         btn_save.bind("<Enter>", lambda _e: btn_save.config(bg="#0d47a1"))
         btn_save.bind("<Leave>", lambda _e: btn_save.config(bg=TS_COLORS["btn_save_bg"]))
-    
+
         self._toolbar_frame = bar
         self._btn_save_ref = btn_save
-    
+
         if self.read_only:
             for container in (top_row, bottom_row):
                 for child in container.winfo_children():
@@ -954,19 +942,6 @@ class TimesheetPage(tk.Frame):
 
         self._active_header_id = None
         self._load_existing_rows()
-
-    def _on_fio_select(self, *_):
-        display = normalize_spaces(self.fio_var.get() or "")
-        emp = self._employee_display_to_data.get(display)
-        if not emp:
-            self.ent_tbn.delete(0, "end")
-            self.pos_var.set("")
-            return
-
-        fio, tbn, pos, _dep = emp
-        self.ent_tbn.delete(0, "end")
-        self.ent_tbn.insert(0, tbn)
-        self.pos_var.set(pos)
 
     def _clear_filter(self):
         try:
@@ -1284,31 +1259,11 @@ class TimesheetPage(tk.Frame):
     def add_row(self):
         if self.read_only:
             return
-
-        display = normalize_spaces(self.fio_var.get() or "")
-        emp = self._employee_display_to_data.get(display)
-        if not emp:
-            messagebox.showwarning("Объектный табель", "Выберите сотрудника из списка.", parent=self)
-            return
-
-        fio, tbn_default, _pos, _dep = emp
-        tbn = normalize_tbn(self.ent_tbn.get()) or normalize_tbn(tbn_default)
-
-        key = make_row_key(fio, tbn)
-        existing = {make_row_key(r.get("fio", ""), r.get("tbn", "")) for r in self.model_rows_all}
-        if key in existing:
-            if not messagebox.askyesno(
-                "Дублирование",
-                f"Сотрудник уже есть в табеле:\n{fio} (Таб.№ {tbn}).\nДобавить ещё одну строку?",
-                parent=self,
-            ):
-                return
-
-        self.model_rows_all.append({"fio": fio, "tbn": tbn, "hours": [None] * 31})
-        self._recalc_all_row_totals()
-        self._apply_filter()
-        self._mark_dirty()
-        self._schedule_auto_save()
+        messagebox.showinfo(
+            "Объектный табель",
+            "Ручное добавление сотрудника отключено.\nИспользуйте добавление из подразделения.",
+            parent=self,
+        )
 
     def add_department_all(self):
         if self.read_only:
@@ -1834,14 +1789,6 @@ class TimesheetPage(tk.Frame):
             messagebox.showerror("Копирование", f"Ошибка при копировании из БД:\n{e}", parent=self)
 
     def _get_brigadier_map_for_current_export(self) -> dict[str, str]:
-        """
-        Возвращает карту:
-            employee_tbn -> brigadier_fio
-
-        Приоритет:
-        1) если табель уже существует в БД и открыт по header_id — берём точную карту из БД;
-        2) иначе собираем по текущим назначениям бригадиров в подразделении.
-        """
         if self._active_header_id:
             try:
                 return load_brigadiers_map_for_header(int(self._active_header_id))
@@ -1871,14 +1818,6 @@ class TimesheetPage(tk.Frame):
         return result
 
     def export_current_timesheet_to_excel(self):
-        """
-        Выгружает текущий табель в Excel прямо из открытой страницы.
-
-        ВАЖНО:
-        - берутся текущие данные из self.model_rows_all;
-        - если пользователь изменил значения, но ещё не сохранил в БД,
-          в Excel попадут именно эти текущие изменения.
-        """
         try:
             if hasattr(self, "grid"):
                 self.grid.close_editor(commit=True)
@@ -1961,7 +1900,7 @@ class TimesheetPage(tk.Frame):
         except Exception as e:
             logger.exception("Ошибка выгрузки текущего табеля в Excel")
             messagebox.showerror("Выгрузка", f"Ошибка выгрузки:\n{e}", parent=self)
-            
+
     # --------------------------------------------------------
     # Сохранение
     # --------------------------------------------------------
@@ -2299,11 +2238,9 @@ class TimesheetPage(tk.Frame):
             pass
         self._fit_job = self.after(150, self._auto_fit_columns)
 
-
 # ============================================================
 # Мои табели
 # ============================================================
-
 
 class MyTimesheetsPage(tk.Frame):
     def __init__(self, master, app_ref):
