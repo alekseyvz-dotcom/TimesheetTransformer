@@ -574,48 +574,46 @@ class TimesheetPage(tk.Frame):
             bg=TS_COLORS["panel"],
         ).pack(side="left", padx=8)
 
-    def _ts_btn(self, parent, text: str, cmd, side="left", padx=3, pady=0):
-        b = ttk.Button(parent, text=text, command=cmd, width=18)
+    def _ts_btn(self, parent, text: str, cmd, side="left", padx=3, pady=0, width=None):
+        b = ttk.Button(parent, text=text, command=cmd, width=width)
         b.pack(side=side, padx=padx, pady=pady)
         return b
 
     def _build_ts_toolbar(self):
         bar = tk.Frame(self, bg=TS_COLORS["accent_light"], relief="flat")
         bar.pack(fill="x", padx=10, pady=(4, 0))
-
-        top_row = tk.Frame(bar, bg=TS_COLORS["accent_light"])
-        top_row.pack(fill="x", pady=(4, 2))
-
-        bottom_row = tk.Frame(bar, bg=TS_COLORS["accent_light"])
-        bottom_row.pack(fill="x", pady=(0, 4))
-
-        self._ts_btn(top_row, "Подразделение: все", self.add_department_all, side="left", padx=(4, 3))
-        self._ts_btn(top_row, "Выбрать сотрудников…", self.add_department_partial, side="left", padx=3)
-
-        tk.Frame(top_row, bg=TS_COLORS["border"], width=1, height=24).pack(side="left", padx=6, fill="y")
-
-        self._ts_btn(top_row, "Время выбранным", self.fill_time_selected, side="left", padx=3)
-        self._ts_btn(top_row, "Часы всем", self.fill_hours_all, side="left", padx=3)
-        self._ts_btn(top_row, "Очистить часы", self.clear_all_rows, side="left", padx=3)
-
-        self._ts_btn(bottom_row, "Импорт Excel", self.import_from_excel, side="left", padx=(4, 3))
-        self._ts_btn(bottom_row, "Копировать из месяца…", self.copy_from_month, side="left", padx=3)
-        self._ts_btn(bottom_row, "Загрузить СКУД…", self.import_from_skud, side="left", padx=3)
-
-        tk.Frame(bottom_row, bg=TS_COLORS["border"], width=1, height=24).pack(side="left", padx=6, fill="y")
-
-        self._ts_btn(bottom_row, "Снять выделение", self.clear_selection, side="left", padx=3)
-
-        self._btn_export_ref = self._ts_btn(
-            bottom_row,
-            "Выгрузить Excel",
-            self.export_current_timesheet_to_excel,
-            side="right",
-            padx=4,
-        )
-
+    
+        left = tk.Frame(bar, bg=TS_COLORS["accent_light"])
+        left.pack(side="left", fill="x", expand=True)
+    
+        actions = tk.Frame(bar, bg=TS_COLORS["accent_light"])
+        actions.pack(side="right", anchor="n", padx=(10, 4), pady=4)
+    
+        # --- Верхний ряд: состав табеля + часы ---
+        row1 = tk.Frame(left, bg=TS_COLORS["accent_light"])
+        row1.pack(fill="x", pady=(4, 2))
+    
+        self._ts_btn(row1, "Добавить всех из подразделения", self.add_department_all, side="left", padx=(4, 3))
+        self._ts_btn(row1, "Выбрать сотрудников", self.add_department_partial, side="left", padx=3)
+    
+        tk.Frame(row1, bg=TS_COLORS["border"], width=1, height=24).pack(side="left", padx=8, fill="y")
+    
+        self._ts_btn(row1, "Время выбранным", self.fill_time_selected, side="left", padx=3)
+        self._ts_btn(row1, "Часы всем", self.fill_hours_all, side="left", padx=3)
+        self._ts_btn(row1, "Очистить часы", self.clear_all_rows, side="left", padx=3)
+        self._ts_btn(row1, "Снять выделение", self.clear_selection, side="left", padx=3)
+    
+        # --- Нижний ряд: импорт / копирование ---
+        row2 = tk.Frame(left, bg=TS_COLORS["accent_light"])
+        row2.pack(fill="x", pady=(0, 4))
+    
+        self._ts_btn(row2, "Импорт Excel", self.import_from_excel, side="left", padx=(4, 3))
+        self._ts_btn(row2, "Копировать из месяца", self.copy_from_month, side="left", padx=3)
+        self._ts_btn(row2, "Загрузить СКУД", self.import_from_skud, side="left", padx=3)
+    
+        # --- Правый блок действий ---
         btn_save = tk.Button(
-            bottom_row,
+            actions,
             text="Сохранить",
             font=("Segoe UI", 9, "bold"),
             bg=TS_COLORS["btn_save_bg"],
@@ -624,26 +622,38 @@ class TimesheetPage(tk.Frame):
             activeforeground="white",
             relief="flat",
             cursor="hand2",
-            padx=12,
-            pady=3,
+            padx=14,
+            pady=4,
             command=self.save_all,
+            width=14,
         )
-        btn_save.pack(side="right", padx=(4, 8))
+        btn_save.pack(fill="x", pady=(0, 4))
         btn_save.bind("<Enter>", lambda _e: btn_save.config(bg="#0d47a1"))
         btn_save.bind("<Leave>", lambda _e: btn_save.config(bg=TS_COLORS["btn_save_bg"]))
-
+    
+        self._btn_export_ref = ttk.Button(
+            actions,
+            text="Выгрузить Excel",
+            command=self.export_current_timesheet_to_excel,
+            width=16,
+        )
+        self._btn_export_ref.pack(fill="x")
+    
         self._toolbar_frame = bar
         self._btn_save_ref = btn_save
-
+    
         if self.read_only:
-            for container in (top_row, bottom_row):
+            for container in (row1, row2):
                 for child in container.winfo_children():
-                    if child is getattr(self, "_btn_export_ref", None):
-                        continue
                     try:
                         child.configure(state="disabled")
                     except Exception:
                         pass
+    
+            try:
+                btn_save.configure(state="disabled")
+            except Exception:
+                pass
 
     def _build_ts_filter_bar(self):
         bar = tk.Frame(self, bg=TS_COLORS["bg"], pady=2)
