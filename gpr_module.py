@@ -2010,8 +2010,12 @@ class GprPage(tk.Frame):
 
         task_id = t0.get("id")
         assignments = upd.pop("_assignments", None)
+        facts_payload = upd.pop("_facts", None)
+        facts_changed = bool(upd.pop("_facts_changed", False))
+        
+        uid = (self.app_ref.current_user or {}).get("id")
+        
         if task_id and assignments is not None:
-            uid = (self.app_ref.current_user or {}).get("id")
             try:
                 from gpr_task_dialog import _EmployeeService
                 _EmployeeService.save_task_assignments(task_id, assignments, uid)
@@ -2022,6 +2026,28 @@ class GprPage(tk.Frame):
                 messagebox.showwarning(
                     "ГПР",
                     f"Ошибка сохранения назначений:\n{e}",
+                    parent=self,
+                )
+        
+        if task_id and facts_changed:
+            try:
+                from gpr_task_dialog import _TaskFactService
+                _TaskFactService.save_task_facts(task_id, facts_payload or [], uid)
+        
+                # Обновляем накопительный факт по задаче для Ганта
+                fact_map = GprService.load_task_facts_cumulative([task_id])
+                if task_id in fact_map:
+                    self.facts[task_id] = fact_map[task_id]
+                else:
+                    self.facts.pop(task_id, None)
+        
+            except ImportError:
+                logger.warning("gpr_task_dialog not available — facts not saved")
+            except Exception as e:
+                logger.exception("Save facts error")
+                messagebox.showwarning(
+                    "ГПР",
+                    f"Ошибка сохранения факта:\n{e}",
                     parent=self,
                 )
 
