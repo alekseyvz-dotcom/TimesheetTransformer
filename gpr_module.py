@@ -288,7 +288,6 @@ class GprService:
                     )
                     return dict(cur.fetchone())
 
-    # ── tasks ──
     @staticmethod
     def load_plan_tasks(plan_id: int) -> List[Dict[str, Any]]:
         with _DBConn() as conn:
@@ -305,6 +304,7 @@ class GprService:
                         FROM public.gpr_tasks t
                         JOIN public.gpr_work_types wt ON wt.id = t.work_type_id
                         WHERE t.plan_id = %s
+                          AND COALESCE(t.is_deleted, false) = false
                         ORDER BY t.sort_order, wt.sort_order, wt.name,
                                  t.name, t.plan_start, t.id
                     """,
@@ -314,7 +314,6 @@ class GprService:
                 for r in cur.fetchall():
                     d = dict(r)
                     d["row_kind"] = (d.get("row_kind") or "task").strip()
-                    # Нормализуем даты
                     d["plan_start"] = _to_date(d.get("plan_start"))
                     d["plan_finish"] = _to_date(d.get("plan_finish"))
                     rows.append(d)
@@ -341,63 +340,182 @@ class GprService:
     def replace_plan_tasks(
         plan_id: int, user_id: Optional[int], tasks: List[Dict[str, Any]]
     ) -> None:
+
         with _DBConn() as conn:
             with conn:
-                with conn.cursor() as cur:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    # Все задачи плана (включая уже архивные)
                     cur.execute(
-                        "DELETE FROM public.gpr_tasks WHERE plan_id=%s",
+                        """
+                        SELECT id, COALESCE(is_deleted, false) AS is_deleted
+                        FROM public.gpr_tasks
+                        WHERE plan_id = %s
+                        """,
                         (plan_id,),
                     )
-                    if tasks:
-                        vals = []
-                        for i, t in enumerate(tasks):
-                            row_kind = (t.get("row_kind") or "task").strip()
+                    existing_rows = cur.fetchall()
+                    existing_ids: Set[int] = {int(r["id"]) for r in existing_rows}
+                    existing_active_ids: Set[int] = {
+                        int(r["id"]) for r in existing_rows if not r["is_deleted"]
+                    }
     
-                            ps = _to_date(t.get("plan_start"))
-                            pf = _to_date(t.get("plan_finish"))
+                    seen_ids: Set[int] = set()
+                    inserts: List[Tuple[Any, ...]] = []
     
-                            if row_kind == "task":
-                                if not ps or not pf:
-                                    raise ValueError(
-                                        f"Задача '{t.get('name')}': невалидные даты"
-                                    )
-                            else:
-                                if not ps:
-                                    ps = _today()
-                                if not pf:
-                                    pf = ps
+                    for i, t in enumerate(tasks):
+                        row_kind = (t.get("row_kind") or "task").strip()
+                        if row_kind not in ("task", "group", "title"):
+                            row_kind = "task"
     
-                            vals.append(
+                        name = (t.get("name") or "").strip()
+                        if not name:
+                            raise ValueError(f"Строка {i + 1}: пустое название")
+    
+                        work_type_id = t.get("work_type_id")
+                        if work_type_id is None:
+                            raise ValueError(f"Строка {i + 1} '{name}': не указан тип работ")
+    
+                        try:
+                            work_type_id = int(work_type_id)
+                        except (ValueError, TypeError):
+                            raise ValueError(f"Строка {i + 1} '{name}': неверный work_type_id")
+    
+                        parent_id = t.get("parent_id")
+                        if parent_id in ("", 0):
+                            parent_id = None
+                        elif parent_id is not None:
+                            try:
+                                parent_id = int(parent_id)
+                            except (ValueError, TypeError):
+                                parent_id = None
+    
+                        ps = _to_date(t.get("plan_start"))
+                        pf = _to_date(t.get("plan_finish"))
+    
+                        if row_kind == "task":
+                            if not ps or not pf:
+                                raise ValueError(f"Задача '{name}': невалидные даты")
+                            if pf < ps:
+                                raise ValueError(f"Задача '{name}': окончание раньше начала")
+                        else:
+                            # Для group/title держим технические даты,
+                            # чтобы не ломать текущую схему БД.
+                            if not ps:
+                                ps = _today()
+                            if not pf:
+                                pf = ps
+    
+                        status = (t.get("status") or "planned").strip()
+                        if status not in STATUS_LIST:
+                            status = "planned"
+    
+                        sort_order = int(
+                            t.get("sort_order")
+                            if t.get("sort_order") is not None
+                            else i * 10
+                        )
+    
+                        is_milestone = bool(t.get("is_milestone") or False)
+                        uom_code = t.get("uom_code") or None
+                        plan_qty = t.get("plan_qty")
+    
+                        task_id = t.get("id")
+                        if task_id is not None:
+                            try:
+                                task_id = int(task_id)
+                            except (ValueError, TypeError):
+                                task_id = None
+    
+                        # ── update existing ──
+                        if task_id and task_id in existing_ids:
+                            cur.execute(
+                                """
+                                UPDATE public.gpr_tasks
+                                   SET parent_id=%s,
+                                       work_type_id=%s,
+                                       name=%s,
+                                       uom_code=%s,
+                                       plan_qty=%s,
+                                       plan_start=%s,
+                                       plan_finish=%s,
+                                       status=%s,
+                                       sort_order=%s,
+                                       is_milestone=%s,
+                                       row_kind=%s,
+                                       is_deleted=false,
+                                       deleted_at=NULL,
+                                       deleted_by=NULL
+                                 WHERE id=%s
+                                   AND plan_id=%s
+                                """,
                                 (
-                                    plan_id,
-                                    int(t["work_type_id"]),
-                                    (t.get("name") or "").strip(),
-                                    t.get("uom_code") or None,
-                                    t.get("plan_qty"),
+                                    parent_id,
+                                    work_type_id,
+                                    name,
+                                    uom_code,
+                                    plan_qty,
                                     ps,
                                     pf,
-                                    (t.get("status") or "planned"),
-                                    int(
-                                        t.get("sort_order")
-                                        if t.get("sort_order") is not None
-                                        else i * 10
-                                    ),
-                                    bool(t.get("is_milestone") or False),
+                                    status,
+                                    sort_order,
+                                    is_milestone,
+                                    row_kind,
+                                    task_id,
+                                    plan_id,
+                                ),
+                            )
+                            seen_ids.add(task_id)
+                        else:
+                            # ── insert new ──
+                            inserts.append(
+                                (
+                                    plan_id,
+                                    work_type_id,
+                                    parent_id,
+                                    name,
+                                    uom_code,
+                                    plan_qty,
+                                    ps,
+                                    pf,
+                                    status,
+                                    is_milestone,
+                                    sort_order,
                                     user_id,
                                     row_kind,
                                 )
                             )
     
+                    if inserts:
                         execute_values(
                             cur,
                             """
                             INSERT INTO public.gpr_tasks
-                            (plan_id, work_type_id, name, uom_code, plan_qty,
-                             plan_start, plan_finish, status, sort_order,
-                             is_milestone, created_by, row_kind)
+                            (plan_id, work_type_id, parent_id, name, uom_code, plan_qty,
+                             plan_start, plan_finish, status, is_milestone,
+                             sort_order, created_by, row_kind)
                             VALUES %s
                             """,
-                            vals,
+                            inserts,
+                        )
+    
+                    # Всё, что было активным, но не пришло в новом списке — архивируем
+                    ids_to_soft_delete = list(existing_active_ids - seen_ids)
+                    if ids_to_soft_delete:
+                        cur.execute(
+                            """
+                            UPDATE public.gpr_tasks
+                               SET is_deleted=true,
+                                   deleted_at=now(),
+                                   deleted_by=%s,
+                                   status=CASE
+                                       WHEN status IN ('planned', 'in_progress', 'paused')
+                                       THEN 'canceled'
+                                       ELSE status
+                                   END
+                             WHERE id = ANY(%s)
+                               AND plan_id=%s
+                            """,
+                            (user_id, ids_to_soft_delete, plan_id),
                         )
     
                     cur.execute(
@@ -413,8 +531,12 @@ class GprService:
             with conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "UPDATE public.gpr_tasks "
-                        "SET status=%s, updated_at=now() WHERE id=%s",
+                        """
+                        UPDATE public.gpr_tasks
+                        SET status=%s, updated_at=now()
+                        WHERE id=%s
+                          AND COALESCE(is_deleted, false)=false
+                        """,
                         (new_status, task_id),
                     )
 
@@ -853,7 +975,9 @@ class GanttCanvas(tk.Frame):
         return "break"
 
     def _get_tree_row_positions(self) -> List[Optional[Tuple[int, int]]]:
-        """Точное вычисление позиций строк Treeview в координатах canvas."""
+        """Позиции строк Treeview, нормализованные относительно
+        первой видимой строки. Это устраняет потерю первой строки
+        и выравнивает бары по строкам."""
         if not self._tree:
             return []
     
@@ -861,51 +985,34 @@ class GanttCanvas(tk.Frame):
         if not items:
             return []
     
-        positions: List[Optional[Tuple[int, int]]] = []
-    
-        try:
-            self._tree.update_idletasks()
-            self.body.update_idletasks()
-    
-            tree_root_y = self._tree.winfo_rooty()
-            body_root_y = self.body.winfo_rooty()
-        except tk.TclError:
-            return []
-    
-        first_bbox = None
-        for iid in items:
-            try:
-                first_bbox = self._tree.bbox(iid)
-                if first_bbox:
-                    break
-            except tk.TclError:
-                pass
-    
-        if first_bbox:
-            data_origin_abs_y = tree_root_y + first_bbox[1]
-        else:
-            data_origin_abs_y = tree_root_y
+        raw_positions: List[Optional[Tuple[int, int]]] = []
+        first_visible_y: Optional[int] = None
     
         for iid in items:
             try:
                 bbox = self._tree.bbox(iid)
-                if not bbox:
-                    positions.append(None)
-                    continue
-    
-                _x, y, _w, h = bbox
-    
-                abs_y0 = data_origin_abs_y + (y - first_bbox[1] if first_bbox else y)
-                abs_y1 = abs_y0 + h
-    
-                canvas_y0 = abs_y0 - body_root_y
-                canvas_y1 = abs_y1 - body_root_y
-    
-                positions.append((canvas_y0, canvas_y1))
+                if bbox:
+                    _x, y, _w, h = bbox
+                    raw_positions.append((y, y + h))
+                    if first_visible_y is None:
+                        first_visible_y = y
+                else:
+                    raw_positions.append(None)
             except (tk.TclError, Exception):
-                positions.append(None)
+                raw_positions.append(None)
     
-        return positions
+        if first_visible_y is None:
+            return raw_positions
+    
+        norm_positions: List[Optional[Tuple[int, int]]] = []
+        for pos in raw_positions:
+            if pos is None:
+                norm_positions.append(None)
+            else:
+                y0, y1 = pos
+                norm_positions.append((y0 - first_visible_y, y1 - first_visible_y))
+    
+        return norm_positions
 
     def _draw_header(self):
         d0, d1 = self._range
@@ -1283,10 +1390,31 @@ class GprPage(tk.Frame):
         right = tk.Frame(pw, bg=C["panel"])
         pw.add(left, minsize=480)
         pw.add(right, minsize=400)
-
+        
+        self.tree_top_spacer = tk.Frame(
+            left,
+            bg="#d6dbe0",
+            height=GanttCanvas.MONTH_H,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.tree_top_spacer.pack(side="top", fill="x")
+        self.tree_top_spacer.pack_propagate(False)
+        
+        tree_wrap = tk.Frame(left, bg=C["panel"])
+        tree_wrap.pack(side="top", fill="both", expand=True)
+        
+        style = ttk.Style(self)
+        style.configure("GPR.Treeview", rowheight=24)
+        style.configure("GPR.Treeview.Heading", font=("Segoe UI", 9, "bold"))
+        
         cols = ("type", "name", "start", "finish", "uom", "qty", "status")
         self.tree = ttk.Treeview(
-            left, columns=cols, show="headings", selectmode="browse"
+            tree_wrap,
+            columns=cols,
+            show="headings",
+            selectmode="browse",
+            style="GPR.Treeview",
         )
         heads = {
             "type": ("Тип работ", 130),
@@ -1305,9 +1433,9 @@ class GprPage(tk.Frame):
                 else ("e" if c == "qty" else "w")
             )
             self.tree.column(c, width=w, anchor=anc)
-
+        
         vsb = ttk.Scrollbar(
-            left, orient="vertical", command=self._on_tree_scroll
+            tree_wrap, orient="vertical", command=self._on_tree_scroll
         )
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -1323,6 +1451,8 @@ class GprPage(tk.Frame):
 
         self.gantt = GanttCanvas(right, day_px=20, linked_tree=self.tree)
         self.gantt.pack(fill="both", expand=True)
+        
+        self.after_idle(self._sync_tree_header_spacer)
 
         bot = tk.Frame(self, bg=C["border"], height=1)
         bot.pack(fill="x", padx=10)
@@ -1332,6 +1462,44 @@ class GprPage(tk.Frame):
             font=("Segoe UI", 8), anchor="w", padx=14, pady=2
         )
         self.lbl_bottom.pack(fill="x", padx=0, pady=(0, 6))
+
+    def _sync_tree_header_spacer(self):
+        """Подгоняет высоту верхнего spacer слева так, чтобы
+        первая строка дерева совпадала по вертикали с первой строкой Ганта."""
+        try:
+            self.update_idletasks()
+    
+            items = self.tree.get_children()
+            if not items:
+                self.tree_top_spacer.config(height=GanttCanvas.MONTH_H)
+                return
+    
+            # bbox первой видимой строки:
+            first_bbox = None
+            for iid in items:
+                try:
+                    bb = self.tree.bbox(iid)
+                    if bb:
+                        first_bbox = bb
+                        break
+                except tk.TclError:
+                    continue
+    
+            if not first_bbox:
+                self.tree_top_spacer.config(height=GanttCanvas.MONTH_H)
+                return
+    
+            # y первой строки внутри tree обычно ~= высоте заголовка treeview
+            tree_header_h = max(0, int(first_bbox[1]))
+    
+            # хотим, чтобы:
+            # spacer + tree_header_h == высоте шапки Ганта
+            spacer_h = max(0, int(self.gantt.HEADER_H) - tree_header_h)
+            self.tree_top_spacer.config(height=spacer_h)
+    
+        except Exception:
+            logger.exception("Error syncing tree/gantt header heights")
+            self.tree_top_spacer.config(height=GanttCanvas.MONTH_H)    
 
     def _accent_btn(self, parent, text, cmd):
         b = tk.Button(
@@ -1346,7 +1514,9 @@ class GprPage(tk.Frame):
         return b
 
     def _tb_btn(self, parent, text, cmd):
-        ttk.Button(parent, text=text, command=cmd).pack(side="left", padx=2)
+        b = ttk.Button(parent, text=text, command=cmd)
+        b.pack(side="left", padx=2)
+        return b
 
     def _on_tree_scroll(self, *args):
         self.tree.yview(*args)
@@ -1606,6 +1776,8 @@ class GprPage(tk.Frame):
         self.tree.tag_configure("title", font=("Segoe UI", 9, "bold"), background="#e3f2fd")
 
         self.gantt.set_data(self.tasks_filtered, self.facts)
+        self.after_idle(self._sync_tree_header_spacer)
+        self.after_idle(self.gantt.redraw_bars_only)
 
     def _change_range(self):
         dlg = DateRangeDialog(self, self.range_from, self.range_to)
