@@ -1087,6 +1087,10 @@ class MainApp(tk.Tk):
 
         self.nav_tree.bind("<Double-1>", self._on_nav_tree_open)
         self.nav_tree.bind("<Return>", self._on_nav_tree_open)
+        self.nav_tree.tag_configure("group", font=("Segoe UI", 9, "bold"))
+        self.nav_tree.tag_configure("page", font=("Segoe UI", 9))
+        self.nav_tree.tag_configure("service", font=("Segoe UI", 9, "bold"))
+        self.nav_tree.tag_configure("favorite", font=("Segoe UI", 9, "bold"))
 
         workspace = tk.Frame(body, bg=UI["bg"])
         workspace.pack(side="left", fill="both", expand=True)
@@ -1173,12 +1177,11 @@ class MainApp(tk.Tk):
         active_key = self._current_key or "home"
         titles_map = self._favorites_titles()
     
-        # словарь item_id -> action
         self._nav_actions = {}
     
         # --- Избранное ---
-        fav_root = self.nav_tree.insert("", "end", text="Избранное", open=True)
-        home_id = self.nav_tree.insert(fav_root, "end", text="Главная")
+        fav_root = self.nav_tree.insert("", "end", text="★ Избранное", open=True, tags=("favorite",))
+        home_id = self.nav_tree.insert(fav_root, "end", text="• Главная", tags=("page",))
         self._nav_actions[home_id] = ("home", "home")
     
         for key in self._favorite_keys:
@@ -1188,18 +1191,29 @@ class MainApp(tk.Tk):
             if required and not self.has_perm(required):
                 continue
             title = titles_map.get(key, key)
-            iid = self.nav_tree.insert(fav_root, "end", text=title)
+            iid = self.nav_tree.insert(fav_root, "end", text=f"• {title}", tags=("page",))
             self._nav_actions[iid] = ("page", key)
     
-        # --- Разделы ---
+        # --- Основные разделы ---
         if self.is_authenticated:
             visible_sections = self._visible_menu_sections()
             for sec, entries in visible_sections:
-                sec_id = self.nav_tree.insert("", "end", text=sec.label, open=False)
+                sec_id = self.nav_tree.insert(
+                    "",
+                    "end",
+                    text=f"📁 {sec.label}",
+                    open=False,
+                    tags=("group",),
+                )
                 for entry in entries:
                     if not entry.key:
                         continue
-                    iid = self.nav_tree.insert(sec_id, "end", text=entry.label)
+                    iid = self.nav_tree.insert(
+                        sec_id,
+                        "end",
+                        text=f"• {entry.label}",
+                        tags=("page",),
+                    )
                     self._nav_actions[iid] = ("page", entry.key)
     
             # --- Служебные ---
@@ -1209,19 +1223,39 @@ class MainApp(tk.Tk):
             )
     
             if settings_allowed or self.is_authenticated:
-                srv_id = self.nav_tree.insert("", "end", text="Служебные", open=True)
+                srv_id = self.nav_tree.insert(
+                    "",
+                    "end",
+                    text="⚙ Служебные",
+                    open=True,
+                    tags=("service",),
+                )
     
                 if settings_allowed:
-                    iid = self.nav_tree.insert(srv_id, "end", text="Настройки")
+                    iid = self.nav_tree.insert(
+                        srv_id,
+                        "end",
+                        text="• Настройки",
+                        tags=("page",),
+                    )
                     self._nav_actions[iid] = ("settings", None)
     
-                iid_add = self.nav_tree.insert(srv_id, "end", text="Добавить текущую в избранное")
+                iid_add = self.nav_tree.insert(
+                    srv_id,
+                    "end",
+                    text="• Добавить текущую в избранное",
+                    tags=("page",),
+                )
                 self._nav_actions[iid_add] = ("fav_add", None)
     
-                iid_rem = self.nav_tree.insert(srv_id, "end", text="Убрать текущую из избранного")
+                iid_rem = self.nav_tree.insert(
+                    srv_id,
+                    "end",
+                    text="• Убрать текущую из избранного",
+                    tags=("page",),
+                )
                 self._nav_actions[iid_rem] = ("fav_remove", None)
     
-        # выделение активного пункта
         self._select_tree_item_by_key(active_key)
 
     def _select_tree_item_by_key(self, key: str):
