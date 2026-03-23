@@ -853,28 +853,58 @@ class GanttCanvas(tk.Frame):
         return "break"
 
     def _get_tree_row_positions(self) -> List[Optional[Tuple[int, int]]]:
-        """Возвращает позиции строк Treeview в его внутренних координатах.
-        Это надёжнее, чем пересчёт через winfo_rooty, и не теряет первую строку.
-        """
+        """Точное вычисление позиций строк Treeview в координатах canvas."""
         if not self._tree:
             return []
-
+    
         items = self._tree.get_children()
         if not items:
             return []
-
+    
         positions: List[Optional[Tuple[int, int]]] = []
+    
+        try:
+            self._tree.update_idletasks()
+            self.body.update_idletasks()
+    
+            tree_root_y = self._tree.winfo_rooty()
+            body_root_y = self.body.winfo_rooty()
+        except tk.TclError:
+            return []
+    
+        first_bbox = None
+        for iid in items:
+            try:
+                first_bbox = self._tree.bbox(iid)
+                if first_bbox:
+                    break
+            except tk.TclError:
+                pass
+    
+        if first_bbox:
+            data_origin_abs_y = tree_root_y + first_bbox[1]
+        else:
+            data_origin_abs_y = tree_root_y
+    
         for iid in items:
             try:
                 bbox = self._tree.bbox(iid)
-                if bbox:
-                    _x, y, _w, h = bbox
-                    positions.append((y, y + h))
-                else:
+                if not bbox:
                     positions.append(None)
+                    continue
+    
+                _x, y, _w, h = bbox
+    
+                abs_y0 = data_origin_abs_y + (y - first_bbox[1] if first_bbox else y)
+                abs_y1 = abs_y0 + h
+    
+                canvas_y0 = abs_y0 - body_root_y
+                canvas_y1 = abs_y1 - body_root_y
+    
+                positions.append((canvas_y0, canvas_y1))
             except (tk.TclError, Exception):
                 positions.append(None)
-
+    
         return positions
 
     def _draw_header(self):
