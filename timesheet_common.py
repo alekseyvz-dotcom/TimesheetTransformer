@@ -39,7 +39,7 @@ SPECIAL_CODES: dict[str, dict[str, Any]] = {
     "МО": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Междувахтовый отдых"},
     "ВМ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Вахта"},
     "ДО": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отпуск без сохранения"},
-    "ОД": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отгул донорский"},
+    "ОВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отгул донорский"},
     "ОТ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отпуск"},
     "УВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Уволен"},
     "КВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Командировка выходного дня"},
