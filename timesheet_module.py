@@ -448,7 +448,6 @@ class TimesheetPage(tk.Frame):
     def _build_ui(self):
         self._build_ts_header()
         self._build_ts_top_form()
-        self._build_ts_add_employee_panel()
         self._build_ts_toolbar()
         self._build_ts_filter_bar()
         self._build_ts_grid()
@@ -492,7 +491,7 @@ class TimesheetPage(tk.Frame):
 
     def _build_ts_top_form(self):
         outer = tk.Frame(self, bg=TS_COLORS["bg"])
-        outer.pack(fill="x", padx=10, pady=(8, 4))
+        outer.pack(fill="x", padx=10, pady=(6, 2))
         outer.grid_columnconfigure(0, weight=1)
         outer.grid_columnconfigure(1, weight=2)
 
@@ -585,119 +584,51 @@ class TimesheetPage(tk.Frame):
             bg=TS_COLORS["panel"],
         ).pack(side="left", padx=8)
 
-    def _build_ts_add_employee_panel(self):
-        pnl = tk.LabelFrame(
-            self,
-            text=" 👤 Добавить сотрудника вручную ",
-            font=("Segoe UI", 9, "bold"),
-            bg=TS_COLORS["panel"],
-            fg=TS_COLORS["accent"],
-            relief="groove",
-            bd=1,
-            padx=10,
-            pady=6,
-        )
-        pnl.pack(fill="x", padx=10, pady=(4, 2))
-
-        tk.Label(
-            pnl,
-            text="Сотрудник  *:",
-            font=("Segoe UI", 9),
-            bg=TS_COLORS["panel"],
-            fg=TS_COLORS["warning"],
-        ).grid(row=0, column=0, sticky="e", padx=(0, 6), pady=3)
-
-        self.fio_var = tk.StringVar()
-        self.cmb_fio = AutoCompleteCombobox(pnl, textvariable=self.fio_var, width=36, font=("Segoe UI", 9))
-        self.cmb_fio.grid(row=0, column=1, sticky="w", pady=3)
-        self.cmb_fio.bind("<<ComboboxSelected>>", self._on_fio_select)
-
-        tk.Label(
-            pnl,
-            text="Таб. №:",
-            font=("Segoe UI", 9),
-            bg=TS_COLORS["panel"],
-            fg="#333",
-        ).grid(row=0, column=2, sticky="e", padx=(16, 6), pady=3)
-
-        self.ent_tbn = ttk.Entry(pnl, width=12, font=("Segoe UI", 9))
-        self.ent_tbn.grid(row=0, column=3, sticky="w", pady=3)
-
-        tk.Label(
-            pnl,
-            text="Должность:",
-            font=("Segoe UI", 9),
-            bg=TS_COLORS["panel"],
-            fg="#333",
-        ).grid(row=0, column=4, sticky="e", padx=(16, 6), pady=3)
-
-        self.pos_var = tk.StringVar()
-        self.ent_pos = ttk.Entry(pnl, textvariable=self.pos_var, width=30, state="readonly", font=("Segoe UI", 9))
-        self.ent_pos.grid(row=0, column=5, sticky="w", pady=3)
-
-        btn_add = tk.Button(
-            pnl,
-            text="➕ Добавить",
-            font=("Segoe UI", 9, "bold"),
-            bg=TS_COLORS["btn_save_bg"],
-            fg=TS_COLORS["btn_save_fg"],
-            activebackground="#0d47a1",
-            activeforeground="white",
-            relief="flat",
-            cursor="hand2",
-            padx=10,
-            pady=3,
-            command=self.add_row,
-        )
-        btn_add.grid(row=0, column=6, padx=(16, 0), pady=3)
-        btn_add.bind("<Enter>", lambda _e: btn_add.config(bg="#0d47a1"))
-        btn_add.bind("<Leave>", lambda _e: btn_add.config(bg=TS_COLORS["btn_save_bg"]))
-
-        if self.read_only:
-            try:
-                btn_add.configure(state="disabled")
-            except Exception:
-                pass
-
-    def _ts_btn(self, parent, text: str, cmd, side="left", padx=4, pady=0):
-        b = ttk.Button(parent, text=text, command=cmd)
+    def _ts_btn(self, parent, text: str, cmd, side="left", padx=3, pady=0):
+        b = ttk.Button(parent, text=text, command=cmd, width=18)
         b.pack(side=side, padx=padx, pady=pady)
         return b
 
     def _build_ts_toolbar(self):
-        bar = tk.Frame(self, bg=TS_COLORS["accent_light"], pady=5, relief="flat")
-        bar.pack(fill="x", padx=10, pady=(2, 0))
-
-        self._ts_btn(bar, "👥 Добавить подразделение", self.add_department_all, side="left", padx=(8, 4))
-        self._ts_btn(bar, "☑ Выбрать из подразделения…", self.add_department_partial, side="left", padx=4)
-
-        tk.Frame(bar, bg=TS_COLORS["border"], width=1).pack(side="left", fill="y", padx=8)
-
-        self._ts_btn(bar, "⏱ Время (выбранные)", self.fill_time_selected, side="left", padx=4)
-        self._ts_btn(bar, "🕐 Проставить часы всем", self.fill_hours_all, side="left", padx=4)
-        self._ts_btn(bar, "🗑 Очистить часы всем", self.clear_all_rows, side="left", padx=4)
-
-        tk.Frame(bar, bg=TS_COLORS["border"], width=1).pack(side="left", fill="y", padx=8)
-
-        self._ts_btn(bar, "📥 Из Excel", self.import_from_excel, side="left", padx=4)
-        self._ts_btn(bar, "📋 Копировать из месяца…", self.copy_from_month, side="left", padx=4)
-        self._ts_btn(bar, "🔒 Загрузить СКУД…", self.import_from_skud, side="left", padx=4)
-
-        tk.Frame(bar, bg=TS_COLORS["border"], width=1).pack(side="left", fill="y", padx=8)
-
-        self._ts_btn(bar, "✖ Снять выделение", self.clear_selection, side="left", padx=4)
-
+        bar = tk.Frame(self, bg=TS_COLORS["accent_light"], relief="flat")
+        bar.pack(fill="x", padx=10, pady=(4, 0))
+    
+        top_row = tk.Frame(bar, bg=TS_COLORS["accent_light"])
+        top_row.pack(fill="x", pady=(4, 2))
+    
+        bottom_row = tk.Frame(bar, bg=TS_COLORS["accent_light"])
+        bottom_row.pack(fill="x", pady=(0, 4))
+    
+        # ---------- Верхний ряд ----------
+        self._ts_btn(top_row, "Подразделение: все", self.add_department_all, side="left", padx=(4, 3))
+        self._ts_btn(top_row, "Выбрать сотрудников…", self.add_department_partial, side="left", padx=3)
+    
+        tk.Frame(top_row, bg=TS_COLORS["border"], width=1, height=24).pack(side="left", padx=6, fill="y")
+    
+        self._ts_btn(top_row, "Время выбранным", self.fill_time_selected, side="left", padx=3)
+        self._ts_btn(top_row, "Часы всем", self.fill_hours_all, side="left", padx=3)
+        self._ts_btn(top_row, "Очистить часы", self.clear_all_rows, side="left", padx=3)
+    
+        # ---------- Нижний ряд ----------
+        self._ts_btn(bottom_row, "Импорт Excel", self.import_from_excel, side="left", padx=(4, 3))
+        self._ts_btn(bottom_row, "Копировать из месяца…", self.copy_from_month, side="left", padx=3)
+        self._ts_btn(bottom_row, "Загрузить СКУД…", self.import_from_skud, side="left", padx=3)
+    
+        tk.Frame(bottom_row, bg=TS_COLORS["border"], width=1, height=24).pack(side="left", padx=6, fill="y")
+    
+        self._ts_btn(bottom_row, "Снять выделение", self.clear_selection, side="left", padx=3)
+    
         self._btn_export_ref = self._ts_btn(
-            bar,
-            "📊 Выгрузить в Excel",
+            bottom_row,
+            "Выгрузить Excel",
             self.export_current_timesheet_to_excel,
             side="right",
             padx=4,
         )
-
+    
         btn_save = tk.Button(
-            bar,
-            text="💾 СОХРАНИТЬ",
+            bottom_row,
+            text="Сохранить",
             font=("Segoe UI", 9, "bold"),
             bg=TS_COLORS["btn_save_bg"],
             fg=TS_COLORS["btn_save_fg"],
@@ -705,28 +636,29 @@ class TimesheetPage(tk.Frame):
             activeforeground="white",
             relief="flat",
             cursor="hand2",
-            padx=14,
-            pady=4,
+            padx=12,
+            pady=3,
             command=self.save_all,
         )
         btn_save.pack(side="right", padx=(4, 8))
         btn_save.bind("<Enter>", lambda _e: btn_save.config(bg="#0d47a1"))
         btn_save.bind("<Leave>", lambda _e: btn_save.config(bg=TS_COLORS["btn_save_bg"]))
-
+    
         self._toolbar_frame = bar
         self._btn_save_ref = btn_save
-
+    
         if self.read_only:
-            for child in bar.winfo_children():
-                if child is getattr(self, "_btn_export_ref", None):
-                    continue
-                try:
-                    child.configure(state="disabled")
-                except Exception:
-                    pass
+            for container in (top_row, bottom_row):
+                for child in container.winfo_children():
+                    if child is getattr(self, "_btn_export_ref", None):
+                        continue
+                    try:
+                        child.configure(state="disabled")
+                    except Exception:
+                        pass
 
     def _build_ts_filter_bar(self):
-        bar = tk.Frame(self, bg=TS_COLORS["bg"], pady=4)
+        bar = tk.Frame(self, bg=TS_COLORS["bg"], pady=2)
         bar.pack(fill="x", padx=10, pady=(4, 0))
 
         tk.Label(
@@ -2390,7 +2322,7 @@ class MyTimesheetsPage(tk.Frame):
         self._load_data()
 
     def _build_ui(self):
-        hdr = tk.Frame(self, bg=TS_COLORS["accent"], pady=6)
+        hdr = tk.Frame(self, bg=TS_COLORS["accent"], pady=4)
         hdr.pack(fill="x")
         tk.Label(
             hdr,
