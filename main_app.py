@@ -217,6 +217,32 @@ def setup_ttk_styles(root):
         pass
 
     style.configure(
+        "Sidebar.Treeview",
+        font=("Segoe UI", 9),
+        rowheight=22,
+        background=UI["sidebar"],
+        fieldbackground=UI["sidebar"],
+        foreground=UI["text"],
+        bordercolor=UI["line"],
+        lightcolor=UI["line"],
+        darkcolor=UI["line"],
+    )
+
+    style.configure(
+        "Sidebar.Treeview.Heading",
+        font=("Segoe UI", 9, "bold"),
+        background=UI["panel2"],
+        foreground=UI["text"],
+        relief="flat",
+    )
+
+    style.map(
+        "Sidebar.Treeview",
+        background=[("selected", UI["sidebar_active"])],
+        foreground=[("selected", UI["text"])],
+    )
+
+    style.configure(
         "App.TButton",
         font=("Segoe UI", 9),
         padding=(8, 5),
@@ -491,58 +517,6 @@ def embedded_logo_image(parent, max_w=360, max_h=160):
     except Exception as e:
         logging.error(f"Критическая ошибка загрузки логотипа через tkinter: {e}")
         return None
-
-
-# ================================================================== #
-#  ВИДЖЕТЫ
-# ================================================================== #
-
-class NavButton(tk.Frame):
-    def __init__(self, master, text: str, command=None, active=False, enabled=True, level: int = 0):
-        bg = UI["sidebar_active"] if active else UI["sidebar"]
-        fg = UI["text"] if enabled else UI["soft"]
-        super().__init__(
-            master,
-            bg=bg,
-            highlightbackground=UI["line"],
-            highlightthickness=1,
-            cursor="hand2" if enabled else "",
-        )
-        self.command = command
-        self.enabled = enabled
-        self._normal_bg = bg
-        self._hover_bg = UI["sidebar_hover"] if enabled else bg
-
-        self.lbl = tk.Label(
-            self,
-            text=text,
-            bg=bg,
-            fg=fg,
-            font=("Segoe UI", 8),
-            anchor="w",
-            padx=8 + level * 8,
-            pady=3,
-        )
-        self.lbl.pack(fill="x")
-
-        if enabled:
-            for w in (self, self.lbl):
-                w.bind("<Enter>", self._on_enter)
-                w.bind("<Leave>", self._on_leave)
-                w.bind("<Button-1>", self._on_click)
-
-    def _on_enter(self, _e=None):
-        self.configure(bg=self._hover_bg)
-        self.lbl.configure(bg=self._hover_bg)
-
-    def _on_leave(self, _e=None):
-        self.configure(bg=self._normal_bg)
-        self.lbl.configure(bg=self._normal_bg)
-
-    def _on_click(self, _e=None):
-        if self.enabled and self.command:
-            self.command()
-
 
 class CompactInfoBox(tk.Frame):
     def __init__(self, master, title: str, value: str, accent="#2f74c0", **kw):
@@ -1078,22 +1052,41 @@ class MainApp(tk.Tk):
         body = tk.Frame(self, bg=UI["bg"])
         body.pack(fill="both", expand=True)
 
-        self.sidebar = tk.Frame(body, bg=UI["sidebar"], width=220, highlightbackground=UI["line"], highlightthickness=1)
+        self.sidebar = tk.Frame(body, bg=UI["sidebar"], width=270, highlightbackground=UI["line"], highlightthickness=1)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
 
-        self.sidebar_canvas = tk.Canvas(self.sidebar, bg=UI["sidebar"], highlightthickness=0, borderwidth=0)
-        self.sidebar_scroll = ttk.Scrollbar(self.sidebar, orient="vertical", command=self.sidebar_canvas.yview)
-        self.sidebar_inner = tk.Frame(self.sidebar_canvas, bg=UI["sidebar"])
+        side_head = tk.Frame(self.sidebar, bg=UI["panel2"], height=32)
+        side_head.pack(fill="x")
+        side_head.pack_propagate(False)
 
-        self.sidebar_window = self.sidebar_canvas.create_window((0, 0), window=self.sidebar_inner, anchor="nw")
-        self.sidebar_canvas.configure(yscrollcommand=self.sidebar_scroll.set)
+        tk.Label(
+            side_head,
+            text="Навигация",
+            font=FONT_H2,
+            fg=UI["text"],
+            bg=UI["panel2"],
+            anchor="w",
+            padx=10,
+        ).pack(fill="both", expand=True)
 
-        self.sidebar_canvas.pack(side="left", fill="both", expand=True)
-        self.sidebar_scroll.pack(side="right", fill="y")
+        tree_wrap = tk.Frame(self.sidebar, bg=UI["sidebar"])
+        tree_wrap.pack(fill="both", expand=True, padx=4, pady=4)
 
-        self.sidebar_inner.bind("<Configure>", lambda e: self.sidebar_canvas.configure(scrollregion=self.sidebar_canvas.bbox("all")))
-        self.sidebar_canvas.bind("<Configure>", lambda e: self.sidebar_canvas.itemconfigure(self.sidebar_window, width=e.width))
+        self.nav_tree = ttk.Treeview(
+            tree_wrap,
+            show="tree",
+            selectmode="browse",
+            style="Sidebar.Treeview",
+        )
+        self.nav_tree.pack(side="left", fill="both", expand=True)
+
+        self.nav_scroll = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.nav_tree.yview)
+        self.nav_scroll.pack(side="right", fill="y")
+        self.nav_tree.configure(yscrollcommand=self.nav_scroll.set)
+
+        self.nav_tree.bind("<Double-1>", self._on_nav_tree_open)
+        self.nav_tree.bind("<Return>", self._on_nav_tree_open)
 
         workspace = tk.Frame(body, bg=UI["bg"])
         workspace.pack(side="left", fill="both", expand=True)
@@ -1168,108 +1161,125 @@ class MainApp(tk.Tk):
                     result[e.key] = e.label
         return result
 
-    def _section_label(self, parent, text):
-        tk.Label(
-            parent,
-            text=text,
-            font=("Segoe UI", 8, "bold"),
-            fg=UI["muted"],
-            bg=UI["panel2"],
-            anchor="w",
-            padx=8,
-            pady=4,
-        ).pack(fill="x", pady=(0, 2))
-
     def _rebuild_sidebar(self):
         from menu_spec import TOP_LEVEL
-
-        for w in self.sidebar_inner.winfo_children():
-            w.destroy()
-
+    
+        if not hasattr(self, "nav_tree"):
+            return
+    
+        for item in self.nav_tree.get_children():
+            self.nav_tree.delete(item)
+    
         active_key = self._current_key or "home"
         titles_map = self._favorites_titles()
-
-        self._section_label(self.sidebar_inner, "Избранное")
-
-        fav_items = [("Главная", "home")]
+    
+        # словарь item_id -> action
+        self._nav_actions = {}
+    
+        # --- Избранное ---
+        fav_root = self.nav_tree.insert("", "end", text="Избранное", open=True)
+        home_id = self.nav_tree.insert(fav_root, "end", text="Главная")
+        self._nav_actions[home_id] = ("home", "home")
+    
         for key in self._favorite_keys:
             if key == "home":
                 continue
-            title = titles_map.get(key, key)
             required = self._perm_for_key(key)
             if required and not self.has_perm(required):
                 continue
-            fav_items.append((title, key))
-
-        for title, key in fav_items:
-            btn = NavButton(
-                self.sidebar_inner,
-                text=title,
-                active=(key == active_key),
-                enabled=(key == "home" or self.is_authenticated),
-                command=lambda kk=key: self.show_home() if kk == "home" else self._open_known_page(kk),
-            )
-            btn.pack(fill="x", pady=1, padx=4)
-
+            title = titles_map.get(key, key)
+            iid = self.nav_tree.insert(fav_root, "end", text=title)
+            self._nav_actions[iid] = ("page", key)
+    
+        # --- Разделы ---
         if self.is_authenticated:
             visible_sections = self._visible_menu_sections()
             for sec, entries in visible_sections:
-                self._section_label(self.sidebar_inner, sec.label)
+                sec_id = self.nav_tree.insert("", "end", text=sec.label, open=False)
                 for entry in entries:
                     if not entry.key:
                         continue
-                    btn = NavButton(
-                        self.sidebar_inner,
-                        text=entry.label,
-                        active=(entry.key == active_key),
-                        enabled=True,
-                        level=1,
-                        command=lambda kk=entry.key: self._open_known_page(kk),
-                    )
-                    btn.pack(fill="x", pady=1, padx=4)
-
-            self._section_label(self.sidebar_inner, "Служебные")
-
+                    iid = self.nav_tree.insert(sec_id, "end", text=entry.label)
+                    self._nav_actions[iid] = ("page", entry.key)
+    
+            # --- Служебные ---
             settings_allowed = any(
                 e.label == "Настройки" and self._has_access_to_entry(e)
                 for e in TOP_LEVEL
             )
-            if settings_allowed:
-                btn_settings = NavButton(
-                    self.sidebar_inner,
-                    text="Настройки",
-                    active=False,
-                    enabled=True,
-                    command=lambda: Settings.open_settings_window(self),
-                )
-                btn_settings.pack(fill="x", pady=2, padx=6)
+    
+            if settings_allowed or self.is_authenticated:
+                srv_id = self.nav_tree.insert("", "end", text="Служебные", open=True)
+    
+                if settings_allowed:
+                    iid = self.nav_tree.insert(srv_id, "end", text="Настройки")
+                    self._nav_actions[iid] = ("settings", None)
+    
+                iid_add = self.nav_tree.insert(srv_id, "end", text="Добавить текущую в избранное")
+                self._nav_actions[iid_add] = ("fav_add", None)
+    
+                iid_rem = self.nav_tree.insert(srv_id, "end", text="Убрать текущую из избранного")
+                self._nav_actions[iid_rem] = ("fav_remove", None)
+    
+        # выделение активного пункта
+        self._select_tree_item_by_key(active_key)
 
-            tools = tk.Frame(self.sidebar_inner, bg=UI["sidebar"])
-            tools.pack(fill="x", padx=6, pady=(6, 4))
-            
-            row = tk.Frame(tools, bg=UI["sidebar"])
-            row.pack(fill="x")
-            
-            ttk.Button(
-                row,
-                text="В избранное",
-                style="App.TButton",
-                command=self.add_current_to_favorites,
-            ).pack(side="left", fill="x", expand=True, padx=(0, 2))
-            
-            ttk.Button(
-                row,
-                text="Убрать",
-                style="App.TButton",
-                command=self.remove_current_from_favorites,
-            ).pack(side="left", fill="x", expand=True, padx=(2, 0))
-
-            ttk.Button(
-                tools,
-                text="Убрать текущую из избранного",
-                style="App.TButton",
-                command=self.remove_current_from_favorites,
-            ).pack(fill="x", pady=2)
+    def _select_tree_item_by_key(self, key: str):
+        if not hasattr(self, "_nav_actions"):
+            return
+    
+        for item_id, action in self._nav_actions.items():
+            kind, value = action
+            if kind in ("home", "page") and value == key:
+                try:
+                    self.nav_tree.selection_set(item_id)
+                    self.nav_tree.focus(item_id)
+                    self._ensure_tree_item_visible(item_id)
+                except Exception:
+                    pass
+                return
+    
+    
+    def _ensure_tree_item_visible(self, item_id: str):
+        try:
+            parent = self.nav_tree.parent(item_id)
+            while parent:
+                self.nav_tree.item(parent, open=True)
+                parent = self.nav_tree.parent(parent)
+            self.nav_tree.see(item_id)
+        except Exception:
+            pass
+    
+    
+    def _on_nav_tree_open(self, _event=None):
+        sel = self.nav_tree.selection()
+        if not sel:
+            return
+    
+        item_id = sel[0]
+        action = self._nav_actions.get(item_id)
+        if not action:
+            # если это просто раздел, переключаем раскрытие
+            try:
+                is_open = self.nav_tree.item(item_id, "open")
+                self.nav_tree.item(item_id, open=not is_open)
+            except Exception:
+                pass
+            return
+    
+        kind, value = action
+    
+        if kind == "home":
+            self.show_home()
+        elif kind == "page" and value:
+            self._open_known_page(value)
+        elif kind == "settings":
+            if self.is_authenticated and self.has_perm("page.settings"):
+                Settings.open_settings_window(self)
+        elif kind == "fav_add":
+            self.add_current_to_favorites()
+        elif kind == "fav_remove":
+            self.remove_current_from_favorites()
 
     # ------------------------------------------------------------------ #
     #  История
