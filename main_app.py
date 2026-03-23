@@ -15,7 +15,7 @@ import os as _os
 from io import BytesIO
 from datetime import datetime, date
 from pathlib import Path
-from typing import List, Tuple, Optional, Any, Dict
+from typing import List, Tuple, Optional, Any, Dict, Callable
 import base64
 
 # --- ИМПОРТ GUI ---
@@ -59,7 +59,6 @@ logging.debug("=== main_app запущен ===")
 # ================================================================== #
 
 def _load_local_settings() -> dict:
-    """Читает settings.dat и возвращает словарь."""
     try:
         if SETTINGS_FILE.exists():
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -70,7 +69,6 @@ def _load_local_settings() -> dict:
 
 
 def _save_local_settings(data: dict):
-    """Записывает словарь в settings.dat."""
     try:
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -79,10 +77,6 @@ def _save_local_settings(data: dict):
 
 
 def _obfuscate(text: str) -> str:
-    """
-    Простая обфускация (base64). НЕ является криптостойким шифрованием,
-    но не хранит пароль в открытом виде в файле.
-    """
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
@@ -94,10 +88,6 @@ def _deobfuscate(text: str) -> str:
 
 
 def load_saved_credentials() -> Tuple[str, str, bool]:
-    """
-    Возвращает (username, password, remember_me).
-    Если данных нет — пустые строки и False.
-    """
     cfg = _load_local_settings()
     remember = cfg.get("remember_me", False)
     if not remember:
@@ -108,7 +98,6 @@ def load_saved_credentials() -> Tuple[str, str, bool]:
 
 
 def save_credentials(username: str, password: str, remember: bool):
-    """Сохраняет или удаляет учётные данные в settings.dat."""
     cfg = _load_local_settings()
     cfg["remember_me"] = remember
     if remember:
@@ -183,42 +172,41 @@ def perform_heavy_imports():
 
 
 # --- КОНСТАНТЫ И ГЛОБАЛЬНЫЕ НАСТРОЙКИ ---
-APP_NAME = "Управление строительством (Главное меню)"
+APP_NAME = "Управление строительством"
 db_connection_pool = None
 
 
 # ================================================================== #
-#  ERP/1C ПАЛИТРА И СТИЛИ
+#  ТЕМА ПРОМЫШЛЕННОГО ПО
 # ================================================================== #
 
-ERP = {
-    "bg": "#f2f4f7",
-    "panel": "#e9edf2",
-    "panel2": "#dde4ec",
-    "card": "#ffffff",
-    "line": "#cfd7e3",
-    "line_dark": "#b8c3d1",
+UI = {
+    "bg": "#edf1f5",
+    "panel": "#f7f9fb",
+    "panel2": "#e7edf4",
+    "line": "#c9d3df",
+    "line_dark": "#b6c1ce",
+    "sidebar": "#e3eaf2",
+    "sidebar_hover": "#d7e3f1",
+    "sidebar_active": "#c9dbef",
+    "tab_bg": "#eef3f8",
+    "tab_active": "#ffffff",
+    "white": "#ffffff",
     "text": "#1f2937",
-    "muted": "#5f6b7a",
-    "soft": "#7b8794",
+    "muted": "#5b6776",
+    "soft": "#7f8a98",
     "blue": "#2f74c0",
-    "blue_dark": "#215b9a",
-    "blue_soft": "#e8f1fb",
+    "blue_dark": "#255f9d",
     "green": "#2f855a",
     "orange": "#c97a20",
     "red": "#c05656",
-    "sidebar": "#e6ebf1",
-    "sidebar_active": "#d6e4f5",
-    "header": "#f8fafc",
-    "login_bg": "#eef2f6",
+    "status": "#f8fafc",
 }
 
-FONT_H1 = ("Segoe UI", 15, "bold")
-FONT_H2 = ("Segoe UI", 12, "bold")
-FONT_H3 = ("Segoe UI", 10, "bold")
+FONT_H1 = ("Segoe UI", 12, "bold")
+FONT_H2 = ("Segoe UI", 10, "bold")
 FONT_BODY = ("Segoe UI", 9)
 FONT_SMALL = ("Segoe UI", 8)
-FONT_MONO = ("Consolas", 9)
 
 
 def setup_ttk_styles(root):
@@ -229,73 +217,61 @@ def setup_ttk_styles(root):
         pass
 
     style.configure(
-        "ERP.TButton",
+        "App.TButton",
         font=("Segoe UI", 9),
-        padding=(10, 6),
+        padding=(8, 5),
     )
 
     style.configure(
-        "ERPPrimary.TButton",
+        "Primary.TButton",
         font=("Segoe UI", 9, "bold"),
-        padding=(10, 6),
+        padding=(8, 5),
         foreground="white",
-        background=ERP["blue"],
+        background=UI["blue"],
         borderwidth=1,
-        relief="flat",
     )
     style.map(
-        "ERPPrimary.TButton",
-        background=[("active", ERP["blue_dark"])],
+        "Primary.TButton",
+        background=[("active", UI["blue_dark"])],
     )
 
     style.configure(
-        "ERPTool.TButton",
-        font=("Segoe UI", 8),
-        padding=(8, 4),
-        background="#f4f7fa",
-    )
-
-    style.configure(
-        "ERP.TEntry",
+        "App.TEntry",
         padding=5,
     )
 
     style.configure(
-        "ERP.Treeview",
-        font=("Segoe UI", 9),
-        rowheight=24,
-        fieldbackground="white",
-        background="white",
-        foreground=ERP["text"],
-        bordercolor=ERP["line"],
-        lightcolor=ERP["line"],
-        darkcolor=ERP["line"],
+        "Main.TNotebook",
+        background=UI["bg"],
+        borderwidth=0,
+        tabmargins=(0, 0, 0, 0),
     )
     style.configure(
-        "ERP.Treeview.Heading",
-        font=("Segoe UI", 9, "bold"),
-        background=ERP["panel"],
-        foreground=ERP["text"],
-        relief="flat",
-        padding=6,
+        "Main.TNotebook.Tab",
+        font=("Segoe UI", 9),
+        padding=(12, 6),
+        background=UI["tab_bg"],
+        foreground=UI["text"],
+        borderwidth=1,
     )
     style.map(
-        "ERP.Treeview.Heading",
-        background=[("active", ERP["panel2"])],
+        "Main.TNotebook.Tab",
+        background=[("selected", UI["tab_active"]), ("active", "#f8fbff")],
+        foreground=[("selected", UI["text"])],
     )
 
     style.configure(
-        "ERP.Horizontal.TProgressbar",
+        "App.Horizontal.TProgressbar",
         troughcolor="#e5e7eb",
-        background=ERP["blue"],
+        background=UI["blue"],
         bordercolor="#d1d5db",
-        lightcolor=ERP["blue"],
-        darkcolor=ERP["blue"],
+        lightcolor=UI["blue"],
+        darkcolor=UI["blue"],
     )
 
     style.configure(
         "TCheckbutton",
-        background=ERP["login_bg"],
+        background=UI["bg"],
         font=("Segoe UI", 9),
     )
 
@@ -303,7 +279,6 @@ def setup_ttk_styles(root):
 # --- ГЛАВНЫЕ УТИЛИТЫ ПРИЛОЖЕНИЯ ---
 
 def initialize_db_pool():
-    """Создает пул соединений с БД. Вызывается один раз при старте приложения."""
     global db_connection_pool
     if db_connection_pool:
         return
@@ -334,7 +309,6 @@ def initialize_db_pool():
 
 
 def close_db_pool():
-    """Закрывает все соединения в пуле. Вызывается при выходе из приложения."""
     global db_connection_pool
     if db_connection_pool:
         logging.info("Закрытие пула соединений с БД...")
@@ -448,7 +422,7 @@ def load_user_permissions(user_id: int) -> set[str]:
 
 
 # ================================================================== #
-#  Быстрая статистика для домашней страницы
+#  Быстрая статистика для компактной домашней страницы
 # ================================================================== #
 
 def _load_home_stats() -> Dict[str, Any]:
@@ -498,6 +472,10 @@ def _load_home_stats() -> Dict[str, Any]:
     return stats
 
 
+# ================================================================== #
+#  GUI Helpers
+# ================================================================== #
+
 def embedded_logo_image(parent, max_w=360, max_h=160):
     b64 = _LOGO_BASE64 or TINY_PNG_BASE64
 
@@ -523,193 +501,89 @@ def embedded_logo_image(parent, max_w=360, max_h=160):
         return None
 
 
-# ================================================================== #
-#  ERP ВИДЖЕТЫ
-# ================================================================== #
-
-class ERPPanel(tk.Frame):
-    def __init__(self, master, bg=None, border=True, **kw):
-        super().__init__(
-            master,
-            bg=bg or ERP["card"],
-            highlightbackground=ERP["line"],
-            highlightthickness=1 if border else 0,
-            bd=0,
-            **kw,
-        )
-
-
-class ERPSectionHeader(tk.Frame):
-    def __init__(self, master, title: str, toolbar: Optional[list] = None, **kw):
-        super().__init__(master, bg=ERP["panel"], height=32, **kw)
-        self.pack_propagate(False)
-
-        tk.Label(
-            self,
-            text=title,
-            font=FONT_H3,
-            fg=ERP["text"],
-            bg=ERP["panel"],
-            anchor="w",
-        ).pack(side="left", padx=10)
-
-        if toolbar:
-            btns = tk.Frame(self, bg=ERP["panel"])
-            btns.pack(side="right", padx=6)
-            for text, cmd in toolbar:
-                ttk.Button(
-                    btns,
-                    text=text,
-                    command=cmd,
-                    style="ERPTool.TButton",
-                ).pack(side="left", padx=2, pady=3)
-
-
-class ERPSidebarButton(tk.Frame):
-    def __init__(self, master, text: str, command=None, active=False, enabled=True, **kw):
-        bg = ERP["sidebar_active"] if active else ERP["sidebar"]
-        fg = ERP["text"] if enabled else ERP["soft"]
+class NavButton(tk.Frame):
+    def __init__(self, master, text: str, command=None, active=False, enabled=True):
+        bg = UI["sidebar_active"] if active else UI["sidebar"]
+        fg = UI["text"] if enabled else UI["soft"]
         super().__init__(
             master,
             bg=bg,
-            highlightbackground=ERP["line"],
+            highlightbackground=UI["line"],
             highlightthickness=1,
             cursor="hand2" if enabled else "",
-            **kw,
         )
         self.command = command
         self.enabled = enabled
         self._normal_bg = bg
-        self._hover_bg = "#dbe7f5" if enabled else bg
+        self._hover_bg = UI["sidebar_hover"] if enabled else bg
 
-        self.label = tk.Label(
+        self.lbl = tk.Label(
             self,
             text=text,
-            font=FONT_BODY,
-            fg=fg,
             bg=bg,
+            fg=fg,
+            font=FONT_BODY,
             anchor="w",
             padx=10,
-            pady=7,
+            pady=6,
         )
-        self.label.pack(fill="x")
+        self.lbl.pack(fill="x")
 
         if enabled:
-            self.bind("<Enter>", self._on_enter)
-            self.bind("<Leave>", self._on_leave)
-            self.bind("<Button-1>", self._on_click)
-            self.label.bind("<Enter>", self._on_enter)
-            self.label.bind("<Leave>", self._on_leave)
-            self.label.bind("<Button-1>", self._on_click)
-
-    def _on_enter(self, _e=None):
-        self.configure(bg=self._hover_bg)
-        self.label.configure(bg=self._hover_bg)
-
-    def _on_leave(self, _e=None):
-        self.configure(bg=self._normal_bg)
-        self.label.configure(bg=self._normal_bg)
-
-    def _on_click(self, _e=None):
-        if self.command and self.enabled:
-            self.command()
-
-
-class ERPStatBox(tk.Frame):
-    def __init__(self, master, title: str, value: Any, accent="#2f74c0", command=None, **kw):
-        super().__init__(
-            master,
-            bg=ERP["card"],
-            highlightbackground=ERP["line"],
-            highlightthickness=1,
-            cursor="hand2" if command else "",
-            **kw,
-        )
-        self.command = command
-        self._normal_bg = ERP["card"]
-        self._hover_bg = "#f6f9fd"
-
-        top = tk.Frame(self, bg=accent, height=4)
-        top.pack(fill="x")
-
-        body = tk.Frame(self, bg=ERP["card"])
-        body.pack(fill="both", expand=True, padx=10, pady=10)
-
-        self.lbl_title = tk.Label(
-            body,
-            text=title,
-            font=FONT_SMALL,
-            fg=ERP["muted"],
-            bg=ERP["card"],
-            anchor="w",
-        )
-        self.lbl_title.pack(fill="x")
-
-        self.lbl_value = tk.Label(
-            body,
-            text=str(value),
-            font=("Segoe UI", 16, "bold"),
-            fg=ERP["text"],
-            bg=ERP["card"],
-            anchor="w",
-        )
-        self.lbl_value.pack(fill="x", pady=(6, 0))
-
-        if command:
-            for w in (self, top, body, self.lbl_title, self.lbl_value):
+            for w in (self, self.lbl):
                 w.bind("<Enter>", self._on_enter)
                 w.bind("<Leave>", self._on_leave)
                 w.bind("<Button-1>", self._on_click)
 
-    def _set_bg(self, color):
-        self.configure(bg=color)
-        for child in self.winfo_children():
-            try:
-                child.configure(bg=color)
-            except Exception:
-                pass
-            for sub in child.winfo_children():
-                try:
-                    sub.configure(bg=color)
-                except Exception:
-                    pass
-
     def _on_enter(self, _e=None):
-        self._set_bg(self._hover_bg)
+        self.configure(bg=self._hover_bg)
+        self.lbl.configure(bg=self._hover_bg)
 
     def _on_leave(self, _e=None):
-        self._set_bg(self._normal_bg)
+        self.configure(bg=self._normal_bg)
+        self.lbl.configure(bg=self._normal_bg)
 
     def _on_click(self, _e=None):
-        if self.command:
+        if self.enabled and self.command:
             self.command()
 
 
+class CompactInfoBox(tk.Frame):
+    def __init__(self, master, title: str, value: str, accent="#2f74c0", **kw):
+        super().__init__(
+            master,
+            bg=UI["white"],
+            highlightbackground=UI["line"],
+            highlightthickness=1,
+            **kw,
+        )
+        tk.Frame(self, bg=accent, width=4).pack(side="left", fill="y")
+        body = tk.Frame(self, bg=UI["white"])
+        body.pack(side="left", fill="both", expand=True, padx=8, pady=6)
+
+        tk.Label(
+            body,
+            text=title,
+            font=FONT_SMALL,
+            fg=UI["muted"],
+            bg=UI["white"],
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            body,
+            text=value,
+            font=FONT_H2,
+            fg=UI["text"],
+            bg=UI["white"],
+            anchor="w",
+        ).pack(fill="x", pady=(2, 0))
+
+
 # ================================================================== #
-#  HomePage — 1C/ERP стиль
+#  HomePage — компактная домашняя страница
 # ================================================================== #
 
 class HomePage(tk.Frame):
-    """
-    Главная страница в стиле 1С/ERP:
-    - слева: разделы и быстрые переходы
-    - справа: рабочий стол, показатели, служебная информация
-    """
-
-    NAV_ITEMS = [
-        ("Главная", "home"),
-        ("Создать табель", "timesheet"),
-        ("Мои табели", "my_timesheets"),
-        ("Заявка на транспорт", "transport"),
-        ("Заказ питания", "meals_order"),
-        ("Реестр объектов", "objects_registry"),
-        ("Проживание", "lodging_registry"),
-        ("Карточка сотрудника", "employee_card"),
-        ("Реестр табелей", "timesheet_registry"),
-        ("Реестр транспорта", "transport_registry"),
-        ("Аналитика", "analytics_dashboard"),
-    ]
-
     PAGE_BUILDERS = {
         "timesheet": lambda p, app: timesheet_module.create_timesheet_page(p, app),
         "my_timesheets": lambda p, app: timesheet_module.create_my_timesheets_page(p, app),
@@ -724,310 +598,139 @@ class HomePage(tk.Frame):
     }
 
     def __init__(self, master, app_ref: "MainApp" = None):
-        super().__init__(master, bg=ERP["bg"])
+        super().__init__(master, bg=UI["bg"])
         self._app_ref = app_ref
-        self.logo_img = None
         self._build()
 
     def _build(self):
-        root = tk.Frame(self, bg=ERP["bg"])
+        root = tk.Frame(self, bg=UI["bg"])
         root.pack(fill="both", expand=True, padx=8, pady=8)
 
-        root.columnconfigure(1, weight=1)
-        root.rowconfigure(0, weight=1)
+        top = tk.Frame(root, bg=UI["white"], highlightbackground=UI["line"], highlightthickness=1)
+        top.pack(fill="x")
 
-        # --- ЛЕВАЯ ПАНЕЛЬ ---
-        sidebar = ERPPanel(root, bg=ERP["sidebar"], width=250)
-        sidebar.grid(row=0, column=0, sticky="nsw", padx=(0, 8))
-        sidebar.pack_propagate(False)
+        inner = tk.Frame(top, bg=UI["white"])
+        inner.pack(fill="x", padx=10, pady=8)
 
-        side_head = tk.Frame(sidebar, bg=ERP["panel"])
-        side_head.pack(fill="x")
-
-        tk.Label(
-            side_head,
-            text="Разделы системы",
-            font=FONT_H3,
-            fg=ERP["text"],
-            bg=ERP["panel"],
-            anchor="w",
-            padx=10,
-            pady=8,
-        ).pack(fill="x")
-
-        side_body = tk.Frame(sidebar, bg=ERP["sidebar"])
-        side_body.pack(fill="both", expand=True, padx=6, pady=6)
-
-        for title, key in self.NAV_ITEMS:
-            if key != "home" and not self._has_access(key):
-                continue
-            btn = ERPSidebarButton(
-                side_body,
-                text=title,
-                active=(key == "home"),
-                enabled=True,
-                command=(lambda k=key: self._go(k)),
-            )
-            btn.pack(fill="x", pady=2)
-
-        side_sep = tk.Frame(sidebar, bg=ERP["line"], height=1)
-        side_sep.pack(fill="x", padx=6, pady=6)
-
-        user_name = ""
-        role = ""
+        name = ""
         if self._app_ref and self._app_ref.current_user:
-            user_name = self._app_ref.current_user.get("full_name") or self._app_ref.current_user.get("username") or ""
-            role = self._app_ref.current_user.get("role") or ""
-
-        user_box = tk.Frame(sidebar, bg=ERP["sidebar"])
-        user_box.pack(fill="x", padx=10, pady=(0, 10))
+            name = self._app_ref.current_user.get("full_name") or self._app_ref.current_user.get("username") or ""
 
         tk.Label(
-            user_box,
-            text="Текущий пользователь",
-            font=FONT_SMALL,
-            fg=ERP["muted"],
-            bg=ERP["sidebar"],
-            anchor="w",
-        ).pack(fill="x")
-        tk.Label(
-            user_box,
-            text=user_name or "-",
-            font=FONT_BODY,
-            fg=ERP["text"],
-            bg=ERP["sidebar"],
-            anchor="w",
-        ).pack(fill="x", pady=(2, 0))
-        tk.Label(
-            user_box,
-            text=f"Роль: {role or '-'}",
-            font=FONT_SMALL,
-            fg=ERP["soft"],
-            bg=ERP["sidebar"],
-            anchor="w",
-        ).pack(fill="x", pady=(2, 0))
-
-        # --- ПРАВАЯ РАБОЧАЯ ОБЛАСТЬ ---
-        work = tk.Frame(root, bg=ERP["bg"])
-        work.grid(row=0, column=1, sticky="nsew")
-        work.rowconfigure(3, weight=1)
-        work.columnconfigure(0, weight=1)
-
-        # Верхняя информационная полоса
-        info = ERPPanel(work, bg=ERP["card"])
-        info.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-
-        info_inner = tk.Frame(info, bg=ERP["card"])
-        info_inner.pack(fill="x", padx=12, pady=10)
-
-        left = tk.Frame(info_inner, bg=ERP["card"])
-        left.pack(side="left", fill="x", expand=True)
-
-        self.logo_img = embedded_logo_image(info_inner, max_w=160, max_h=52)
-        if self.logo_img:
-            tk.Label(info_inner, image=self.logo_img, bg=ERP["card"]).pack(side="right", padx=(12, 0))
-
-        now = datetime.now()
-        wd_map = {
-            "Monday": "понедельник",
-            "Tuesday": "вторник",
-            "Wednesday": "среда",
-            "Thursday": "четверг",
-            "Friday": "пятница",
-            "Saturday": "суббота",
-            "Sunday": "воскресенье",
-        }
-
-        tk.Label(
-            left,
-            text="Рабочий стол системы управления строительством",
+            inner,
+            text=f"Рабочий стол пользователя: {name or '-'}",
             font=FONT_H1,
-            fg=ERP["text"],
-            bg=ERP["card"],
+            fg=UI["text"],
+            bg=UI["white"],
             anchor="w",
-        ).pack(fill="x")
+        ).pack(side="left")
 
-        tk.Label(
-            left,
-            text=f"Текущая дата: {now.strftime('%d.%m.%Y')}  |  {wd_map.get(now.strftime('%A'), '')}",
-            font=FONT_BODY,
-            fg=ERP["muted"],
-            bg=ERP["card"],
-            anchor="w",
-        ).pack(fill="x", pady=(4, 0))
-
-        # Показатели
         stats = _load_home_stats()
 
-        stats_panel = tk.Frame(work, bg=ERP["bg"])
-        stats_panel.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        stats_wrap = tk.Frame(root, bg=UI["bg"])
+        stats_wrap.pack(fill="x", pady=(8, 8))
 
-        stats_cfg = [
-            ("Сотрудники", stats["employees_count"], ERP["blue"], None),
-            ("Объекты", stats["objects_count"], ERP["orange"], "objects_registry"),
-            ("Табели за месяц", stats["timesheets_month"], ERP["green"], "my_timesheets"),
-            ("Транспорт на сегодня", stats["transport_today"], "#7b61c9", "transport"),
-            ("Питание на сегодня", stats["meals_today"], ERP["red"], "meals_order"),
+        items = [
+            ("Сотрудники", str(stats["employees_count"]), UI["blue"]),
+            ("Объекты", str(stats["objects_count"]), UI["orange"]),
+            ("Табели/месяц", str(stats["timesheets_month"]), UI["green"]),
+            ("Транспорт/день", str(stats["transport_today"]), "#7c5cc4"),
+            ("Питание/день", str(stats["meals_today"]), UI["red"]),
         ]
 
-        for i, (title, value, accent, key) in enumerate(stats_cfg):
-            box = ERPStatBox(
-                stats_panel,
-                title=title,
-                value=value,
-                accent=accent,
-                command=(lambda k=key: self._go(k)) if key else None,
-            )
+        for i, (title, value, accent) in enumerate(items):
+            box = CompactInfoBox(stats_wrap, title, value, accent=accent)
             box.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 6, 0))
-            stats_panel.columnconfigure(i, weight=1)
+            stats_wrap.columnconfigure(i, weight=1)
 
-        # Средняя зона: рабочие области
-        center = tk.Frame(work, bg=ERP["bg"])
-        center.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
-        center.columnconfigure(0, weight=3)
-        center.columnconfigure(1, weight=2)
+        middle = tk.Frame(root, bg=UI["bg"])
+        middle.pack(fill="both", expand=True)
 
-        # Быстрые операции
-        quick_wrap = ERPPanel(center, bg=ERP["card"])
-        quick_wrap.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        left = tk.Frame(middle, bg=UI["bg"])
+        left.pack(side="left", fill="both", expand=True)
 
-        ERPSectionHeader(quick_wrap, "Быстрые операции").pack(fill="x")
+        right = tk.Frame(middle, bg=UI["bg"], width=290)
+        right.pack(side="right", fill="y", padx=(8, 0))
+        right.pack_propagate(False)
 
-        quick_body = tk.Frame(quick_wrap, bg=ERP["card"])
-        quick_body.pack(fill="both", expand=True, padx=8, pady=8)
+        # Быстрые действия
+        quick = tk.Frame(left, bg=UI["white"], highlightbackground=UI["line"], highlightthickness=1)
+        quick.pack(fill="x")
 
-        operations = [
+        tk.Label(
+            quick,
+            text="Быстрые действия",
+            font=FONT_H2,
+            fg=UI["text"],
+            bg=UI["panel"],
+            anchor="w",
+            padx=10,
+            pady=6,
+        ).pack(fill="x")
+
+        quick_body = tk.Frame(quick, bg=UI["white"])
+        quick_body.pack(fill="x", padx=8, pady=8)
+
+        actions = [
             ("Создать табель", "timesheet"),
-            ("Открыть мои табели", "my_timesheets"),
-            ("Создать заявку на транспорт", "transport"),
-            ("Создать заявку на питание", "meals_order"),
-            ("Открыть реестр объектов", "objects_registry"),
-            ("Открыть проживание", "lodging_registry"),
-            ("Открыть карточку сотрудника", "employee_card"),
-            ("Открыть аналитику", "analytics_dashboard"),
+            ("Мои табели", "my_timesheets"),
+            ("Заявка на транспорт", "transport"),
+            ("Заказ питания", "meals_order"),
+            ("Реестр объектов", "objects_registry"),
+            ("Проживание", "lodging_registry"),
+            ("Карточка сотрудника", "employee_card"),
+            ("Аналитика", "analytics_dashboard"),
         ]
 
-        visible_ops = [(title, key) for title, key in operations if self._has_access(key)]
+        visible = [(t, k) for t, k in actions if self._has_access(k)]
 
-        for i, (title, key) in enumerate(visible_ops):
-            r = i // 2
-            c = i % 2
+        for i, (title, key) in enumerate(visible):
             btn = ttk.Button(
                 quick_body,
                 text=title,
-                style="ERP.TButton",
-                command=lambda k=key: self._go(k),
+                style="App.TButton",
+                command=lambda kk=key: self._go(kk),
             )
-            btn.grid(row=r, column=c, sticky="ew", padx=4, pady=4)
-            quick_body.columnconfigure(c, weight=1)
+            btn.grid(row=i // 2, column=i % 2, sticky="ew", padx=4, pady=4)
+            quick_body.columnconfigure(i % 2, weight=1)
 
-        # Информация / поручения
-        note_wrap = ERPPanel(center, bg=ERP["card"])
-        note_wrap.grid(row=0, column=1, sticky="nsew")
+        # Инфо-панель справа
+        side = tk.Frame(right, bg=UI["white"], highlightbackground=UI["line"], highlightthickness=1)
+        side.pack(fill="both", expand=True)
 
-        ERPSectionHeader(note_wrap, "Служебная информация").pack(fill="x")
-
-        note_body = tk.Frame(note_wrap, bg=ERP["card"])
-        note_body.pack(fill="both", expand=True, padx=10, pady=10)
-
-        lines = [
-            "Проверьте полноту заполнения табелей за текущий месяц.",
-            "Оформляйте заявки на транспорт и питание заранее.",
-            "Для доступа к полному функционалу используйте верхнее меню.",
-            "При отсутствии доступа к разделу обратитесь к администратору системы.",
-        ]
-        for line in lines:
-            tk.Label(
-                note_body,
-                text="• " + line,
-                font=FONT_BODY,
-                fg=ERP["muted"],
-                bg=ERP["card"],
-                anchor="w",
-                justify="left",
-                wraplength=320,
-            ).pack(fill="x", pady=3)
-
-        # Нижняя зона: список возможностей
-        bottom = ERPPanel(work, bg=ERP["card"])
-        bottom.grid(row=3, column=0, sticky="nsew")
-
-        ERPSectionHeader(
-            bottom,
-            "Доступные разделы",
-            toolbar=[
-                ("Обновить", self._refresh_home),
-                ("Главная", lambda: self._go("home")),
-            ],
+        tk.Label(
+            side,
+            text="Информация",
+            font=FONT_H2,
+            fg=UI["text"],
+            bg=UI["panel"],
+            anchor="w",
+            padx=10,
+            pady=6,
         ).pack(fill="x")
 
-        table_wrap = tk.Frame(bottom, bg=ERP["card"])
-        table_wrap.pack(fill="both", expand=True, padx=8, pady=8)
+        side_body = tk.Frame(side, bg=UI["white"])
+        side_body.pack(fill="both", expand=True, padx=10, pady=10)
 
-        columns = ("section", "status", "description")
-        tree = ttk.Treeview(table_wrap, columns=columns, show="headings", style="ERP.Treeview")
-        tree.heading("section", text="Раздел")
-        tree.heading("status", text="Доступ")
-        tree.heading("description", text="Описание")
-        tree.column("section", width=220, anchor="w")
-        tree.column("status", width=90, anchor="center")
-        tree.column("description", width=520, anchor="w")
-
-        ysb = ttk.Scrollbar(table_wrap, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=ysb.set)
-
-        tree.pack(side="left", fill="both", expand=True)
-        ysb.pack(side="right", fill="y")
-
-        descriptions = {
-            "timesheet": "Создание и заполнение объектного табеля.",
-            "my_timesheets": "Просмотр и редактирование личных табелей.",
-            "transport": "Формирование заявок на транспорт и спецтехнику.",
-            "meals_order": "Формирование заявок на питание.",
-            "objects_registry": "Работа с объектами строительства.",
-            "lodging_registry": "Учет проживания и заселения работников.",
-            "employee_card": "Сводная карточка по сотруднику.",
-            "timesheet_registry": "Общий реестр табелей.",
-            "transport_registry": "Общий реестр транспортных заявок.",
-            "analytics_dashboard": "Сводные управленческие показатели.",
-        }
-
-        for title, key in self.NAV_ITEMS:
-            if key == "home":
-                continue
-            allowed = self._has_access(key)
-            tree.insert(
-                "",
-                "end",
-                values=(
-                    title,
-                    "Да" if allowed else "Нет",
-                    descriptions.get(key, ""),
-                ),
-            )
-
-        tree.bind("<Double-1>", lambda e: self._on_tree_open(tree))
-
-    def _refresh_home(self):
-        self._app_ref.show_home()
-
-    def _on_tree_open(self, tree: ttk.Treeview):
-        item = tree.focus()
-        if not item:
-            return
-        values = tree.item(item, "values")
-        if not values:
-            return
-        section_title = values[0]
-
-        mapping = {title: key for title, key in self.NAV_ITEMS}
-        key = mapping.get(section_title)
-        if key and key != "home" and self._has_access(key):
-            self._go(key)
+        notes = [
+            "Используйте вкладки для быстрого переключения между разделами.",
+            "Кнопки Назад/Вперёд позволяют возвращаться к предыдущим страницам.",
+            "Левая панель предназначена для открытия основных разделов.",
+            "Верхнее меню сохраняется для полного доступа ко всем функциям.",
+        ]
+        for note in notes:
+            tk.Label(
+                side_body,
+                text="• " + note,
+                font=FONT_BODY,
+                fg=UI["muted"],
+                bg=UI["white"],
+                anchor="w",
+                justify="left",
+                wraplength=250,
+            ).pack(fill="x", pady=3)
 
     def _has_access(self, page_key: str, perm: Optional[str] = None) -> bool:
-        if page_key == "home":
-            return True
         if not self._app_ref:
             return True
         if perm:
@@ -1040,26 +743,22 @@ class HomePage(tk.Frame):
     def _go(self, page_key: str):
         if not self._app_ref:
             return
-        if page_key == "home":
-            self._app_ref.show_home()
-            return
         builder_fn = self.PAGE_BUILDERS.get(page_key)
         if builder_fn:
             app = self._app_ref
-            self._app_ref._show_page(
+            self._app_ref.open_page_in_tab(
                 page_key,
                 lambda p, _fn=builder_fn, _app=app: _fn(p, _app),
             )
 
 
 # ================================================================== #
-#  LoginPage — строгий ERP стиль
+#  LoginPage — компактный профессиональный стиль
 # ================================================================== #
 
 class LoginPage(tk.Frame):
-    """Страница входа в строгом ERP-стиле."""
     def __init__(self, master, app_ref: "MainApp"):
-        super().__init__(master, bg=ERP["login_bg"])
+        super().__init__(master, bg=UI["bg"])
         self.app_ref = app_ref
         self._show_pass = False
         self.logo_img = None
@@ -1067,88 +766,78 @@ class LoginPage(tk.Frame):
         self.bind_all("<Return>", self._on_enter)
 
     def _build(self):
-        center = tk.Frame(self, bg=ERP["login_bg"])
+        center = tk.Frame(self, bg=UI["bg"])
         center.place(relx=0.5, rely=0.5, anchor="center")
 
-        card = ERPPanel(center, bg=ERP["card"], width=440, height=320)
+        card = tk.Frame(center, bg=UI["white"], highlightbackground=UI["line"], highlightthickness=1)
         card.pack()
-        card.pack_propagate(False)
 
-        top = tk.Frame(card, bg=ERP["panel"])
-        top.pack(fill="x")
-
-        tk.Label(
-            top,
-            text="Авторизация",
-            font=FONT_H2,
-            fg=ERP["text"],
-            bg=ERP["panel"],
-            anchor="w",
-            padx=12,
-            pady=8,
-        ).pack(fill="x")
-
-        body = tk.Frame(card, bg=ERP["card"])
-        body.pack(fill="both", expand=True, padx=18, pady=16)
+        body = tk.Frame(card, bg=UI["white"])
+        body.pack(padx=20, pady=18)
 
         self.logo_img = embedded_logo_image(body, max_w=180, max_h=56)
         if self.logo_img:
-            tk.Label(body, image=self.logo_img, bg=ERP["card"]).grid(
-                row=0, column=0, columnspan=3, pady=(0, 8)
-            )
+            tk.Label(body, image=self.logo_img, bg=UI["white"]).grid(row=0, column=0, columnspan=3, pady=(0, 8))
 
         tk.Label(
             body,
-            text="Система управления строительством",
-            font=FONT_H3,
-            fg=ERP["text"],
-            bg=ERP["card"],
-        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 12))
+            text="Управление строительством",
+            font=FONT_H1,
+            fg=UI["text"],
+            bg=UI["white"],
+        ).grid(row=1, column=0, columnspan=3, sticky="w")
 
-        tk.Label(body, text="Логин", font=FONT_BODY, fg=ERP["text"], bg=ERP["card"]).grid(
-            row=2, column=0, sticky="w", pady=(0, 4)
+        tk.Label(
+            body,
+            text="Вход в систему",
+            font=FONT_BODY,
+            fg=UI["muted"],
+            bg=UI["white"],
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 14))
+
+        tk.Label(body, text="Логин", font=FONT_BODY, fg=UI["text"], bg=UI["white"]).grid(
+            row=3, column=0, columnspan=3, sticky="w"
         )
-        self.ent_login = ttk.Entry(body, width=34, style="ERP.TEntry")
-        self.ent_login.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 10), ipady=2)
+        self.ent_login = ttk.Entry(body, width=34, style="App.TEntry")
+        self.ent_login.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(4, 10), ipady=2)
 
-        tk.Label(body, text="Пароль", font=FONT_BODY, fg=ERP["text"], bg=ERP["card"]).grid(
-            row=4, column=0, sticky="w", pady=(0, 4)
+        tk.Label(body, text="Пароль", font=FONT_BODY, fg=UI["text"], bg=UI["white"]).grid(
+            row=5, column=0, columnspan=3, sticky="w"
         )
-
-        self.ent_pass = ttk.Entry(body, width=30, show="*", style="ERP.TEntry")
-        self.ent_pass.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 10), ipady=2)
+        self.ent_pass = ttk.Entry(body, width=28, show="*", style="App.TEntry")
+        self.ent_pass.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(4, 10), ipady=2)
 
         self.btn_eye = ttk.Button(
             body,
             text="Показать",
             width=10,
+            style="App.TButton",
             command=self._toggle_password,
-            style="ERP.TButton",
         )
-        self.btn_eye.grid(row=5, column=2, sticky="e", padx=(6, 0))
+        self.btn_eye.grid(row=6, column=2, sticky="e", padx=(6, 0))
 
         self.var_remember = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             body,
             text="Запомнить учетные данные",
             variable=self.var_remember,
-        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 14))
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 14))
 
-        btns = tk.Frame(body, bg=ERP["card"])
-        btns.grid(row=7, column=0, columnspan=3, sticky="e")
+        btns = tk.Frame(body, bg=UI["white"])
+        btns.grid(row=8, column=0, columnspan=3, sticky="e")
 
         ttk.Button(
             btns,
             text="Войти",
+            style="Primary.TButton",
             command=self._on_login,
-            style="ERPPrimary.TButton",
         ).pack(side="left", padx=(0, 6))
 
         ttk.Button(
             btns,
             text="Выход",
+            style="App.TButton",
             command=self._on_exit,
-            style="ERP.TButton",
         ).pack(side="left")
 
         body.columnconfigure(0, weight=1)
@@ -1205,7 +894,7 @@ class SplashScreen(tk.Toplevel):
         self.title("Загрузка...")
         self.overrideredirect(True)
 
-        width = 460
+        width = 440
         height = 220
 
         screen_width = self.winfo_screenwidth()
@@ -1214,31 +903,31 @@ class SplashScreen(tk.Toplevel):
         y = (screen_height // 2) - (height // 2)
         self.geometry(f"{width}x{height}+{x}+{y}")
 
-        self.config(bg=ERP["card"], relief="solid", borderwidth=1)
+        self.config(bg=UI["white"], relief="solid", borderwidth=1)
 
-        container = tk.Frame(self, bg=ERP["card"])
+        container = tk.Frame(self, bg=UI["white"])
         container.pack(fill="both", expand=True, padx=20, pady=20)
 
         tk.Label(
             container,
             text="Управление строительством",
-            font=FONT_H2,
-            fg=ERP["text"],
-            bg=ERP["card"],
-        ).pack(pady=(24, 10))
+            font=FONT_H1,
+            fg=UI["text"],
+            bg=UI["white"],
+        ).pack(pady=(26, 10))
 
         tk.Label(
             container,
-            text="Идет запуск системы...",
+            text="Запуск системы...",
             font=FONT_BODY,
-            fg=ERP["muted"],
-            bg=ERP["card"],
+            fg=UI["muted"],
+            bg=UI["white"],
         ).pack()
 
         self.progress = ttk.Progressbar(
             container,
             mode="indeterminate",
-            style="ERP.Horizontal.TProgressbar",
+            style="App.Horizontal.TProgressbar",
         )
         self.progress.pack(pady=20, padx=20, fill="x")
         self.progress.start(10)
@@ -1247,8 +936,8 @@ class SplashScreen(tk.Toplevel):
             container,
             text="Инициализация...",
             font=FONT_SMALL,
-            fg=ERP["muted"],
-            bg=ERP["card"],
+            fg=UI["muted"],
+            bg=UI["white"],
         )
         self.status_label.pack(side="bottom", fill="x", ipady=6)
 
@@ -1257,8 +946,24 @@ class SplashScreen(tk.Toplevel):
         self.update_idletasks()
 
 
+# ================================================================== #
+#  MainApp — промышленная оболочка с вкладками и историей
+# ================================================================== #
+
 class MainApp(tk.Tk):
-    """Главный класс приложения (каркас)."""
+    SIDEBAR_ITEMS = [
+        ("Главная", "home"),
+        ("Создать табель", "timesheet"),
+        ("Мои табели", "my_timesheets"),
+        ("Транспорт", "transport"),
+        ("Питание", "meals_order"),
+        ("Объекты", "objects_registry"),
+        ("Проживание", "lodging_registry"),
+        ("Сотрудники", "employee_card"),
+        ("Реестр табелей", "timesheet_registry"),
+        ("Аналитика", "analytics_dashboard"),
+    ]
+
     def __init__(self, current_user: Optional[Dict[str, Any]] = None):
         super().__init__()
 
@@ -1268,325 +973,258 @@ class MainApp(tk.Tk):
         self.is_authenticated: bool = bool(current_user)
 
         self.title(APP_NAME)
-        self.geometry("1280x820")
-        self.minsize(1080, 700)
-        self.configure(bg=ERP["bg"])
+        self.geometry("1360x840")
+        self.minsize(1120, 700)
+        self.configure(bg=UI["bg"])
 
         self._pages: Dict[str, tk.Widget] = {}
+        self._tab_frames: Dict[str, tk.Frame] = {}
+        self._tab_builders: Dict[str, Callable] = {}
+        self._tab_titles: Dict[str, str] = {}
+        self._history_back: List[str] = []
+        self._history_forward: List[str] = []
+        self._current_key: Optional[str] = None
+
         self._build_menu()
-
-        # --- Верхняя служебная панель ---
-        self.header = tk.Frame(self, bg=ERP["header"])
-        self.header.pack(fill="x")
-
-        top_line = tk.Frame(self.header, bg=ERP["panel"], height=1)
-        top_line.pack(fill="x", side="top")
-
-        self.header_inner = tk.Frame(self.header, bg=ERP["header"])
-        self.header_inner.pack(fill="x", padx=12, pady=8)
-
-        header_left = tk.Frame(self.header_inner, bg=ERP["header"])
-        header_left.pack(side="left", fill="x", expand=True)
-
-        self.lbl_header_title = tk.Label(
-            header_left,
-            text="",
-            font=FONT_H1,
-            fg=ERP["text"],
-            bg=ERP["header"],
-        )
-        self.lbl_header_title.pack(side="left")
-
-        self.lbl_header_hint = tk.Label(
-            header_left,
-            text="",
-            font=FONT_BODY,
-            fg=ERP["muted"],
-            bg=ERP["header"],
-        )
-        self.lbl_header_hint.pack(side="left", padx=(12, 0))
-
-        header_right = tk.Frame(self.header_inner, bg=ERP["header"])
-        header_right.pack(side="right")
-
-        self.lbl_user_info = tk.Label(
-            header_right,
-            text="",
-            font=FONT_BODY,
-            fg=ERP["muted"],
-            bg=ERP["header"],
-        )
-        self.lbl_user_info.pack(side="left", padx=(0, 10))
-
-        self.btn_logout = ttk.Button(
-            header_right,
-            text="Выход из системы",
-            width=16,
-            command=self._on_logout,
-            style="ERP.TButton",
-        )
-        self.btn_logout.pack(side="left")
-        self.btn_logout.pack_forget()
-
-        tk.Frame(self, height=1, bg=ERP["line"]).pack(fill="x")
-
-        self.content = tk.Frame(self, bg=ERP["bg"])
-        self.content.pack(fill="both", expand=True)
-
-        footer = tk.Frame(self, bg=ERP["panel"])
-        footer.pack(fill="x")
-        tk.Frame(footer, height=1, bg=ERP["line"]).pack(fill="x", side="top")
-        tk.Label(
-            footer,
-            text="Разработал Алексей Зезюкин, 2025",
-            font=FONT_SMALL,
-            fg=ERP["muted"],
-            bg=ERP["panel"],
-        ).pack(side="right", padx=12, pady=4)
+        self._build_shell()
 
         self._set_user(None)
         self.show_login()
 
     # ------------------------------------------------------------------ #
-    #  Выход из аккаунта
+    #  Каркас окна
+    # ------------------------------------------------------------------ #
+    def _build_shell(self):
+        # Top bar
+        self.topbar = tk.Frame(self, bg=UI["panel"], height=38, highlightbackground=UI["line"], highlightthickness=1)
+        self.topbar.pack(fill="x")
+        self.topbar.pack_propagate(False)
+
+        left_tools = tk.Frame(self.topbar, bg=UI["panel"])
+        left_tools.pack(side="left", padx=6)
+
+        self.btn_back = ttk.Button(left_tools, text="← Назад", style="App.TButton", command=self.go_back)
+        self.btn_back.pack(side="left", padx=(0, 4), pady=4)
+
+        self.btn_forward = ttk.Button(left_tools, text="Вперёд →", style="App.TButton", command=self.go_forward)
+        self.btn_forward.pack(side="left", padx=(0, 4), pady=4)
+
+        self.btn_home = ttk.Button(left_tools, text="Главная", style="App.TButton", command=self.show_home)
+        self.btn_home.pack(side="left", padx=(0, 4), pady=4)
+
+        self.btn_refresh = ttk.Button(left_tools, text="Обновить", style="App.TButton", command=self.refresh_current_tab)
+        self.btn_refresh.pack(side="left", padx=(0, 4), pady=4)
+
+        self.btn_close_tab = ttk.Button(left_tools, text="Закрыть вкладку", style="App.TButton", command=self.close_current_tab)
+        self.btn_close_tab.pack(side="left", padx=(0, 4), pady=4)
+
+        center_info = tk.Frame(self.topbar, bg=UI["panel"])
+        center_info.pack(side="left", fill="x", expand=True, padx=10)
+
+        self.lbl_header_title = tk.Label(
+            center_info,
+            text="",
+            font=FONT_H1,
+            fg=UI["text"],
+            bg=UI["panel"],
+            anchor="w",
+        )
+        self.lbl_header_title.pack(side="left")
+
+        self.lbl_header_hint = tk.Label(
+            center_info,
+            text="",
+            font=FONT_BODY,
+            fg=UI["muted"],
+            bg=UI["panel"],
+            anchor="w",
+        )
+        self.lbl_header_hint.pack(side="left", padx=(10, 0))
+
+        right_tools = tk.Frame(self.topbar, bg=UI["panel"])
+        right_tools.pack(side="right", padx=8)
+
+        self.lbl_user_info = tk.Label(
+            right_tools,
+            text="",
+            font=FONT_BODY,
+            fg=UI["muted"],
+            bg=UI["panel"],
+        )
+        self.lbl_user_info.pack(side="left", padx=(0, 8))
+
+        self.btn_logout = ttk.Button(
+            right_tools,
+            text="Выход",
+            style="App.TButton",
+            command=self._on_logout,
+        )
+        self.btn_logout.pack(side="left", pady=4)
+        self.btn_logout.pack_forget()
+
+        # Main body
+        body = tk.Frame(self, bg=UI["bg"])
+        body.pack(fill="both", expand=True)
+
+        # Sidebar
+        self.sidebar = tk.Frame(body, bg=UI["sidebar"], width=210, highlightbackground=UI["line"], highlightthickness=1)
+        self.sidebar.pack(side="left", fill="y")
+        self.sidebar.pack_propagate(False)
+
+        tk.Label(
+            self.sidebar,
+            text="Навигация",
+            font=FONT_H2,
+            fg=UI["text"],
+            bg=UI["panel2"],
+            anchor="w",
+            padx=10,
+            pady=7,
+        ).pack(fill="x")
+
+        self.sidebar_body = tk.Frame(self.sidebar, bg=UI["sidebar"])
+        self.sidebar_body.pack(fill="both", expand=True, padx=6, pady=6)
+
+        # Workspace
+        workspace = tk.Frame(body, bg=UI["bg"])
+        workspace.pack(side="left", fill="both", expand=True)
+
+        self.notebook = ttk.Notebook(workspace, style="Main.TNotebook")
+        self.notebook.pack(fill="both", expand=True)
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+        # Status bar
+        self.statusbar = tk.Frame(self, bg=UI["status"], height=24, highlightbackground=UI["line"], highlightthickness=1)
+        self.statusbar.pack(fill="x")
+        self.statusbar.pack_propagate(False)
+
+        self.lbl_status_left = tk.Label(
+            self.statusbar,
+            text="Готово",
+            font=FONT_SMALL,
+            fg=UI["muted"],
+            bg=UI["status"],
+            anchor="w",
+        )
+        self.lbl_status_left.pack(side="left", padx=8)
+
+        self.lbl_status_right = tk.Label(
+            self.statusbar,
+            text="",
+            font=FONT_SMALL,
+            fg=UI["soft"],
+            bg=UI["status"],
+            anchor="e",
+        )
+        self.lbl_status_right.pack(side="right", padx=8)
+
+        footer = tk.Frame(self, bg=UI["panel2"], height=20)
+        footer.pack(fill="x")
+        footer.pack_propagate(False)
+        tk.Label(
+            footer,
+            text="Разработал Алексей Зезюкин, 2025",
+            font=FONT_SMALL,
+            fg=UI["muted"],
+            bg=UI["panel2"],
+        ).pack(side="right", padx=8)
+
+    def _rebuild_sidebar(self):
+        for w in self.sidebar_body.winfo_children():
+            w.destroy()
+
+        active_key = self._current_key or "home"
+
+        for title, key in self.SIDEBAR_ITEMS:
+            if key != "home":
+                required = self._perm_for_key(key)
+                if required and not self.has_perm(required):
+                    continue
+
+            btn = NavButton(
+                self.sidebar_body,
+                text=title,
+                active=(key == active_key),
+                enabled=True,
+                command=lambda kk=key: self.show_home() if kk == "home" else self._open_known_page(kk),
+            )
+            btn.pack(fill="x", pady=2)
+
+    # ------------------------------------------------------------------ #
+    #  Навигация
+    # ------------------------------------------------------------------ #
+    def _push_history(self, key: str):
+        if self._current_key and self._current_key != key:
+            self._history_back.append(self._current_key)
+            if len(self._history_back) > 50:
+                self._history_back = self._history_back[-50:]
+            self._history_forward.clear()
+
+    def go_back(self):
+        if not self._history_back:
+            return
+        if self._current_key:
+            self._history_forward.append(self._current_key)
+        key = self._history_back.pop()
+        self._activate_tab_by_key(key, add_to_history=False)
+
+    def go_forward(self):
+        if not self._history_forward:
+            return
+        if self._current_key:
+            self._history_back.append(self._current_key)
+        key = self._history_forward.pop()
+        self._activate_tab_by_key(key, add_to_history=False)
+
+    def refresh_current_tab(self):
+        if not self._current_key:
+            return
+        if self._current_key == "login":
+            return
+        builder = self._tab_builders.get(self._current_key)
+        frame = self._tab_frames.get(self._current_key)
+        if not builder or not frame:
+            return
+
+        for w in frame.winfo_children():
+            w.destroy()
+        try:
+            page = builder(frame)
+            page.pack(fill="both", expand=True)
+            self._pages[self._current_key] = page
+            self.set_status(f"Раздел '{self._tab_titles.get(self._current_key, self._current_key)}' обновлён")
+        except Exception as e:
+            logging.exception(f"Ошибка обновления вкладки '{self._current_key}'")
+            messagebox.showerror("Ошибка", f"Не удалось обновить вкладку:\n{e}")
+
+    def close_current_tab(self):
+        current = self._current_key
+        if not current or current in ("home", "login"):
+            return
+        frame = self._tab_frames.get(current)
+        if frame:
+            idx = self.notebook.index(frame)
+            self.notebook.forget(idx)
+
+        self._tab_frames.pop(current, None)
+        self._tab_builders.pop(current, None)
+        self._tab_titles.pop(current, None)
+        self._pages.pop(current, None)
+
+        remaining = list(self._tab_frames.keys())
+        if "home" in self._tab_frames:
+            self._activate_tab_by_key("home", add_to_history=False)
+        elif remaining:
+            self._activate_tab_by_key(remaining[0], add_to_history=False)
+        else:
+            self.show_home()
+
+    # ------------------------------------------------------------------ #
+    #  Пользователь
     # ------------------------------------------------------------------ #
     def _on_logout(self):
         self.show_login()
 
-    def _perm_for_key(self, key: str) -> Optional[str]:
-        from menu_spec import MENU_SPEC
-        for sec in MENU_SPEC:
-            for e in sec.entries:
-                if e.kind == "page" and e.key == key:
-                    return e.perm
-        return None
-
-    def _build_menu(self):
-        self._menubar = tk.Menu(self)
-        self.config(menu=self._menubar)
-
-        self._menubar.add_command(label="Главная", command=self.show_home)
-
-        # === Объектный табель ===
-        m_ts = tk.Menu(self._menubar, tearoff=0)
-        m_ts.add_command(
-            label="Создать",
-            command=lambda: self._show_page(
-                "timesheet",
-                lambda p: timesheet_module.create_timesheet_page(p, self),
-            ),
-        )
-        m_ts.add_command(
-            label="Мои табели",
-            command=lambda: self._show_page(
-                "my_timesheets",
-                lambda p: timesheet_module.create_my_timesheets_page(p, self),
-            ),
-        )
-        m_ts.add_command(
-            label="Бригады",
-            command=lambda: self._show_page(
-                "brigades",
-                lambda p: brigades_module.create_brigades_page(p, self),
-            ),
-        )
-        m_ts.add_command(
-            label="Реестр табелей",
-            command=lambda: self._show_page(
-                "timesheet_registry",
-                lambda p: timesheet_module.create_timesheet_registry_page(p, self),
-            ),
-        )
-        m_ts.add_command(
-            label="Работники",
-            command=lambda: self._show_page(
-                "workers",
-                lambda p: employees_module.create_workers_page(p, self),
-            ),
-        )
-        m_ts.add_command(
-            label="Сравнение с 1С",
-            command=lambda: self._show_page(
-                "timesheet_compare",
-                lambda p: timesheet_compare.create_timesheet_compare_page(p, self),
-            ),
-        )
-        self._menu_timesheets_registry_index = m_ts.index("end")
-        self._menubar.add_cascade(label="Объектный табель", menu=m_ts)
-        self._menu_timesheets = m_ts
-
-        m_gpr = tk.Menu(self._menubar, tearoff=0)
-        m_gpr.add_command(
-            label="ГПР (Диаграмма Ганта)",
-            command=lambda: self._show_page(
-                "gpr",
-                lambda p: gpr_module.create_gpr_page(p, self),
-            ),
-        )
-        m_gpr.add_command(
-            label="Справочники ГПР",
-            command=lambda: self._show_page(
-                "gpr_dicts",
-                lambda p: gpr_dictionaries.create_gpr_dicts_page(p, self),
-            ),
-        )
-        self._menubar.add_cascade(label="Планирование (ГПР)", menu=m_gpr)
-        self._menu_gpr = m_gpr
-
-        # === Автотранспорт ===
-        m_transport = tk.Menu(self._menubar, tearoff=0)
-        m_transport.add_command(
-            label="Создать заявку",
-            command=lambda: self._show_page("transport", lambda p: SpecialOrders.create_page(p, self)),
-        )
-        m_transport.add_command(
-            label="Мои заявки",
-            command=lambda: self._show_page("my_transport_orders", lambda p: SpecialOrders.create_my_transport_orders_page(p, self)),
-        )
-        self._menu_transport_planning_index = m_transport.index("end")
-        m_transport.add_command(
-            label="Планирование",
-            command=lambda: self._show_page("planning", lambda p: SpecialOrders.create_planning_page(p)),
-        )
-        self._menu_transport_registry_index = m_transport.index("end")
-        m_transport.add_command(
-            label="Реестр",
-            command=lambda: self._show_page("transport_registry", lambda p: SpecialOrders.create_transport_registry_page(p)),
-        )
-        self._menubar.add_cascade(label="Автотранспорт", menu=m_transport)
-        self._menu_transport = m_transport
-
-        # === Питание ===
-        m_meals = tk.Menu(self._menubar, tearoff=0)
-        m_meals.add_command(
-            label="Создать заявку",
-            command=lambda: self._show_page("meals_order", lambda p: meals_module.create_meals_order_page(p, self)),
-        )
-        m_meals.add_command(
-            label="Мои заявки",
-            command=lambda: self._show_page("my_meals_orders", lambda p: meals_module.create_my_meals_orders_page(p, self)),
-        )
-        m_meals.add_command(
-            label="Планирование",
-            command=lambda: self._show_page("meals_planning", lambda p: meals_module.create_meals_planning_page(p, self)),
-        )
-        m_meals.add_command(
-            label="Реестр",
-            command=lambda: self._show_page("meals_registry", lambda p: meals_module.create_all_meals_orders_page(p, self)),
-        )
-        m_meals.add_command(
-            label="Отчеты",
-            command=lambda: self._show_page("meals_reports", lambda p: meals_reports_module.create_meals_reports_page(p, self)),
-        )
-        m_meals.add_command(
-            label="Работники (питание)",
-            command=lambda: self._show_page("meals_workers", lambda p: meals_employees_module.create_meals_workers_page(p, self)),
-        )
-        self._menu_meals_settings_index = m_meals.index("end")
-        m_meals.add_command(
-            label="Настройки",
-            command=lambda: self._show_page("meals_settings", lambda p: meals_module.create_meals_settings_page(p, self.current_user.get("role"))),
-        )
-        self._menubar.add_cascade(label="Питание", menu=m_meals)
-        self._menu_meals = m_meals
-
-        m_lodging = tk.Menu(self._menubar, tearoff=0)
-        m_lodging.add_command(
-            label="Реестр проживаний",
-            command=lambda: self._show_page(
-                "lodging_registry",
-                lambda p: lodging_module.create_lodging_registry_page(p, self),
-            ),
-        )
-        m_lodging.add_command(
-            label="Общежития и комнаты",
-            command=lambda: self._show_page(
-                "lodging_dorms",
-                lambda p: lodging_module.create_dorms_page(p, self),
-            ),
-        )
-        m_lodging.add_command(
-            label="Тарифы (цена за сутки)",
-            command=lambda: self._show_page(
-                "lodging_rates",
-                lambda p: lodging_module.create_rates_page(p, self),
-            ),
-        )
-        self._menubar.add_cascade(label="Проживание", menu=m_lodging)
-        self._menu_lodging = m_lodging
-
-        # === Объекты ===
-        m_objects = tk.Menu(self._menubar, tearoff=0)
-        m_objects.add_command(
-            label="Создать/Редактировать",
-            command=lambda: self._show_page("object_create", lambda p: objects.ObjectCreatePage(p, self)),
-        )
-        m_objects.add_command(
-            label="Реестр",
-            command=lambda: self._show_page("objects_registry", lambda p: objects.ObjectsRegistryPage(p, self)),
-        )
-        self._menubar.add_cascade(label="Объекты", menu=m_objects)
-        self._menu_objects = m_objects
-
-        # === Аналитика ===
-        m_analytics = tk.Menu(self._menubar, tearoff=0)
-        m_analytics.add_command(
-            label="Операционная аналитика",
-            command=lambda: self._show_page(
-                "analytics_dashboard",
-                lambda p: analytics_module.AnalyticsPage(p, self),
-            ),
-        )
-        m_analytics.add_command(
-            label="Затраты (ФОТ)",
-            command=lambda: self._show_page(
-                "payroll",
-                lambda p: payroll_module.create_payroll_page(p, self),
-            ),
-        )
-        self._menubar.add_cascade(label="Аналитика", menu=m_analytics)
-        self._menu_analytics = m_analytics
-
-        m_emp = tk.Menu(self._menubar, tearoff=0)
-        m_emp.add_command(
-            label="Карточка сотрудника",
-            command=lambda: self._show_page(
-                "employee_card",
-                lambda p: employee_card_module.create_employee_card_page(p, self),
-            ),
-        )
-        self._menubar.add_cascade(label="Сотрудники", menu=m_emp)
-        self._menu_employees_card = m_emp
-
-        # === Инструменты и Настройки ===
-        m_tools = tk.Menu(self._menubar, tearoff=0)
-        if timesheet_transformer and hasattr(timesheet_transformer, "open_converter"):
-            m_tools.add_command(
-                label="Конвертер табеля (1С)",
-                command=lambda: timesheet_transformer.open_converter(self),
-            )
-        if BudgetAnalyzer and hasattr(BudgetAnalyzer, "create_page"):
-            m_tools.add_command(
-                label="Анализ смет",
-                command=lambda: self._show_page("budget", lambda p: BudgetAnalyzer.create_page(p)),
-            )
-        if EstimateResourceDecoder and hasattr(EstimateResourceDecoder, "create_page"):
-            m_tools.add_command(
-                label="Раскрытие ресурсов сметы",
-                command=lambda: self._show_page(
-                    "estimate_resource_decoder",
-                    lambda p: EstimateResourceDecoder.create_page(p),
-                ),
-            )
-        self._menubar.add_cascade(label="Инструменты", menu=m_tools)
-        self._menu_tools = m_tools
-
-        self._menu_settings_index = self._menubar.index("end")
-        self._menubar.add_command(label="Настройки", command=lambda: Settings.open_settings_window(self))
-
-    # ------------------------------------------------------------------ #
-    #  Управление пользователем
-    # ------------------------------------------------------------------ #
     def _set_user(self, user: Optional[Dict[str, Any]]):
         self.current_user = user or {}
         self.is_authenticated = bool(user)
@@ -1596,13 +1234,14 @@ class MainApp(tk.Tk):
             name = user.get("full_name") or user.get("username") or ""
             caption = f" — {name}"
             self.lbl_user_info.config(text=f"Пользователь: {name}")
-            self.btn_logout.pack(side="left")
+            self.btn_logout.pack(side="left", pady=4)
         else:
             self.lbl_user_info.config(text="")
             self.btn_logout.pack_forget()
 
         self.title(APP_NAME + caption)
         self._apply_permissions_visibility()
+        self._rebuild_sidebar()
 
     def on_login_success(self, user: Dict[str, Any]):
         logging.debug(f"MainApp.on_login_success: {user!r}")
@@ -1619,15 +1258,81 @@ class MainApp(tk.Tk):
         perms = self.current_user.get("permissions")
         return bool(perms and perm_code in perms)
 
-    def show_home(self):
-        self._show_page("home", lambda p: HomePage(p, app_ref=self))
+    def _perm_for_key(self, key: str) -> Optional[str]:
+        from menu_spec import MENU_SPEC
+        for sec in MENU_SPEC:
+            for e in sec.entries:
+                if e.kind == "page" and e.key == key:
+                    return e.perm
+        return None
 
-    def show_login(self):
-        self._set_user(None)
-        self._show_page("login", lambda p: LoginPage(p, self))
+    # ------------------------------------------------------------------ #
+    #  Вкладки
+    # ------------------------------------------------------------------ #
+    def _make_tab_title(self, key: str) -> str:
+        headers = self._headers_map()
+        return headers.get(key, (key.replace("_", " ").title(), ""))[0]
 
-    def _show_page(self, key: str, builder):
-        """Отображает нужную страницу, создавая ее при необходимости."""
+    def _headers_map(self):
+        return {
+            "home": ("Главная", "Рабочий стол"),
+            "timesheet": ("Создать табель", ""),
+            "my_timesheets": ("Мои табели", ""),
+            "timesheet_registry": ("Реестр табелей", ""),
+            "brigades": ("Бригады", "Назначение бригадиров"),
+            "workers": ("Работники", "Поиск по сотрудникам"),
+            "timesheet_compare": ("Сравнение табелей", "Объектный vs 1С"),
+            "gpr": ("ГПР", "Диаграмма Ганта"),
+            "transport": ("Транспорт", "Заявка на спецтехнику"),
+            "my_transport_orders": ("Мои заявки", "Транспорт"),
+            "planning": ("Планирование", "Транспорт"),
+            "transport_registry": ("Реестр транспорта", ""),
+            "meals_order": ("Питание", "Заказ питания"),
+            "my_meals_orders": ("Мои заявки", "Питание"),
+            "meals_planning": ("Планирование", "Питание"),
+            "meals_registry": ("Реестр питания", ""),
+            "meals_reports": ("Отчеты по питанию", ""),
+            "meals_workers": ("Работники (питание)", ""),
+            "meals_settings": ("Настройки питания", ""),
+            "lodging_registry": ("Проживание", ""),
+            "lodging_dorms": ("Общежития и комнаты", ""),
+            "lodging_rates": ("Тарифы проживания", ""),
+            "object_create": ("Объекты", "Создание/Редактирование"),
+            "objects_registry": ("Реестр объектов", ""),
+            "employee_card": ("Карточка сотрудника", ""),
+            "analytics_dashboard": ("Аналитика", ""),
+            "payroll": ("Затраты (ФОТ)", ""),
+            "budget": ("Анализ смет", ""),
+            "estimate_resource_decoder": ("Раскрытие ресурсов сметы", ""),
+            "login": ("Вход", "Авторизация"),
+        }
+
+    def _set_header(self, title: str, hint: str = ""):
+        self.lbl_header_title.config(text=title)
+        self.lbl_header_hint.config(text=hint or "")
+        self.lbl_status_right.config(text=hint or "")
+
+    def set_status(self, text: str):
+        self.lbl_status_left.config(text=text)
+
+    def _activate_tab_by_key(self, key: str, add_to_history: bool = True):
+        frame = self._tab_frames.get(key)
+        if not frame:
+            return
+        if add_to_history:
+            self._push_history(key)
+        self.notebook.select(frame)
+        self._current_key = key
+        self._sync_header_for_key(key)
+        self._rebuild_sidebar()
+
+    def _sync_header_for_key(self, key: str):
+        headers = self._headers_map()
+        title, hint = headers.get(key, (key.replace("_", " ").title(), ""))
+        self._set_header(title, hint)
+        self.set_status(f"Открыт раздел: {title}")
+
+    def open_page_in_tab(self, key: str, builder):
         if not self.is_authenticated and key != "login":
             self.show_login()
             return
@@ -1635,62 +1340,204 @@ class MainApp(tk.Tk):
         required = self._perm_for_key(key)
         if key not in ("login", "home") and required and not self.has_perm(required):
             messagebox.showwarning("Доступ запрещён", "У вас нет прав на этот пункт.")
-            self.show_home()
             return
 
-        headers = {
-            "home": ("Рабочий стол", "Главная страница системы"),
-            "timesheet": ("Объектный табель", ""),
-            "my_timesheets": ("Мои табели", ""),
-            "timesheet_registry": ("Реестр табелей", ""),
-            "brigades": ("Бригады", "Назначение бригадиров по подразделениям"),
-            "workers": ("Работники", "Поиск по сотруднику и его объектам"),
-            "timesheet_compare": ("Сравнение табелей", "Объектный vs Кадровый (1С)"),
-            "gpr": ("ГПР (Диаграмма Ганта)", "План работ по объекту"),
-            "transport": ("Заявка на спецтехнику", ""),
-            "my_transport_orders": ("Мои заявки на транспорт", ""),
-            "planning": ("Планирование транспорта", ""),
-            "transport_registry": ("Реестр транспорта", ""),
-            "meals_order": ("Заказ питания", ""),
-            "my_meals_orders": ("Мои заявки на питание", ""),
-            "meals_planning": ("Планирование питания", ""),
-            "meals_registry": ("Реестр заявок на питание", ""),
-            "meals_reports": ("Отчеты по питанию", "Дневной и месячный свод"),
-            "meals_workers": ("Работники (питание)", "История питания по сотруднику"),
-            "meals_settings": ("Настройки питания", ""),
-            "lodging_registry": ("Проживание", "Реестр заселений/выселений"),
-            "lodging_dorms": ("Проживание", "Общежития и комнаты"),
-            "lodging_rates": ("Проживание", "Тарифы проживания"),
-            "object_create": ("Объекты: Создание/Редактирование", ""),
-            "payroll": ("Затраты (ФОТ)", "Загрузка начислений и распределение по объектам"),
-            "objects_registry": ("Реестр объектов", ""),
-            "employee_card": ("Сотрудники", "Карточка сотрудника"),
-            "budget": ("Анализ смет", ""),
-            "estimate_resource_decoder": ("Раскрытие ресурсов сметы", "Расшифровка ресурсов"),
-            "login": ("Авторизация", "Вход в систему"),
-            "analytics_dashboard": ("Операционная аналитика", "Сводные показатели"),
-        }
-        title, hint = headers.get(key, (key.replace("_", " ").title(), ""))
-        self._set_header(title, hint)
+        if key in self._tab_frames:
+            self._activate_tab_by_key(key)
+            return
 
-        for w in self.content.winfo_children():
-            w.destroy()
+        frame = tk.Frame(self.notebook, bg=UI["bg"])
+        self._tab_frames[key] = frame
+        self._tab_builders[key] = builder
+        self._tab_titles[key] = self._make_tab_title(key)
 
         try:
-            page = builder(self.content)
+            page = builder(frame)
             page.pack(fill="both", expand=True)
             self._pages[key] = page
         except Exception as e:
             logging.exception(f"Ошибка при открытии страницы '{key}'")
             messagebox.showerror("Ошибка", f"Не удалось открыть страницу '{key}':\n{e}")
-            if self.is_authenticated:
-                self.show_home()
-            else:
-                self.show_login()
+            self._tab_frames.pop(key, None)
+            self._tab_builders.pop(key, None)
+            self._tab_titles.pop(key, None)
+            return
 
-    def _set_header(self, title: str, hint: str = ""):
-        self.lbl_header_title.config(text=title)
-        self.lbl_header_hint.config(text=hint or "")
+        self.notebook.add(frame, text=self._tab_titles[key])
+        self._activate_tab_by_key(key)
+
+    def _on_tab_changed(self, _event=None):
+        try:
+            selected = self.notebook.select()
+            if not selected:
+                return
+            selected_widget = self.nametowidget(selected)
+            for key, frame in self._tab_frames.items():
+                if str(frame) == str(selected_widget):
+                    self._current_key = key
+                    self._sync_header_for_key(key)
+                    self._rebuild_sidebar()
+                    break
+        except Exception:
+            logging.exception("Ошибка обработки смены вкладки")
+
+    # ------------------------------------------------------------------ #
+    #  Маршрутизация
+    # ------------------------------------------------------------------ #
+    def _open_known_page(self, key: str):
+        mapping = {
+            "timesheet": lambda p: timesheet_module.create_timesheet_page(p, self),
+            "my_timesheets": lambda p: timesheet_module.create_my_timesheets_page(p, self),
+            "timesheet_registry": lambda p: timesheet_module.create_timesheet_registry_page(p, self),
+            "brigades": lambda p: brigades_module.create_brigades_page(p, self),
+            "workers": lambda p: employees_module.create_workers_page(p, self),
+            "timesheet_compare": lambda p: timesheet_compare.create_timesheet_compare_page(p, self),
+            "gpr": lambda p: gpr_module.create_gpr_page(p, self),
+            "gpr_dicts": lambda p: gpr_dictionaries.create_gpr_dicts_page(p, self),
+            "transport": lambda p: SpecialOrders.create_page(p, self),
+            "my_transport_orders": lambda p: SpecialOrders.create_my_transport_orders_page(p, self),
+            "planning": lambda p: SpecialOrders.create_planning_page(p),
+            "transport_registry": lambda p: SpecialOrders.create_transport_registry_page(p),
+            "meals_order": lambda p: meals_module.create_meals_order_page(p, self),
+            "my_meals_orders": lambda p: meals_module.create_my_meals_orders_page(p, self),
+            "meals_planning": lambda p: meals_module.create_meals_planning_page(p, self),
+            "meals_registry": lambda p: meals_module.create_all_meals_orders_page(p, self),
+            "meals_reports": lambda p: meals_reports_module.create_meals_reports_page(p, self),
+            "meals_workers": lambda p: meals_employees_module.create_meals_workers_page(p, self),
+            "meals_settings": lambda p: meals_module.create_meals_settings_page(p, self.current_user.get("role")),
+            "lodging_registry": lambda p: lodging_module.create_lodging_registry_page(p, self),
+            "lodging_dorms": lambda p: lodging_module.create_dorms_page(p, self),
+            "lodging_rates": lambda p: lodging_module.create_rates_page(p, self),
+            "object_create": lambda p: objects.ObjectCreatePage(p, self),
+            "objects_registry": lambda p: objects.ObjectsRegistryPage(p, self),
+            "analytics_dashboard": lambda p: analytics_module.AnalyticsPage(p, self),
+            "payroll": lambda p: payroll_module.create_payroll_page(p, self),
+            "employee_card": lambda p: employee_card_module.create_employee_card_page(p, self),
+            "budget": lambda p: BudgetAnalyzer.create_page(p),
+            "estimate_resource_decoder": lambda p: EstimateResourceDecoder.create_page(p),
+        }
+
+        builder = mapping.get(key)
+        if not builder:
+            messagebox.showinfo("Раздел", f"Для раздела '{key}' не найден обработчик.")
+            return
+
+        self.open_page_in_tab(key, builder)
+
+    def show_home(self):
+        if not self.is_authenticated:
+            self.show_login()
+            return
+        self.open_page_in_tab("home", lambda p: HomePage(p, app_ref=self))
+
+    def show_login(self):
+        self.current_user = {}
+        self.is_authenticated = False
+
+        for tab_key, frame in list(self._tab_frames.items()):
+            try:
+                idx = self.notebook.index(frame)
+                self.notebook.forget(idx)
+            except Exception:
+                pass
+
+        self._pages.clear()
+        self._tab_frames.clear()
+        self._tab_builders.clear()
+        self._tab_titles.clear()
+        self._history_back.clear()
+        self._history_forward.clear()
+        self._current_key = None
+
+        self._set_user(None)
+        self.open_page_in_tab("login", lambda p: LoginPage(p, self))
+
+    def _show_page(self, key: str, builder):
+        """Совместимость со старым кодом: теперь просто открываем страницу во вкладке."""
+        self.open_page_in_tab(key, builder)
+
+    # ------------------------------------------------------------------ #
+    #  Меню
+    # ------------------------------------------------------------------ #
+    def _build_menu(self):
+        self._menubar = tk.Menu(self)
+        self.config(menu=self._menubar)
+
+        self._menubar.add_command(label="Главная", command=self.show_home)
+
+        m_ts = tk.Menu(self._menubar, tearoff=0)
+        m_ts.add_command(label="Создать", command=lambda: self._open_known_page("timesheet"))
+        m_ts.add_command(label="Мои табели", command=lambda: self._open_known_page("my_timesheets"))
+        m_ts.add_command(label="Бригады", command=lambda: self._open_known_page("brigades"))
+        m_ts.add_command(label="Реестр табелей", command=lambda: self._open_known_page("timesheet_registry"))
+        m_ts.add_command(label="Работники", command=lambda: self._open_known_page("workers"))
+        m_ts.add_command(label="Сравнение с 1С", command=lambda: self._open_known_page("timesheet_compare"))
+        self._menubar.add_cascade(label="Объектный табель", menu=m_ts)
+        self._menu_timesheets = m_ts
+
+        m_gpr = tk.Menu(self._menubar, tearoff=0)
+        m_gpr.add_command(label="ГПР (Диаграмма Ганта)", command=lambda: self._open_known_page("gpr"))
+        m_gpr.add_command(label="Справочники ГПР", command=lambda: self._open_known_page("gpr_dicts"))
+        self._menubar.add_cascade(label="Планирование (ГПР)", menu=m_gpr)
+        self._menu_gpr = m_gpr
+
+        m_transport = tk.Menu(self._menubar, tearoff=0)
+        m_transport.add_command(label="Создать заявку", command=lambda: self._open_known_page("transport"))
+        m_transport.add_command(label="Мои заявки", command=lambda: self._open_known_page("my_transport_orders"))
+        m_transport.add_command(label="Планирование", command=lambda: self._open_known_page("planning"))
+        m_transport.add_command(label="Реестр", command=lambda: self._open_known_page("transport_registry"))
+        self._menubar.add_cascade(label="Автотранспорт", menu=m_transport)
+        self._menu_transport = m_transport
+
+        m_meals = tk.Menu(self._menubar, tearoff=0)
+        m_meals.add_command(label="Создать заявку", command=lambda: self._open_known_page("meals_order"))
+        m_meals.add_command(label="Мои заявки", command=lambda: self._open_known_page("my_meals_orders"))
+        m_meals.add_command(label="Планирование", command=lambda: self._open_known_page("meals_planning"))
+        m_meals.add_command(label="Реестр", command=lambda: self._open_known_page("meals_registry"))
+        m_meals.add_command(label="Отчеты", command=lambda: self._open_known_page("meals_reports"))
+        m_meals.add_command(label="Работники (питание)", command=lambda: self._open_known_page("meals_workers"))
+        m_meals.add_command(label="Настройки", command=lambda: self._open_known_page("meals_settings"))
+        self._menubar.add_cascade(label="Питание", menu=m_meals)
+        self._menu_meals = m_meals
+
+        m_lodging = tk.Menu(self._menubar, tearoff=0)
+        m_lodging.add_command(label="Реестр проживаний", command=lambda: self._open_known_page("lodging_registry"))
+        m_lodging.add_command(label="Общежития и комнаты", command=lambda: self._open_known_page("lodging_dorms"))
+        m_lodging.add_command(label="Тарифы (цена за сутки)", command=lambda: self._open_known_page("lodging_rates"))
+        self._menubar.add_cascade(label="Проживание", menu=m_lodging)
+        self._menu_lodging = m_lodging
+
+        m_objects = tk.Menu(self._menubar, tearoff=0)
+        m_objects.add_command(label="Создать/Редактировать", command=lambda: self._open_known_page("object_create"))
+        m_objects.add_command(label="Реестр", command=lambda: self._open_known_page("objects_registry"))
+        self._menubar.add_cascade(label="Объекты", menu=m_objects)
+        self._menu_objects = m_objects
+
+        m_analytics = tk.Menu(self._menubar, tearoff=0)
+        m_analytics.add_command(label="Операционная аналитика", command=lambda: self._open_known_page("analytics_dashboard"))
+        m_analytics.add_command(label="Затраты (ФОТ)", command=lambda: self._open_known_page("payroll"))
+        self._menubar.add_cascade(label="Аналитика", menu=m_analytics)
+        self._menu_analytics = m_analytics
+
+        m_emp = tk.Menu(self._menubar, tearoff=0)
+        m_emp.add_command(label="Карточка сотрудника", command=lambda: self._open_known_page("employee_card"))
+        self._menubar.add_cascade(label="Сотрудники", menu=m_emp)
+        self._menu_employees_card = m_emp
+
+        m_tools = tk.Menu(self._menubar, tearoff=0)
+        if timesheet_transformer and hasattr(timesheet_transformer, "open_converter"):
+            m_tools.add_command(
+                label="Конвертер табеля (1С)",
+                command=lambda: timesheet_transformer.open_converter(self),
+            )
+        if BudgetAnalyzer and hasattr(BudgetAnalyzer, "create_page"):
+            m_tools.add_command(label="Анализ смет", command=lambda: self._open_known_page("budget"))
+        if EstimateResourceDecoder and hasattr(EstimateResourceDecoder, "create_page"):
+            m_tools.add_command(label="Раскрытие ресурсов сметы", command=lambda: self._open_known_page("estimate_resource_decoder"))
+        self._menubar.add_cascade(label="Инструменты", menu=m_tools)
+        self._menu_tools = m_tools
+
+        self._menubar.add_command(label="Настройки", command=lambda: Settings.open_settings_window(self))
 
     def _apply_permissions_visibility(self):
         from menu_spec import MENU_SPEC, TOP_LEVEL
@@ -1737,7 +1584,6 @@ class MainApp(tk.Tk):
             set_state(self._menubar, e.label, allowed)
 
     def destroy(self):
-        """Корректное завершение работы приложения."""
         logging.info("Приложение закрывается. Закрываем пул соединений.")
         close_db_pool()
         super().destroy()
