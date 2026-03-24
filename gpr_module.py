@@ -243,6 +243,66 @@ class GprService:
                 )
                 return [dict(r) for r in cur.fetchall()]
 
+    @staticmethod
+    def load_gpr_registry() -> List[Dict[str, Any]]:
+        with _DBConn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        o.id AS object_db_id,
+                        COALESCE(o.excel_id, '') AS excel_id,
+                        COALESCE(o.short_name, '') AS short_name,
+                        o.address,
+                        COALESCE(o.status, '') AS object_status,
+    
+                        p.id AS plan_id,
+                        p.version_no,
+                        p.updated_at,
+                        COALESCE(u.full_name, '') AS creator_name,
+    
+                        COALESCE(s.task_count, 0) AS task_count,
+                        COALESCE(s.done_count, 0) AS done_count,
+                        COALESCE(s.in_progress_count, 0) AS in_progress_count,
+                        COALESCE(s.overdue_count, 0) AS overdue_count
+    
+                    FROM public.objects o
+                    LEFT JOIN public.gpr_plans p
+                           ON p.object_db_id = o.id
+                          AND p.is_current = true
+                    LEFT JOIN public.app_users u
+                           ON u.id = p.created_by
+                    LEFT JOIN (
+                        SELECT
+                            t.plan_id,
+                            COUNT(*) FILTER (
+                                WHERE COALESCE(t.is_deleted, false) = false
+                                  AND COALESCE(t.row_kind, 'task') = 'task'
+                            ) AS task_count,
+                            COUNT(*) FILTER (
+                                WHERE COALESCE(t.is_deleted, false) = false
+                                  AND COALESCE(t.row_kind, 'task') = 'task'
+                                  AND t.status = 'done'
+                            ) AS done_count,
+                            COUNT(*) FILTER (
+                                WHERE COALESCE(t.is_deleted, false) = false
+                                  AND COALESCE(t.row_kind, 'task') = 'task'
+                                  AND t.status = 'in_progress'
+                            ) AS in_progress_count,
+                            COUNT(*) FILTER (
+                                WHERE COALESCE(t.is_deleted, false) = false
+                                  AND COALESCE(t.row_kind, 'task') = 'task'
+                                  AND t.status NOT IN ('done', 'canceled')
+                                  AND t.plan_finish < CURRENT_DATE
+                            ) AS overdue_count
+                        FROM public.gpr_tasks t
+                        GROUP BY t.plan_id
+                    ) s ON s.plan_id = p.id
+                    ORDER BY o.address, o.short_name
+                    """
+                )
+                return [dict(r) for r in cur.fetchall()]
+
     # ── plans ──
     @staticmethod
     def get_or_create_current_plan(
@@ -1221,6 +1281,9 @@ class GprPage(tk.Frame):
         self.tasks_filtered: List[Dict[str, Any]] = []
         self.facts: Dict[int, float] = {}
 
+        self.registry_rows: List[Dict[str, Any]] = []
+        self.registry_filtered: List[Dict[str, Any]] = []
+
         self._new_task_counter = 0
 
         q = _quarter_range()
@@ -1229,11 +1292,13 @@ class GprPage(tk.Frame):
 
         self._build_ui()
         self._load_refs()
+        self._refresh_registry()
         self._update_range_label()
 
     def _build_ui(self):
         hdr = tk.Frame(self, bg=C["accent"], pady=6)
         hdr.pack(fill="x")
+
         tk.Label(
             hdr,
             text="📊  ГПР — График производства работ",
@@ -1253,8 +1318,278 @@ class GprPage(tk.Frame):
         )
         self.lbl_plan_info.pack(side="right")
 
+        self.nb_main = ttk.Notebook(self)
+        self.nb_main.pack(fill="both", expand=True, padx=0, pady=0)
+
+        self.tab_registry = tk.Frame(self.nb_main, bg=C["bg"])
+        self.tab_editor = tk.Frame(self.nb_main, bg=C["bg"])
+
+        self.nb_main.add(self.tab_registry, text="  📚 Реестр ГПР  ")
+        self.nb_main.add(self.tab_editor, text="  🛠 Редактор ГПР  ")
+
+        self._build_registry_tab(self.tab_registry)
+        self._build_editor_tab(self.tab_editor)
+
+    # ══════════════════════════════════════════════════════
+    #  REGISTRY TAB
+    # ══════════════════════════════════════════════════════
+    def _build_registry_tab(self, parent):
         top = tk.LabelFrame(
-            self,
+            parent,
+            text=" 🔎 Поиск и фильтрация ",
+            font=("Segoe UI", 9, "bold"),
+            bg=C["panel"],
+            fg=C["accent"],
+            relief="groove",
+            bd=1,
+            padx=10,
+            pady=8,
+        )
+        top.pack(fill="x", padx=10, pady=(8, 4))
+
+        row1 = tk.Frame(top, bg=C["panel"])
+        row1.pack(fill="x")
+
+        tk.Label(
+            row1, text="Поиск:", bg=C["panel"], font=("Segoe UI", 9)
+        ).pack(side="left")
+        self.var_registry_search = tk.StringVar()
+        ent = ttk.Entry(row1, textvariable=self.var_registry_search, width=40)
+        ent.pack(side="left", padx=(6, 12))
+        ent.bind("<KeyRelease>", lambda _e: self._apply_registry_filter())
+
+        tk.Label(
+            row1, text="Фильтр:", bg=C["panel"], font=("Segoe UI", 9)
+        ).pack(side="left")
+        self.cmb_registry_filter = ttk.Combobox(
+            row1,
+            state="readonly",
+            width=20,
+            values=[
+                "Все объекты",
+                "Только с ГПР",
+                "Без ГПР",
+                "С просрочкой",
+            ],
+        )
+        self.cmb_registry_filter.pack(side="left", padx=(6, 12))
+        self.cmb_registry_filter.current(0)
+        self.cmb_registry_filter.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self._apply_registry_filter(),
+        )
+
+        ttk.Button(
+            row1, text="Обновить", command=self._refresh_registry
+        ).pack(side="right", padx=2)
+
+        ttk.Button(
+            row1, text="Открыть выбранный", command=self._open_selected_registry
+        ).pack(side="right", padx=2)
+
+        self.lbl_registry_summary = tk.Label(
+            parent,
+            text="",
+            bg=C["bg"],
+            fg=C["text2"],
+            font=("Segoe UI", 8),
+            anchor="w",
+        )
+        self.lbl_registry_summary.pack(fill="x", padx=14, pady=(2, 0))
+
+        wrap = tk.Frame(parent, bg=C["panel"])
+        wrap.pack(fill="both", expand=True, padx=10, pady=(4, 8))
+
+        cols = (
+            "excel_id",
+            "short_name",
+            "address",
+            "object_status",
+            "version_no",
+            "updated_at",
+            "creator_name",
+            "task_count",
+            "done_count",
+            "overdue_count",
+        )
+        self.registry_tree = ttk.Treeview(
+            wrap, columns=cols, show="headings", selectmode="browse"
+        )
+
+        heads = {
+            "excel_id": ("Код", 80),
+            "short_name": ("Краткое имя", 180),
+            "address": ("Адрес", 420),
+            "object_status": ("Статус объекта", 110),
+            "version_no": ("Версия", 60),
+            "updated_at": ("Обновлён", 120),
+            "creator_name": ("Создал", 140),
+            "task_count": ("Работ", 70),
+            "done_count": ("Выполнено", 85),
+            "overdue_count": ("Просрочено", 90),
+        }
+
+        for c, (t, w) in heads.items():
+            self.registry_tree.heading(c, text=t)
+            anc = "center" if c in (
+                "excel_id", "version_no", "task_count", "done_count", "overdue_count"
+            ) else "w"
+            self.registry_tree.column(c, width=w, anchor=anc)
+
+        vsb = ttk.Scrollbar(
+            wrap, orient="vertical", command=self.registry_tree.yview
+        )
+        hsb = ttk.Scrollbar(
+            parent.winfo_toplevel() if False else wrap,
+            orient="horizontal",
+            command=self.registry_tree.xview,
+        )
+        self.registry_tree.configure(
+            yscrollcommand=vsb.set,
+            xscrollcommand=hsb.set,
+        )
+
+        self.registry_tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+
+        self.registry_tree.bind(
+            "<Double-1>", lambda _e: self._open_selected_registry()
+        )
+        self.registry_tree.bind(
+            "<Return>", lambda _e: self._open_selected_registry()
+        )
+
+        self.registry_tree.tag_configure("no_plan", foreground="#777")
+        self.registry_tree.tag_configure("overdue", background="#fff3f3")
+
+    def _refresh_registry(self):
+        try:
+            self.registry_rows = GprService.load_gpr_registry()
+        except Exception as e:
+            logger.exception("GPR registry load error")
+            messagebox.showerror(
+                "ГПР", f"Ошибка загрузки реестра ГПР:\n{e}", parent=self
+            )
+            return
+
+        self._apply_registry_filter()
+
+    def _apply_registry_filter(self):
+        q = (self.var_registry_search.get() or "").strip().lower()
+        mode = self.cmb_registry_filter.get().strip()
+
+        res = []
+        for r in self.registry_rows:
+            has_plan = bool(r.get("plan_id"))
+            overdue = int(r.get("overdue_count") or 0)
+
+            if mode == "Только с ГПР" and not has_plan:
+                continue
+            if mode == "Без ГПР" and has_plan:
+                continue
+            if mode == "С просрочкой" and overdue <= 0:
+                continue
+
+            if q:
+                hay = " ".join([
+                    str(r.get("excel_id") or ""),
+                    str(r.get("short_name") or ""),
+                    str(r.get("address") or ""),
+                    str(r.get("creator_name") or ""),
+                    str(r.get("object_status") or ""),
+                ]).lower()
+                if q not in hay:
+                    continue
+
+            res.append(r)
+
+        self.registry_filtered = res
+        self._render_registry()
+
+    def _render_registry(self):
+        self.registry_tree.delete(*self.registry_tree.get_children())
+
+        total = len(self.registry_filtered)
+        with_plan = 0
+        overdue_cnt = 0
+
+        for r in self.registry_filtered:
+            oid = int(r["object_db_id"])
+            iid = f"obj_{oid}"
+
+            plan_id = r.get("plan_id")
+            if plan_id:
+                with_plan += 1
+
+            overdue = int(r.get("overdue_count") or 0)
+            if overdue > 0:
+                overdue_cnt += 1
+
+            upd = r.get("updated_at")
+            if isinstance(upd, datetime):
+                upd_s = upd.strftime("%d.%m.%Y %H:%M")
+            else:
+                upd_s = ""
+
+            tags = []
+            if not plan_id:
+                tags.append("no_plan")
+            if overdue > 0:
+                tags.append("overdue")
+
+            self.registry_tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(
+                    r.get("excel_id") or "",
+                    r.get("short_name") or "",
+                    r.get("address") or "",
+                    r.get("object_status") or "",
+                    r.get("version_no") or "",
+                    upd_s,
+                    r.get("creator_name") or "",
+                    r.get("task_count") or 0,
+                    r.get("done_count") or 0,
+                    overdue,
+                ),
+                tags=tuple(tags),
+            )
+
+        self.lbl_registry_summary.config(
+            text=(
+                f"Объектов: {total}  |  "
+                f"С ГПР: {with_plan}  |  "
+                f"С просрочкой: {overdue_cnt}"
+            )
+        )
+
+    def _open_selected_registry(self):
+        sel = self.registry_tree.selection()
+        if not sel:
+            messagebox.showinfo(
+                "ГПР", "Выберите объект в реестре.", parent=self
+            )
+            return
+
+        iid = sel[0]
+        if not iid.startswith("obj_"):
+            return
+
+        try:
+            oid = int(iid[4:])
+        except ValueError:
+            return
+
+        self._open_object_by_id(oid)
+
+    # ══════════════════════════════════════════════════════
+    #  EDITOR TAB
+    # ══════════════════════════════════════════════════════
+    def _build_editor_tab(self, parent):
+        top = tk.LabelFrame(
+            parent,
             text=" 📍 Объект и диапазон ",
             font=("Segoe UI", 9, "bold"),
             bg=C["panel"],
@@ -1270,6 +1605,7 @@ class GprPage(tk.Frame):
         tk.Label(
             top, text="Объект:", bg=C["panel"], font=("Segoe UI", 9)
         ).grid(row=0, column=0, sticky="e", padx=(0, 6))
+
         self.cmb_obj = _AutoCombo(top, width=60, font=("Segoe UI", 9))
         self.cmb_obj.grid(row=0, column=1, sticky="ew", pady=3)
 
@@ -1283,11 +1619,16 @@ class GprPage(tk.Frame):
 
         range_f = tk.Frame(top, bg=C["panel"])
         range_f.grid(row=1, column=1, sticky="w", pady=3)
+
         self.lbl_range = tk.Label(
-            range_f, text="", bg=C["panel"], fg=C["text2"],
-            font=("Segoe UI", 9)
+            range_f,
+            text="",
+            bg=C["panel"],
+            fg=C["text2"],
+            font=("Segoe UI", 9),
         )
         self.lbl_range.pack(side="left")
+
         ttk.Button(
             range_f, text="Изменить…", command=self._change_range
         ).pack(side="left", padx=(12, 0))
@@ -1295,34 +1636,36 @@ class GprPage(tk.Frame):
             range_f, text="По работам", command=self._fit_range
         ).pack(side="left", padx=(6, 0))
 
-        bar = tk.Frame(self, bg=C["accent_light"], pady=5)
+        bar = tk.Frame(parent, bg=C["accent_light"], pady=5)
         bar.pack(fill="x", padx=10)
 
-        self._tb_btn(bar, "➕ Добавить", self._add_task)
-        self._tb_btn(bar, "📁 Группа", self._add_group)
-        self._tb_btn(bar, "🟦 Титул", self._add_title)
-        self._tb_btn(bar, "✏️ Редактировать", self._edit_selected)
-        self._tb_btn(bar, "🗑 Удалить", self._delete_selected)
-        self._tb_btn(bar, "⬆ Вверх", self._move_selected_up)
-        self._tb_btn(bar, "⬇ Вниз", self._move_selected_down)
+        self.btn_add = self._tb_btn(bar, "➕ Добавить", self._add_task)
+        self.btn_group = self._tb_btn(bar, "📁 Группа", self._add_group)
+        self.btn_title = self._tb_btn(bar, "🟦 Титул", self._add_title)
+        self.btn_edit = self._tb_btn(bar, "✏️ Редактировать", self._edit_selected)
+        self.btn_delete = self._tb_btn(bar, "🗑 Удалить", self._delete_selected)
+        self.btn_up = self._tb_btn(bar, "⬆ Вверх", self._move_selected_up)
+        self.btn_down = self._tb_btn(bar, "⬇ Вниз", self._move_selected_down)
 
         tk.Frame(bar, bg=C["border"], width=1).pack(
             side="left", fill="y", padx=8
         )
-        self._tb_btn(bar, "📋 Из шаблона…", self._apply_template)
-        self._tb_btn(bar, "📥 Экспорт Excel", self._export_excel)
+
+        self.btn_template = self._tb_btn(bar, "📋 Из шаблона…", self._apply_template)
+        self.btn_export = self._tb_btn(bar, "📥 Экспорт Excel", self._export_excel)
 
         tk.Frame(bar, bg=C["border"], width=1).pack(
             side="left", fill="y", padx=8
         )
+
         self._tb_btn(bar, "🔍−", lambda: self._zoom(-2))
         self._tb_btn(bar, "🔍+", lambda: self._zoom(2))
 
-        self._accent_btn(bar, "💾  СОХРАНИТЬ", self._save).pack(
-            side="right", padx=(4, 8)
-        )
+        self.btn_save = self._accent_btn(bar, "💾  СОХРАНИТЬ", self._save)
+        self.btn_save.pack_forget()
+        self.btn_save.pack(side="right", padx=(4, 8))
 
-        fbar = tk.Frame(self, bg=C["bg"], pady=4)
+        fbar = tk.Frame(parent, bg=C["bg"], pady=4)
         fbar.pack(fill="x", padx=10)
 
         tk.Label(
@@ -1361,28 +1704,39 @@ class GprPage(tk.Frame):
         ent_s.bind("<KeyRelease>", lambda _e: self._apply_filter())
 
         self.lbl_summary = tk.Label(
-            self, text="", bg=C["bg"],
-            font=("Segoe UI", 8), fg=C["text2"], anchor="w"
+            parent,
+            text="",
+            bg=C["bg"],
+            font=("Segoe UI", 8),
+            fg=C["text2"],
+            anchor="w",
         )
         self.lbl_summary.pack(fill="x", padx=14, pady=(2, 0))
 
-        leg = tk.Frame(self, bg=C["bg"])
+        leg = tk.Frame(parent, bg=C["bg"])
         leg.pack(fill="x", padx=14, pady=(0, 2))
         for code in STATUS_LIST:
             col, _, label = STATUS_COLORS[code]
             f = tk.Frame(leg, bg=C["bg"])
             f.pack(side="left", padx=(0, 12))
             tk.Canvas(
-                f, width=12, height=12, bg=col,
-                highlightthickness=1, highlightbackground="#999"
+                f,
+                width=12,
+                height=12,
+                bg=col,
+                highlightthickness=1,
+                highlightbackground="#999",
             ).pack(side="left", padx=(0, 3))
             tk.Label(
-                f, text=label, bg=C["bg"],
-                font=("Segoe UI", 7), fg=C["text2"]
+                f,
+                text=label,
+                bg=C["bg"],
+                font=("Segoe UI", 7),
+                fg=C["text2"],
             ).pack(side="left")
 
         pw = tk.PanedWindow(
-            self, orient="horizontal", sashrelief="raised", bg=C["bg"]
+            parent, orient="horizontal", sashrelief="raised", bg=C["bg"]
         )
         pw.pack(fill="both", expand=True, padx=10, pady=(4, 4))
 
@@ -1390,7 +1744,7 @@ class GprPage(tk.Frame):
         right = tk.Frame(pw, bg=C["panel"])
         pw.add(left, minsize=480)
         pw.add(right, minsize=400)
-        
+
         self.tree_top_spacer = tk.Frame(
             left,
             bg="#d6dbe0",
@@ -1400,14 +1754,14 @@ class GprPage(tk.Frame):
         )
         self.tree_top_spacer.pack(side="top", fill="x")
         self.tree_top_spacer.pack_propagate(False)
-        
+
         tree_wrap = tk.Frame(left, bg=C["panel"])
         tree_wrap.pack(side="top", fill="both", expand=True)
-        
+
         style = ttk.Style(self)
         style.configure("GPR.Treeview", rowheight=24)
         style.configure("GPR.Treeview.Heading", font=("Segoe UI", 9, "bold"))
-        
+
         cols = ("type", "name", "start", "finish", "uom", "qty", "status")
         self.tree = ttk.Treeview(
             tree_wrap,
@@ -1416,6 +1770,7 @@ class GprPage(tk.Frame):
             selectmode="browse",
             style="GPR.Treeview",
         )
+
         heads = {
             "type": ("Тип работ", 130),
             "name": ("Вид работ", 260),
@@ -1425,6 +1780,7 @@ class GprPage(tk.Frame):
             "qty": ("Объём", 75),
             "status": ("Статус", 100),
         }
+
         for c, (t, w) in heads.items():
             self.tree.heading(c, text=t)
             anc = (
@@ -1433,7 +1789,7 @@ class GprPage(tk.Frame):
                 else ("e" if c == "qty" else "w")
             )
             self.tree.column(c, width=w, anchor=anc)
-        
+
         vsb = ttk.Scrollbar(
             tree_wrap, orient="vertical", command=self._on_tree_scroll
         )
@@ -1451,30 +1807,36 @@ class GprPage(tk.Frame):
 
         self.gantt = GanttCanvas(right, day_px=20, linked_tree=self.tree)
         self.gantt.pack(fill="both", expand=True)
-        
+
         self.after_idle(self._sync_tree_header_spacer)
 
-        bot = tk.Frame(self, bg=C["border"], height=1)
+        bot = tk.Frame(parent, bg=C["border"], height=1)
         bot.pack(fill="x", padx=10)
+
         self.lbl_bottom = tk.Label(
-            self, text="Выберите объект для начала работы",
-            bg=C["bg"], fg=C["text3"],
-            font=("Segoe UI", 8), anchor="w", padx=14, pady=2
+            parent,
+            text="Выберите объект в реестре или откройте его вручную",
+            bg=C["bg"],
+            fg=C["text3"],
+            font=("Segoe UI", 8),
+            anchor="w",
+            padx=14,
+            pady=2,
         )
         self.lbl_bottom.pack(fill="x", padx=0, pady=(0, 6))
 
+    # ══════════════════════════════════════════════════════
+    #  COMMON
+    # ══════════════════════════════════════════════════════
     def _sync_tree_header_spacer(self):
-        """Подгоняет высоту верхнего spacer слева так, чтобы
-        первая строка дерева совпадала по вертикали с первой строкой Ганта."""
         try:
             self.update_idletasks()
-    
+
             items = self.tree.get_children()
             if not items:
                 self.tree_top_spacer.config(height=GanttCanvas.MONTH_H)
                 return
-    
-            # bbox первой видимой строки:
+
             first_bbox = None
             for iid in items:
                 try:
@@ -1484,29 +1846,33 @@ class GprPage(tk.Frame):
                         break
                 except tk.TclError:
                     continue
-    
+
             if not first_bbox:
                 self.tree_top_spacer.config(height=GanttCanvas.MONTH_H)
                 return
-    
-            # y первой строки внутри tree обычно ~= высоте заголовка treeview
+
             tree_header_h = max(0, int(first_bbox[1]))
-    
-            # хотим, чтобы:
-            # spacer + tree_header_h == высоте шапки Ганта
             spacer_h = max(0, int(self.gantt.HEADER_H) - tree_header_h)
             self.tree_top_spacer.config(height=spacer_h)
-    
+
         except Exception:
             logger.exception("Error syncing tree/gantt header heights")
-            self.tree_top_spacer.config(height=GanttCanvas.MONTH_H)    
+            self.tree_top_spacer.config(height=GanttCanvas.MONTH_H)
 
     def _accent_btn(self, parent, text, cmd):
         b = tk.Button(
-            parent, text=text, font=("Segoe UI", 9, "bold"),
-            bg=C["btn_bg"], fg=C["btn_fg"],
-            activebackground="#0d47a1", activeforeground="white",
-            relief="flat", cursor="hand2", padx=10, pady=3, command=cmd,
+            parent,
+            text=text,
+            font=("Segoe UI", 9, "bold"),
+            bg=C["btn_bg"],
+            fg=C["btn_fg"],
+            activebackground="#0d47a1",
+            activeforeground="white",
+            relief="flat",
+            cursor="hand2",
+            padx=10,
+            pady=3,
+            command=cmd,
         )
         b.pack(side="left", padx=2)
         b.bind("<Enter>", lambda _e: b.config(bg="#0d47a1"))
@@ -1549,11 +1915,7 @@ class GprPage(tk.Frame):
             db_id = str(o.get("id") or "")
 
             tag = f"[{eid}]" if eid else f"[id:{db_id}]"
-
-            if sn:
-                lbl = f"{sn} — {addr} — {tag}"
-            else:
-                lbl = f"{addr} — {tag}"
+            lbl = f"{sn} — {addr} — {tag}" if sn else f"{addr} — {tag}"
             vals.append(lbl)
 
         self.cmb_obj.set_values(vals)
@@ -1572,12 +1934,14 @@ class GprPage(tk.Frame):
         if not p:
             self.lbl_plan_info.config(text="")
             return
+
         cr = p.get("creator_name") or "—"
         upd = p.get("updated_at")
         if isinstance(upd, datetime):
             upd_s = upd.strftime("%d.%m.%Y %H:%M")
         else:
             upd_s = str(upd or "")
+
         v = p.get("version_no", 1)
         self.lbl_plan_info.config(
             text=f"Версия: {v}  |  Создал: {cr}  |  Обновлён: {upd_s}"
@@ -1641,6 +2005,9 @@ class GprPage(tk.Frame):
                 self.tree.see(iid)
                 break
 
+    # ══════════════════════════════════════════════════════
+    #  OPEN OBJECT
+    # ══════════════════════════════════════════════════════
     def _open_object(self):
         oid = self._sel_obj_id()
         if not oid:
@@ -1648,19 +2015,26 @@ class GprPage(tk.Frame):
                 "ГПР", "Выберите объект из списка.", parent=self
             )
             return
+        self._open_object_by_id(oid)
+
+    def _open_object_by_id(self, oid: int):
         self.object_db_id = oid
         uid = (self.app_ref.current_user or {}).get("id")
+
         try:
             self.plan_info = GprService.get_or_create_current_plan(oid, uid)
             self.plan_id = int(self.plan_info["id"])
             self.tasks = GprService.load_plan_tasks(self.plan_id)
+
             for t in self.tasks:
                 t["row_kind"] = (t.get("row_kind") or "task").strip()
+
             tids = [
                 t["id"] for t in self.tasks
                 if t.get("id") and (t.get("row_kind") or "task") == "task"
             ]
             self.facts = GprService.load_task_facts_cumulative(tids)
+
         except Exception as e:
             logger.exception("GPR open error")
             messagebox.showerror(
@@ -1668,21 +2042,36 @@ class GprPage(tk.Frame):
             )
             return
 
-        self._update_plan_info()
-        self._apply_filter()
-        self._update_summary()
-
         obj = next((o for o in self.objects if int(o["id"]) == oid), None)
         if obj:
             sn = (obj.get("short_name") or "").strip()
             addr = (obj.get("address") or "").strip()
             name = sn if sn else addr
+
+            label = None
+            for i, o in enumerate(self.objects):
+                if int(o["id"]) == oid:
+                    eid = str(o.get("excel_id") or "").strip()
+                    tag = f"[{eid}]" if eid else f"[id:{oid}]"
+                    label = f"{sn} — {addr} — {tag}" if sn else f"{addr} — {tag}"
+                    if label:
+                        self.cmb_obj.set(label)
+                    break
         else:
             name = str(oid)
+
+        self._update_plan_info()
+        self._apply_filter()
+        self._update_summary()
         self.lbl_bottom.config(
             text=f"Объект: {name}  |  Строк: {len(self.tasks)}"
         )
 
+        self.nb_main.select(self.tab_editor)
+
+    # ══════════════════════════════════════════════════════
+    #  FILTER / RENDER
+    # ══════════════════════════════════════════════════════
     def _apply_filter(self):
         wt_idx = self.cmb_filt_wt.current()
         wt_name = None
@@ -1733,33 +2122,19 @@ class GprPage(tk.Frame):
             row_kind = (t.get("row_kind") or "task").strip()
 
             if row_kind == "group":
-                values = (
-                    "",
-                    f"📁 {t.get('name', '')}",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                )
+                values = ("", f"📁 {t.get('name', '')}", "", "", "", "", "")
                 self.tree.insert("", "end", iid=iid, values=values, tags=("group",))
             elif row_kind == "title":
-                values = (
-                    "",
-                    f"🟦 {t.get('name', '')}",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
-                )
+                values = ("", f"🟦 {t.get('name', '')}", "", "", "", "", "")
                 self.tree.insert("", "end", iid=iid, values=values, tags=("title",))
             else:
                 st_label = STATUS_LABELS.get(
                     t.get("status", ""), t.get("status", "")
                 )
                 self.tree.insert(
-                    "", "end", iid=iid,
+                    "",
+                    "end",
+                    iid=iid,
                     values=(
                         t.get("work_type_name", ""),
                         t.get("name", ""),
@@ -1773,12 +2148,19 @@ class GprPage(tk.Frame):
                 )
 
         self.tree.tag_configure("group", font=("Segoe UI", 9, "bold"))
-        self.tree.tag_configure("title", font=("Segoe UI", 9, "bold"), background="#e3f2fd")
+        self.tree.tag_configure(
+            "title",
+            font=("Segoe UI", 9, "bold"),
+            background="#e3f2fd",
+        )
 
         self.gantt.set_data(self.tasks_filtered, self.facts)
         self.after_idle(self._sync_tree_header_spacer)
         self.after_idle(self.gantt.redraw_bars_only)
 
+    # ══════════════════════════════════════════════════════
+    #  RANGE / ZOOM
+    # ══════════════════════════════════════════════════════
     def _change_range(self):
         dlg = DateRangeDialog(self, self.range_from, self.range_to)
         if dlg.result:
@@ -1794,8 +2176,16 @@ class GprPage(tk.Frame):
             )
             return
 
-        starts = [_to_date(t["plan_start"]) for t in task_rows if _to_date(t.get("plan_start"))]
-        finishes = [_to_date(t["plan_finish"]) for t in task_rows if _to_date(t.get("plan_finish"))]
+        starts = [
+            _to_date(t["plan_start"])
+            for t in task_rows
+            if _to_date(t.get("plan_start"))
+        ]
+        finishes = [
+            _to_date(t["plan_finish"])
+            for t in task_rows
+            if _to_date(t.get("plan_finish"))
+        ]
 
         if not starts or not finishes:
             messagebox.showinfo(
@@ -1815,6 +2205,9 @@ class GprPage(tk.Frame):
         self.gantt._header_cache_key = None
         self.gantt._schedule_heavy_redraw()
 
+    # ══════════════════════════════════════════════════════
+    #  CRUD
+    # ══════════════════════════════════════════════════════
     def _find_task_idx(self) -> Optional[int]:
         sel = self.tree.selection()
         if not sel:
@@ -1861,7 +2254,9 @@ class GprPage(tk.Frame):
                     init=init, user_id=uid
                 )
             except Exception:
-                logger.exception("External task dialog error, falling back to built-in")
+                logger.exception(
+                    "External task dialog error, falling back to built-in"
+                )
 
         logger.warning("Using built-in TaskEditDialog (no gpr_task_dialog)")
         dlg = TaskEditDialog(self, self.work_types, self.uoms, init=init)
@@ -1906,13 +2301,17 @@ class GprPage(tk.Frame):
         if not self.plan_id:
             messagebox.showinfo("ГПР", "Сначала откройте объект.", parent=self)
             return
-
-        name = simpledialog.askstring("Группа", "Введите название группы:", parent=self)
+    
+        name = simpledialog.askstring(
+            "Группа",
+            "Введите название группы:",
+            parent=self,
+        )
         if not name:
             return
-
+    
         wt_id = int(self.work_types[0]["id"]) if self.work_types else 1
-
+    
         t = {
             "id": None,
             "row_kind": "group",
@@ -1927,7 +2326,7 @@ class GprPage(tk.Frame):
             "is_milestone": False,
             "sort_order": len(self.tasks) * 10,
         }
-
+    
         self.tasks.append(t)
         self._recalc_sort_order()
         self._apply_filter()
@@ -1937,15 +2336,17 @@ class GprPage(tk.Frame):
         if not self.plan_id:
             messagebox.showinfo("ГПР", "Сначала откройте объект.", parent=self)
             return
-
+    
         name = simpledialog.askstring(
-            "Титульная строка", "Введите текст титульной строки:", parent=self
+            "Титульная строка",
+            "Введите текст титульной строки:",
+            parent=self,
         )
         if not name:
             return
-
+    
         wt_id = int(self.work_types[0]["id"]) if self.work_types else 1
-
+    
         t = {
             "id": None,
             "row_kind": "title",
@@ -1960,7 +2361,7 @@ class GprPage(tk.Frame):
             "is_milestone": False,
             "sort_order": len(self.tasks) * 10,
         }
-
+    
         self.tasks.append(t)
         self._recalc_sort_order()
         self._apply_filter()
@@ -1980,7 +2381,10 @@ class GprPage(tk.Frame):
         if row_kind in ("group", "title"):
             title = "Группа" if row_kind == "group" else "Титульная строка"
             name = simpledialog.askstring(
-                title, "Введите новый текст:", initialvalue=t0.get("name", ""), parent=self
+                title,
+                "Введите новый текст:",
+                initialvalue=t0.get("name", ""),
+                parent=self,
             )
             if not name:
                 return
@@ -2012,15 +2416,17 @@ class GprPage(tk.Frame):
         assignments = upd.pop("_assignments", None)
         facts_payload = upd.pop("_facts", None)
         facts_changed = bool(upd.pop("_facts_changed", False))
-        
+
         uid = (self.app_ref.current_user or {}).get("id")
-        
+
         if task_id and assignments is not None:
             try:
                 from gpr_task_dialog import _EmployeeService
                 _EmployeeService.save_task_assignments(task_id, assignments, uid)
             except ImportError:
-                logger.warning("gpr_task_dialog not available — assignments not saved")
+                logger.warning(
+                    "gpr_task_dialog not available — assignments not saved"
+                )
             except Exception as e:
                 logger.exception("Save assignments error")
                 messagebox.showwarning(
@@ -2028,19 +2434,18 @@ class GprPage(tk.Frame):
                     f"Ошибка сохранения назначений:\n{e}",
                     parent=self,
                 )
-        
+
         if task_id and facts_changed:
             try:
                 from gpr_task_dialog import _TaskFactService
                 _TaskFactService.save_task_facts(task_id, facts_payload or [], uid)
-        
-                # Обновляем накопительный факт по задаче для Ганта
+
                 fact_map = GprService.load_task_facts_cumulative([task_id])
                 if task_id in fact_map:
                     self.facts[task_id] = fact_map[task_id]
                 else:
                     self.facts.pop(task_id, None)
-        
+
             except ImportError:
                 logger.warning("gpr_task_dialog not available — facts not saved")
             except Exception as e:
@@ -2230,6 +2635,7 @@ class GprPage(tk.Frame):
             self._update_plan_info()
             self._apply_filter()
             self._update_summary()
+            self._refresh_registry()
             messagebox.showinfo("ГПР", "Сохранено успешно.", parent=self)
         except Exception as e:
             logger.exception("GPR save error")
@@ -2401,8 +2807,9 @@ class GprPage(tk.Frame):
             ws.cell(last_row, 2, f"Итого работ: {task_count}").font = Font(bold=True)
             ws.cell(last_row, 9, f"Выполнено: {done_cnt}").font = Font(bold=True)
             ws.cell(
-                last_row + 1, 2,
-                f"Выгружено: {_today().strftime('%d.%m.%Y')}"
+                last_row + 1,
+                2,
+                f"Выгружено: {_today().strftime('%d.%m.%Y')}",
             ).font = Font(italic=True, size=8, color="888888")
 
             wb.save(path)
