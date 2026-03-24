@@ -84,12 +84,56 @@ except Exception:
     get_selected_department_from_config = None
     set_selected_department_in_config = None
 
+# Приводим цвета модуля к новой светлой оболочке
+TS_COLORS = dict(TS_COLORS)
+TS_COLORS["bg"] = "#edf1f5"
+TS_COLORS["panel"] = "#f7f9fb"
+TS_COLORS["accent_light"] = "#eef3f8"
+TS_COLORS.setdefault("border", "#c9d3df")
+TS_COLORS.setdefault("accent", "#2f74c0")
+TS_COLORS.setdefault("warning", "#c97a20")
+TS_COLORS.setdefault("btn_save_bg", "#2f74c0")
+TS_COLORS.setdefault("btn_save_fg", "#ffffff")
+
+
+def _set_timesheet_tab_title(app_ref, key: str, header: Dict[str, Any]):
+    """
+    Обновляет заголовок вкладки после открытия конкретного табеля.
+    """
+    try:
+        year = int(header.get("year") or 0)
+        month = int(header.get("month") or 0)
+        month_ru = month_name_ru(month) if 1 <= month <= 12 else str(month or "")
+        oid = normalize_spaces(header.get("object_id") or "")
+        addr = normalize_spaces(header.get("object_addr") or "")
+        dep = normalize_spaces(header.get("department") or "")
+
+        if oid and addr:
+            title = f"[{oid}] {month_ru} {year}"
+        elif addr:
+            title = f"{month_ru} {year}"
+        else:
+            title = f"Табель {month_ru} {year}"
+
+        if dep:
+            title = f"{title} · {dep}"
+
+        if hasattr(app_ref, "_tab_titles"):
+            app_ref._tab_titles[key] = title
+
+        frame = getattr(app_ref, "_tab_frames", {}).get(key)
+        notebook = getattr(app_ref, "notebook", None)
+        if frame is not None and notebook is not None:
+            notebook.tab(frame, text=title)
+    except Exception:
+        logger.exception("Не удалось обновить заголовок вкладки табеля")
+
 # ============================================================
 # Основная страница табеля
 # ============================================================
 
 class TimesheetPage(tk.Frame):
-    COLPX = {"fio": 220, "tbn": 100, "day": 36, "days": 52, "hours": 58, "del": 66}
+    COLPX = {"fio": 220, "tbn": 100, "day": 36, "days": 52, "hours": 58, "ot_day": 58, "ot_night": 58, "del": 66}
     MIN_FIO_PX = 140
     MAX_FIO_PX = 280
 
@@ -580,6 +624,8 @@ class TimesheetPage(tk.Frame):
         return b
 
     def _build_ts_toolbar(self):
+        border_color = TS_COLORS.get("border", "#c9d3df")
+    
         bar = tk.Frame(self, bg=TS_COLORS["accent_light"], relief="flat")
         bar.pack(fill="x", padx=10, pady=(4, 0))
     
@@ -589,21 +635,21 @@ class TimesheetPage(tk.Frame):
         actions = tk.Frame(bar, bg=TS_COLORS["accent_light"])
         actions.pack(side="right", anchor="n", padx=(10, 4), pady=4)
     
-        # --- Верхний ряд: состав табеля + часы ---
+        # --- Верхний ряд ---
         row1 = tk.Frame(left, bg=TS_COLORS["accent_light"])
         row1.pack(fill="x", pady=(4, 2))
     
-        self._ts_btn(row1, "Добавить всех из подразделения", self.add_department_all, side="left", padx=(4, 3))
+        self._ts_btn(row1, "Добавить подразделение", self.add_department_all, side="left", padx=(4, 3))
         self._ts_btn(row1, "Выбрать сотрудников", self.add_department_partial, side="left", padx=3)
     
-        tk.Frame(row1, bg=TS_COLORS["border"], width=1, height=24).pack(side="left", padx=8, fill="y")
+        tk.Frame(row1, bg=border_color, width=1, height=24).pack(side="left", padx=8, fill="y")
     
         self._ts_btn(row1, "Время выбранным", self.fill_time_selected, side="left", padx=3)
         self._ts_btn(row1, "Часы всем", self.fill_hours_all, side="left", padx=3)
         self._ts_btn(row1, "Очистить часы", self.clear_all_rows, side="left", padx=3)
         self._ts_btn(row1, "Снять выделение", self.clear_selection, side="left", padx=3)
     
-        # --- Нижний ряд: импорт / копирование ---
+        # --- Нижний ряд ---
         row2 = tk.Frame(left, bg=TS_COLORS["accent_light"])
         row2.pack(fill="x", pady=(0, 4))
     
@@ -656,19 +702,21 @@ class TimesheetPage(tk.Frame):
                 pass
 
     def _build_ts_filter_bar(self):
+        border_color = TS_COLORS.get("border", "#c9d3df")
+    
         bar = tk.Frame(self, bg=TS_COLORS["bg"], pady=2)
         bar.pack(fill="x", padx=10, pady=(4, 0))
-
+    
         tk.Label(
             bar,
             text="🔍 Поиск (ФИО / таб. №):",
             font=("Segoe UI", 9),
             bg=TS_COLORS["bg"],
         ).pack(side="left")
-
+    
         ent_filter = ttk.Entry(bar, textvariable=self.var_filter, width=36)
         ent_filter.pack(side="left", padx=(4, 8))
-
+    
         def on_filter_click(_event):
             if hasattr(self, "grid") and self.grid is not None:
                 try:
@@ -676,20 +724,20 @@ class TimesheetPage(tk.Frame):
                 except Exception:
                     pass
             self.after_idle(lambda: ent_filter.focus_set())
-
+    
         ent_filter.bind("<Button-1>", on_filter_click)
-
+    
         ttk.Button(bar, text="Очистить", command=self._clear_filter).pack(side="left")
-
-        tk.Frame(bar, bg=TS_COLORS["border"], width=1).pack(side="left", fill="y", padx=12)
-
+    
+        tk.Frame(bar, bg=border_color, width=1).pack(side="left", fill="y", padx=12)
+    
         tk.Label(
             bar,
             text="Бригадир:",
             font=("Segoe UI", 9),
             bg=TS_COLORS["bg"],
         ).pack(side="left")
-
+    
         self.cmb_brigadier = ttk.Combobox(
             bar,
             state="readonly",
@@ -699,7 +747,7 @@ class TimesheetPage(tk.Frame):
         )
         self.cmb_brigadier.pack(side="left", padx=(4, 0))
         self.cmb_brigadier.bind("<<ComboboxSelected>>", lambda _e: self._apply_filter())
-
+    
         def _on_filter_key(_e=None):
             try:
                 if self._filter_job is not None:
@@ -707,15 +755,21 @@ class TimesheetPage(tk.Frame):
             except Exception:
                 pass
             self._filter_job = self.after(120, self._apply_filter)
-
+    
         ent_filter.bind("<KeyRelease>", _on_filter_key)
 
     def _build_ts_grid(self):
-        main_frame = tk.Frame(self, bg=TS_COLORS["bg"])
+        main_frame = tk.Frame(
+            self,
+            bg=TS_COLORS["panel"],
+            highlightbackground=TS_COLORS.get("border", "#c9d3df"),
+            highlightthickness=1,
+            bd=0,
+        )
         main_frame.pack(fill="both", expand=True, padx=10, pady=(4, 4))
         main_frame.grid_rowconfigure(0, weight=1)
         main_frame.grid_columnconfigure(0, weight=1)
-
+    
         self.grid = VirtualTimesheetGrid(
             main_frame,
             get_year_month=self.get_year_month,
@@ -726,7 +780,10 @@ class TimesheetPage(tk.Frame):
             read_only=self.read_only,
         )
         self.grid.grid(row=0, column=0, sticky="nsew")
-        self.after(50, self.grid.refresh)
+    
+        # Для notebook / вкладок нужно несколько отложенных refresh
+        self.after(60, self.grid.refresh)
+        self.after(180, self.grid.refresh)
 
 
     def _build_ts_bottom(self):
@@ -2214,7 +2271,17 @@ class TimesheetPage(tk.Frame):
         px = self.COLPX.copy()
         if fio_px is not None:
             px["fio"] = fio_px
-        return px["fio"] + px["tbn"] + 31 * px["day"] + px["days"] + px["hours"] * 3 + px["del"]
+    
+        return (
+            px["fio"]
+            + px["tbn"]
+            + 31 * px["day"]
+            + px["days"]
+            + px.get("hours", 58)
+            + px.get("ot_day", px.get("hours", 58))
+            + px.get("ot_night", px.get("hours", 58))
+            + px["del"]
+        )
 
     def _auto_fit_columns(self):
         try:
@@ -2550,28 +2617,31 @@ class MyTimesheetsPage(tk.Frame):
         h = self._get_selected_header()
         if not h:
             return
-
-        self.app_ref._show_page(
-            f"timesheet_{int(h['id'])}",
-            lambda parent: TimesheetPage(
-                parent,
-                app_ref=self.app_ref,
-                init_header_id=int(h["id"]),
-                init_object_id=h.get("object_id"),
-                init_object_addr=h.get("object_addr"),
-                init_department=h.get("department"),
-                init_year=h.get("year"),
-                init_month=h.get("month"),
-                read_only=False,
-                owner_user_id=h.get("user_id") or (getattr(self.app_ref, "current_user", None) or {}).get("id"),
-            ),
+    
+        key = f"timesheet_{int(h['id'])}"
+        builder = lambda parent: TimesheetPage(
+            parent,
+            app_ref=self.app_ref,
+            init_header_id=int(h["id"]),
+            init_object_id=h.get("object_id"),
+            init_object_addr=h.get("object_addr"),
+            init_department=h.get("department"),
+            init_year=h.get("year"),
+            init_month=h.get("month"),
+            read_only=False,
+            owner_user_id=h.get("user_id") or (getattr(self.app_ref, "current_user", None) or {}).get("id"),
         )
-
+    
+        if hasattr(self.app_ref, "open_page_in_tab"):
+            self.app_ref.open_page_in_tab(key, builder)
+        else:
+            self.app_ref._show_page(key, builder)
+    
+        _set_timesheet_tab_title(self.app_ref, key, h)
 
 # ============================================================
 # Реестр табелей
 # ============================================================
-
 
 class TimesheetRegistryPage(tk.Frame):
     def __init__(self, master, app_ref):
@@ -3036,27 +3106,30 @@ class TimesheetRegistryPage(tk.Frame):
         h = self._get_selected_header()
         if not h:
             return
-
+    
         role = (getattr(self.app_ref, "current_user", None) or {}).get("role") or "specialist"
         read_only = role != "admin"
-
-        self.app_ref._show_page(
-            f"timesheet_{int(h['id'])}",
-            lambda parent: TimesheetPage(
-                parent,
-                app_ref=self.app_ref,
-                init_header_id=int(h["id"]),
-                init_object_id=h.get("object_id"),
-                init_object_addr=h.get("object_addr"),
-                init_department=h.get("department"),
-                init_year=int(h.get("year") or 0),
-                init_month=int(h.get("month") or 0),
-                read_only=read_only,
-                owner_user_id=h.get("user_id"),
-            ),
+    
+        key = f"timesheet_{int(h['id'])}"
+        builder = lambda parent: TimesheetPage(
+            parent,
+            app_ref=self.app_ref,
+            init_header_id=int(h["id"]),
+            init_object_id=h.get("object_id"),
+            init_object_addr=h.get("object_addr"),
+            init_department=h.get("department"),
+            init_year=int(h.get("year") or 0),
+            init_month=int(h.get("month") or 0),
+            read_only=read_only,
+            owner_user_id=h.get("user_id"),
         )
-
-
+    
+        if hasattr(self.app_ref, "open_page_in_tab"):
+            self.app_ref.open_page_in_tab(key, builder)
+        else:
+            self.app_ref._show_page(key, builder)
+    
+        _set_timesheet_tab_title(self.app_ref, key, h)
 # ============================================================
 # API для main_app
 # ============================================================
