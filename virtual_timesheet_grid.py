@@ -36,7 +36,7 @@ class VirtualTimesheetGrid(tk.Frame):
         read_only: bool = False,
         allow_row_select: bool = True,
     ):
-        super().__init__(master)
+        super().__init__(master, bg="#ffffff")
 
         self.get_year_month = get_year_month
         self.on_change = on_change
@@ -69,17 +69,28 @@ class VirtualTimesheetGrid(tk.Frame):
         self._edit_day: Optional[int] = None
 
         # --- Цвета ---
-        self.HEADER_BG = "#d0d0d0"
+        self.HEADER_BG = "#e7edf4"
         self.ZEBRA_EVEN = "#ffffff"
-        self.ZEBRA_ODD = "#f6f8fa"
-        self.SELECT_BG = "#c5e1ff"
-        self.DISABLED_BG = "#f0f0f0"
-        self.WEEK_BG_SAT = "#fff8e1"
-        self.WEEK_BG_SUN = "#ffebee"
+        self.ZEBRA_ODD = "#f8fbfd"
+        self.SELECT_BG = "#d7e8fb"
+        self.DISABLED_BG = "#eef2f6"
+        self.WEEK_BG_SAT = "#fff8e8"
+        self.WEEK_BG_SUN = "#fff1f1"
 
         # --- UI Components ---
-        self.header = tk.Canvas(self, height=26, highlightthickness=0, bg=self.HEADER_BG)
-        self.body = tk.Canvas(self, highlightthickness=0, bg="white")
+        self.header = tk.Canvas(
+            self,
+            height=26,
+            highlightthickness=0,
+            bg=self.HEADER_BG,
+            bd=0,
+        )
+        self.body = tk.Canvas(
+            self,
+            highlightthickness=0,
+            bg="#ffffff",
+            bd=0,
+        )
         
         self.vsb = ttk.Scrollbar(self, orient="vertical", command=self._yview)
         self.hsb = ttk.Scrollbar(self, orient="horizontal", command=self._xview)
