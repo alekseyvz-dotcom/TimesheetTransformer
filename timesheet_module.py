@@ -726,6 +726,8 @@ class TimesheetPage(tk.Frame):
             read_only=self.read_only,
         )
         self.grid.grid(row=0, column=0, sticky="nsew")
+        self.after(50, self.grid.refresh)
+
 
     def _build_ts_bottom(self):
         bottom = tk.Frame(self, bg=TS_COLORS["accent_light"], pady=5)
@@ -2550,7 +2552,7 @@ class MyTimesheetsPage(tk.Frame):
             return
 
         self.app_ref._show_page(
-            "timesheet",
+            f"timesheet_{int(h['id'])}",
             lambda parent: TimesheetPage(
                 parent,
                 app_ref=self.app_ref,
@@ -3039,7 +3041,7 @@ class TimesheetRegistryPage(tk.Frame):
         read_only = role != "admin"
 
         self.app_ref._show_page(
-            "timesheet",
+            f"timesheet_{int(h['id'])}",
             lambda parent: TimesheetPage(
                 parent,
                 app_ref=self.app_ref,
