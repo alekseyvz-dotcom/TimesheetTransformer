@@ -25,6 +25,8 @@ class EstimateResourceDecoderPage(tk.Frame):
 
         self.file_path: Optional[Path] = None
         self.workbook = None
+        self.workbook_values = None
+        self.workbook_formula = None
 
         self.local_sheet_name: Optional[str] = None
         self.source_sheet_name: Optional[str] = None
@@ -292,15 +294,22 @@ class EstimateResourceDecoderPage(tk.Frame):
     def _load_workbook(self):
         if not self.file_path:
             raise RuntimeError("Файл не выбран")
-
-        self.workbook = load_workbook(self.file_path, data_only=True)
-
+    
+        # Книга со значениями формул
+        self.workbook_values = load_workbook(self.file_path, data_only=True)
+    
+        # Книга с самими формулами
+        self.workbook_formula = load_workbook(self.file_path, data_only=False)
+    
+        # Для совместимости со старым кодом
+        self.workbook = self.workbook_values
+    
         sheetnames = self.workbook.sheetnames
         self.local_sheet_name = self._detect_local_sheet(sheetnames)
         self.source_sheet_name = self._detect_source_sheet(sheetnames)
         self.etalon_sheet_name = self._detect_etalon_sheet(sheetnames)
         self.smtres_sheet_name = self._detect_smtres_sheet(sheetnames)
-
+    
         info = [
             f"Локальная смета: {self.local_sheet_name or 'не найдено'}",
             f"Source: {self.source_sheet_name or 'не найдено'}",
@@ -310,6 +319,35 @@ class EstimateResourceDecoderPage(tk.Frame):
         self.lbl_sheets.config(text="\n".join(info))
 
     # ========================= DETECT / HELPERS =========================
+
+    def _extract_sheet_row_ref(self, formula: Any, sheet_name: Optional[str]) -> Optional[int]:
+        """
+        Извлекает номер строки из формул вида:
+        =Source!F114
+        =СТРОКА(SmtRes!A71)
+        =ROW(Source!A114)
+        """
+        if not isinstance(formula, str):
+            return None
+    
+        s = formula.strip()
+        if not s.startswith("=") or not sheet_name:
+            return None
+    
+        # Excel иногда хранит имя листа в одинарных кавычках
+        s = s.replace("'", "")
+    
+        m = re.search(
+            rf"(?i){re.escape(sheet_name)}!\$?[A-Za-zА-Яа-я]+\$?(\d+)",
+            s
+        )
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                return None
+    
+        return None
 
     def _normalize_rate_code(self, raw: Any) -> str:
         s = self._s(raw)
@@ -476,51 +514,68 @@ class EstimateResourceDecoderPage(tk.Frame):
     def _parse_local_works(self) -> List[Dict[str, Any]]:
         if not self.local_sheet_name:
             raise RuntimeError("Не найден лист локальной сметы.")
-
-        ws = self.workbook[self.local_sheet_name]
+    
+        ws_val = self.workbook_values[self.local_sheet_name]
+        ws_for = self.workbook_formula[self.local_sheet_name] if self.workbook_formula else ws_val
+    
         works: List[Dict[str, Any]] = []
         current_section = ""
         current_work: Optional[Dict[str, Any]] = None
         header_found = False
-
-        for row in ws.iter_rows(values_only=True):
-            row = list(row)
-
-            if not any(v is not None and str(v).strip() for v in row):
+    
+        max_row = max(ws_val.max_row, ws_for.max_row)
+        max_col = max(ws_val.max_column, ws_for.max_column)
+    
+        for r in range(1, max_row + 1):
+            row_val = [ws_val.cell(r, c).value for c in range(1, max_col + 1)]
+            row_for = [ws_for.cell(r, c).value for c in range(1, max_col + 1)]
+    
+            if not any(v is not None and str(v).strip() for v in row_val):
                 continue
-
-            first = self._s(row[0]) if len(row) > 0 else ""
-            third = self._s(row[2]) if len(row) > 2 else ""
-
+    
+            first = self._s(row_val[0]) if len(row_val) > 0 else ""
+            third = self._s(row_val[2]) if len(row_val) > 2 else ""
+    
             if first == "№ п/п" or third == "Наименование работ и затрат":
                 header_found = True
                 continue
-
+    
             if not header_found:
                 continue
-
+    
             if first.startswith("Раздел:"):
                 current_section = first.replace("Раздел:", "").strip()
                 continue
-
-            if self._is_main_pos(row[0] if len(row) > 0 else None):
-                pos_num = self._s(row[0])
-                code = self._normalize_rate_code(row[1] if len(row) > 1 else "")
-                name = self._s(row[2] if len(row) > 2 else "")
-                unit = self._s(row[3] if len(row) > 3 else "")
-                qty = self._f(row[4] if len(row) > 4 else None)
-
+    
+            if self._is_main_pos(row_val[0] if len(row_val) > 0 else None):
+                pos_num = self._s(row_val[0])
+                code = self._normalize_rate_code(row_val[1] if len(row_val) > 1 else "")
+                name = self._s(row_val[2] if len(row_val) > 2 else "")
+                unit = self._s(row_val[3] if len(row_val) > 3 else "")
+                qty = self._f(row_val[4] if len(row_val) > 4 else None)
+    
                 # строка нумерации колонок
-                if code == "2" and name == "3" and self._s(row[3] if len(row) > 3 else "") == "4":
+                if code == "2" and name == "3" and self._s(row_val[3] if len(row_val) > 3 else "") == "4":
                     continue
-
+    
                 if not name:
                     continue
                 if name.lower().startswith("итого"):
                     continue
                 if name.lower().startswith("вес "):
                     continue
-
+    
+                # Ищем прямую ссылку на строку Source в формулах строки позиции
+                source_row = None
+                scan_cols = min(8, max_col)
+                for c in range(scan_cols):
+                    source_row = self._extract_sheet_row_ref(
+                        row_for[c],
+                        self.source_sheet_name
+                    )
+                    if source_row is not None:
+                        break
+    
                 current_work = {
                     "pos_num": pos_num,
                     "work_code": code,
@@ -528,6 +583,7 @@ class EstimateResourceDecoderPage(tk.Frame):
                     "unit": unit,
                     "qty": qty or 0.0,
                     "section": current_section,
+                    "source_row": source_row,   # <-- новое поле
                     "zp_base": None,
                     "em_base": None,
                     "mr_base": None,
@@ -535,54 +591,71 @@ class EstimateResourceDecoderPage(tk.Frame):
                 }
                 works.append(current_work)
                 continue
-
+    
             if current_work is None:
                 continue
-
+    
             if third == "ЗП":
-                current_work["zp_base"] = self._f(row[8] if len(row) > 8 else None)
+                current_work["zp_base"] = self._f(row_val[8] if len(row_val) > 8 else None)
             elif third == "ЭМ":
-                current_work["em_base"] = self._f(row[8] if len(row) > 8 else None)
+                current_work["em_base"] = self._f(row_val[8] if len(row_val) > 8 else None)
             elif third == "МР":
-                current_work["mr_base"] = self._f(row[8] if len(row) > 8 else None)
+                current_work["mr_base"] = self._f(row_val[8] if len(row_val) > 8 else None)
             elif third == "в т.ч. ЗПМ":
-                current_work["zpm_base"] = self._f(row[8] if len(row) > 8 else None)
-
+                current_work["zpm_base"] = self._f(row_val[8] if len(row_val) > 8 else None)
+    
         return works
 
     def _parse_rate_resources(self) -> Dict[int, List[Dict[str, Any]]]:
-        sheet_name = self.etalon_sheet_name or self.smtres_sheet_name
+        sheet_name = self.smtres_sheet_name or self.etalon_sheet_name
         if not sheet_name:
-            raise RuntimeError("Не найден лист EtalonRes/SmtRes.")
-
-        ws = self.workbook[sheet_name]
+            raise RuntimeError("Не найден лист SmtRes/EtalonRes.")
+    
+        ws_val = self.workbook_values[sheet_name]
+        ws_for = self.workbook_formula[sheet_name] if self.workbook_formula else ws_val
+    
         result: Dict[int, List[Dict[str, Any]]] = {}
-
-        for row in ws.iter_rows(values_only=True):
-            vals = list(row)
+        current_source_row: Optional[int] = None
+    
+        max_row = max(ws_val.max_row, ws_for.max_row)
+        max_col = max(ws_val.max_column, ws_for.max_column)
+    
+        for r in range(1, max_row + 1):
+            vals = [ws_val.cell(r, c).value for c in range(1, max_col + 1)]
+            forms = [ws_for.cell(r, c).value for c in range(1, max_col + 1)]
+    
             if not any(v is not None and str(v).strip() for v in vals):
                 continue
-
-            rate_id = self._try_parse_int(vals[0] if len(vals) > 0 else None)
-            if rate_id is None:
+    
+            first_val = self._try_parse_int(vals[0] if len(vals) > 0 else None)
+            first_formula_ref = self._extract_sheet_row_ref(forms[0] if len(forms) > 0 else None, self.source_sheet_name)
+    
+            # Новый блок ресурсов
+            if first_val is not None and first_val > 0:
+                current_source_row = first_val
+            elif first_formula_ref is not None and first_formula_ref > 0:
+                current_source_row = first_formula_ref
+            # Если A=0 или пусто — считаем строку продолжением предыдущего блока
+            elif current_source_row is None:
                 continue
-
+    
             resource_type = self._try_parse_int(vals[7] if len(vals) > 7 else None)
             resource_code = self._s(vals[8] if len(vals) > 8 else "")
             resource_name = self._s(vals[10] if len(vals) > 10 else "")
             unit = self._extract_unit(vals)
             norm_qty = self._extract_norm_qty(vals)
             price = self._extract_price(vals)
-
+    
             if resource_type not in (1, 2, 3):
                 continue
             if not resource_code and not resource_name:
                 continue
             if norm_qty is None:
                 continue
-
-            result.setdefault(rate_id, []).append({
-                "rate_id": rate_id,
+    
+            result.setdefault(current_source_row, []).append({
+                "rate_id": current_source_row,   # оставляем старое имя поля ради совместимости UI
+                "source_row": current_source_row,
                 "resource_type_id": resource_type,
                 "resource_type": self.RESOURCE_TYPE_MAP.get(resource_type, str(resource_type)),
                 "resource_code": resource_code,
@@ -590,92 +663,57 @@ class EstimateResourceDecoderPage(tk.Frame):
                 "unit": unit,
                 "norm_qty": norm_qty,
                 "price": price,
+                "smtres_row": r,
             })
-
+    
         return result
 
     def _build_code_to_rate_map(self) -> Dict[str, List[int]]:
         code_map: Dict[str, List[int]] = {}
-
-        def add_pair(code: str, rate_id: int):
-            if not code or rate_id is None:
+    
+        def add_pair(code: str, source_row: int):
+            if not code:
                 return
             code_map.setdefault(code, [])
-            if rate_id not in code_map[code]:
-                code_map[code].append(rate_id)
-
-        # 1) Source
-        if self.source_sheet_name:
-            ws = self.workbook[self.source_sheet_name]
-
-            for row in ws.iter_rows(values_only=True):
-                vals = list(row)
-                if not any(v is not None and str(v).strip() for v in vals):
-                    continue
-
-                codes = []
-                for v in vals:
-                    code = self._normalize_rate_code(v)
-                    if self._looks_like_rate_code(code):
-                        codes.append(code)
-                if not codes:
-                    continue
-
-                rate_candidates = []
-                for i in range(min(8, len(vals))):
-                    rid = self._try_parse_int(vals[i])
-                    if rid is not None and rid > 0:
-                        rate_candidates.append(rid)
-
-                if not rate_candidates:
-                    continue
-
-                # чуть более осторожный выбор
-                # сначала ищем кандидатов > 100, потом > 10, потом max
-                big = [x for x in rate_candidates if x >= 100]
-                mid = [x for x in rate_candidates if x >= 10]
-
-                if big:
-                    rate_id = max(big)
-                elif mid:
-                    rate_id = max(mid)
-                else:
-                    rate_id = max(rate_candidates)
-
-                for code in codes:
-                    add_pair(code, rate_id)
-
-        # 2) fallback
-        if not code_map:
-            for sheet_name in [self.etalon_sheet_name, self.smtres_sheet_name]:
-                if not sheet_name:
-                    continue
-
-                ws = self.workbook[sheet_name]
-
-                for row in ws.iter_rows(values_only=True):
-                    vals = list(row)
-                    if not any(v is not None and str(v).strip() for v in vals):
-                        continue
-
-                    rate_id = self._try_parse_int(vals[0] if len(vals) > 0 else None)
-                    if rate_id is None or rate_id <= 0:
-                        continue
-
-                    codes = []
-                    for v in vals:
-                        code = self._normalize_rate_code(v)
-                        if self._looks_like_rate_code(code):
-                            codes.append(code)
-                    for code in codes:
-                        add_pair(code, rate_id)
-
+            if source_row not in code_map[code]:
+                code_map[code].append(source_row)
+    
+        if not self.source_sheet_name:
+            return code_map
+    
+        ws = self.workbook_values[self.source_sheet_name]
+    
+        for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+            vals = list(row)
+            if not any(v is not None and str(v).strip() for v in vals):
+                continue
+    
+            # В твоем файле шифр часто живет в F-колонке, но делаем fallback
+            candidate_values: List[Any] = []
+            if len(vals) > 5:
+                candidate_values.append(vals[5])  # F
+            candidate_values.extend(vals)
+    
+            found_codes: List[str] = []
+    
+            for v in candidate_values:
+                code = self._normalize_rate_code(v)
+                if self._looks_like_rate_code(code) and code not in found_codes:
+                    found_codes.append(code)
+    
+            if not found_codes:
+                continue
+    
+            # ВАЖНО: ключ SmtRes = номер строки Source
+            for code in found_codes:
+                add_pair(code, row_idx)
+    
         return code_map
 
     def _decode_rows(self) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
         report_lines = []
-
+    
         report_lines.append("ОТЧЕТ ПО РАСКРЫТИЮ РЕСУРСОВ")
         report_lines.append("=" * 100)
         report_lines.append(f"Локальный лист: {self.local_sheet_name}")
@@ -683,52 +721,68 @@ class EstimateResourceDecoderPage(tk.Frame):
         report_lines.append(f"EtalonRes лист: {self.etalon_sheet_name}")
         report_lines.append(f"SmtRes лист: {self.smtres_sheet_name}")
         report_lines.append("")
-        report_lines.append("КАРТА code -> rate_ids")
+        report_lines.append("КАРТА code -> source_rows")
         for code in sorted(self.code_to_rate_ids.keys()):
             report_lines.append(f"  {code} -> {self.code_to_rate_ids[code]}")
         report_lines.append("")
-
+    
         matched = 0
         unmatched = 0
-
+    
         for work in self.local_works:
             code = work.get("work_code") or ""
             qty = work.get("qty") or 0.0
-
-            if not code:
-                unmatched += 1
-                report_lines.append(f"[NO CODE] Поз. {work['pos_num']} | {work['name']}")
-                continue
-
-            rate_ids = self.code_to_rate_ids.get(code, [])
-            if not rate_ids:
-                unmatched += 1
-                report_lines.append(f"[NO RATE_ID] Поз. {work['pos_num']} | {code} | {work['name']}")
-                continue
-
-            rate_id = self._choose_best_rate_id(work, rate_ids)
-            resources = self.rate_resources.get(rate_id, [])
-
+            direct_source_row = work.get("source_row")
+    
+            chosen_source_row: Optional[int] = None
+            resources: List[Dict[str, Any]] = []
+    
+            # 1) Сначала пробуем прямую ссылку из локалки на строку Source
+            if direct_source_row is not None:
+                resources = self.rate_resources.get(direct_source_row, [])
+                if resources:
+                    chosen_source_row = direct_source_row
+    
+            # 2) Если прямой связи нет — fallback через code -> source_rows
+            if chosen_source_row is None:
+                if not code:
+                    unmatched += 1
+                    report_lines.append(f"[NO CODE] Поз. {work['pos_num']} | {work['name']}")
+                    continue
+    
+                candidate_rows = self.code_to_rate_ids.get(code, [])
+                if not candidate_rows:
+                    unmatched += 1
+                    report_lines.append(f"[NO SOURCE_ROW] Поз. {work['pos_num']} | {code} | {work['name']}")
+                    continue
+    
+                chosen_source_row = self._choose_best_rate_id(work, candidate_rows)
+                resources = self.rate_resources.get(chosen_source_row, [])
+    
             if not resources:
                 unmatched += 1
-                report_lines.append(f"[NO RESOURCES] Поз. {work['pos_num']} | {code} | rate_id={rate_id}")
+                report_lines.append(
+                    f"[NO RESOURCES] Поз. {work['pos_num']} | {code} | source_row={chosen_source_row}"
+                )
                 continue
-
+    
             matched += 1
-            report_lines.append(f"[OK] Поз. {work['pos_num']} | {code} -> rate_id={rate_id} | ресурсов={len(resources)}")
-
+            report_lines.append(
+                f"[OK] Поз. {work['pos_num']} | {code} -> source_row={chosen_source_row} | ресурсов={len(resources)}"
+            )
+    
             for res in resources:
                 norm_qty = res.get("norm_qty") or 0.0
                 price = res.get("price")
                 res_qty = norm_qty * qty
                 base_cost = (res_qty * price) if isinstance(price, (int, float)) else None
-
+    
                 rows.append({
                     "work_num": work["pos_num"],
                     "work_code": code,
                     "work_name": work["name"],
                     "work_qty": qty,
-                    "rate_id": rate_id,
+                    "rate_id": chosen_source_row,   # в UI пока останется это поле
                     "resource_type": res["resource_type"],
                     "resource_type_id": res["resource_type_id"],
                     "resource_code": res["resource_code"],
@@ -744,12 +798,12 @@ class EstimateResourceDecoderPage(tk.Frame):
                     "mr_base": work.get("mr_base"),
                     "zpm_base": work.get("zpm_base"),
                 })
-
+    
         report_lines.append("")
         report_lines.append(f"Всего позиций: {len(self.local_works)}")
         report_lines.append(f"Сопоставлено: {matched}")
         report_lines.append(f"Не сопоставлено: {unmatched}")
-
+    
         self.last_report = "\n".join(report_lines)
         return rows
 
