@@ -17,7 +17,7 @@ from psycopg2.extras import RealDictCursor, execute_values
 try:
     from openpyxl import Workbook
     from openpyxl.utils import get_column_letter
-    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
     HAS_OPENPYXL = True
 except ImportError:
@@ -2643,6 +2643,282 @@ class GprPage(tk.Frame):
                 "ГПР", f"Ошибка сохранения:\n{e}", parent=self
             )
 
+    @staticmethod
+    def _xl_fill(color: str) -> PatternFill:
+        """Excel fill из hex-цвета."""
+        return PatternFill(
+            "solid",
+            fgColor=(color or "FFFFFF").replace("#", "").upper()
+        )
+
+    def _export_excel_gantt_sheet(self, wb, obj, obj_name: str) -> None:
+        """
+        Создаёт второй лист Excel с диаграммой Ганта.
+        Использует текущий диапазон self.range_from / self.range_to.
+        """
+        rows = self.tasks  # если нужно экспортировать только отфильтрованные: self.tasks_filtered or self.tasks
+
+        ws = wb.create_sheet("Диаграмма Ганта")
+
+        d0 = _to_date(self.range_from) or _today()
+        d1 = _to_date(self.range_to) or d0
+        if d1 < d0:
+            d0, d1 = d1, d0
+
+        days = (d1 - d0).days + 1
+
+        fixed_cols = [
+            ("№", 6),
+            ("Тип работ", 18),
+            ("Вид работ", 36),
+            ("Начало", 12),
+            ("Окончание", 12),
+            ("Статус", 16),
+        ]
+        gantt_col_start = len(fixed_cols) + 1
+        total_cols = len(fixed_cols) + days
+
+        addr = (obj or {}).get("address", "") if obj else ""
+        title = f"Диаграмма Ганта: {obj_name}"
+        if addr:
+            title += f" — {addr}"
+
+        # ── Стили ─────────────────────────────────────────────
+        thin_side = Side(style="thin", color="D0D0D0")
+        thin_border = Border(
+            left=thin_side, right=thin_side,
+            top=thin_side, bottom=thin_side
+        )
+
+        header_fill = PatternFill("solid", fgColor="D6DCE4")
+        month_fill = PatternFill("solid", fgColor="D6DBE0")
+        weekday_fill = PatternFill("solid", fgColor="F3F4F6")
+        weekend_fill = PatternFill("solid", fgColor="FFECEC")
+        group_fill = PatternFill("solid", fgColor="EEF5FF")
+        title_fill = PatternFill("solid", fgColor="DFF1FF")
+        progress_fill = PatternFill("solid", fgColor="388E3C")
+
+        status_fill = {
+            "planned": self._xl_fill("#90caf9"),
+            "in_progress": self._xl_fill("#ffcc80"),
+            "done": self._xl_fill("#a5d6a7"),
+            "paused": self._xl_fill("#fff176"),
+            "canceled": self._xl_fill("#ef9a9a"),
+        }
+
+        month_names = {
+            1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
+            5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
+            9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь",
+        }
+        weekday_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+        # ── Заголовок ────────────────────────────────────────
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=total_cols)
+        c = ws.cell(1, 1, title)
+        c.font = Font(bold=True, size=12)
+        c.alignment = Alignment(horizontal="left", vertical="center")
+
+        month_row = 2
+        day_row = 3
+        week_row = 4
+        data_row = 5
+
+        # ── Левые заголовки ──────────────────────────────────
+        for col_idx, (caption, width) in enumerate(fixed_cols, start=1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = width
+            ws.merge_cells(
+                start_row=month_row, start_column=col_idx,
+                end_row=week_row, end_column=col_idx
+            )
+            cell = ws.cell(month_row, col_idx, caption)
+            cell.font = Font(bold=True, size=10)
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = thin_border
+
+        # ── Заголовок месяцев ────────────────────────────────
+        cur = date(d0.year, d0.month, 1)
+        while cur <= d1:
+            month_last_day = calendar.monthrange(cur.year, cur.month)[1]
+            ms = max(cur, d0)
+            me = min(date(cur.year, cur.month, month_last_day), d1)
+
+            c0 = gantt_col_start + (ms - d0).days
+            c1 = gantt_col_start + (me - d0).days
+
+            if c0 != c1:
+                ws.merge_cells(
+                    start_row=month_row, start_column=c0,
+                    end_row=month_row, end_column=c1
+                )
+
+            mcell = ws.cell(month_row, c0, f"{month_names[cur.month]} {cur.year}")
+            mcell.font = Font(bold=True, size=10)
+            mcell.fill = month_fill
+            mcell.alignment = Alignment(horizontal="center", vertical="center")
+
+            if cur.month == 12:
+                cur = date(cur.year + 1, 1, 1)
+            else:
+                cur = date(cur.year, cur.month + 1, 1)
+
+        # ── Дни и дни недели ────────────────────────────────
+        for i in range(days):
+            col = gantt_col_start + i
+            dt = d0 + timedelta(days=i)
+
+            ws.column_dimensions[get_column_letter(col)].width = 3.2
+            fill = weekend_fill if dt.weekday() >= 5 else weekday_fill
+
+            day_cell = ws.cell(day_row, col, dt.day)
+            day_cell.font = Font(bold=True, size=8)
+            day_cell.fill = fill
+            day_cell.alignment = Alignment(horizontal="center", vertical="center")
+            day_cell.border = thin_border
+
+            wd_cell = ws.cell(week_row, col, weekday_names[dt.weekday()])
+            wd_cell.font = Font(size=8)
+            wd_cell.fill = fill
+            wd_cell.alignment = Alignment(horizontal="center", vertical="center")
+            wd_cell.border = thin_border
+
+        # ── Данные ───────────────────────────────────────────
+        excel_no = 0
+        last_row = data_row - 1
+
+        for row_num, t in enumerate(rows, start=data_row):
+            last_row = row_num
+            ws.row_dimensions[row_num].height = 20
+
+            row_kind = (t.get("row_kind") or "task").strip()
+
+            if row_kind == "group":
+                for col in range(1, total_cols + 1):
+                    ws.cell(row_num, col).fill = group_fill
+                ws.cell(row_num, 2, "ГРУППА").font = Font(bold=True)
+                ws.cell(row_num, 3, t.get("name", "")).font = Font(bold=True)
+                ws.cell(row_num, 3).alignment = Alignment(horizontal="left", vertical="center")
+                continue
+
+            if row_kind == "title":
+                for col in range(1, total_cols + 1):
+                    ws.cell(row_num, col).fill = title_fill
+                ws.cell(row_num, 2, "ТИТУЛ").font = Font(bold=True)
+                ws.cell(row_num, 3, t.get("name", "")).font = Font(bold=True)
+                ws.cell(row_num, 3).alignment = Alignment(horizontal="left", vertical="center")
+                continue
+
+            excel_no += 1
+
+            ds = _to_date(t.get("plan_start"))
+            df = _to_date(t.get("plan_finish"))
+            st_code = (t.get("status") or "planned").strip()
+            st_label = STATUS_LABELS.get(st_code, st_code)
+
+            left_values = [
+                excel_no,
+                t.get("work_type_name", ""),
+                t.get("name", ""),
+                _fmt_date(ds) if ds else "",
+                _fmt_date(df) if df else "",
+                st_label,
+            ]
+
+            for col_idx, val in enumerate(left_values, start=1):
+                cell = ws.cell(row_num, col_idx, val)
+                cell.border = thin_border
+                if col_idx in (1, 4, 5, 6):
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                else:
+                    cell.alignment = Alignment(horizontal="left", vertical="center")
+
+            st_fill = status_fill.get(st_code)
+            if st_fill:
+                ws.cell(row_num, 6).fill = st_fill
+
+            # Полоса Ганта
+            if not ds or not df:
+                continue
+            if df < d0 or ds > d1:
+                continue
+
+            clip_start = max(ds, d0)
+            clip_finish = min(df, d1)
+
+            col_start = gantt_col_start + (clip_start - d0).days
+            col_finish = gantt_col_start + (clip_finish - d0).days
+
+            bar_fill = status_fill.get(st_code, self._xl_fill("#90caf9"))
+
+            for col in range(col_start, col_finish + 1):
+                cell = ws.cell(row_num, col)
+                cell.fill = bar_fill
+                cell.border = thin_border
+
+            # Прогресс по факту (зелёная часть)
+            pq = _safe_float(t.get("plan_qty"))
+            tid = t.get("id")
+            fq = self.facts.get(tid, 0) if tid else 0.0
+
+            if pq and pq > 0 and fq > 0:
+                pct = max(0.0, min(1.0, fq / pq))
+                total_task_days = max(1, (df - ds).days + 1)
+                progress_days = max(1, min(total_task_days, int(round(total_task_days * pct))))
+                progress_finish = ds + timedelta(days=progress_days - 1)
+
+                p0 = max(ds, d0)
+                p1 = min(progress_finish, d1)
+
+                if p1 >= p0:
+                    pcol0 = gantt_col_start + (p0 - d0).days
+                    pcol1 = gantt_col_start + (p1 - d0).days
+                    for col in range(pcol0, pcol1 + 1):
+                        cell = ws.cell(row_num, col)
+                        cell.fill = progress_fill
+                        cell.border = thin_border
+
+            # Веха
+            if t.get("is_milestone"):
+                milestone_date = min(max(ds, d0), d1)
+                mcol = gantt_col_start + (milestone_date - d0).days
+                mcell = ws.cell(row_num, mcol, "◆")
+                mcell.font = Font(bold=True, color="1A73E8")
+                mcell.alignment = Alignment(horizontal="center", vertical="center")
+
+        # ── Линия "сегодня" ─────────────────────────────────
+        td = _today()
+        if d0 <= td <= d1:
+            today_col = gantt_col_start + (td - d0).days
+            red_side = Side(style="medium", color="FF0000")
+            for rr in range(day_row, max(last_row, week_row) + 1):
+                cell = ws.cell(rr, today_col)
+                old_border = cell.border
+                cell.border = Border(
+                    left=red_side,
+                    right=red_side,
+                    top=old_border.top,
+                    bottom=old_border.bottom
+                )
+
+        # ── Легенда ─────────────────────────────────────────
+        legend_row = last_row + 2
+        ws.cell(legend_row, 1, "Легенда:").font = Font(bold=True)
+
+        lc = 2
+        for code in STATUS_LIST:
+            ws.cell(legend_row, lc, " ").fill = status_fill[code]
+            ws.cell(legend_row, lc).border = thin_border
+            ws.cell(legend_row, lc + 1, STATUS_LABELS[code])
+            lc += 2
+
+        ws.cell(legend_row + 1, 2, " ").fill = progress_fill
+        ws.cell(legend_row + 1, 2).border = thin_border
+        ws.cell(legend_row + 1, 3, "Фактическое выполнение")
+
+        # ── Фиксация области ───────────────────────────────
+        ws.freeze_panes = ws.cell(data_row, gantt_col_start) 
+    
     def _export_excel(self):
         if not self.tasks:
             messagebox.showinfo(
@@ -2812,8 +3088,15 @@ class GprPage(tk.Frame):
                 f"Выгружено: {_today().strftime('%d.%m.%Y')}",
             ).font = Font(italic=True, size=8, color="888888")
 
+            self._export_excel_gantt_sheet(wb, obj, obj_name)
+
             wb.save(path)
-            messagebox.showinfo("ГПР", f"Файл сохранён:\n{path}", parent=self)
+            messagebox.showinfo(
+                "ГПР",
+                f"Файл сохранён:\n{path}\n\n"
+                f"Листы: 'ГПР' и 'Диаграмма Ганта'",
+                parent=self
+            )
 
         except PermissionError:
             messagebox.showerror(
