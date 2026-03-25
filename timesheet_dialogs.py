@@ -921,7 +921,7 @@ class HoursFillDialog(simpledialog.Dialog):
         tk.Label(master, text="Часы:").grid(row=3, column=0, sticky="e", pady=(6, 0))
         self.ent_hours = ttk.Entry(master, width=12)
         self.ent_hours.grid(row=3, column=1, sticky="w", pady=(6, 0))
-        self.ent_hours.insert(0, "8")
+        self.ent_hours.insert(0, "8,25")
 
         tk.Label(master, text="Форматы: 8 | 8,25 | 8:30 | 1/7").grid(
             row=4, column=0, columnspan=3, sticky="w", pady=(6, 2)
@@ -970,7 +970,6 @@ class HoursFillDialog(simpledialog.Dialog):
             "hours": self._h,
             "clear": self._clear,
         }
-
 
 # ============================================================
 # Автодополняемый combobox
