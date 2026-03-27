@@ -1,51 +1,39 @@
 import os
 import re
 import sys
-import csv
-import json
-import calendar
 import configparser
-import urllib.request
-import urllib.error
-import urllib.parse
-from urllib.parse import urlparse, parse_qs
-import psycopg2
-from psycopg2 import pool
-from psycopg2.extras import RealDictCursor
-from io import BytesIO
+import logging
+from dataclasses import dataclass
+from datetime import datetime, date, time, timedelta
 from pathlib import Path
 from typing import List, Tuple, Optional, Any, Dict
 
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 
-from openpyxl import Workbook, load_workbook
-from openpyxl.utils import get_column_letter
-from datetime import datetime, date, timedelta
+import psycopg2
+from psycopg2 import pool
+from psycopg2.extras import RealDictCursor, execute_batch
 
-# ------------------------- Логика работы с пулом соединений -------------------------
-db_connection_pool = None
-USING_SHARED_POOL = False
+from openpyxl import load_workbook
+from urllib.parse import urlparse, parse_qs
 
-def set_db_pool(pool):
-    """Функция для установки пула соединений извне."""
-    global db_connection_pool, USING_SHARED_POOL
-    db_connection_pool = pool
-    USING_SHARED_POOL = True
 
-def release_db_connection(conn):
-    """Возвращает соединение обратно в пул."""
-    if db_connection_pool:
-        db_connection_pool.putconn(conn)
+# ========================= ЛОГИРОВАНИЕ =========================
 
-# ------------------------- Загрузка зависимостей и констант -------------------------
-try:
-    import settings_manager as Settings
-except Exception:
-    Settings = None
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
+
+
+# ========================= ГЛОБАЛЬНЫЕ КОНСТАНТЫ =========================
 
 APP_TITLE = "Заказ спецтехники"
 CONFIG_FILE = "tabel_config.ini"
+
 CONFIG_SECTION_PATHS = "Paths"
 CONFIG_SECTION_UI = "UI"
 CONFIG_SECTION_INTEGR = "Integrations"
@@ -62,18 +50,51 @@ KEY_DRIVER_DEPARTMENTS = "driver_departments"
 KEY_REMOTE_USE = "use_remote"
 KEY_YA_PUBLIC_LINK = "yadisk_public_link"
 KEY_YA_PUBLIC_PATH = "yadisk_public_path"
+
 SPRAVOCHNIK_FILE = "Справочник.xlsx"
 
+ORDER_STATUSES = ["Новая", "Назначена", "В работе", "Выполнена", "Отменена"]
 
-# ------------------------- Утилиты конфигурации -------------------------
+
+# ========================= SETTINGS MANAGER =========================
+
+try:
+    import settings_manager as Settings
+except Exception:
+    Settings = None
+
+
+# ========================= ПУЛ СОЕДИНЕНИЙ =========================
+
+db_connection_pool = None
+USING_SHARED_POOL = False
+
+
+def set_db_pool(shared_pool):
+    """Установка внешнего пула соединений."""
+    global db_connection_pool, USING_SHARED_POOL
+    db_connection_pool = shared_pool
+    USING_SHARED_POOL = True
+
+
+def release_db_connection(conn):
+    """Возврат соединения в пул."""
+    global db_connection_pool
+    if conn and db_connection_pool:
+        db_connection_pool.putconn(conn)
+
+
+# ========================= УТИЛИТЫ КОНФИГА =========================
 
 def exe_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
+
 def config_path() -> Path:
     return exe_dir() / CONFIG_FILE
+
 
 if Settings:
     ensure_config = Settings.ensure_config
@@ -89,20 +110,229 @@ if Settings:
     def set_saved_dep(dep: str):
         return Settings.set_selected_department_in_config(dep)
 
-# ------------------------- БД: подключение -------------------------
+else:
+    def ensure_config():
+        cp = config_path()
+        cfg = configparser.ConfigParser()
+
+        if cp.exists():
+            cfg.read(cp, encoding="utf-8")
+
+        changed = False
+
+        if not cfg.has_section(CONFIG_SECTION_PATHS):
+            cfg[CONFIG_SECTION_PATHS] = {}
+            changed = True
+        if KEY_SPR not in cfg[CONFIG_SECTION_PATHS]:
+            cfg[CONFIG_SECTION_PATHS][KEY_SPR] = str(exe_dir() / SPRAVOCHNIK_FILE)
+            changed = True
+
+        if not cfg.has_section(CONFIG_SECTION_UI):
+            cfg[CONFIG_SECTION_UI] = {}
+            changed = True
+        if KEY_SELECTED_DEP not in cfg[CONFIG_SECTION_UI]:
+            cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = "Все"
+            changed = True
+
+        if not cfg.has_section(CONFIG_SECTION_INTEGR):
+            cfg[CONFIG_SECTION_INTEGR] = {}
+            changed = True
+        if KEY_PLANNING_ENABLED not in cfg[CONFIG_SECTION_INTEGR]:
+            cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_ENABLED] = "false"
+            changed = True
+        if KEY_DRIVER_DEPARTMENTS not in cfg[CONFIG_SECTION_INTEGR]:
+            cfg[CONFIG_SECTION_INTEGR][KEY_DRIVER_DEPARTMENTS] = "Служба гаража, Автопарк, Транспортный цех"
+            changed = True
+        if KEY_PLANNING_PASSWORD not in cfg[CONFIG_SECTION_INTEGR]:
+            cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_PASSWORD] = "2025"
+            changed = True
+
+        if not cfg.has_section(CONFIG_SECTION_ORDERS):
+            cfg[CONFIG_SECTION_ORDERS] = {}
+            changed = True
+        if KEY_CUTOFF_ENABLED not in cfg[CONFIG_SECTION_ORDERS]:
+            cfg[CONFIG_SECTION_ORDERS][KEY_CUTOFF_ENABLED] = "true"
+            changed = True
+        if KEY_CUTOFF_HOUR not in cfg[CONFIG_SECTION_ORDERS]:
+            cfg[CONFIG_SECTION_ORDERS][KEY_CUTOFF_HOUR] = "13"
+            changed = True
+
+        if not cfg.has_section(CONFIG_SECTION_REMOTE):
+            cfg[CONFIG_SECTION_REMOTE] = {}
+            changed = True
+        if KEY_REMOTE_USE not in cfg[CONFIG_SECTION_REMOTE]:
+            cfg[CONFIG_SECTION_REMOTE][KEY_REMOTE_USE] = "false"
+            changed = True
+        if KEY_YA_PUBLIC_LINK not in cfg[CONFIG_SECTION_REMOTE]:
+            cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_LINK] = ""
+            changed = True
+        if KEY_YA_PUBLIC_PATH not in cfg[CONFIG_SECTION_REMOTE]:
+            cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_PATH] = ""
+            changed = True
+
+        if changed or not cp.exists():
+            with open(cp, "w", encoding="utf-8") as f:
+                cfg.write(f)
+
+    def read_config() -> configparser.ConfigParser:
+        ensure_config()
+        cfg = configparser.ConfigParser()
+        cfg.read(config_path(), encoding="utf-8")
+        return cfg
+
+    def write_config(cfg: configparser.ConfigParser):
+        with open(config_path(), "w", encoding="utf-8") as f:
+            cfg.write(f)
+
+    def get_spr_path() -> Path:
+        cfg = read_config()
+        raw = cfg.get(CONFIG_SECTION_PATHS, KEY_SPR, fallback=str(exe_dir() / SPRAVOCHNIK_FILE))
+        return Path(os.path.expandvars(raw))
+
+    def get_saved_dep() -> str:
+        cfg = read_config()
+        return cfg.get(CONFIG_SECTION_UI, KEY_SELECTED_DEP, fallback="Все")
+
+    def set_saved_dep(dep: str):
+        cfg = read_config()
+        if not cfg.has_section(CONFIG_SECTION_UI):
+            cfg[CONFIG_SECTION_UI] = {}
+        cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = dep or "Все"
+        write_config(cfg)
+
+
+def get_planning_password() -> str:
+    cfg = read_config()
+    return cfg.get(CONFIG_SECTION_INTEGR, KEY_PLANNING_PASSWORD, fallback="2025").strip()
+
+
+def get_planning_enabled() -> bool:
+    cfg = read_config()
+    v = cfg.get(CONFIG_SECTION_INTEGR, KEY_PLANNING_ENABLED, fallback="false").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def get_cutoff_enabled() -> bool:
+    cfg = read_config()
+    v = cfg.get(CONFIG_SECTION_ORDERS, KEY_CUTOFF_ENABLED, fallback="true").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def get_cutoff_hour() -> int:
+    cfg = read_config()
+    try:
+        h = int(cfg.get(CONFIG_SECTION_ORDERS, KEY_CUTOFF_HOUR, fallback="13").strip())
+        return min(23, max(0, h))
+    except Exception:
+        return 13
+
+
+# ========================= ПАРСИНГ / ВАЛИДАЦИЯ =========================
+
+def parse_hours_value(v: Any) -> Optional[float]:
+    s = str(v or "").strip()
+    if not s:
+        return None
+
+    if "/" in s:
+        total = 0.0
+        any_part = False
+        for part in s.split("/"):
+            n = parse_hours_value(part)
+            if isinstance(n, (int, float)):
+                total += float(n)
+                any_part = True
+        return total if any_part else None
+
+    if ":" in s:
+        p = s.split(":")
+        try:
+            hh = float(p[0].replace(",", "."))
+            mm = float((p[1] if len(p) > 1 else "0").replace(",", "."))
+            ss = float((p[2] if len(p) > 2 else "0").replace(",", "."))
+            return hh + mm / 60.0 + ss / 3600.0
+        except Exception:
+            pass
+
+    s = s.replace(",", ".")
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
+def parse_time_str(s: str) -> Optional[str]:
+    s = (s or "").strip()
+    if not s:
+        return None
+    m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", s)
+    if not m:
+        return None
+    hh = int(m.group(1))
+    mm = int(m.group(2))
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        return None
+    return f"{hh:02d}:{mm:02d}"
+
+
+def parse_date_any(s: str) -> Optional[date]:
+    s = (s or "").strip()
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except Exception:
+            pass
+    return None
+
+
+def normalize_plate(plate: str) -> str:
+    return re.sub(r"\s+", "", (plate or "").strip().upper())
+
+
+def safe_str(v: Any) -> str:
+    return str(v or "").strip()
+
+
+def validate_phone(phone: str) -> bool:
+    digits = re.sub(r"\D+", "", phone or "")
+    return len(digits) >= 5
+
+
+def validate_future_order_date(req: date) -> bool:
+    return req > date.today()
+
+
+def make_interval(req_date_str: str, req_time_str: str, hours_val: Any) -> Optional[Tuple[datetime, datetime]]:
+    req_date = parse_date_any(req_date_str)
+    req_time = parse_time_str(req_time_str)
+    hours_num = parse_hours_value(hours_val)
+
+    if not req_date or not req_time or hours_num is None or hours_num <= 0:
+        return None
+
+    hh, mm = map(int, req_time.split(":"))
+    dt_from = datetime.combine(req_date, time(hour=hh, minute=mm))
+    dt_to = dt_from + timedelta(hours=float(hours_num))
+    return dt_from, dt_to
+
+
+def intervals_intersect(a_from: datetime, a_to: datetime, b_from: datetime, b_to: datetime) -> bool:
+    return max(a_from, b_from) < min(a_to, b_to)
+
+
+# ========================= DB =========================
 
 def get_db_connection():
-    """Получает соединение из пула (общего или локального)."""
     global db_connection_pool
+
     if db_connection_pool:
         return db_connection_pool.getconn()
 
-    # Если мы здесь, значит, пул не установлен. Это либо самостоятельный запуск,
-    # либо ошибка в главном приложении.
     if USING_SHARED_POOL:
         raise RuntimeError("Общий пул соединений не был передан в модуль.")
 
-    # Логика для самостоятельного запуска: создаем локальный пул
     if not Settings:
         raise RuntimeError("settings_manager не доступен, не могу прочитать параметры БД")
 
@@ -124,81 +354,207 @@ def get_db_connection():
     sslmode = (q.get("sslmode", [Settings.get_db_sslmode()])[0] or "require")
 
     db_connection_pool = pool.SimpleConnectionPool(
-        minconn=1, maxconn=5,
-        host=host, port=port, dbname=dbname, user=user, password=password, sslmode=sslmode
+        minconn=1,
+        maxconn=5,
+        host=host,
+        port=port,
+        dbname=dbname,
+        user=user,
+        password=password,
+        sslmode=sslmode,
     )
     return db_connection_pool.getconn()
 
+
 def get_or_create_object(cur, excel_id: str, address: str) -> Optional[int]:
-    excel_id = (excel_id or "").strip()
-    address = (address or "").strip()
+    excel_id = safe_str(excel_id)
+    address = safe_str(address)
+
     if not (excel_id or address):
         return None
 
     if excel_id:
-        cur.execute("SELECT id FROM objects WHERE excel_id = %s", (excel_id,))
+        cur.execute("SELECT id, COALESCE(address, '') FROM objects WHERE excel_id = %s", (excel_id,))
         row = cur.fetchone()
-        if row: return row[0]
-        cur.execute("INSERT INTO objects (excel_id, address) VALUES (%s, %s) RETURNING id", (excel_id, address))
+        if row:
+            object_id = row[0]
+            current_address = row[1] or ""
+            if address and address != current_address:
+                cur.execute("UPDATE objects SET address = %s WHERE id = %s", (address, object_id))
+            return object_id
+
+        cur.execute(
+            "INSERT INTO objects (excel_id, address) VALUES (%s, %s) RETURNING id",
+            (excel_id, address)
+        )
         return cur.fetchone()[0]
 
     cur.execute("SELECT id FROM objects WHERE address = %s", (address,))
     row = cur.fetchone()
-    if row: return row[0]
-    cur.execute("INSERT INTO objects (excel_id, address) VALUES (NULL, %s) RETURNING id", (address,))
+    if row:
+        return row[0]
+
+    cur.execute(
+        "INSERT INTO objects (excel_id, address) VALUES (NULL, %s) RETURNING id",
+        (address,)
+    )
     return cur.fetchone()[0]
 
+
+def validate_order_payload(data: dict):
+    if not isinstance(data, dict):
+        raise ValueError("Неверный формат заявки")
+
+    dep = safe_str(data.get("department"))
+    fio = safe_str(data.get("requester_fio"))
+    phone = safe_str(data.get("requester_phone"))
+    comment = safe_str(data.get("comment"))
+    positions = data.get("positions") or []
+
+    req_date = parse_date_any(data.get("date"))
+    if not dep:
+        raise ValueError("Не указано подразделение")
+    if not fio:
+        raise ValueError("Не указано ФИО заявителя")
+    if not validate_phone(phone):
+        raise ValueError("Некорректный телефон заявителя")
+    if not req_date or not validate_future_order_date(req_date):
+        raise ValueError("Дата заявки должна быть позже текущей даты")
+    if not safe_str((data.get("object") or {}).get("address")):
+        raise ValueError("Не указан адрес объекта")
+    if not comment:
+        raise ValueError("Не указан комментарий")
+    if not positions:
+        raise ValueError("В заявке должна быть хотя бы одна позиция")
+
+    for idx, p in enumerate(positions, start=1):
+        tech = safe_str(p.get("tech"))
+        qty_raw = p.get("qty")
+        time_str = parse_time_str(p.get("time"))
+        hours = parse_hours_value(p.get("hours"))
+
+        try:
+            qty = int(qty_raw)
+        except Exception:
+            qty = 0
+
+        if not tech:
+            raise ValueError(f"Позиция {idx}: не указана техника")
+        if qty <= 0:
+            raise ValueError(f"Позиция {idx}: количество должно быть больше 0")
+        if not time_str:
+            raise ValueError(f"Позиция {idx}: неверное время подачи")
+        if hours is None or hours <= 0:
+            raise ValueError(f"Позиция {idx}: неверное количество часов")
+
+
 def save_transport_order_to_db(data: dict, edit_order_id: Optional[int] = None) -> int:
+    """
+    Сохраняет заявку.
+    При edit_order_id выполняется UPDATE заголовка и полная замена позиций,
+    но сама заявка не удаляется.
+    """
+    validate_order_payload(data)
+
     conn = None
     try:
         conn = get_db_connection()
-        with conn: # Начинаем транзакцию
+        with conn:
             with conn.cursor() as cur:
-                # Если это редактирование, сначала полностью удаляем старую заявку
-                if edit_order_id:
-                    cur.execute("DELETE FROM transport_order_positions WHERE order_id = %s", (edit_order_id,))
-                    cur.execute("DELETE FROM transport_orders WHERE id = %s", (edit_order_id,))
-
-                # Общая логика вставки (для новой или "отредактированной" заявки)
                 obj = data.get("object") or {}
                 object_id = get_or_create_object(cur, obj.get("id", ""), obj.get("address", ""))
-                
-                # Валидация: если адрес есть, а ID объекта не нашелся, это ошибка
-                if obj.get("address", "") and not object_id:
-                     raise ValueError(f"Не удалось найти или создать объект с адресом: {obj.get('address', '')}")
 
                 created_at = datetime.strptime(data["created_at"], "%Y-%m-%dT%H:%M:%S")
                 order_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
-                user_id = data.get("user_id") # Получаем ID пользователя
+                user_id = data.get("user_id")
 
-                cur.execute(
-                    """
-                    INSERT INTO transport_orders (created_at, date, department, requester_fio, requester_phone, object_id, comment, user_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
-                    """,
-                    (created_at, order_date, data.get("department", ""), data.get("requester_fio", ""), data.get("requester_phone", ""), object_id, data.get("comment", ""), user_id),
-                )
-                order_id = cur.fetchone()[0]
+                if edit_order_id:
+                    cur.execute("SELECT id FROM transport_orders WHERE id = %s", (edit_order_id,))
+                    existing = cur.fetchone()
+                    if not existing:
+                        raise ValueError(f"Редактируемая заявка ID={edit_order_id} не найдена")
 
-                for p in data.get("positions", []):
-                    time_str = (p.get("time") or "").strip()
-                    tval = datetime.strptime(time_str, "%H:%M").time() if time_str else None
                     cur.execute(
                         """
-                        INSERT INTO transport_order_positions (order_id, tech, qty, time, hours, note, status)
-                        VALUES (%s, %s, %s, %s, %s, %s, 'Новая')
+                        UPDATE transport_orders
+                        SET date = %s,
+                            department = %s,
+                            requester_fio = %s,
+                            requester_phone = %s,
+                            object_id = %s,
+                            comment = %s,
+                            user_id = COALESCE(%s, user_id)
+                        WHERE id = %s
                         """,
-                        (order_id, p.get("tech", ""), int(p.get("qty", 0)), tval, float(p.get("hours", 0.0)), p.get("note", "")),
+                        (
+                            order_date,
+                            safe_str(data.get("department")),
+                            safe_str(data.get("requester_fio")),
+                            safe_str(data.get("requester_phone")),
+                            object_id,
+                            safe_str(data.get("comment")),
+                            user_id,
+                            edit_order_id,
+                        ),
                     )
+                    order_id = edit_order_id
+
+                    cur.execute("DELETE FROM transport_order_positions WHERE order_id = %s", (order_id,))
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO transport_orders
+                            (created_at, date, department, requester_fio, requester_phone, object_id, comment, user_id)
+                        VALUES
+                            (%s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                        """,
+                        (
+                            created_at,
+                            order_date,
+                            safe_str(data.get("department")),
+                            safe_str(data.get("requester_fio")),
+                            safe_str(data.get("requester_phone")),
+                            object_id,
+                            safe_str(data.get("comment")),
+                            user_id,
+                        ),
+                    )
+                    order_id = cur.fetchone()[0]
+
+                positions_payload = []
+                for p in data.get("positions", []):
+                    time_str = parse_time_str(p.get("time"))
+                    tval = datetime.strptime(time_str, "%H:%M").time() if time_str else None
+                    positions_payload.append(
+                        (
+                            order_id,
+                            safe_str(p.get("tech")),
+                            int(p.get("qty") or 0),
+                            tval,
+                            float(parse_hours_value(p.get("hours")) or 0.0),
+                            safe_str(p.get("note")),
+                            "Новая" if not edit_order_id else safe_str(p.get("status")) or "Новая",
+                        )
+                    )
+
+                execute_batch(
+                    cur,
+                    """
+                    INSERT INTO transport_order_positions
+                        (order_id, tech, qty, time, hours, note, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    positions_payload
+                )
+
         return order_id
     finally:
         if conn:
             release_db_connection(conn)
 
+
 def load_user_transport_orders(user_id: int) -> List[Dict[str, Any]]:
-    """
-    Возвращает список заголовков заявок на транспорт, созданных пользователем.
-    """
     if not user_id:
         return []
 
@@ -230,14 +586,10 @@ def load_user_transport_orders(user_id: int) -> List[Dict[str, Any]]:
 
 
 def get_transport_order_with_positions_from_db(order_id: int) -> Dict[str, Any]:
-    """
-    Возвращает полную информацию о заявке на транспорт, включая все её позиции.
-    """
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # Загружаем заголовок заявки
             cur.execute(
                 """
                 SELECT
@@ -255,15 +607,23 @@ def get_transport_order_with_positions_from_db(order_id: int) -> Dict[str, Any]:
             if not order_header:
                 raise ValueError(f"Заявка на транспорт с ID={order_id} не найдена")
 
-            # Загружаем позиции заявки
             cur.execute(
-                "SELECT tech, qty, to_char(time, 'HH24:MI') AS time, hours, note "
-                "FROM transport_order_positions WHERE order_id = %s ORDER BY id",
+                """
+                SELECT
+                    tech,
+                    qty,
+                    to_char(time, 'HH24:MI') AS time,
+                    hours,
+                    note,
+                    COALESCE(status, 'Новая') AS status
+                FROM transport_order_positions
+                WHERE order_id = %s
+                ORDER BY id
+                """,
                 (order_id,),
             )
             positions = cur.fetchall()
 
-            # Собираем результат в нужном формате
             return {
                 "id": order_header["id"],
                 "created_at": order_header["created_at"].strftime("%Y-%m-%dT%H:%M:%S"),
@@ -282,31 +642,65 @@ def get_transport_order_with_positions_from_db(order_id: int) -> Dict[str, Any]:
         if conn:
             release_db_connection(conn)
 
+
 def fetch_all_vehicles() -> List[Dict[str, Any]]:
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT id, type, name, plate, department, note FROM vehicles ORDER BY type, name, plate")
+            cur.execute(
+                """
+                SELECT id, type, name, plate, department, note
+                FROM vehicles
+                ORDER BY type, name, plate
+                """
+            )
             return [dict(r) for r in cur.fetchall()]
     finally:
         if conn:
             release_db_connection(conn)
 
+
 def insert_vehicle(v_type: str, name: str, plate: str, department: str = "", note: str = "") -> int:
+    v_type = safe_str(v_type)
+    name = safe_str(name)
+    plate = normalize_plate(plate)
+    department = safe_str(department)
+    note = safe_str(note)
+
+    if not v_type or not name or not plate:
+        raise ValueError("Тип, наименование и госномер обязательны")
+
     conn = None
     try:
         conn = get_db_connection()
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO vehicles (type, name, plate, department, note) VALUES (%s, %s, %s, %s, %s) RETURNING id",
-                    (v_type.strip(), name.strip(), plate.strip(), department.strip(), note.strip()),
+                    """
+                    SELECT id
+                    FROM vehicles
+                    WHERE type = %s AND name = %s AND plate = %s
+                    """,
+                    (v_type, name, plate),
+                )
+                row = cur.fetchone()
+                if row:
+                    raise ValueError("Такое транспортное средство уже существует")
+
+                cur.execute(
+                    """
+                    INSERT INTO vehicles (type, name, plate, department, note)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (v_type, name, plate, department, note),
                 )
                 return cur.fetchone()[0]
     finally:
         if conn:
             release_db_connection(conn)
+
 
 def delete_vehicle(vehicle_id: int) -> None:
     conn = None
@@ -314,70 +708,194 @@ def delete_vehicle(vehicle_id: int) -> None:
         conn = get_db_connection()
         with conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT id, type, name, plate FROM vehicles WHERE id = %s", (vehicle_id,))
+                row = cur.fetchone()
+                if not row:
+                    return
+
+                _, v_type, name, plate = row
+                assigned_value = " | ".join([safe_str(v_type), safe_str(name), safe_str(plate)]).strip(" |")
+
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM transport_order_positions
+                    WHERE COALESCE(assigned_vehicle, '') = %s
+                    """,
+                    (assigned_value,),
+                )
+                used_count = int(cur.fetchone()[0] or 0)
+                if used_count > 0:
+                    raise ValueError(
+                        f"Нельзя удалить транспорт: он уже используется в назначениях ({used_count} записей)"
+                    )
+
                 cur.execute("DELETE FROM vehicles WHERE id = %s", (vehicle_id,))
     finally:
         if conn:
             release_db_connection(conn)
+
+
+def bulk_insert_vehicles(rows: List[Tuple[str, str, str, str, str]]) -> Tuple[int, int]:
+    """
+    rows: [(type, name, plate, department, note), ...]
+    """
+    prepared = []
+    skipped = 0
+    seen = set()
+
+    for row in rows:
+        v_type, name, plate, dep, note = [safe_str(x) for x in row]
+        plate = normalize_plate(plate)
+
+        if not v_type or not name or not plate:
+            skipped += 1
+            continue
+
+        key = (v_type, name, plate)
+        if key in seen:
+            skipped += 1
+            continue
+        seen.add(key)
+        prepared.append((v_type, name, plate, dep, note))
+
+    if not prepared:
+        return 0, skipped
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT type, name, plate FROM vehicles")
+                existing = {(safe_str(r[0]), safe_str(r[1]), normalize_plate(r[2])) for r in cur.fetchall()}
+
+                to_insert = [r for r in prepared if (r[0], r[1], r[2]) not in existing]
+                skipped += len(prepared) - len(to_insert)
+
+                if to_insert:
+                    execute_batch(
+                        cur,
+                        """
+                        INSERT INTO vehicles (type, name, plate, department, note)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        to_insert,
+                    )
+                return len(to_insert), skipped
+    finally:
+        if conn:
+            release_db_connection(conn)
+
 
 def load_employees_for_transport() -> List[Dict[str, Any]]:
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT e.fio, e.tbn, e.position, d.name AS dep FROM employees e
+            cur.execute(
+                """
+                SELECT e.fio, e.tbn, e.position, d.name AS dep
+                FROM employees e
                 LEFT JOIN departments d ON d.id = e.department_id
-                WHERE COALESCE(e.is_fired, FALSE) = FALSE ORDER BY e.fio
-            """)
-            return [{"fio": r[0] or "", "tbn": r[1] or "", "pos": r[2] or "", "dep": r[3] or ""} for r in cur.fetchall()]
+                WHERE COALESCE(e.is_fired, FALSE) = FALSE
+                ORDER BY e.fio
+                """
+            )
+            return [
+                {"fio": r[0] or "", "tbn": r[1] or "", "pos": r[2] or "", "dep": r[3] or ""}
+                for r in cur.fetchall()
+            ]
     finally:
         if conn:
             release_db_connection(conn)
+
 
 def load_objects_for_transport() -> List[Tuple[str, str]]:
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            cur.execute("SELECT COALESCE(NULLIF(excel_id, ''), '') AS code, address FROM objects ORDER BY address")
+            cur.execute(
+                """
+                SELECT COALESCE(NULLIF(excel_id, ''), '') AS code, address
+                FROM objects
+                ORDER BY address
+                """
+            )
             return [(r[0] or "", r[1] or "") for r in cur.fetchall()]
     finally:
         if conn:
             release_db_connection(conn)
+
 
 def load_vehicles_for_transport() -> List[Dict[str, Any]]:
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT type, name, plate, department AS dep, note FROM vehicles ORDER BY type, name, plate")
+            cur.execute(
+                """
+                SELECT type, name, plate, department AS dep, note
+                FROM vehicles
+                ORDER BY type, name, plate
+                """
+            )
             return [dict(r) for r in cur.fetchall()]
     finally:
         if conn:
             release_db_connection(conn)
 
-def get_transport_orders_for_planning(filter_date: Optional[str], filter_department: Optional[str], filter_status: Optional[str]) -> List[Dict[str, Any]]:
+
+def get_transport_orders_for_planning(
+    filter_date: Optional[str],
+    filter_department: Optional[str],
+    filter_status: Optional[str]
+) -> List[Dict[str, Any]]:
     conn = None
     try:
         conn = get_db_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            params, where = [], []
-            if filter_date: where.append("o.date = %s"); params.append(filter_date)
-            if filter_department and filter_department.lower() != "все": where.append("o.department = %s"); params.append(filter_department)
-            if filter_status and filter_status.lower() != "все": where.append("p.status = %s"); params.append(filter_status)
+            params = []
+            where = []
+
+            if filter_date:
+                where.append("o.date = %s")
+                params.append(filter_date)
+
+            if filter_department and filter_department.lower() != "все":
+                where.append("o.department = %s")
+                params.append(filter_department)
+
+            if filter_status and filter_status.lower() != "все":
+                where.append("COALESCE(p.status, 'Новая') = %s")
+                params.append(filter_status)
+
             where_sql = "WHERE " + " AND ".join(where) if where else ""
+
             sql = f"""
-                SELECT p.id, to_char(o.created_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS created_at, o.date::text AS date,
-                       COALESCE(o.department,'') AS department, COALESCE(o.requester_fio,'') AS requester_fio,
-                       COALESCE(obj.address,'') AS object_address, -- Изменено
-                       COALESCE(obj.excel_id,'') AS object_id,
-                       COALESCE(p.tech,'') AS tech, COALESCE(p.qty,0) AS qty,
-                       COALESCE(to_char(p.time, 'HH24:MI'),'') AS time, COALESCE(p.hours,0) AS hours,
-                       COALESCE(p.assigned_vehicle,'') AS assigned_vehicle, COALESCE(p.driver,'') AS driver,
-                       COALESCE(p.status,'Новая') AS status, COALESCE(o.comment,'') AS comment,
-                       COALESCE(p.note,'') AS position_note
-                FROM transport_order_positions p JOIN transport_orders o ON o.id = p.order_id
-                LEFT JOIN objects obj ON obj.id = o.object_id {where_sql} ORDER BY o.date, o.created_at, p.id
+                SELECT
+                    p.id,
+                    to_char(o.created_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS created_at,
+                    o.date::text AS date,
+                    COALESCE(o.department, '') AS department,
+                    COALESCE(o.requester_fio, '') AS requester_fio,
+                    COALESCE(obj.address, '') AS object_address,
+                    COALESCE(obj.excel_id, '') AS object_id,
+                    COALESCE(p.tech, '') AS tech,
+                    COALESCE(p.qty, 0) AS qty,
+                    COALESCE(to_char(p.time, 'HH24:MI'), '') AS time,
+                    COALESCE(p.hours, 0) AS hours,
+                    COALESCE(p.assigned_vehicle, '') AS assigned_vehicle,
+                    COALESCE(p.driver, '') AS driver,
+                    COALESCE(p.status, 'Новая') AS status,
+                    COALESCE(o.comment, '') AS comment,
+                    COALESCE(p.note, '') AS position_note
+                FROM transport_order_positions p
+                JOIN transport_orders o ON o.id = p.order_id
+                LEFT JOIN objects obj ON obj.id = o.object_id
+                {where_sql}
+                ORDER BY o.date, o.created_at, p.id
             """
             cur.execute(sql, params)
             return [dict(r) for r in cur.fetchall()]
@@ -385,235 +903,54 @@ def get_transport_orders_for_planning(filter_date: Optional[str], filter_departm
         if conn:
             release_db_connection(conn)
 
-def exe_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent
 
-def config_path() -> Path:
-    return exe_dir() / CONFIG_FILE
+def save_transport_assignments(assignments: List[Dict[str, Any]]) -> int:
+    if not assignments:
+        return 0
 
-# Старые ini-функции конфигурации — только если нет settings_manager
-if not Settings:
-    def get_planning_password() -> str:
-        cfg = read_config()
-        return cfg.get(CONFIG_SECTION_INTEGR, KEY_PLANNING_PASSWORD, fallback="2025").strip()
+    payload = []
+    for a in assignments:
+        pos_id = a.get("id")
+        if not pos_id:
+            continue
 
-    def ensure_config():
-        cp = config_path()
-        if cp.exists():
-            cfg = configparser.ConfigParser()
-            cfg.read(cp, encoding="utf-8")
-            changed = False
+        status = safe_str(a.get("status")) or "Новая"
+        if status not in ORDER_STATUSES:
+            status = "Новая"
 
-            # --- Paths ---
-            if not cfg.has_section(CONFIG_SECTION_PATHS):
-                cfg[CONFIG_SECTION_PATHS] = {}
-                changed = True
-            if KEY_SPR not in cfg[CONFIG_SECTION_PATHS]:
-                cfg[CONFIG_SECTION_PATHS][KEY_SPR] = str(exe_dir() / SPRAVOCHNIK_FILE)
-                changed = True
+        payload.append((
+            safe_str(a.get("assigned_vehicle")),
+            safe_str(a.get("driver")),
+            status,
+            pos_id,
+        ))
 
-            # --- UI ---
-            if not cfg.has_section(CONFIG_SECTION_UI):
-                cfg[CONFIG_SECTION_UI] = {}
-                changed = True
-            if KEY_SELECTED_DEP not in cfg[CONFIG_SECTION_UI]:
-                cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = "Все"
-                changed = True
+    if not payload:
+        return 0
 
-            # --- Integrations (только то, что реально нужно модулю) ---
-            if not cfg.has_section(CONFIG_SECTION_INTEGR):
-                cfg[CONFIG_SECTION_INTEGR] = {}
-                changed = True
-            # planning_enabled
-            if KEY_PLANNING_ENABLED not in cfg[CONFIG_SECTION_INTEGR]:
-                cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_ENABLED] = "false"
-                changed = True
-            # driver_departments
-            if KEY_DRIVER_DEPARTMENTS not in cfg[CONFIG_SECTION_INTEGR]:
-                cfg[CONFIG_SECTION_INTEGR][KEY_DRIVER_DEPARTMENTS] = "Служба гаража, Автопарк, Транспортный цех"
-                changed = True
-            # planning_password
-            if KEY_PLANNING_PASSWORD not in cfg[CONFIG_SECTION_INTEGR]:
-                cfg[CONFIG_SECTION_INTEGR][KEY_PLANNING_PASSWORD] = "2025"
-                changed = True
-
-            # --- Orders (отсечка по времени) ---
-            if not cfg.has_section(CONFIG_SECTION_ORDERS):
-                cfg[CONFIG_SECTION_ORDERS] = {}
-                changed = True
-            if KEY_CUTOFF_ENABLED not in cfg[CONFIG_SECTION_ORDERS]:
-                cfg[CONFIG_SECTION_ORDERS][KEY_CUTOFF_ENABLED] = "true"
-                changed = True
-            if KEY_CUTOFF_HOUR not in cfg[CONFIG_SECTION_ORDERS]:
-                cfg[CONFIG_SECTION_ORDERS][KEY_CUTOFF_HOUR] = "13"
-                changed = True
-
-            # --- Remote (Яндекс.Диск для справочника) ---
-            if not cfg.has_section(CONFIG_SECTION_REMOTE):
-                cfg[CONFIG_SECTION_REMOTE] = {}
-                changed = True
-            if KEY_REMOTE_USE not in cfg[CONFIG_SECTION_REMOTE]:
-                cfg[CONFIG_SECTION_REMOTE][KEY_REMOTE_USE] = "false"
-                changed = True
-            if KEY_YA_PUBLIC_LINK not in cfg[CONFIG_SECTION_REMOTE]:
-                cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_LINK] = ""
-                changed = True
-            if KEY_YA_PUBLIC_PATH not in cfg[CONFIG_SECTION_REMOTE]:
-                cfg[CONFIG_SECTION_REMOTE][KEY_YA_PUBLIC_PATH] = ""
-                changed = True
-
-            if changed:
-                with open(cp, "w", encoding="utf-8") as f:
-                    cfg.write(f)
-            return
-
-        # создаём ini с нуля (только если нет settings_manager)
-        cfg = configparser.ConfigParser()
-
-        cfg[CONFIG_SECTION_PATHS] = {
-            KEY_SPR: str(exe_dir() / SPRAVOCHNIK_FILE),
-        }
-
-        cfg[CONFIG_SECTION_UI] = {
-            KEY_SELECTED_DEP: "Все",
-        }
-
-        cfg[CONFIG_SECTION_INTEGR] = {
-            KEY_PLANNING_ENABLED: "false",
-            KEY_DRIVER_DEPARTMENTS: "Служба гаража, Автопарк, Транспортный цех",
-            KEY_PLANNING_PASSWORD: "2025",
-        }
-
-        cfg[CONFIG_SECTION_ORDERS] = {
-            KEY_CUTOFF_ENABLED: "true",
-            KEY_CUTOFF_HOUR: "13",
-        }
-
-        cfg[CONFIG_SECTION_REMOTE] = {
-            KEY_REMOTE_USE: "false",
-            KEY_YA_PUBLIC_LINK: "",
-            KEY_YA_PUBLIC_PATH: "",
-        }
-
-        with open(cp, "w", encoding="utf-8") as f:
-            cfg.write(f)
-
-
-    def read_config() -> configparser.ConfigParser:
-        ensure_config()
-        cfg = configparser.ConfigParser()
-        cfg.read(config_path(), encoding="utf-8")
-        return cfg
-
-    def write_config(cfg: configparser.ConfigParser):
-        with open(config_path(), "w", encoding="utf-8") as f:
-            cfg.write(f)
-
-    def get_spr_path() -> Path:
-        cfg = read_config()
-        raw = cfg.get(CONFIG_SECTION_PATHS, KEY_SPR, fallback=str(exe_dir() / SPRAVOCHNIK_FILE))
-        return Path(os.path.expandvars(raw))
-
-    def get_saved_dep() -> str:
-        cfg = read_config()
-        return cfg.get(CONFIG_SECTION_UI, KEY_SELECTED_DEP, fallback="Все")
-
-    def set_saved_dep(dep: str):
-        cfg = read_config()
-        if not cfg.has_section(CONFIG_SECTION_UI):
-            cfg[CONFIG_SECTION_UI] = {}
-        cfg[CONFIG_SECTION_UI][KEY_SELECTED_DEP] = dep or "Все"
-        write_config(cfg)
-
-else:
-    # Если Settings есть, дополнительные геттеры на его Proxy
-    def get_planning_password() -> str:
-        cfg = read_config()
-        return cfg.get(CONFIG_SECTION_INTEGR, KEY_PLANNING_PASSWORD, fallback="2025").strip()
-
-def get_planning_enabled() -> bool:
-    cfg = read_config()
-    v = cfg.get(CONFIG_SECTION_INTEGR, KEY_PLANNING_ENABLED, fallback="false").strip().lower()
-    return v in ("1", "true", "yes", "on")
-
-# Настройки отсечки приёма заявок
-def get_cutoff_enabled() -> bool:
-    cfg = read_config()
-    v = cfg.get(CONFIG_SECTION_ORDERS, KEY_CUTOFF_ENABLED, fallback="true").strip().lower()
-    return v in ("1", "true", "yes", "on")
-
-def get_cutoff_hour() -> int:
-    cfg = read_config()
+    conn = None
     try:
-        h = int(cfg.get(CONFIG_SECTION_ORDERS, KEY_CUTOFF_HOUR, fallback="13").strip())
-        return min(23, max(0, h))
-    except Exception:
-        return 13
-
-def is_past_cutoff_for_date(req_date: date, cutoff_hour: int) -> bool:
-    now = datetime.now()
-    if req_date != now.date():
-        return False
-    cutoff = now.replace(hour=cutoff_hour, minute=0, second=0, microsecond=0)
-    return now >= cutoff
-
-# ------------------------- Парсинг значений -------------------------
-
-def parse_hours_value(v: Any) -> Optional[float]:
-    s = str(v or "").strip()
-    if not s:
-        return None
-    if "/" in s:
-        total = 0.0
-        any_part = False
-        for part in s.split("/"):
-            n = parse_hours_value(part)
-            if isinstance(n, (int, float)):
-                total += float(n); any_part = True
-        return total if any_part else None
-    if ":" in s:
-        p = s.split(":")
-        try:
-            hh = float(p[0].replace(",", "."))
-            mm = float((p[1] if len(p)>1 else "0").replace(",", "."))
-            ss = float((p[2] if len(p)>2 else "0").replace(",", "."))
-            return hh + mm/60.0 + ss/3600.0
-        except:
-            pass
-    s = s.replace(",", ".")
-    try:
-        return float(s)
-    except:
-        return None
-
-def parse_time_str(s: str) -> Optional[str]:
-    s = (s or "").strip()
-    if not s:
-        return None
-    m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", s)
-    if not m:
-        return None
-    hh = int(m.group(1))
-    mm = int(m.group(2))
-    if not (0 <= hh <= 23 and 0 <= mm <= 59):
-        return None
-    return f"{hh:02d}:{mm:02d}"
-
-def parse_date_any(s: str) -> Optional[date]:
-    s = (s or "").strip()
-    if not s:
-        return None
-    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y"):
-        try:
-            return datetime.strptime(s, fmt).date()
-        except:
-            pass
-    return None
+        conn = get_db_connection()
+        with conn:
+            with conn.cursor() as cur:
+                execute_batch(
+                    cur,
+                    """
+                    UPDATE transport_order_positions
+                    SET assigned_vehicle = %s,
+                        driver = %s,
+                        status = %s
+                    WHERE id = %s
+                    """,
+                    payload,
+                )
+        return len(payload)
+    finally:
+        if conn:
+            release_db_connection(conn)
 
 
-# ------------------------- Виджеты -------------------------
+# ========================= UI WIDGETS =========================
 
 class AutoCompleteCombobox(ttk.Combobox):
     def __init__(self, master=None, **kw):
@@ -624,29 +961,25 @@ class AutoCompleteCombobox(ttk.Combobox):
 
     def set_completion_list(self, values: List[str]):
         self._all_values = list(values)
-        self['values'] = self._all_values
+        self["values"] = self._all_values
 
     def _clear_all(self, _=None):
         self.delete(0, tk.END)
-        self['values'] = self._all_values
+        self["values"] = self._all_values
 
     def _on_keyrelease(self, event):
         if event.keysym in ("Up", "Down", "Left", "Right", "Home", "End", "Return", "Escape", "Tab"):
             return
+
         typed = self.get().strip()
         if not typed:
-            self['values'] = self._all_values
+            self["values"] = self._all_values
             return
-        self['values'] = [x for x in self._all_values if typed.lower() in x.lower()]
 
+        self["values"] = [x for x in self._all_values if typed.lower() in x.lower()]
 
-# ------------------------- Строка позиции -------------------------
 
 class PositionRow:
-    ERR_BG = "#ffccbc"
-    ZEBRA_EVEN = "#ffffff"
-    ZEBRA_ODD  = "#f6f8fa"
-
     def __init__(self, parent, idx: int, tech_values: List[str], on_delete):
         self.parent = parent
         self.idx = idx
@@ -662,19 +995,15 @@ class PositionRow:
         self.ent_qty.grid(row=0, column=1, padx=2)
         self.ent_qty.insert(0, "1")
 
-        # ===== ИЗМЕНЕНИЯ ДЛЯ АВТОФОРМАТИРОВАНИЯ ВРЕМЕНИ =====
         self.time_var = tk.StringVar()
         self.time_var.trace_add("write", self._on_time_changed)
         self._formatting_time = False
-        self._format_timer = None  # Таймер для отложенного форматирования
-        
+        self._format_timer = None
+
         self.ent_time = ttk.Entry(self.frame, width=8, justify="center", textvariable=self.time_var)
         self.ent_time.grid(row=0, column=2, padx=2)
-        
-        # Форматирование при потере фокуса (мгновенно)
         self.ent_time.bind("<FocusOut>", self._format_immediately)
         self.ent_time.bind("<Return>", self._format_immediately)
-        # ====================================================
 
         self.ent_hours = ttk.Entry(self.frame, width=8, justify="center")
         self.ent_hours.grid(row=0, column=3, padx=2)
@@ -686,28 +1015,24 @@ class PositionRow:
         self.btn_del = ttk.Button(self.frame, text="Удалить", width=9, command=self._delete)
         self.btn_del.grid(row=0, column=5, padx=2)
 
-        for i in range(6):
-            self.frame.grid_columnconfigure(i, minsize=[380, 50, 70, 70, 280, 80][i])
+        for i, minsize in enumerate([380, 50, 70, 70, 280, 80]):
+            self.frame.grid_columnconfigure(i, minsize=minsize)
 
-    # ===== НОВЫЕ МЕТОДЫ ДЛЯ АВТОФОРМАТИРОВАНИЯ =====
-    def _on_time_changed(self, *args):
-        """Вызывается при каждом изменении - запускает отложенное форматирование"""
+    def _on_time_changed(self, *_):
         if self._formatting_time:
             return
         if self._format_timer:
             self.ent_time.after_cancel(self._format_timer)
         self._format_timer = self.ent_time.after(500, self._do_format)
-    
+
     def _format_immediately(self, event=None):
-        """Форматирует немедленно (при FocusOut или Enter)"""
         if self._format_timer:
             self.ent_time.after_cancel(self._format_timer)
             self._format_timer = None
         self._do_format()
         return None
-    
+
     def _do_format(self):
-        """Выполняет форматирование"""
         if self._formatting_time:
             return
         current = self.time_var.get()
@@ -719,38 +1044,28 @@ class PositionRow:
                 self.ent_time.icursor(tk.END)
             finally:
                 self._formatting_time = False
-    
+
     def _auto_format_time_input(self, raw: str) -> str:
-        """
-        Автоматически форматирует ввод времени в формат ЧЧ:ММ
-        Примеры:
-        - '8' → '08:00'
-        - '13' → '13:00'
-        - '130' → '01:30'
-        - '1300' → '13:00'
-        - '13.00' → '13:00'
-        - '9.45' → '09:45'
-        """
         if not raw:
             return ""
-        digits = ''.join(c for c in raw if c.isdigit())
+        digits = "".join(c for c in raw if c.isdigit())
         if not digits:
             return ""
+
         if len(digits) == 1:
             hh = int(digits)
             return f"{hh:02d}:00"
-        elif len(digits) == 2:
+        if len(digits) == 2:
             hh = min(int(digits), 23)
             return f"{hh:02d}:00"
-        elif len(digits) == 3:
+        if len(digits) == 3:
             hh = int(digits[0])
             mm = min(int(digits[1:3]), 59)
             return f"{hh:02d}:{mm:02d}"
-        else:
-            hh = min(int(digits[:2]), 23)
-            mm = min(int(digits[2:4]), 59)
-            return f"{hh:02d}:{mm:02d}"
-    # ===============================================
+
+        hh = min(int(digits[:2]), 23)
+        mm = min(int(digits[2:4]), 59)
+        return f"{hh:02d}:{mm:02d}"
 
     def grid(self, row: int):
         self.frame.grid(row=row, column=0, sticky="w")
@@ -759,68 +1074,43 @@ class PositionRow:
         self.frame.destroy()
 
     def apply_zebra(self, row0: int):
-        bg = self.ZEBRA_ODD if (row0 % 2 == 1) else self.ZEBRA_EVEN
-        for w in (self.cmb_tech, self.ent_qty, self.ent_time, self.ent_hours, self.ent_note):
-            try:
-                w.configure(background=bg)
-            except Exception:
-                pass
+        bg = "#f6f8fa" if (row0 % 2 == 1) else "#ffffff"
+        self.frame.configure(bg=bg)
 
     def _delete(self):
         self.on_delete(self)
 
     def validate(self) -> bool:
-        ok = True
-        val = (self.cmb_tech.get() or "").strip()
+        val = safe_str(self.cmb_tech.get())
         if not val:
-            self._mark_err(self.cmb_tech); ok = False
-        else:
-            self._clear_err(self.cmb_tech)
+            return False
 
         try:
-            qty = int((self.ent_qty.get() or "0").strip())
+            qty = int(safe_str(self.ent_qty.get()) or "0")
             if qty <= 0:
-                raise ValueError
-            self._clear_err(self.ent_qty)
+                return False
         except Exception:
-            self._mark_err(self.ent_qty); ok = False
+            return False
 
-        # время ПОДАЧИ — обязательно
-        tstr = (self.ent_time.get() or "").strip()
+        tstr = safe_str(self.ent_time.get())
         if not tstr or parse_time_str(tstr) is None:
-            self._mark_err(self.ent_time); ok = False
-        else:
-            self._clear_err(self.ent_time)
+            return False
 
         hv = parse_hours_value(self.ent_hours.get())
         if hv is None or hv <= 0:
-            self._mark_err(self.ent_hours); ok = False
-        else:
-            self._clear_err(self.ent_hours)
-        return ok
+            return False
 
-    def _mark_err(self, widget):
-        try:
-            widget.configure(background=self.ERR_BG)
-        except Exception:
-            pass
+        return True
 
-    def _clear_err(self, widget):
-        try:
-            widget.configure(background="white")
-        except Exception:
-            pass
-
-    def get_dict(self) -> Dict:
+    def get_dict(self) -> Dict[str, Any]:
         return {
-            "tech": (self.cmb_tech.get() or "").strip(),
-            "qty": int((self.ent_qty.get() or "0").strip() or 0),
-            "time": (parse_time_str(self.ent_time.get()) or ""),
+            "tech": safe_str(self.cmb_tech.get()),
+            "qty": int(safe_str(self.ent_qty.get()) or 0),
+            "time": parse_time_str(self.ent_time.get()) or "",
             "hours": float(parse_hours_value(self.ent_hours.get()) or 0.0),
-            "note": (self.ent_note.get() or "").strip(),
+            "note": safe_str(self.ent_note.get()),
         }
 
-# ------------------------- Диалог добавления транспорта -------------------------
 
 class AddVehicleDialog(simpledialog.Dialog):
     def __init__(self, parent, title="Добавить транспортное средство"):
@@ -852,9 +1142,9 @@ class AddVehicleDialog(simpledialog.Dialog):
         return self.ent_type
 
     def validate(self):
-        v_type = self.ent_type.get().strip()
-        name = self.ent_name.get().strip()
-        plate = self.ent_plate.get().strip()
+        v_type = safe_str(self.ent_type.get())
+        name = safe_str(self.ent_name.get())
+        plate = normalize_plate(self.ent_plate.get())
 
         if not v_type or not name or not plate:
             messagebox.showwarning(
@@ -867,23 +1157,25 @@ class AddVehicleDialog(simpledialog.Dialog):
 
     def apply(self):
         self.result = {
-            "type": self.ent_type.get().strip(),
-            "name": self.ent_name.get().strip(),
-            "plate": self.ent_plate.get().strip(),
-            "department": self.ent_dep.get().strip(),
+            "type": safe_str(self.ent_type.get()),
+            "name": safe_str(self.ent_name.get()),
+            "plate": normalize_plate(self.ent_plate.get()),
+            "department": safe_str(self.ent_dep.get()),
             "note": self.txt_note.get("1.0", "end").strip(),
         }
-        
-# ------------------------- Встраиваемая страница -------------------------
+
+
+# ========================= SPECIAL ORDERS PAGE =========================
 
 class SpecialOrdersPage(tk.Frame):
     def __init__(self, master, existing_data: dict = None, order_id: int = None, on_saved=None):
         super().__init__(master, bg="#f7f7f7")
         ensure_config()
+
         self.base_dir = exe_dir()
-    
-        self.edit_order_id = order_id  # id редактируемой заявки
-        self.on_saved = on_saved      # callback после сохранения
+        self.edit_order_id = order_id
+        self.on_saved = on_saved
+        self.pos_rows: List[PositionRow] = []
 
         self._load_spr()
         self._build_ui()
@@ -891,85 +1183,36 @@ class SpecialOrdersPage(tk.Frame):
         if existing_data:
             self._fill_from_existing(existing_data)
         else:
-            # Для новой заявки, как и раньше
             self._update_fio_list()
             self._update_tomorrow_hint()
             self.add_position()
 
-    def _fill_from_existing(self, data: dict):
-        # Заполняем поля заголовка
-        self.cmb_dep.set(data.get("department", "Все"))
-        self._update_fio_list()
-        self.fio_var.set(data.get("requester_fio", ""))
-        self.ent_phone.delete(0, "end"); self.ent_phone.insert(0, data.get("requester_phone", ""))
-        self.ent_date.delete(0, "end"); self.ent_date.insert(0, data.get("date", ""))
-        self.txt_comment.delete("1.0", "end"); self.txt_comment.insert("1.0", data.get("comment", ""))
-    
-        # Объект
-        obj = data.get("object", {})
-        self.cmb_address.set(obj.get("address", ""))
-        self._sync_ids_by_address()
-        if obj.get("id"):
-            self.cmb_object_id.set(obj.get("id"))
-
-        # Очищаем и заполняем позиции
-        for row in self.pos_rows:
-            row.destroy()
-        self.pos_rows.clear()
-    
-        positions_data = data.get("positions", [])
-        if not positions_data: # Если вдруг позиций нет, добавляем одну пустую
-            self.add_position()
-        else:
-            for pos_data in positions_data:
-                self.add_position()
-                row = self.pos_rows[-1]
-                row.cmb_tech.set(pos_data.get("tech", ""))
-                row.ent_qty.delete(0, "end"); row.ent_qty.insert(0, str(pos_data.get("qty", "1")))
-                row.ent_time.delete(0, "end"); row.ent_time.insert(0, pos_data.get("time", ""))
-                row.ent_hours.delete(0, "end"); row.ent_hours.insert(0, str(pos_data.get("hours", "4")))
-                row.ent_note.delete(0, "end"); row.ent_note.insert(0, pos_data.get("note", ""))
-
-        self._update_tomorrow_hint()
-
     def _load_spr(self):
-        """
-        Загружает сотрудников, объекты и технику из БД,
-        вместо Excel/Яндекс-диска.
-        """
-        # сотрудники
-        employees = load_employees_for_transport()
-        self.emps = employees
-
-        # объекты
+        self.emps = load_employees_for_transport()
         self.objects = load_objects_for_transport()
+        self.techs = load_vehicles_for_transport()
 
-        # техника из таблицы vehicles
-        vehicles = load_vehicles_for_transport()
-        self.techs = vehicles
-
-        tech_types: set[str] = set()
-        for v in vehicles:
-            tp = (v.get("type") or "").strip()
+        tech_types = set()
+        for v in self.techs:
+            tp = safe_str(v.get("type"))
             if tp:
                 tech_types.add(tp)
-
         self.tech_values = sorted(tech_types)
 
-        self.deps = ["Все"] + sorted(
-            {(r["dep"] or "").strip() for r in self.emps if (r["dep"] or "").strip()}
-        )
-        self.emp_names_all = [r["fio"] for r in self.emps]
+        self.deps = ["Все"] + sorted({safe_str(r["dep"]) for r in self.emps if safe_str(r["dep"])})
 
         self.addr_to_ids: Dict[str, List[str]] = {}
         for oid, addr in self.objects:
+            addr = safe_str(addr)
+            oid = safe_str(oid)
             if not addr:
                 continue
             self.addr_to_ids.setdefault(addr, [])
             if oid and oid not in self.addr_to_ids[addr]:
                 self.addr_to_ids[addr].append(oid)
+
         addresses_set = set(self.addr_to_ids.keys())
-        addresses_set.update(addr for _, addr in self.objects if addr)
+        addresses_set.update(addr for _, addr in self.objects if safe_str(addr))
         self.addresses = sorted(addresses_set)
 
     def _build_ui(self):
@@ -981,8 +1224,7 @@ class SpecialOrdersPage(tk.Frame):
         saved_dep = get_saved_dep()
         self.cmb_dep.set(saved_dep if saved_dep in self.deps else self.deps[0])
         self.cmb_dep.grid(row=0, column=1, sticky="w", padx=(4, 12))
-        self.cmb_dep.bind("<<ComboboxSelected>>",
-                          lambda e: (set_saved_dep(self.cmb_dep.get()), self._update_fio_list()))
+        self.cmb_dep.bind("<<ComboboxSelected>>", lambda e: (set_saved_dep(self.cmb_dep.get()), self._update_fio_list()))
 
         tk.Label(top, text="ФИО*:", bg="#f7f7f7").grid(row=0, column=2, sticky="w")
         self.fio_var = tk.StringVar()
@@ -996,8 +1238,6 @@ class SpecialOrdersPage(tk.Frame):
         tk.Label(top, text="Дата*:", bg="#f7f7f7").grid(row=0, column=6, sticky="w")
         self.ent_date = ttk.Entry(top, width=12)
         self.ent_date.grid(row=0, column=7, sticky="w", padx=(4, 0))
-        # по умолчанию — завтра
-        self.ent_date.delete(0, "end")
         self.ent_date.insert(0, (date.today() + timedelta(days=1)).strftime("%Y-%m-%d"))
         self.ent_date.bind("<KeyRelease>", lambda e: self._update_tomorrow_hint())
         self.ent_date.bind("<FocusOut>", lambda e: self._update_tomorrow_hint())
@@ -1014,7 +1254,6 @@ class SpecialOrdersPage(tk.Frame):
         self.cmb_object_id = ttk.Combobox(top, state="readonly", values=[], width=20)
         self.cmb_object_id.grid(row=1, column=5, sticky="w", padx=(4, 12), pady=(8, 0))
 
-        # новая подсказка по дате (вместо отсечки)
         self.lbl_date_hint = tk.Label(top, text="", fg="#555", bg="#f7f7f7")
         self.lbl_date_hint.grid(row=1, column=6, columnspan=2, sticky="w", pady=(8, 0))
 
@@ -1036,17 +1275,19 @@ class SpecialOrdersPage(tk.Frame):
 
         wrap = tk.Frame(pos_wrap)
         wrap.pack(fill="both", expand=True)
+
         self.cv = tk.Canvas(wrap, borderwidth=0, highlightthickness=0)
         self.rows_holder = tk.Frame(self.cv)
         self.cv.create_window((0, 0), window=self.rows_holder, anchor="nw")
         self.cv.pack(side="left", fill="both", expand=True)
+
         self.vscroll = ttk.Scrollbar(wrap, orient="vertical", command=self.cv.yview)
         self.vscroll.pack(side="right", fill="y")
         self.cv.configure(yscrollcommand=self.vscroll.set)
-        self.rows_holder.bind("<Configure>", lambda e: self.cv.configure(scrollregion=self.cv.bbox("all")))
-        self.cv.bind("<MouseWheel>", lambda e: (self.cv.yview_scroll(int(-1*(e.delta/120)), "units"), "break"))
 
-        self.pos_rows: List[PositionRow] = []
+        self.rows_holder.bind("<Configure>", lambda e: self.cv.configure(scrollregion=self.cv.bbox("all")))
+        self.cv.bind("<MouseWheel>", lambda e: (self.cv.yview_scroll(int(-1 * (e.delta / 120)), "units"), "break"))
+
         btns = tk.Frame(pos_wrap)
         btns.pack(fill="x")
         ttk.Button(btns, text="Добавить позицию", command=self.add_position).pack(side="left", padx=2, pady=4)
@@ -1058,56 +1299,89 @@ class SpecialOrdersPage(tk.Frame):
 
         self._update_fio_list()
         self._update_tomorrow_hint()
-        self.add_position()
 
-        for c in range(8):
-            top.grid_columnconfigure(c, weight=0)
-        top.grid_columnconfigure(1, weight=1)
-        top.grid_columnconfigure(5, weight=0)
+    def _fill_from_existing(self, data: dict):
+        self.cmb_dep.set(data.get("department", "Все"))
+        self._update_fio_list()
+        self.fio_var.set(data.get("requester_fio", ""))
+        self.ent_phone.delete(0, "end")
+        self.ent_phone.insert(0, data.get("requester_phone", ""))
+        self.ent_date.delete(0, "end")
+        self.ent_date.insert(0, data.get("date", ""))
+        self.txt_comment.delete("1.0", "end")
+        self.txt_comment.insert("1.0", data.get("comment", ""))
 
-    # Методы логики/валидации/сохранения — те же, что и в standalone
-    def _update_fio_list(self):
-        dep = (self.cmb_dep.get() or "Все").strip()
-        if dep == "Все":
-            names = [r['fio'] for r in self.emps]
+        obj = data.get("object", {})
+        self.cmb_address.set(obj.get("address", ""))
+        self._sync_ids_by_address()
+        if obj.get("id"):
+            self.cmb_object_id.set(obj.get("id"))
+
+        for row in self.pos_rows:
+            row.destroy()
+        self.pos_rows.clear()
+
+        positions_data = data.get("positions", [])
+        if not positions_data:
+            self.add_position()
         else:
-            names = [r['fio'] for r in self.emps if (r['dep'] or "") == dep]
-        seen, filtered = set(), []
+            for pos_data in positions_data:
+                self.add_position()
+                row = self.pos_rows[-1]
+                row.cmb_tech.set(pos_data.get("tech", ""))
+                row.ent_qty.delete(0, "end")
+                row.ent_qty.insert(0, str(pos_data.get("qty", "1")))
+                row.ent_time.delete(0, "end")
+                row.ent_time.insert(0, pos_data.get("time", ""))
+                row.ent_hours.delete(0, "end")
+                row.ent_hours.insert(0, str(pos_data.get("hours", "4")))
+                row.ent_note.delete(0, "end")
+                row.ent_note.insert(0, pos_data.get("note", ""))
+
+        self._update_tomorrow_hint()
+
+    def _update_fio_list(self):
+        dep = safe_str(self.cmb_dep.get()) or "Все"
+        if dep == "Все":
+            names = [r["fio"] for r in self.emps]
+        else:
+            names = [r["fio"] for r in self.emps if safe_str(r["dep"]) == dep]
+
+        seen = set()
+        filtered = []
         for n in names:
             if n not in seen:
                 seen.add(n)
                 filtered.append(n)
+
         if not filtered and dep != "Все":
-            filtered = [r['fio'] for r in self.emps]
+            filtered = [r["fio"] for r in self.emps]
+
         self.cmb_fio.set_completion_list(filtered)
 
     def _update_tomorrow_hint(self):
-        """Подсказка по дате заявки: разрешены завтрашний и любые более поздние дни"""
-        try:
-            req = parse_date_any(self.ent_date.get())
-            today = date.today()
-            tomorrow = today + timedelta(days=1)
+        req = parse_date_any(self.ent_date.get())
+        today = date.today()
+        tomorrow = today + timedelta(days=1)
 
-            if req is None:
-                self.lbl_date_hint.config(
-                    text="Укажите дату в формате YYYY-MM-DD или DD.MM.YYYY",
-                    fg="#b00020"
-                )
-            elif req <= today:
-                self.lbl_date_hint.config(
-                    text=f"Дата должна быть не ранее {tomorrow.strftime('%Y-%m-%d')}",
-                    fg="#b00020"
-                )
-            else:
-                self.lbl_date_hint.config(
-                    text="Ок: заявка на будущую дату",
-                    fg="#2e7d32"
-                )
-        except Exception:
-            self.lbl_date_hint.config(text="", fg="#555")
+        if req is None:
+            self.lbl_date_hint.config(
+                text="Укажите дату в формате YYYY-MM-DD или DD.MM.YYYY",
+                fg="#b00020"
+            )
+        elif req <= today:
+            self.lbl_date_hint.config(
+                text=f"Дата должна быть не ранее {tomorrow.strftime('%Y-%m-%d')}",
+                fg="#b00020"
+            )
+        else:
+            self.lbl_date_hint.config(
+                text="Ок: заявка на будущую дату",
+                fg="#2e7d32"
+            )
 
     def _sync_ids_by_address(self):
-        addr = (self.cmb_address.get() or "").strip()
+        addr = safe_str(self.cmb_address.get())
         ids = sorted(self.addr_to_ids.get(addr, []))
         if ids:
             self.cmb_object_id.config(state="readonly", values=ids)
@@ -1129,81 +1403,81 @@ class SpecialOrdersPage(tk.Frame):
         except Exception:
             pass
         prow.destroy()
-        for i, r in enumerate(self.pos_rows, start=0):
+        for i, r in enumerate(self.pos_rows):
             r.grid(i)
             r.apply_zebra(i)
 
     def _validate_form(self) -> bool:
-        # Подразделение
-        if not (self.cmb_dep.get() or "").strip():
-            messagebox.showwarning("Заявка", "Выберите Подразделение.")
+        if not safe_str(self.cmb_dep.get()):
+            messagebox.showwarning("Заявка", "Выберите подразделение.", parent=self)
             return False
-        # ФИО
-        if not (self.cmb_fio.get() or "").strip():
-            messagebox.showwarning("Заявка", "Укажите ФИО.")
+
+        if not safe_str(self.cmb_fio.get()):
+            messagebox.showwarning("Заявка", "Укажите ФИО.", parent=self)
             return False
-        # Телефон (хотя бы 5 цифр)
-        phone = (self.ent_phone.get() or "").strip()
-        digits = re.sub(r"\D+", "", phone)
-        if not phone or len(digits) < 5:
-            messagebox.showwarning("Заявка", "Укажите номер телефона (минимум 5 цифр).")
+
+        phone = safe_str(self.ent_phone.get())
+        if not validate_phone(phone):
+            messagebox.showwarning("Заявка", "Укажите корректный номер телефона (минимум 5 цифр).", parent=self)
             return False
-        # Дата — не ранее завтрашнего дня
+
         req = parse_date_any(self.ent_date.get())
-        today = date.today()
-        tomorrow = today + timedelta(days=1)
-        if req is None or req <= today:
+        tomorrow = date.today() + timedelta(days=1)
+        if req is None or req <= date.today():
             messagebox.showwarning(
                 "Заявка",
-                f"Заявка возможна на даты, начинающиеся с {tomorrow.strftime('%Y-%m-%d')} и позже."
+                f"Заявка возможна на даты, начиная с {tomorrow.strftime('%Y-%m-%d')}.",
+                parent=self,
             )
             return False
 
-        # Адрес (обязателен)
-        addr = (self.cmb_address.get() or "").strip()
+        addr = safe_str(self.cmb_address.get())
         if not addr:
-            messagebox.showwarning("Заявка", "Укажите Адрес.")
+            messagebox.showwarning("Заявка", "Укажите адрес.", parent=self)
             return False
-        # Комментарий
+
         comment = self.txt_comment.get("1.0", "end").strip()
         if not comment:
-            messagebox.showwarning("Заявка", "Добавьте комментарий к заявке.")
+            messagebox.showwarning("Заявка", "Добавьте комментарий к заявке.", parent=self)
             return False
-        # Позиции
+
         if not self.pos_rows:
-            messagebox.showwarning("Заявка", "Добавьте хотя бы одну позицию.")
+            messagebox.showwarning("Заявка", "Добавьте хотя бы одну позицию.", parent=self)
             return False
-        all_ok = True
-        for r in self.pos_rows:
-            all_ok = r.validate() and all_ok
-        if not all_ok:
-            messagebox.showwarning("Заявка", "Исправьте подсвеченные поля в позициях (Техника, Кол-во, Подача, Часы).")
-            return False
+
+        for idx, r in enumerate(self.pos_rows, start=1):
+            if not r.validate():
+                messagebox.showwarning(
+                    "Заявка",
+                    f"Исправьте данные в позиции №{idx}.",
+                    parent=self
+                )
+                return False
+
         return True
 
-    def _build_order_dict(self) -> Dict:
+    def _build_order_dict(self) -> Dict[str, Any]:
         created_at = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         req_date = parse_date_any(self.ent_date.get()) or date.today()
-        addr = (self.cmb_address.get() or "").strip()
-        oid = (self.cmb_object_id.get() or "").strip()
+        addr = safe_str(self.cmb_address.get())
+        oid = safe_str(self.cmb_object_id.get())
         comment = self.txt_comment.get("1.0", "end").strip()
         positions = [r.get_dict() for r in self.pos_rows]
-    
+
         user_id = None
-        # Получаем user_id из app_ref, который будет передан из главного приложения
         app_ref = getattr(self, "app_ref", None)
         if app_ref is not None and hasattr(app_ref, "current_user"):
             try:
                 user_id = int((app_ref.current_user or {}).get("id") or 0) or None
             except (ValueError, TypeError):
                 user_id = None
-            
+
         data = {
             "created_at": created_at,
             "date": req_date.strftime("%Y-%m-%d"),
-            "department": (self.cmb_dep.get() or "").strip(),
-            "requester_fio": (self.cmb_fio.get() or "").strip(),
-            "requester_phone": (self.ent_phone.get() or "").strip(),
+            "department": safe_str(self.cmb_dep.get()),
+            "requester_fio": safe_str(self.cmb_fio.get()),
+            "requester_phone": safe_str(self.ent_phone.get()),
             "object": {"id": oid, "address": addr},
             "comment": comment,
             "positions": positions,
@@ -1217,29 +1491,23 @@ class SpecialOrdersPage(tk.Frame):
             return
 
         data = self._build_order_dict()
-    
         try:
-            # Передаем edit_order_id в функцию сохранения
             order_db_id = save_transport_order_to_db(data, edit_order_id=self.edit_order_id)
         except Exception as e:
-            import traceback
-            messagebox.showerror(
-                "Сохранение",
-                f"Не удалось сохранить заявку в БД:\n{traceback.format_exc()}"
-            )
+            logger.exception("Ошибка сохранения заявки")
+            messagebox.showerror("Сохранение", f"Не удалось сохранить заявку:\n{e}", parent=self)
             return
 
         messagebox.showinfo(
             "Сохранение",
-            f"Заявка {'обновлена' if self.edit_order_id else 'сохранена'} в БД.\nID: {order_db_id}"
+            f"Заявка {'обновлена' if self.edit_order_id else 'сохранена'}.\nID: {order_db_id}",
+            parent=self,
         )
 
-        # Вызываем callback для обновления списка "Мои заявки", если он был передан
         if self.on_saved:
             self.on_saved()
-            # Если это было окно редактирования, закрываем его
             if self.edit_order_id:
-                 self.winfo_toplevel().destroy()
+                self.winfo_toplevel().destroy()
 
     def clear_form(self):
         self.fio_var.set("")
@@ -1250,139 +1518,137 @@ class SpecialOrdersPage(tk.Frame):
         self.cmb_object_id.config(values=[])
         self.cmb_object_id.set("")
         self.txt_comment.delete("1.0", "end")
+
         for r in self.pos_rows:
             r.destroy()
         self.pos_rows.clear()
+
         self.add_position()
         self._update_tomorrow_hint()
 
-# ------------------------- Планирование транспорта -------------------------
+
+# ========================= TRANSPORT PLANNING =========================
 
 class TransportPlanningPage(tk.Frame):
-    """Вкладка планирования транспорта"""
-    
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
         self.spr_path = get_spr_path()
         self.authenticated = False
-        self.row_meta: Dict[str, Dict[str, str]] = {} 
+        self.row_meta: Dict[str, Dict[str, str]] = {}
 
         self._load_spr()
         self._build_ui()
-        
+        self.load_orders(silent=True)
+
     def _load_spr(self):
-        """Загрузка справочников из БД."""
-        # техника
         self.vehicles = load_vehicles_for_transport()
         self.vehicle_types = sorted(
-            { (v.get("type") or "").strip() for v in self.vehicles if (v.get("type") or "").strip() }
+            {(safe_str(v.get("type"))) for v in self.vehicles if safe_str(v.get("type"))}
         )
 
-        # сотрудники-водители
         employees_raw = load_employees_for_transport()
         cfg = read_config()
-        driver_depts_str = cfg.get(
-            CONFIG_SECTION_INTEGR, KEY_DRIVER_DEPARTMENTS, fallback="Служба гаража"
-        )
-        DRIVER_DEPARTMENTS = [d.strip() for d in driver_depts_str.split(",") if d.strip()]
+        driver_depts_str = cfg.get(CONFIG_SECTION_INTEGR, KEY_DRIVER_DEPARTMENTS, fallback="Служба гаража")
+        driver_departments = [d.strip() for d in driver_depts_str.split(",") if d.strip()]
 
-        self.drivers = []
-        for e in employees_raw:
-            dep = e.get("dep") or ""
-            if dep in DRIVER_DEPARTMENTS:
-                self.drivers.append(e)
-
+        self.drivers = [e for e in employees_raw if safe_str(e.get("dep")) in driver_departments]
         self.drivers.sort(key=lambda x: x["fio"])
-        self.departments = ["Все"] + sorted(
-            { (e.get("dep") or "") for e in employees_raw if e.get("dep") }
-        )
-    
-        self.vehicle_types = sorted(list(self.vehicle_types))
-        
+
+        self.departments = ["Все"] + sorted({safe_str(e.get("dep")) for e in employees_raw if safe_str(e.get("dep"))})
+
     def _build_ui(self):
-        """Построение интерфейса"""
-        # Верхняя панель с фильтрами
         top = tk.Frame(self, bg="#f7f7f7")
         top.pack(fill="x", padx=10, pady=8)
-        
+
         tk.Label(top, text="Дата:", bg="#f7f7f7").grid(row=0, column=0, sticky="w")
         self.ent_filter_date = ttk.Entry(top, width=12)
         self.ent_filter_date.grid(row=0, column=1, padx=4)
         self.ent_filter_date.insert(0, date.today().strftime("%Y-%m-%d"))
-        
-        tk.Label(top, text="Подразделение:", bg="#f7f7f7").grid(row=0, column=2, sticky="w", padx=(12,0))
+
+        tk.Label(top, text="Подразделение:", bg="#f7f7f7").grid(row=0, column=2, sticky="w", padx=(12, 0))
         self.cmb_filter_dep = ttk.Combobox(top, state="readonly", values=self.departments, width=20)
         self.cmb_filter_dep.set("Все")
         self.cmb_filter_dep.grid(row=0, column=3, padx=4)
-        
-        tk.Label(top, text="Статус:", bg="#f7f7f7").grid(row=0, column=4, sticky="w", padx=(12,0))
-        self.cmb_filter_status = ttk.Combobox(
-            top, state="readonly", 
-            values=["Все", "Новая", "Назначена", "В работе", "Выполнена"], 
-            width=15
-        )
+
+        tk.Label(top, text="Статус:", bg="#f7f7f7").grid(row=0, column=4, sticky="w", padx=(12, 0))
+        self.cmb_filter_status = ttk.Combobox(top, state="readonly", values=["Все"] + ORDER_STATUSES, width=15)
         self.cmb_filter_status.set("Все")
         self.cmb_filter_status.grid(row=0, column=5, padx=4)
-        
-        ttk.Button(top, text="🔄 Обновить", command=self.load_orders).grid(row=0, column=6, padx=12)
-        ttk.Button(top, text="💾 Сохранить назначения", command=self.save_assignments).grid(row=0, column=7, padx=4)
-        
-        # Таблица заявок
+
+        ttk.Button(top, text="Обновить", command=self.load_orders).grid(row=0, column=6, padx=12)
+        ttk.Button(top, text="Сохранить назначения", command=self.save_assignments).grid(row=0, column=7, padx=4)
+
         table_frame = tk.Frame(self)
         table_frame.pack(fill="both", expand=True, padx=10, pady=8)
-        
+
         columns = (
-            "id", "created", "date", "dept", "requester", 
-            "object", "tech", "qty", "time", "hours", 
+            "id", "created", "date", "dept", "requester",
+            "object", "tech", "qty", "time", "hours",
             "assigned_vehicle", "driver", "status"
         )
-        
+
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=20)
-        
+
         headers = {
-            "id": "ID", "created": "Создано", "date": "Дата", 
-            "dept": "Подразделение", "requester": "Заявитель",
-            "object": "Объект/Адрес", "tech": "Техника", "qty": "Кол-во",
-            "time": "Подача", "hours": "Часы", 
-            "assigned_vehicle": "Назначен авто", "driver": "Водитель", 
-            "status": "Статус"
+            "id": "ID",
+            "created": "Создано",
+            "date": "Дата",
+            "dept": "Подразделение",
+            "requester": "Заявитель",
+            "object": "Объект/Адрес",
+            "tech": "Техника",
+            "qty": "Кол-во",
+            "time": "Подача",
+            "hours": "Часы",
+            "assigned_vehicle": "Назначен авто",
+            "driver": "Водитель",
+            "status": "Статус",
         }
-        
+
         widths = {
-            "id": 80, "created": 130, "date": 90, "dept": 120, 
-            "requester": 150, "object": 200, "tech": 180, 
-            "qty": 50, "time": 60, "hours": 50, 
-            "assigned_vehicle": 180, "driver": 150, "status": 100
+            "id": 80,
+            "created": 130,
+            "date": 90,
+            "dept": 120,
+            "requester": 150,
+            "object": 220,
+            "tech": 180,
+            "qty": 50,
+            "time": 60,
+            "hours": 60,
+            "assigned_vehicle": 220,
+            "driver": 150,
+            "status": 100,
         }
-        
+
         for col in columns:
             self.tree.heading(col, text=headers.get(col, col))
-            self.tree.column(col, width=widths.get(col, 100))
-        
+            self.tree.column(col, width=widths.get(col, 100), anchor="w")
+
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        
+
         self.tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
-        
+
         table_frame.grid_rowconfigure(0, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
-        
+
         self.tree.bind("<Double-1>", self.on_row_double_click)
-        
-        self.tree.tag_configure('Новая', background='#fff3cd')
-        self.tree.tag_configure('Назначена', background='#d1ecf1')
-        self.tree.tag_configure('В работе', background='#d4edda')
-        self.tree.tag_configure('Выполнена', background='#e2e3e5')
-        
-    def load_orders(self):
-        """Загрузка заявок из PostgreSQL"""
+
+        self.tree.tag_configure("Новая", background="#fff3cd")
+        self.tree.tag_configure("Назначена", background="#d1ecf1")
+        self.tree.tag_configure("В работе", background="#d4edda")
+        self.tree.tag_configure("Выполнена", background="#e2e3e5")
+        self.tree.tag_configure("Отменена", background="#f8d7da")
+
+    def load_orders(self, silent: bool = False):
         try:
-            filter_date = self.ent_filter_date.get().strip()
-            filter_dept = self.cmb_filter_dep.get().strip()
-            filter_status = self.cmb_filter_status.get().strip()
+            filter_date = safe_str(self.ent_filter_date.get())
+            filter_dept = safe_str(self.cmb_filter_dep.get())
+            filter_status = safe_str(self.cmb_filter_status.get())
 
             orders = get_transport_orders_for_planning(
                 filter_date=filter_date or None,
@@ -1390,83 +1656,111 @@ class TransportPlanningPage(tk.Frame):
                 filter_status=filter_status or None,
             )
             self._populate_tree(orders)
-            messagebox.showinfo("Загрузка", f"Загружено заявок: {len(orders)}")
+            if not silent:
+                logger.info("Загружено заявок для планирования: %s", len(orders))
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось загрузить заявки из БД:\n{e}")
+            logger.exception("Ошибка загрузки заявок")
+            messagebox.showerror("Ошибка", f"Не удалось загрузить заявки из БД:\n{e}", parent=self)
 
-    def _check_vehicle_conflict(self, vehicle_full: str, req_date: str, req_time: str, current_id: str) -> List[Dict]:
-        """
-        Проверяет, не назначен ли этот автомобиль на другую заявку в это же время
-        vehicle_full: "Автокран | КС-45717 | А123ВС77"
-        """
+    def _check_vehicle_conflict(self, vehicle_full: str, req_date: str, req_time: str, req_hours: Any, current_id: str) -> List[Dict]:
         if not vehicle_full or not req_date:
             return []
-    
+
+        current_interval = make_interval(req_date, req_time, req_hours)
         conflicts = []
-    
+
         for item_id in self.tree.get_children():
-            values = self.tree.item(item_id)['values']
-            if values[0] == current_id:
+            values = self.tree.item(item_id)["values"]
+            other_id = str(values[0])
+
+            if other_id == str(current_id):
                 continue
-            other_date = values[2]
-            other_vehicle = values[10]
-            other_time = values[8]
-            other_requester = values[4]
-            other_object = values[5]
-            other_status = values[12]
-        
-            if (other_vehicle == vehicle_full and 
-                other_date == req_date and
-                other_status not in ['Выполнена', 'Отменена']):
-                if not req_time or not other_time:
-                    conflicts.append({'time': other_time or 'не указано',
-                                      'requester': other_requester,
-                                      'object': other_object,
-                                      'status': other_status})
-                elif req_time == other_time:
-                    conflicts.append({'time': other_time,
-                                      'requester': other_requester,
-                                      'object': other_object,
-                                      'status': other_status})
-    
+
+            other_date = safe_str(values[2])
+            other_vehicle = safe_str(values[10])
+            other_time = safe_str(values[8])
+            other_hours = values[9]
+            other_requester = safe_str(values[4])
+            other_object = safe_str(values[5])
+            other_status = safe_str(values[12])
+
+            if other_vehicle != vehicle_full:
+                continue
+            if other_date != req_date:
+                continue
+            if other_status in ["Выполнена", "Отменена"]:
+                continue
+
+            if current_interval is None:
+                conflicts.append({
+                    "time": other_time or "не указано",
+                    "requester": other_requester,
+                    "object": other_object,
+                    "status": other_status
+                })
+                continue
+
+            other_interval = make_interval(other_date, other_time, other_hours)
+            if other_interval is None:
+                conflicts.append({
+                    "time": other_time or "не указано",
+                    "requester": other_requester,
+                    "object": other_object,
+                    "status": other_status
+                })
+                continue
+
+            if intervals_intersect(current_interval[0], current_interval[1], other_interval[0], other_interval[1]):
+                conflicts.append({
+                    "time": other_time or "не указано",
+                    "requester": other_requester,
+                    "object": other_object,
+                    "status": other_status
+                })
+
         return conflicts
-    
+
     def _populate_tree(self, orders: List[Dict]):
         for item in self.tree.get_children():
             self.tree.delete(item)
         self.row_meta = {}
 
         for order in orders:
-            obj_display = order.get('object_address', '') or order.get('object_id', '')
-            status = order.get('status', 'Новая')
+            obj_display = order.get("object_address", "") or order.get("object_id", "")
+            status = order.get("status", "Новая")
 
-            item_id = self.tree.insert("", "end", values=(
-                order.get('id', ''),
-                order.get('created_at', ''),
-                order.get('date', ''),
-                order.get('department', ''),
-                order.get('requester_fio', ''),
-                obj_display,
-                order.get('tech', ''),
-                order.get('qty', ''),
-                order.get('time', ''),
-                order.get('hours', ''),
-                order.get('assigned_vehicle', ''),
-                order.get('driver', ''),
-                status
-            ), tags=(status,))
+            item_id = self.tree.insert(
+                "",
+                "end",
+                values=(
+                    order.get("id", ""),
+                    order.get("created_at", ""),
+                    order.get("date", ""),
+                    order.get("department", ""),
+                    order.get("requester_fio", ""),
+                    obj_display,
+                    order.get("tech", ""),
+                    order.get("qty", ""),
+                    order.get("time", ""),
+                    order.get("hours", ""),
+                    order.get("assigned_vehicle", ""),
+                    order.get("driver", ""),
+                    status
+                ),
+                tags=(status,),
+            )
 
             self.row_meta[item_id] = {
-                "comment": order.get("comment") or order.get("order_comment") or "",
-                "note": order.get("note") or order.get("position_note") or "",
+                "comment": order.get("comment") or "",
+                "note": order.get("position_note") or "",
             }
-    
+
     def on_row_double_click(self, event):
         selection = self.tree.selection()
         if not selection:
             return
         item = self.tree.item(selection[0])
-        values = item['values']
+        values = item["values"]
         self._show_assignment_dialog(selection[0], values)
 
     def _show_assignment_dialog(self, item_id, values):
@@ -1482,7 +1776,6 @@ class TransportPlanningPage(tk.Frame):
         y = (dialog.winfo_screenheight() // 2) - (700 // 2)
         dialog.geometry(f"640x700+{x}+{y}")
 
-        # Контейнер со скроллом
         scroll_container = tk.Frame(dialog)
         scroll_container.pack(fill="both", expand=True, padx=0, pady=0)
 
@@ -1500,10 +1793,11 @@ class TransportPlanningPage(tk.Frame):
 
         def on_canvas_configure(event):
             canvas.itemconfig(canvas_window, width=event.width)
+
         canvas.bind("<Configure>", on_canvas_configure)
 
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
         def bind_mousewheel(event=None):
             canvas.bind_all("<MouseWheel>", _on_mousewheel)
@@ -1517,13 +1811,12 @@ class TransportPlanningPage(tk.Frame):
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        # Информация о заявке
-        info_frame = tk.LabelFrame(scrollable_frame, text="📋 Информация о заявке", padx=12, pady=10)
+        info_frame = tk.LabelFrame(scrollable_frame, text="Информация о заявке", padx=12, pady=10)
         info_frame.pack(fill="x", padx=15, pady=10)
 
         info_data = [
             ("Дата:", values[2]),
-            ("Время подачи:", values[8] or 'не указано'),
+            ("Время подачи:", values[8] or "не указано"),
             ("Заявитель:", values[4]),
             ("Объект:", values[5]),
         ]
@@ -1531,47 +1824,42 @@ class TransportPlanningPage(tk.Frame):
         for label, value in info_data:
             row = tk.Frame(info_frame)
             row.pack(fill="x", pady=2)
-            tk.Label(row, text=label, font=("Arial", 9), width=15, anchor="w").pack(side="left")
-            tk.Label(row, text=value, font=("Arial", 9), anchor="w").pack(side="left", fill="x", expand=True)
+            tk.Label(row, text=label, width=15, anchor="w").pack(side="left")
+            tk.Label(row, text=value, anchor="w").pack(side="left", fill="x", expand=True)
 
-        # Техника
         tech_frame = tk.Frame(info_frame, bg="#e3f2fd", relief="solid", borderwidth=1)
         tech_frame.pack(fill="x", pady=(8, 2), padx=5)
         tk.Label(
-            tech_frame, 
-            text=f"🚛 Техника: {values[6]} x {values[7]} ({values[9]} ч.)", 
-            font=("Arial", 10, "bold"), 
+            tech_frame,
+            text=f"Техника: {values[6]} x {values[7]} ({values[9]} ч.)",
+            font=("Arial", 10, "bold"),
             fg="#0066cc",
             bg="#e3f2fd",
             padx=8,
             pady=8
         ).pack(anchor="w")
 
-        # Тексты
         meta = self.row_meta.get(item_id, {})
-        order_comment = (meta.get("comment") or "").strip()
-        position_note = (meta.get("note") or "").strip()
+        order_comment = safe_str(meta.get("comment"))
+        position_note = safe_str(meta.get("note"))
 
-        texts_frame = tk.LabelFrame(scrollable_frame, text="🗒 Тексты заявки", padx=12, pady=10)
+        texts_frame = tk.LabelFrame(scrollable_frame, text="Тексты заявки", padx=12, pady=10)
         texts_frame.pack(fill="x", padx=15, pady=(0, 8))
 
         row_c = tk.Frame(texts_frame)
         row_c.pack(fill="x", pady=2)
-        tk.Label(row_c, text="Комментарий:", font=("Arial", 9), width=15, anchor="w").pack(side="left")
-        tk.Label(row_c, text=(order_comment or "—"), font=("Arial", 9),
-                 anchor="w", justify="left", wraplength=560).pack(side="left", fill="x", expand=True)
+        tk.Label(row_c, text="Комментарий:", width=15, anchor="w").pack(side="left")
+        tk.Label(row_c, text=order_comment or "—", anchor="w", justify="left", wraplength=560).pack(side="left", fill="x", expand=True)
 
         row_n = tk.Frame(texts_frame)
         row_n.pack(fill="x", pady=2)
-        tk.Label(row_n, text="Примечание:", font=("Arial", 9), width=15, anchor="w").pack(side="left")
-        tk.Label(row_n, text=(position_note or "—"), font=("Arial", 9),
-                 anchor="w", justify="left", wraplength=560).pack(side="left", fill="x", expand=True)
+        tk.Label(row_n, text="Примечание:", width=15, anchor="w").pack(side="left")
+        tk.Label(row_n, text=position_note or "—", anchor="w", justify="left", wraplength=560).pack(side="left", fill="x", expand=True)
 
         warning_frame = tk.Frame(scrollable_frame, bg="#fff3cd", relief="solid", borderwidth=1)
         warning_label = tk.Label(
-            warning_frame, 
-            text="", 
-            font=("Arial", 9), 
+            warning_frame,
+            text="",
             bg="#fff3cd",
             fg="#856404",
             wraplength=580,
@@ -1579,10 +1867,10 @@ class TransportPlanningPage(tk.Frame):
         )
         warning_label.pack(padx=10, pady=8)
 
-        assign_frame = tk.LabelFrame(scrollable_frame, text="🚗 Назначение транспорта", padx=15, pady=15)
+        assign_frame = tk.LabelFrame(scrollable_frame, text="Назначение транспорта", padx=15, pady=15)
         assign_frame.pack(fill="both", expand=True, padx=15, pady=5)
 
-        current_assignment = values[10]
+        current_assignment = safe_str(values[10])
         current_type = ""
         current_name = ""
         current_plate = ""
@@ -1593,115 +1881,25 @@ class TransportPlanningPage(tk.Frame):
             current_name = parts[1].strip() if len(parts) > 1 else ""
             current_plate = parts[2].strip() if len(parts) > 2 else ""
         elif current_assignment:
-            current_type = current_assignment.strip()
+            current_type = current_assignment
 
-        tk.Label(assign_frame, text="Тип техники:", font=("Arial", 9, "bold")).grid(
-            row=0, column=0, sticky="w", pady=(5, 2)
-        )
+        tk.Label(assign_frame, text="Тип техники:", font=("Arial", 9, "bold")).grid(row=0, column=0, sticky="w", pady=(5, 2))
         vehicle_type_var = tk.StringVar(value=current_type)
-        cmb_vehicle_type = ttk.Combobox(
-            assign_frame, 
-            textvariable=vehicle_type_var,
-            values=self.vehicle_types,
-            state="readonly",
-            width=55,
-            font=("Arial", 9)
-        )
+        cmb_vehicle_type = ttk.Combobox(assign_frame, textvariable=vehicle_type_var, values=self.vehicle_types, state="readonly", width=55)
         cmb_vehicle_type.grid(row=1, column=0, pady=(0, 12), sticky="we")
 
-        tk.Label(assign_frame, text="Наименование:", font=("Arial", 9, "bold")).grid(
-            row=2, column=0, sticky="w", pady=(5, 2)
-        )
+        tk.Label(assign_frame, text="Наименование:", font=("Arial", 9, "bold")).grid(row=2, column=0, sticky="w", pady=(5, 2))
         vehicle_name_var = tk.StringVar(value="")
-        cmb_vehicle_name = ttk.Combobox(
-            assign_frame, 
-            textvariable=vehicle_name_var,
-            values=[],
-            state="readonly",
-            width=55,
-            font=("Arial", 9)
-        )
+        cmb_vehicle_name = ttk.Combobox(assign_frame, textvariable=vehicle_name_var, values=[], state="readonly", width=55)
         cmb_vehicle_name.grid(row=3, column=0, pady=(0, 12), sticky="we")
 
-        tk.Label(assign_frame, text="Гос. номер:", font=("Arial", 9, "bold")).grid(
-            row=4, column=0, sticky="w", pady=(5, 2)
-        )
+        tk.Label(assign_frame, text="Гос. номер:", font=("Arial", 9, "bold")).grid(row=4, column=0, sticky="w", pady=(5, 2))
         vehicle_plate_var = tk.StringVar(value="")
-        cmb_vehicle_plate = ttk.Combobox(
-            assign_frame, 
-            textvariable=vehicle_plate_var,
-            values=[],
-            state="readonly",
-            width=55,
-            font=("Arial", 9)
-        )
+        cmb_vehicle_plate = ttk.Combobox(assign_frame, textvariable=vehicle_plate_var, values=[], state="readonly", width=55)
         cmb_vehicle_plate.grid(row=5, column=0, pady=(0, 12), sticky="we")
 
-        selection_info = tk.Label(
-            assign_frame,
-            text="Выберите сначала тип, затем наименование и гос. номер",
-            font=("Arial", 8),
-            fg="#666"
-        )
+        selection_info = tk.Label(assign_frame, text="Выберите тип, затем наименование и гос. номер", fg="#666")
         selection_info.grid(row=6, column=0, sticky="w", pady=(0, 10))
-
-        def update_names(*args):
-            selected_type = vehicle_type_var.get()
-            vehicle_name_var.set("")
-            vehicle_plate_var.set("")
-    
-            if not selected_type:
-                cmb_vehicle_name['values'] = []
-                cmb_vehicle_plate['values'] = []
-                cmb_vehicle_name.state(['disabled'])
-                cmb_vehicle_plate.state(['disabled'])
-                selection_info.config(text="Выберите тип техники", fg="#666")
-                return
-    
-            names = sorted(set(
-                v['name'] for v in self.vehicles 
-                if v['type'] == selected_type and v['name']
-            ))
-    
-            cmb_vehicle_name['values'] = names
-            cmb_vehicle_name.state(['!disabled'])
-            cmb_vehicle_plate['values'] = []
-            cmb_vehicle_plate.state(['disabled'])
-    
-            if len(names) == 0:
-                selection_info.config(text="Нет доступных наименований для этого типа", fg="#dc3545")
-            elif len(names) == 1:
-                vehicle_name_var.set(names[0])
-            else:
-                selection_info.config(text=f"Доступно наименований: {len(names)}", fg="#666")
-
-        def update_plates(*args):
-            selected_type = vehicle_type_var.get()
-            selected_name = vehicle_name_var.get()
-            vehicle_plate_var.set("")
-    
-            if not selected_type or not selected_name:
-                cmb_vehicle_plate['values'] = []
-                cmb_vehicle_plate.state(['disabled'])
-                return
-    
-            plates = sorted(set(
-                v['plate'] for v in self.vehicles 
-                if v['type'] == selected_type 
-                and v['name'] == selected_name 
-                and v['plate']
-            ))
-    
-            cmb_vehicle_plate['values'] = plates
-            cmb_vehicle_plate.state(['!disabled'])
-    
-            if len(plates) == 0:
-                selection_info.config(text="Нет доступных гос. номеров", fg="#dc3545")
-            elif len(plates) == 1:
-                vehicle_plate_var.set(plates[0])
-                selection_info.config(text=f"✓ Назначен: {get_full_vehicle_string()}", fg="#28a745")
-            else:
-                selection_info.config(text=f"Доступно гос. номеров: {len(plates)}", fg="#666")
 
         def get_full_vehicle_string() -> str:
             parts = []
@@ -1713,89 +1911,118 @@ class TransportPlanningPage(tk.Frame):
                 parts.append(vehicle_plate_var.get())
             return " | ".join(parts) if parts else ""
 
-        vehicle_type_var.trace_add("write", update_names)
-        vehicle_name_var.trace_add("write", update_plates)
+        def update_names(*args):
+            selected_type = vehicle_type_var.get()
+            vehicle_name_var.set("")
+            vehicle_plate_var.set("")
 
-        ttk.Separator(assign_frame, orient='horizontal').grid(
-            row=7, column=0, sticky='ew', pady=15
-        )
+            if not selected_type:
+                cmb_vehicle_name["values"] = []
+                cmb_vehicle_plate["values"] = []
+                cmb_vehicle_name.state(["disabled"])
+                cmb_vehicle_plate.state(["disabled"])
+                selection_info.config(text="Выберите тип техники", fg="#666")
+                return
 
-        tk.Label(assign_frame, text="Водитель:", font=("Arial", 9, "bold")).grid(
-            row=8, column=0, sticky="w", pady=(5, 2)
-        )
+            names = sorted(set(
+                safe_str(v["name"]) for v in self.vehicles
+                if safe_str(v.get("type")) == selected_type and safe_str(v.get("name"))
+            ))
 
-        driver_count_label = tk.Label(
-            assign_frame, 
-            text=f"(доступно: {len(self.drivers)} чел.)",
-            font=("Arial", 8),
-            fg="#666"
-        )
-        driver_count_label.grid(row=8, column=0, sticky="e", pady=(5, 2))
+            cmb_vehicle_name["values"] = names
+            cmb_vehicle_name.state(["!disabled"])
+            cmb_vehicle_plate["values"] = []
+            cmb_vehicle_plate.state(["disabled"])
 
-        driver_var = tk.StringVar(value=values[11])
+            if len(names) == 0:
+                selection_info.config(text="Нет доступных наименований для этого типа", fg="#dc3545")
+            elif len(names) == 1:
+                vehicle_name_var.set(names[0])
+            else:
+                selection_info.config(text=f"Доступно наименований: {len(names)}", fg="#666")
 
+        def update_plates(*args):
+            selected_type = vehicle_type_var.get()
+            selected_name = vehicle_name_var.get()
+            vehicle_plate_var.set("")
+
+            if not selected_type or not selected_name:
+                cmb_vehicle_plate["values"] = []
+                cmb_vehicle_plate.state(["disabled"])
+                return
+
+            plates = sorted(set(
+                safe_str(v["plate"]) for v in self.vehicles
+                if safe_str(v.get("type")) == selected_type
+                and safe_str(v.get("name")) == selected_name
+                and safe_str(v.get("plate"))
+            ))
+
+            cmb_vehicle_plate["values"] = plates
+            cmb_vehicle_plate.state(["!disabled"])
+
+            if len(plates) == 0:
+                selection_info.config(text="Нет доступных гос. номеров", fg="#dc3545")
+            elif len(plates) == 1:
+                vehicle_plate_var.set(plates[0])
+            else:
+                selection_info.config(text=f"Доступно гос. номеров: {len(plates)}", fg="#666")
+
+        driver_var = tk.StringVar(value=safe_str(values[11]))
         driver_display_list = []
         for d in self.drivers:
-            display = f"{d['fio']}"
-            if d.get('dep'):
-                display += f" ({d['dep']})"
+            display = safe_str(d["fio"])
+            if safe_str(d.get("dep")):
+                display += f" ({safe_str(d.get('dep'))})"
             driver_display_list.append(display)
 
-        cmb_driver = ttk.Combobox(
-            assign_frame,
-            textvariable=driver_var,
-            values=driver_display_list,
-            width=55,
-            font=("Arial", 9)
-        )
+        ttk.Separator(assign_frame, orient="horizontal").grid(row=7, column=0, sticky="ew", pady=15)
+
+        tk.Label(assign_frame, text="Водитель:", font=("Arial", 9, "bold")).grid(row=8, column=0, sticky="w", pady=(5, 2))
+        tk.Label(assign_frame, text=f"(доступно: {len(self.drivers)} чел.)", fg="#666").grid(row=8, column=0, sticky="e", pady=(5, 2))
+
+        cmb_driver = ttk.Combobox(assign_frame, textvariable=driver_var, values=driver_display_list, width=55)
         cmb_driver.grid(row=9, column=0, pady=(0, 12), sticky="we")
 
-        tk.Label(assign_frame, text="Статус:", font=("Arial", 9, "bold")).grid(
-            row=10, column=0, sticky="w", pady=(5, 2)
-        )
-        status_var = tk.StringVar(value=values[12])
-        cmb_status = ttk.Combobox(
-            assign_frame,
-            textvariable=status_var,
-            values=["Новая", "Назначена", "В работе", "Выполнена"],
-            state="readonly",
-            width=55,
-            font=("Arial", 9)
-        )
+        tk.Label(assign_frame, text="Статус:", font=("Arial", 9, "bold")).grid(row=10, column=0, sticky="w", pady=(5, 2))
+        status_var = tk.StringVar(value=safe_str(values[12]) or "Новая")
+        cmb_status = ttk.Combobox(assign_frame, textvariable=status_var, values=ORDER_STATUSES, state="readonly", width=55)
         cmb_status.grid(row=11, column=0, pady=(0, 15), sticky="we")
 
         assign_frame.grid_columnconfigure(0, weight=1)
+
+        def on_vehicle_or_driver_change(*args):
+            if get_full_vehicle_string() and status_var.get() == "Новая":
+                status_var.set("Назначена")
+            check_conflicts()
 
         def check_conflicts(*args):
             selected_vehicle = get_full_vehicle_string()
             if not selected_vehicle:
                 warning_frame.pack_forget()
                 return
-    
-            req_date = values[2]
-            req_time = values[8]
-            current_id = values[0]
-    
-            conflicts = self._check_vehicle_conflict(selected_vehicle, req_date, req_time, current_id)
-    
+
+            req_date = safe_str(values[2])
+            req_time = safe_str(values[8])
+            req_hours = values[9]
+            current_id = safe_str(values[0])
+
+            conflicts = self._check_vehicle_conflict(selected_vehicle, req_date, req_time, req_hours, current_id)
             if conflicts:
-                warning_text = f"⚠️ ВНИМАНИЕ! Автомобиль '{selected_vehicle}' уже назначен на {len(conflicts)} заявку(-и) в этот день:\n\n"
+                warning_text = (
+                    f"ВНИМАНИЕ! Автомобиль '{selected_vehicle}' уже назначен на {len(conflicts)} "
+                    f"заявк(у/и) с пересечением по времени:\n\n"
+                )
                 for i, conf in enumerate(conflicts, 1):
                     warning_text += f"{i}. {conf['time']} — {conf['requester']} ({conf['object']}) [{conf['status']}]\n"
-                warning_text += "\nПроверьте возможность выполнения заявок!"
-        
+                warning_text += "\nПроверьте возможность выполнения заявок."
                 warning_label.config(text=warning_text)
                 warning_frame.pack(fill="x", padx=15, pady=(0, 5))
             else:
                 warning_frame.pack_forget()
 
-        def on_vehicle_or_driver_change(*args):
-            if get_full_vehicle_string() and driver_var.get():
-                if status_var.get() == "Новая":
-                    status_var.set("Назначена")
-
-        vehicle_plate_var = tk.StringVar(value="")
-        cmb_vehicle_plate['textvariable'] = vehicle_plate_var
+        vehicle_type_var.trace_add("write", update_names)
+        vehicle_name_var.trace_add("write", update_plates)
         vehicle_plate_var.trace_add("write", on_vehicle_or_driver_change)
         driver_var.trace_add("write", on_vehicle_or_driver_change)
 
@@ -1806,17 +2033,17 @@ class TransportPlanningPage(tk.Frame):
             if not get_full_vehicle_string():
                 messagebox.showwarning("Назначение", "Выберите транспорт!", parent=dialog)
                 return
-    
-            driver_name = driver_var.get()
+
+            driver_name = safe_str(driver_var.get())
             if " (" in driver_name:
                 driver_name = driver_name.split(" (")[0].strip()
-    
+
             new_values = list(values)
             new_values[10] = get_full_vehicle_string()
             new_values[11] = driver_name
-            new_values[12] = status_var.get()
+            new_values[12] = safe_str(status_var.get()) or "Новая"
             self.tree.item(item_id, values=new_values, tags=(new_values[12],))
-    
+
             unbind_mousewheel()
             dialog.destroy()
 
@@ -1824,17 +2051,14 @@ class TransportPlanningPage(tk.Frame):
             unbind_mousewheel()
             dialog.destroy()
 
-        ttk.Button(button_container, text="✓ Сохранить", command=save_and_close, width=20).pack(side="left", padx=15, pady=12)
-        ttk.Button(button_container, text="✗ Отмена", command=cancel_and_close, width=20).pack(side="left", padx=5, pady=12)
+        ttk.Button(button_container, text="Сохранить", command=save_and_close, width=20).pack(side="left", padx=15, pady=12)
+        ttk.Button(button_container, text="Отмена", command=cancel_and_close, width=20).pack(side="left", padx=5, pady=12)
 
         dialog.update_idletasks()
-        scrollable_frame.update_idletasks()
-        canvas.update_idletasks()
-    
+
         if current_type:
             vehicle_type_var.set(current_type)
             dialog.update_idletasks()
-            # После установки типа имена подтянутся через trace
             if current_name:
                 vehicle_name_var.set(current_name)
                 dialog.update_idletasks()
@@ -1844,7 +2068,6 @@ class TransportPlanningPage(tk.Frame):
 
         canvas.configure(scrollregion=canvas.bbox("all"))
         canvas.yview_moveto(0)
-        dialog.update()
 
         cmb_vehicle_type.focus_set()
         dialog.bind("<Return>", lambda e: save_and_close())
@@ -1853,85 +2076,46 @@ class TransportPlanningPage(tk.Frame):
         check_conflicts()
 
     def save_assignments(self):
-        """Сохранение назначений в PostgreSQL в одной транзакции."""
         assignments = []
         for item in self.tree.get_children():
-            values = self.tree.item(item)['values']
+            values = self.tree.item(item)["values"]
             assignments.append({
-                'id': values[0],
-                'assigned_vehicle': values[10],
-                'driver': values[11],
-                'status': values[12],
+                "id": values[0],
+                "assigned_vehicle": values[10],
+                "driver": values[11],
+                "status": values[12],
             })
 
         if not assignments:
-            messagebox.showwarning("Сохранение", "Нет данных для сохранения")
+            messagebox.showwarning("Сохранение", "Нет данных для сохранения", parent=self)
             return
 
-        conn = None
         try:
-            conn = get_db_connection()
-            with conn: # Начинаем транзакцию
-                with conn.cursor() as cur:
-                    # Используем execute_batch для эффективности
-                    from psycopg2.extras import execute_batch
-                    sql = """
-                        UPDATE transport_order_positions
-                        SET assigned_vehicle = %s, driver = %s, status = %s
-                        WHERE id = %s
-                    """
-                    # Готовим данные для execute_batch
-                    data_to_update = [
-                        (
-                            (a.get('assigned_vehicle') or "").strip(),
-                            (a.get('driver') or "").strip(),
-                            (a.get('status') or "Новая").strip(),
-                            a.get('id'),
-                        )
-                        for a in assignments if a.get('id')
-                    ]
-                    execute_batch(cur, sql, data_to_update)
-            
-            messagebox.showinfo("Сохранение", f"Назначения успешно сохранены.\nОбновлено записей: {len(assignments)}")
+            updated = save_transport_assignments(assignments)
+            messagebox.showinfo("Сохранение", f"Назначения успешно сохранены.\nОбновлено записей: {updated}", parent=self)
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Ошибка сохранения в БД:\n{e}")
-        finally:
-            if conn:
-                release_db_connection(conn)
+            logger.exception("Ошибка сохранения назначений")
+            messagebox.showerror("Ошибка", f"Ошибка сохранения в БД:\n{e}", parent=self)
 
-# ------------------------- Реестр транспорта -------------------------
+
+# ========================= TRANSPORT REGISTRY =========================
 
 class TransportRegistryPage(tk.Frame):
-    """
-    Реестр транспортных средств (vehicles):
-    Тип - Наименование - Гос№ - Подразделение - Примечание.
-    """
-
     def __init__(self, master):
         super().__init__(master, bg="#f7f7f7")
 
-        # Верхняя панель с кнопками
         top = tk.Frame(self, bg="#f7f7f7")
         top.pack(fill="x", padx=10, pady=8)
 
-        ttk.Button(top, text="Добавить транспортное средство", command=self.add_vehicle)\
-            .pack(side="left", padx=(0, 8))
-        ttk.Button(top, text="Загрузить из Excel", command=self.import_from_excel)\
-            .pack(side="left", padx=(0, 8))
-        ttk.Button(top, text="Обновить", command=self.reload_data)\
-            .pack(side="left", padx=(0, 8))
+        ttk.Button(top, text="Добавить транспортное средство", command=self.add_vehicle).pack(side="left", padx=(0, 8))
+        ttk.Button(top, text="Загрузить из Excel", command=self.import_from_excel).pack(side="left", padx=(0, 8))
+        ttk.Button(top, text="Обновить", command=self.reload_data).pack(side="left", padx=(0, 8))
 
-        # Таблица
         table_frame = tk.Frame(self)
         table_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
         columns = ("id", "type", "name", "plate", "department", "note")
-        self.tree = ttk.Treeview(
-            table_frame,
-            columns=columns,
-            show="headings",
-            height=20,
-        )
+        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=20)
 
         headers = {
             "id": "ID",
@@ -1965,7 +2149,6 @@ class TransportRegistryPage(tk.Frame):
         table_frame.grid_rowconfigure(0, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
 
-        # Контекстное меню (удаление)
         self.menu = tk.Menu(self, tearoff=0)
         self.menu.add_command(label="Удалить", command=self.delete_selected)
 
@@ -1975,7 +2158,6 @@ class TransportRegistryPage(tk.Frame):
         self.reload_data()
 
     def reload_data(self):
-        """Обновить список из БД."""
         for item in self.tree.get_children():
             self.tree.delete(item)
 
@@ -2000,7 +2182,6 @@ class TransportRegistryPage(tk.Frame):
             )
 
     def add_vehicle(self):
-        """Открыть диалог добавления и записать в БД."""
         dlg = AddVehicleDialog(self)
         if not dlg.result:
             return
@@ -2019,7 +2200,6 @@ class TransportRegistryPage(tk.Frame):
             messagebox.showerror("Добавление транспорта", f"Ошибка записи в БД:\n{e}", parent=self)
 
     def delete_selected(self):
-        """Удалить выбранное ТС."""
         sel = self.tree.selection()
         if not sel:
             return
@@ -2048,16 +2228,12 @@ class TransportRegistryPage(tk.Frame):
             messagebox.showerror("Удаление транспорта", f"Ошибка при удалении из БД:\n{e}", parent=self)
 
     def _on_right_click(self, event):
-        """Показать контекстное меню при ПКМ."""
         row_id = self.tree.identify_row(event.y)
         if row_id:
             self.tree.selection_set(row_id)
             self.menu.tk_popup(event.x_root, event.y_root)
 
     def import_from_excel(self):
-        """Пакетная загрузка транспорта из Excel."""
-        from tkinter import filedialog
-
         path = filedialog.askopenfilename(
             parent=self,
             title="Выберите Excel-файл с транспортом",
@@ -2072,8 +2248,6 @@ class TransportRegistryPage(tk.Frame):
             messagebox.showerror("Импорт из Excel", f"Не удалось открыть файл:\n{e}", parent=self)
             return
 
-        # Ожидаем лист "Техника" с колонками:
-        # Тип - Наименование - Гос№ - Подразделение - Примечание
         sheet_name = "Техника"
         if sheet_name not in wb.sheetnames:
             messagebox.showerror("Импорт из Excel", f"В файле нет листа '{sheet_name}'.", parent=self)
@@ -2081,40 +2255,34 @@ class TransportRegistryPage(tk.Frame):
 
         ws = wb[sheet_name]
 
-        added = 0
-        errors = 0
-
-        # Пропускаем первую строку (заголовок)
+        rows = []
         for row in ws.iter_rows(min_row=2, values_only=True):
-            v_type = (row[0] or "").strip() if row and len(row) > 0 else ""
-            name = (row[1] or "").strip() if row and len(row) > 1 else ""
-            plate = (row[2] or "").strip() if row and len(row) > 2 else ""
-            dep = (row[3] or "").strip() if row and len(row) > 3 else ""
-            note = (row[4] or "").strip() if row and len(row) > 4 else ""
+            v_type = safe_str(row[0]) if row and len(row) > 0 else ""
+            name = safe_str(row[1]) if row and len(row) > 1 else ""
+            plate = safe_str(row[2]) if row and len(row) > 2 else ""
+            dep = safe_str(row[3]) if row and len(row) > 3 else ""
+            note = safe_str(row[4]) if row and len(row) > 4 else ""
 
             if not v_type and not name and not plate:
-                continue  # пустая строка
-
-            if not v_type or not name or not plate:
-                errors += 1
                 continue
 
-            try:
-                insert_vehicle(v_type=v_type, name=name, plate=plate, department=dep, note=note)
-                added += 1
-            except Exception:
-                errors += 1
+            rows.append((v_type, name, plate, dep, note))
 
-        self.reload_data()
+        try:
+            added, skipped = bulk_insert_vehicles(rows)
+            self.reload_data()
+            messagebox.showinfo(
+                "Импорт из Excel",
+                f"Загружено записей: {added}\nПропущено: {skipped}",
+                parent=self,
+            )
+        except Exception as e:
+            messagebox.showerror("Импорт из Excel", f"Ошибка загрузки данных:\n{e}", parent=self)
 
-        messagebox.showinfo(
-            "Импорт из Excel",
-            f"Загружено записей: {added}\nОшибок: {errors}",
-            parent=self,
-        )
+
+# ========================= MY ORDERS PAGE =========================
 
 class MyTransportOrdersPage(tk.Frame):
-    """Реестр заявок на транспорт, созданных текущим пользователем."""
     def __init__(self, master, app_ref=None):
         super().__init__(master, bg="#f7f7f7")
         self.app_ref = app_ref
@@ -2135,7 +2303,7 @@ class MyTransportOrdersPage(tk.Frame):
         top = tk.Frame(self, bg="#f7f7f7")
         top.pack(fill="x", padx=8, pady=(8, 4))
         tk.Label(top, text="Мои заявки на транспорт", font=("Segoe UI", 12, "bold"), bg="#f7f7f7").pack(side="left")
-        ttk.Button(top, text="🔄 Обновить", command=self._load_data).pack(side="right", padx=4)
+        ttk.Button(top, text="Обновить", command=self._load_data).pack(side="right", padx=4)
 
         frame = tk.Frame(self, bg="#f7f7f7")
         frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
@@ -2143,12 +2311,18 @@ class MyTransportOrdersPage(tk.Frame):
         cols = ("date", "object", "department", "requester", "count", "created_at")
         self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="browse")
 
-        self.tree.heading("date", text="Дата"); self.tree.column("date", width=90, anchor="center")
-        self.tree.heading("object", text="Объект"); self.tree.column("object", width=280)
-        self.tree.heading("department", text="Подразделение"); self.tree.column("department", width=180)
-        self.tree.heading("requester", text="Заявитель"); self.tree.column("requester", width=220)
-        self.tree.heading("count", text="Позиций"); self.tree.column("count", width=80, anchor="center")
-        self.tree.heading("created_at", text="Создана"); self.tree.column("created_at", width=140, anchor="center")
+        self.tree.heading("date", text="Дата")
+        self.tree.column("date", width=90, anchor="center")
+        self.tree.heading("object", text="Объект")
+        self.tree.column("object", width=280)
+        self.tree.heading("department", text="Подразделение")
+        self.tree.column("department", width=180)
+        self.tree.heading("requester", text="Заявитель")
+        self.tree.column("requester", width=220)
+        self.tree.heading("count", text="Позиций")
+        self.tree.column("count", width=80, anchor="center")
+        self.tree.heading("created_at", text="Создана")
+        self.tree.column("created_at", width=140, anchor="center")
 
         vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
@@ -2160,8 +2334,13 @@ class MyTransportOrdersPage(tk.Frame):
 
         bottom = tk.Frame(self, bg="#f7f7f7")
         bottom.pack(fill="x", padx=8, pady=(0, 8))
-        tk.Label(bottom, text="Двойной щелчок или Enter — открыть для редактирования или копирования.",
-                 font=("Segoe UI", 9), fg="#555", bg="#f7f7f7").pack(side="left")
+        tk.Label(
+            bottom,
+            text="Двойной щелчок или Enter — открыть для редактирования или копирования.",
+            font=("Segoe UI", 9),
+            fg="#555",
+            bg="#f7f7f7"
+        ).pack(side="left")
 
     def _load_data(self):
         for item in self.tree.get_children():
@@ -2174,23 +2353,27 @@ class MyTransportOrdersPage(tk.Frame):
             return
 
         try:
-            orders = load_user_transport_orders(user_id)
-            self._orders = orders
+            self._orders = load_user_transport_orders(user_id)
         except Exception as e:
             messagebox.showerror("Мои заявки", f"Ошибка загрузки списка заявок:\n{e}", parent=self)
             return
-        
+
         for o in self._orders:
             created_str = o["created_at"].strftime("%d.%m.%Y %H:%M") if isinstance(o.get("created_at"), datetime) else ""
             date_str = o["date"].strftime("%Y-%m-%d") if isinstance(o.get("date"), date) else str(o.get("date", ""))
-            self.tree.insert("", "end", iid=str(o["id"]), values=(
-                date_str,
-                o.get("object_address", ""),
-                o.get("department", ""),
-                o.get("requester_fio", ""),
-                o.get("positions_count", 0),
-                created_str
-            ))
+            self.tree.insert(
+                "",
+                "end",
+                iid=str(o["id"]),
+                values=(
+                    date_str,
+                    o.get("object_address", ""),
+                    o.get("department", ""),
+                    o.get("requester_fio", ""),
+                    o.get("positions_count", 0),
+                    created_str
+                )
+            )
 
     def _get_selected_order_id(self) -> Optional[int]:
         sel = self.tree.selection()
@@ -2206,7 +2389,7 @@ class MyTransportOrdersPage(tk.Frame):
         except Exception as e:
             messagebox.showerror("Мои заявки", f"Не удалось загрузить данные заявки ID={order_id}:\n{e}", parent=self)
             return
-        
+
         choice = messagebox.askyesnocancel(
             "Открыть заявку",
             "Нажмите «Да» для РЕДАКТИРОВАНИЯ заявки.\n"
@@ -2215,17 +2398,18 @@ class MyTransportOrdersPage(tk.Frame):
             parent=self
         )
 
-        if choice is None: return # Отмена
+        if choice is None:
+            return
 
-        if choice is False: # Создать копию
+        if choice is False:
             try:
-                # Увеличиваем дату по умолчанию на 1 день для копии
                 old_date = datetime.strptime(order_data["date"], "%Y-%m-%d").date()
                 order_data["date"] = (old_date + timedelta(days=1)).strftime("%Y-%m-%d")
-            except Exception: pass
+            except Exception:
+                pass
             edit_id = None
             title = f"Новая заявка на транспорт (копия #{order_id})"
-        else: # Редактировать
+        else:
             edit_id = order_id
             title = f"Редактирование заявки на транспорт #{order_id}"
 
@@ -2237,38 +2421,57 @@ class MyTransportOrdersPage(tk.Frame):
             win,
             existing_data=order_data,
             order_id=edit_id,
-            on_saved=self._load_data # Callback для обновления списка
+            on_saved=self._load_data
         )
-        page.app_ref = self.app_ref # Передаем app_ref дальше
+        page.app_ref = self.app_ref
         page.pack(fill="both", expand=True)
 
-# ------------------------- API для встраивания -------------------------
 
-# ЗАМЕНИТЕ существующую функцию create_page
+# ========================= API =========================
+
 def create_page(parent, app_ref=None) -> tk.Frame:
     ensure_config()
     try:
         page = SpecialOrdersPage(parent)
-        page.app_ref = app_ref # Добавлено
+        page.app_ref = app_ref
         return page
     except Exception:
-        import traceback
-        messagebox.showerror("Заявка — ошибка", traceback.format_exc(), parent=parent)
+        logger.exception("Ошибка создания страницы заявок")
+        messagebox.showerror("Заявка — ошибка", "Не удалось открыть страницу заявок.", parent=parent)
         return tk.Frame(parent)
 
-# ДОБАВЬТЕ новую функцию create_my_transport_orders_page в этот же блок
+
 def create_my_transport_orders_page(parent, app_ref=None) -> tk.Frame:
-    """Создает страницу 'Мои заявки на транспорт'."""
     ensure_config()
     try:
-        page = MyTransportOrdersPage(parent, app_ref=app_ref)
-        return page
+        return MyTransportOrdersPage(parent, app_ref=app_ref)
     except Exception:
-        import traceback
-        messagebox.showerror("Мои заявки (транспорт)", traceback.format_exc(), parent=parent)
+        logger.exception("Ошибка создания страницы моих заявок")
+        messagebox.showerror("Мои заявки (транспорт)", "Не удалось открыть страницу.", parent=parent)
         return tk.Frame(parent)
 
-# ------------------------- Вариант standalone-окна -------------------------
+
+def create_planning_page(parent) -> tk.Frame:
+    ensure_config()
+    try:
+        return TransportPlanningPage(parent)
+    except Exception:
+        logger.exception("Ошибка создания страницы планирования")
+        messagebox.showerror("Планирование — ошибка", "Не удалось открыть страницу планирования.", parent=parent)
+        return tk.Frame(parent)
+
+
+def create_transport_registry_page(parent) -> tk.Frame:
+    ensure_config()
+    try:
+        return TransportRegistryPage(parent)
+    except Exception:
+        logger.exception("Ошибка создания страницы реестра транспорта")
+        messagebox.showerror("Реестр транспорта — ошибка", "Не удалось открыть реестр транспорта.", parent=parent)
+        return tk.Frame(parent)
+
+
+# ========================= STANDALONE =========================
 
 class SpecialOrdersApp(tk.Tk):
     def __init__(self):
@@ -2280,43 +2483,20 @@ class SpecialOrdersApp(tk.Tk):
         page.pack(fill="both", expand=True)
 
     def destroy(self):
-        """Переопределяем для закрытия локального пула."""
         global db_connection_pool, USING_SHARED_POOL
         if not USING_SHARED_POOL and db_connection_pool:
-            print("Closing local DB connection pool for SpecialOrders...")
+            logger.info("Closing local DB connection pool for SpecialOrders...")
             db_connection_pool.closeall()
             db_connection_pool = None
         super().destroy()
 
-# ------------------------- API для встраивания -------------------------
-
-def create_planning_page(parent) -> tk.Frame:
-    ensure_config()
-    try:
-        return TransportPlanningPage(parent)
-    except Exception:
-        import traceback
-        messagebox.showerror("Планирование — ошибка", traceback.format_exc(), parent=parent)
-        return tk.Frame(parent)
-
-def create_transport_registry_page(parent) -> tk.Frame:
-    ensure_config()
-    try:
-        return TransportRegistryPage(parent)
-    except Exception:
-        import traceback
-        messagebox.showerror("Реестр транспорта — ошибка", traceback.format_exc(), parent=parent)
-        return tk.Frame(parent)
 
 def open_special_orders(parent=None):
-    """
-    Совместимость: если parent задан — открываем Toplevel с встраиваемой страницей.
-    Если не задан — отдельное окно как раньше.
-    """
     if parent is None:
         app = SpecialOrdersApp()
         app.mainloop()
         return app
+
     win = tk.Toplevel(parent)
     win.title(APP_TITLE)
     win.geometry("1180x720")
@@ -2324,7 +2504,6 @@ def open_special_orders(parent=None):
     page.pack(fill="both", expand=True)
     return win
 
-# ------------------------- Утилиты -------------------------
 
 def safe_filename(s: str, maxlen: int = 60) -> str:
     if not s:
@@ -2337,11 +2516,13 @@ def safe_filename(s: str, maxlen: int = 60) -> str:
 if __name__ == "__main__":
     ensure_config()
     try:
-        # Пробный вызов для инициализации локального пула
         conn = get_db_connection()
         release_db_connection(conn)
     except Exception as e:
+        root = tk.Tk()
+        root.withdraw()
         messagebox.showerror("Критическая ошибка", f"Не удалось подключиться к базе данных:\n{e}")
+        root.destroy()
         sys.exit(1)
 
     app = SpecialOrdersApp()
