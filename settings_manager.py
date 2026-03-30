@@ -77,6 +77,12 @@ KEY_MEALS_PLANNING_PASSWORD = "meals_planning_password"
 SETTINGS_FILENAME = "settings.dat"
 APP_SECRET = "KIwcVIWqzrPoBzrlTdN1lvnTcpX7sikf"
 
+CONFIG_SECTION_AUTH = "Auth"
+
+KEY_REMEMBER_ME = "remember_me"
+KEY_SAVED_USERNAME = "saved_username"
+KEY_SAVED_PASSWORD_B64 = "saved_password_b64"
+
 
 def exe_dir() -> Path:
     if getattr(__import__("sys"), "frozen", False):
@@ -192,8 +198,12 @@ _defaults: Dict[str, Dict[str, Any]] = {
         KEY_MEALS_PLANNING_ENABLED: "true",
         KEY_MEALS_PLANNING_PASSWORD: "2025",
     },
+    "Auth": {
+        KEY_REMEMBER_ME: "false",
+        KEY_SAVED_USERNAME: "",
+        KEY_SAVED_PASSWORD_B64: "",
+    },
 }
-
 _store: Dict[str, Dict[str, Any]] = {}
 
 
@@ -204,10 +214,39 @@ def _ensure_sections():
             if k not in _store[sec]:
                 _store[sec][k] = v
 
+def _to_bool(value: Any) -> bool:
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _migrate_legacy_auth_keys() -> bool:
+    """
+    Перенос старых ключей remember_me / saved_username / saved_password_b64
+    из корня словаря в секцию Auth.
+    """
+    changed = False
+    auth = _store.setdefault("Auth", {})
+
+    if "remember_me" in _store:
+        auth[KEY_REMEMBER_ME] = "true" if _to_bool(_store.pop("remember_me")) else "false"
+        changed = True
+
+    if "saved_username" in _store:
+        auth[KEY_SAVED_USERNAME] = str(_store.pop("saved_username") or "")
+        changed = True
+
+    if "saved_password_b64" in _store:
+        auth[KEY_SAVED_PASSWORD_B64] = str(_store.pop("saved_password_b64") or "")
+        changed = True
+
+    return changed
+
 
 def load_settings():
     global _store
-    if SETTINGS_PATH.exists():
+
+    file_exists = SETTINGS_PATH.exists()
+
+    if file_exists:
         try:
             raw = SETTINGS_PATH.read_bytes()
             _store = _decrypt_dict(raw)
@@ -217,8 +256,12 @@ def load_settings():
             _store = {}
     else:
         _store = {}
+
     _ensure_sections()
-    if not SETTINGS_PATH.exists():
+    migrated = _migrate_legacy_auth_keys()
+    _ensure_sections()
+
+    if (not file_exists) or migrated:
         save_settings()
 
 
@@ -281,6 +324,31 @@ def get_departments_list() -> List[Dict]:
     finally:
         if conn:
             release_db_connection(conn)
+
+def get_saved_auth_settings() -> Dict[str, Any]:
+    ensure_config()
+    auth = _store.setdefault("Auth", {})
+    return {
+        "remember_me": _to_bool(auth.get(KEY_REMEMBER_ME, "false")),
+        "saved_username": str(auth.get(KEY_SAVED_USERNAME, "")),
+        "saved_password_b64": str(auth.get(KEY_SAVED_PASSWORD_B64, "")),
+    }
+
+
+def set_saved_auth_settings(username: str, password_b64: str, remember: bool):
+    ensure_config()
+    auth = _store.setdefault("Auth", {})
+
+    auth[KEY_REMEMBER_ME] = "true" if remember else "false"
+
+    if remember:
+        auth[KEY_SAVED_USERNAME] = username or ""
+        auth[KEY_SAVED_PASSWORD_B64] = password_b64 or ""
+    else:
+        auth[KEY_SAVED_USERNAME] = ""
+        auth[KEY_SAVED_PASSWORD_B64] = ""
+
+    save_settings()
 
 def get_spr_path_from_config() -> Path:
     ensure_config()
