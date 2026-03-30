@@ -43,7 +43,6 @@ def exe_dir() -> Path:
 
 
 LOG_FILE = exe_dir() / "main_app_log.txt"
-SETTINGS_FILE = exe_dir() / "settings.dat"
 
 logging.basicConfig(
     filename=str(LOG_FILE),
@@ -58,24 +57,6 @@ logging.debug("=== main_app запущен ===")
 #  Локальное хранилище учётных данных (settings.dat)
 # ================================================================== #
 
-def _load_local_settings() -> dict:
-    try:
-        if SETTINGS_FILE.exists():
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception:
-        logging.exception("Ошибка чтения settings.dat")
-    return {}
-
-
-def _save_local_settings(data: dict):
-    try:
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        logging.exception("Ошибка записи settings.dat")
-
-
 def _obfuscate(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
@@ -88,25 +69,36 @@ def _deobfuscate(text: str) -> str:
 
 
 def load_saved_credentials() -> Tuple[str, str, bool]:
-    cfg = _load_local_settings()
-    remember = cfg.get("remember_me", False)
-    if not remember:
+    try:
+        if Settings is None:
+            return "", "", False
+
+        cfg = Settings.get_saved_auth_settings()
+        remember = bool(cfg.get("remember_me", False))
+        if not remember:
+            return "", "", False
+
+        username = str(cfg.get("saved_username", ""))
+        password = _deobfuscate(str(cfg.get("saved_password_b64", "")))
+        return username, password, True
+
+    except Exception:
+        logging.exception("Ошибка чтения сохранённых учётных данных")
         return "", "", False
-    username = cfg.get("saved_username", "")
-    password = _deobfuscate(cfg.get("saved_password_b64", ""))
-    return username, password, True
 
 
 def save_credentials(username: str, password: str, remember: bool):
-    cfg = _load_local_settings()
-    cfg["remember_me"] = remember
-    if remember:
-        cfg["saved_username"] = username
-        cfg["saved_password_b64"] = _obfuscate(password)
-    else:
-        cfg.pop("saved_username", None)
-        cfg.pop("saved_password_b64", None)
-    _save_local_settings(cfg)
+    try:
+        if Settings is None:
+            return
+
+        Settings.set_saved_auth_settings(
+            username=username,
+            password_b64=_obfuscate(password) if remember else "",
+            remember=remember,
+        )
+    except Exception:
+        logging.exception("Ошибка сохранения учётных данных")
 
 
 # --- ИМПОРТ ВСЕХ МОДУЛЕЙ ПРИЛОЖЕНИЯ ---
