@@ -485,6 +485,7 @@ class TimesheetPage(tk.Frame):
 
         self.model_rows_all: List[Dict[str, Any]] = []
         self.model_rows: List[Dict[str, Any]] = []
+        self._selected_row_keys: set[str] = set()
 
         self.var_filter = tk.StringVar()
         self.var_brigadier = tk.StringVar(value="Все")
@@ -527,6 +528,13 @@ class TimesheetPage(tk.Frame):
     # Helpers
     # --------------------------------------------------------
 
+def _update_selected_count(self):
+    try:
+        count = len(self._selected_row_keys)
+        self.lbl_selected_count.config(text=f"Выбрано строк: {count}")
+    except Exception:
+        pass
+    
     def _safe_current_user_id(self) -> Optional[int]:
         if self.owner_user_id:
             return int(self.owner_user_id)
@@ -702,6 +710,55 @@ class TimesheetPage(tk.Frame):
     def _auto_save_callback(self):
         self._auto_save_job = None
         self._save_all_internal(show_messages=False, is_auto=True)
+
+    def _row_key(self, rec: Dict[str, Any]) -> str:
+        return make_row_key(rec.get("fio", ""), rec.get("tbn", ""))
+    
+    def _remember_grid_selection(self):
+        """
+        Запоминает выделение текущих видимых строк в self._selected_row_keys
+        через устойчивые ключи (ФИО + таб.№).
+        """
+        if not hasattr(self, "grid"):
+            return
+    
+        try:
+            selected = self.grid.get_selected_indices()
+        except Exception:
+            selected = set()
+    
+        for idx in selected:
+            if 0 <= idx < len(self.model_rows):
+                rec = self.model_rows[idx]
+                self._selected_row_keys.add(self._row_key(rec))
+    
+    def _restore_grid_selection(self):
+        """
+        Восстанавливает выделение на текущем self.model_rows
+        по ранее сохранённым ключам.
+        """
+        if not hasattr(self, "grid"):
+            return
+    
+        indices: set[int] = set()
+        alive_keys: set[str] = set()
+    
+        for idx, rec in enumerate(self.model_rows):
+            key = self._row_key(rec)
+            if key in self._selected_row_keys:
+                indices.add(idx)
+                alive_keys.add(key)
+    
+        # Оставляем только реально существующие выбранные строки
+        # (если кого-то удалили из табеля — он уйдёт из selection)
+        self._selected_row_keys &= {self._row_key(rec) for rec in self.model_rows_all}
+    
+        try:
+            self.grid.set_selected_indices(indices)
+        except Exception:
+            pass
+    
+        self._update_selected_count()
 
     # --------------------------------------------------------
     # Справочники
@@ -1093,6 +1150,15 @@ class TimesheetPage(tk.Frame):
         )
         self.lbl_object_total.pack(side="left", padx=10)
 
+        self.lbl_selected_count = tk.Label(
+            bottom,
+            text="Выбрано строк: 0",
+            font=("Segoe UI", 9, "bold"),
+            fg=TS_COLORS["warning"],
+            bg=TS_COLORS["accent_light"],
+        )
+        self.lbl_selected_count.pack(side="left", padx=(20, 10))
+
         if self.read_only:
             tk.Label(
                 bottom,
@@ -1395,6 +1461,8 @@ class TimesheetPage(tk.Frame):
     def _load_existing_rows(self):
         self.model_rows_all.clear()
         self.model_rows = self.model_rows_all
+        self._selected_row_keys.clear()
+        self._update_selected_count()
         try:
             self.grid.set_selected_indices(set())
         except Exception:
@@ -1506,14 +1574,18 @@ class TimesheetPage(tk.Frame):
 
     def _apply_filter(self):
         self._filter_job = None
+    
+        # Сначала запоминаем текущее выделение видимых строк
+        self._remember_grid_selection()
+    
         q = normalize_spaces(self.var_filter.get() or "").lower()
         brig_tbn_sel = self._parse_selected_brigadier_tbn()
-
+    
         filtered: List[Dict[str, Any]] = []
         for rec in self.model_rows_all:
             fio = normalize_spaces(rec.get("fio") or "")
             tbn = normalize_tbn(rec.get("tbn"))
-
+    
             if brig_tbn_sel is not None:
                 assigned_brig_tbn = normalize_tbn(self._brig_assign.get(tbn) or "")
                 if brig_tbn_sel == "":
@@ -1522,21 +1594,19 @@ class TimesheetPage(tk.Frame):
                 else:
                     if assigned_brig_tbn != brig_tbn_sel:
                         continue
-
+    
             if q:
                 if q not in fio.lower() and q not in tbn.lower():
                     continue
-
+    
             filtered.append(rec)
-
+    
         self.model_rows = filtered
-
-        try:
-            self.grid.set_selected_indices(set())
-        except Exception:
-            pass
-
+    
         self.grid.set_rows(self.model_rows)
+    
+        # После перестройки списка восстанавливаем выделение
+        self._restore_grid_selection()
         self._recalc_object_total()
 
     def _recalc_row_totals_for_rec(self, rec: Dict[str, Any]):
@@ -1722,52 +1792,59 @@ class TimesheetPage(tk.Frame):
             messagebox.showinfo("Объектный табель", "Все выбранные сотрудники уже есть в табеле.", parent=self)
 
     def clear_selection(self):
+        self._selected_row_keys.clear()
         if hasattr(self, "grid"):
             try:
                 self.grid.set_selected_indices(set())
             except Exception:
                 pass
+        self._update_selected_count()
 
     def fill_time_selected(self):
         if self.read_only:
             return
-        if not self.model_rows:
+        if not self.model_rows_all:
             messagebox.showinfo("Время для выделенных", "Список сотрудников пуст.", parent=self)
             return
-
-        selected = self._grid_selected()
-        if not selected:
+    
+        # На всякий случай подтянуть текущее видимое выделение в общее хранилище
+        self._remember_grid_selection()
+    
+        selected_keys = set(self._selected_row_keys)
+        if not selected_keys:
             messagebox.showinfo("Время для выделенных", "Не выбрано ни одного сотрудника.", parent=self)
             return
-
+    
         year, month = self.get_year_month()
         dlg = TimeForSelectedDialog(self, month_days(year, month))
         if dlg.result is None:
             return
-
+    
         day_from = dlg.result["from"]
         day_to = dlg.result["to"]
         value = dlg.result["value"]
-
-        for idx in sorted(selected):
-            if not (0 <= idx < len(self.model_rows)):
+    
+        changed_count = 0
+        for rec in self.model_rows_all:
+            if self._row_key(rec) not in selected_keys:
                 continue
-            rec = self.model_rows[idx]
+    
             hours_list = normalize_hours_list(rec.get("hours"), year, month)
             for d in range(day_from, day_to + 1):
                 hours_list[d - 1] = value
             rec["hours"] = hours_list
             self._recalc_row_totals_for_rec(rec)
-
+            changed_count += 1
+    
         self._apply_filter()
         self._mark_dirty()
         self._schedule_auto_save()
-
+    
         msg_val = "очищены" if value is None else f"установлены в '{value}'"
         msg_days = f"для дня {day_from}" if day_from == day_to else f"для дней {day_from}–{day_to}"
         messagebox.showinfo(
             "Время для выделенных",
-            f"Значения {msg_val} {msg_days} у {len(selected)} выделенных сотрудников.",
+            f"Значения {msg_val} {msg_days} у {changed_count} выделенных сотрудников.",
             parent=self,
         )
 
