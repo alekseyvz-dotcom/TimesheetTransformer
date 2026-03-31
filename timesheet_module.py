@@ -760,6 +760,23 @@ def _update_selected_count(self):
     
         self._update_selected_count()
 
+    def _on_grid_selection_changed(self, selected_indices: set[int]):
+        """
+        Обновляет сохранённый набор выбранных сотрудников
+        при обычных кликах пользователя по строкам грида.
+        """
+        visible_keys = {self._row_key(rec) for rec in self.model_rows}
+    
+        # Удаляем из сохранённого набора только ключи текущего видимого списка,
+        # дальше добавим актуальные заново
+        self._selected_row_keys -= visible_keys
+    
+        for idx in selected_indices:
+            if 0 <= idx < len(self.model_rows):
+                self._selected_row_keys.add(self._row_key(self.model_rows[idx]))
+    
+        self._update_selected_count()
+
     # --------------------------------------------------------
     # Справочники
     # --------------------------------------------------------
@@ -1126,6 +1143,7 @@ def _update_selected_count(self):
             get_year_month=self.get_year_month,
             on_change=self._on_cell_changed,
             on_delete_row=self._grid_delete_row,
+            on_selection_change=self._on_grid_selection_changed,
             row_height=22,
             colpx=self.COLPX,
             read_only=self.read_only,
