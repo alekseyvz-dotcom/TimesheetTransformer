@@ -35,6 +35,7 @@ class VirtualTimesheetGrid(tk.Frame):
         get_year_month: Callable[[], Tuple[int, int]],
         on_change: Optional[Callable[[int, int], None]] = None,
         on_delete_row: Optional[Callable[[int], None]] = None,
+        on_selection_change: Optional[Callable[[Set[int]], None]] = None,
         row_height: int = 22,
         colpx: Optional[Dict[str, int]] = None,
         read_only: bool = False,
@@ -45,6 +46,7 @@ class VirtualTimesheetGrid(tk.Frame):
         self.get_year_month = get_year_month
         self.on_change = on_change
         self.on_delete_row = on_delete_row
+        self.on_selection_change = on_selection_change
 
         self.read_only = bool(read_only)
         self.allow_row_select = bool(allow_row_select)
@@ -150,19 +152,22 @@ class VirtualTimesheetGrid(tk.Frame):
     def set_rows(self, rows: List[Dict[str, Any]]):
         self._end_edit(commit=True)
         self.model_rows = rows or []
-        self.selected_indices.clear()
-
+    
+        # Оставляем только валидные индексы для текущего набора строк
+        self.selected_indices = {i for i in self.selected_indices if 0 <= i < len(self.model_rows)}
+    
         self.body.delete("all")
         self._rendered_rows.clear()
-
+    
         self._update_weekends_cache()
         self._update_scrollregion()
         self._draw_header()
         self.after_idle(lambda: self._refresh(force_redraw=True))
 
     def set_selected_indices(self, indices: Set[int]):
-        self.selected_indices = set(indices or set())
+        self.selected_indices = {i for i in (indices or set()) if 0 <= i < len(self.model_rows)}
         self._refresh(force_redraw=True)
+        self._notify_selection_change()
 
     def get_selected_indices(self) -> Set[int]:
         return set(self.selected_indices)
@@ -305,6 +310,13 @@ class VirtualTimesheetGrid(tk.Frame):
             result = result[:-1]
         return result + ell
 
+    def _notify_selection_change(self):
+        if callable(self.on_selection_change):
+            try:
+                self.on_selection_change(set(self.selected_indices))
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------
     # Scrolling
     # ------------------------------------------------------------------
@@ -401,6 +413,7 @@ class VirtualTimesheetGrid(tk.Frame):
             else:
                 self.selected_indices.add(row_index)
             self._draw_row(row_index)
+            self._notify_selection_change()
 
     # ------------------------------------------------------------------
     # Editing
