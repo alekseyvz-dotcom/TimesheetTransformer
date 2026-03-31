@@ -528,12 +528,12 @@ class TimesheetPage(tk.Frame):
     # Helpers
     # --------------------------------------------------------
 
-def _update_selected_count(self):
-    try:
-        count = len(self._selected_row_keys)
-        self.lbl_selected_count.config(text=f"Выбрано строк: {count}")
-    except Exception:
-        pass
+    def _update_selected_count(self):
+        try:
+            count = len(self._selected_row_keys)
+            self.lbl_selected_count.config(text=f"Выбрано строк: {count}")
+        except Exception:
+            pass
     
     def _safe_current_user_id(self) -> Optional[int]:
         if self.owner_user_id:
