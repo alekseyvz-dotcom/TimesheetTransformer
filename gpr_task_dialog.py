@@ -1832,21 +1832,17 @@ class TaskEditDialogPro(tk.Toplevel):
 
 class TaskFactBatchDialog(tk.Toplevel):
     """
-    PRO: массовый ввод факта по всем работам ГПР.
+    PRO+:
     - фиксированная шапка
-    - прокручивается только тело
+    - корректное совпадение ширин шапки и тела
+    - работает прокрутка колесом мыши
     - древовидное отображение title/group/task
-    - ввод только по task
+    - автоподгрузка существующего факта на выбранную дату/период
+    - подсветка строк с уже существующим фактом
+    - навигация Enter
     """
 
-    COLS = {
-        "name": 560,
-        "type": 190,
-        "uom": 60,
-        "plan": 95,
-        "qty": 120,
-        "workers": 90,
-    }
+    COL_WIDTHS = [620, 200, 60, 100, 120, 90]
 
     def __init__(
         self,
@@ -1864,8 +1860,8 @@ class TaskFactBatchDialog(tk.Toplevel):
         self._destroyed = False
 
         self.title("📈 Массовое заполнение факта")
-        self.minsize(1180, 720)
-        self.geometry("1240x780")
+        self.minsize(1220, 720)
+        self.geometry("1280x780")
         self.resizable(True, True)
         self.configure(bg=C["bg"])
 
@@ -1878,17 +1874,19 @@ class TaskFactBatchDialog(tk.Toplevel):
         self._all_rows: List[Dict[str, Any]] = self._prepare_rows(self.tasks_src)
         self._filtered_rows: List[Dict[str, Any]] = []
         self._row_widgets: Dict[int, Dict[str, Any]] = {}
+        self._loaded_fact_map: Dict[int, Dict[str, Any]] = {}
 
         self._build_ui()
         self._fill_filters()
         self._apply_filter()
+        self._load_existing_facts_into_form()
 
         self.grab_set()
         self.after(20, self._center)
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
 
     # ─────────────────────────────────────────────────────
-    # data
+    # DATA
     # ─────────────────────────────────────────────────────
     def _prepare_rows(self, tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
@@ -1946,8 +1944,50 @@ class TaskFactBatchDialog(tk.Toplevel):
             )
         return rows
 
+    def _task_ids(self) -> List[int]:
+        return [int(r["task_id"]) for r in self._all_rows if r.get("row_kind") == "task" and r.get("task_id")]
+
+    def _load_existing_facts(self) -> Dict[int, Dict[str, Any]]:
+        task_ids = self._task_ids()
+        if not task_ids:
+            return {}
+
+        fact_date = _parse_date(self.var_fact_date.get())
+        period_label = (self.cmb_period.get() or "").strip()
+        period_type = FACT_PERIOD_FROM_LABEL.get(period_label, "day")
+
+        conn = None
+        try:
+            conn = _conn()
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        task_id,
+                        fact_qty,
+                        workers_count,
+                        COALESCE(comment, '') AS comment
+                    FROM public.gpr_task_facts
+                    WHERE task_id = ANY(%s)
+                      AND fact_date = %s
+                      AND period_type = %s
+                    """,
+                    (task_ids, fact_date, period_type),
+                )
+                out = {}
+                for r in cur.fetchall():
+                    d = dict(r)
+                    out[int(d["task_id"])] = {
+                        "fact_qty": d.get("fact_qty"),
+                        "workers_count": d.get("workers_count"),
+                        "comment": d.get("comment") or "",
+                    }
+                return out
+        finally:
+            _release(conn)
+
     # ─────────────────────────────────────────────────────
-    # ui
+    # UI
     # ─────────────────────────────────────────────────────
     def _build_ui(self):
         top = tk.LabelFrame(
@@ -1967,6 +2007,8 @@ class TaskFactBatchDialog(tk.Toplevel):
         tk.Label(row1, text="Дата факта:", bg=C["panel"], font=("Segoe UI", 9)).pack(side="left")
         self.ent_fact_date = ttk.Entry(row1, textvariable=self.var_fact_date, width=12)
         self.ent_fact_date.pack(side="left", padx=(6, 10))
+        self.ent_fact_date.bind("<FocusOut>", lambda _e: self._load_existing_facts_into_form())
+        self.ent_fact_date.bind("<Return>", lambda _e: self._load_existing_facts_into_form())
 
         ttk.Button(row1, text="Сегодня", command=self._set_today).pack(side="left", padx=(0, 14))
 
@@ -1980,13 +2022,15 @@ class TaskFactBatchDialog(tk.Toplevel):
         )
         self.cmb_period.pack(side="left", padx=(6, 14))
         self.cmb_period.current(0)
+        self.cmb_period.bind("<<ComboboxSelected>>", lambda _e: self._load_existing_facts_into_form())
 
         btns = tk.Frame(row1, bg=C["panel"])
         btns.pack(side="right")
 
         ttk.Button(btns, text="Сохранить", command=self._on_ok).pack(side="right", padx=2)
         ttk.Button(btns, text="Отмена", command=self._on_cancel).pack(side="right", padx=2)
-        ttk.Button(btns, text="Очистить ввод", command=self._clear_inputs).pack(side="right", padx=2)
+        ttk.Button(btns, text="Очистить всё", command=self._clear_inputs).pack(side="right", padx=2)
+        ttk.Button(btns, text="Подтянуть факт", command=self._load_existing_facts_into_form).pack(side="right", padx=2)
 
         row2 = tk.Frame(top, bg=C["panel"])
         row2.pack(fill="x", pady=(8, 2))
@@ -2016,6 +2060,8 @@ class TaskFactBatchDialog(tk.Toplevel):
         self.cmb_group.pack(side="left", padx=(6, 12))
         self.cmb_group.bind("<<ComboboxSelected>>", lambda _e: self._apply_filter())
 
+        ttk.Button(row2, text="Очистить видимые", command=self._clear_visible_inputs).pack(side="right", padx=2)
+
         self.lbl_summary = tk.Label(
             self,
             text="",
@@ -2029,11 +2075,9 @@ class TaskFactBatchDialog(tk.Toplevel):
         host = tk.Frame(self, bg=C["panel"], bd=1, relief="solid")
         host.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        # header
         self.header = tk.Frame(host, bg="#dbe5f1")
         self.header.pack(fill="x", side="top")
 
-        # body
         body_wrap = tk.Frame(host, bg="white")
         body_wrap.pack(fill="both", expand=True, side="top")
 
@@ -2056,33 +2100,27 @@ class TaskFactBatchDialog(tk.Toplevel):
         self.inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
 
-        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
-        self.canvas.bind("<Button-4>", self._on_mousewheel)
-        self.canvas.bind("<Button-5>", self._on_mousewheel)
-
         self._build_header()
+
+        self._bind_mousewheel_recursive(self)
+        self._bind_mousewheel_recursive(self.canvas)
+        self._bind_mousewheel_recursive(self.inner)
 
     def _build_header(self):
         for child in self.header.winfo_children():
             child.destroy()
 
-        self.header.grid_columnconfigure(0, weight=1, minsize=self.COLS["name"])
-        self.header.grid_columnconfigure(1, weight=0, minsize=self.COLS["type"])
-        self.header.grid_columnconfigure(2, weight=0, minsize=self.COLS["uom"])
-        self.header.grid_columnconfigure(3, weight=0, minsize=self.COLS["plan"])
-        self.header.grid_columnconfigure(4, weight=0, minsize=self.COLS["qty"])
-        self.header.grid_columnconfigure(5, weight=0, minsize=self.COLS["workers"])
-
         headers = [
-            ("Работа", 0, "w"),
-            ("Тип работ", 1, "w"),
-            ("Ед.", 2, "center"),
-            ("План", 3, "center"),
-            ("Факт объём", 4, "center"),
-            ("Людей", 5, "center"),
+            ("Работа", "w"),
+            ("Тип работ", "w"),
+            ("Ед.", "center"),
+            ("План", "center"),
+            ("Факт объём", "center"),
+            ("Людей", "center"),
         ]
 
-        for text, col, anchor in headers:
+        x = 0
+        for i, ((text, anchor), width) in enumerate(zip(headers, self.COL_WIDTHS)):
             lbl = tk.Label(
                 self.header,
                 text=text,
@@ -2095,10 +2133,14 @@ class TaskFactBatchDialog(tk.Toplevel):
                 padx=6,
                 pady=5,
             )
-            lbl.grid(row=0, column=col, sticky="nsew")
+            lbl.place(x=x, y=0, width=width, height=28)
+            x += width
+
+        self.header.configure(height=28)
+        self.header.pack_propagate(False)
 
     # ─────────────────────────────────────────────────────
-    # filter
+    # FILTER
     # ─────────────────────────────────────────────────────
     def _fill_filters(self):
         titles = sorted({r["title_name"] for r in self._all_rows if r.get("title_name")})
@@ -2173,12 +2215,13 @@ class TaskFactBatchDialog(tk.Toplevel):
         self._filtered_rows = final_rows
         self._build_table()
         self._update_summary()
+        self._load_existing_facts_into_form()
 
     # ─────────────────────────────────────────────────────
-    # table
+    # TABLE
     # ─────────────────────────────────────────────────────
-    def _cell(self, parent, text, row, col, bg, anchor="w", bold=False, fg="#222", padx=6):
-        lbl = tk.Label(
+    def _make_label(self, parent, text, bg, fg="#222", bold=False, anchor="w", padx=6, pady=3):
+        return tk.Label(
             parent,
             text=text,
             bg=bg,
@@ -2188,129 +2231,267 @@ class TaskFactBatchDialog(tk.Toplevel):
             relief="solid",
             anchor=anchor,
             padx=padx,
-            pady=3,
+            pady=pady,
         )
-        lbl.grid(row=row, column=col, sticky="nsew")
-        return lbl
+
+    def _place_widget_row(self, widgets, row_y, height=28):
+        x = 0
+        for w, width in zip(widgets, self.COL_WIDTHS):
+            w.place(x=x, y=row_y, width=width, height=height)
+            x += width
+
+    def _bind_entry_nav(self, ent_qty, ent_workers, task_id):
+        ent_qty.bind("<Return>", lambda _e: ent_workers.focus_set(), add="+")
+        ent_workers.bind("<Return>", lambda _e: self._focus_next_qty(task_id), add="+")
+        ent_qty.bind("<Down>", lambda _e: self._focus_next_qty(task_id), add="+")
+        ent_workers.bind("<Down>", lambda _e: self._focus_next_workers(task_id), add="+")
+        ent_qty.bind("<Up>", lambda _e: self._focus_prev_qty(task_id), add="+")
+        ent_workers.bind("<Up>", lambda _e: self._focus_prev_workers(task_id), add="+")
+
+    def _visible_task_ids(self) -> List[int]:
+        return [int(r["task_id"]) for r in self._filtered_rows if r.get("row_kind") == "task" and r.get("task_id")]
+
+    def _focus_next_qty(self, task_id: int):
+        ids = self._visible_task_ids()
+        if task_id not in ids:
+            return "break"
+        i = ids.index(task_id)
+        if i + 1 < len(ids):
+            nxt = ids[i + 1]
+            w = self._row_widgets.get(nxt, {}).get("qty")
+            if w:
+                w.focus_set()
+        return "break"
+
+    def _focus_next_workers(self, task_id: int):
+        ids = self._visible_task_ids()
+        if task_id not in ids:
+            return "break"
+        i = ids.index(task_id)
+        if i + 1 < len(ids):
+            nxt = ids[i + 1]
+            w = self._row_widgets.get(nxt, {}).get("workers")
+            if w:
+                w.focus_set()
+        return "break"
+
+    def _focus_prev_qty(self, task_id: int):
+        ids = self._visible_task_ids()
+        if task_id not in ids:
+            return "break"
+        i = ids.index(task_id)
+        if i - 1 >= 0:
+            prv = ids[i - 1]
+            w = self._row_widgets.get(prv, {}).get("qty")
+            if w:
+                w.focus_set()
+        return "break"
+
+    def _focus_prev_workers(self, task_id: int):
+        ids = self._visible_task_ids()
+        if task_id not in ids:
+            return "break"
+        i = ids.index(task_id)
+        if i - 1 >= 0:
+            prv = ids[i - 1]
+            w = self._row_widgets.get(prv, {}).get("workers")
+            if w:
+                w.focus_set()
+        return "break"
 
     def _build_table(self):
         for child in self.inner.winfo_children():
             child.destroy()
         self._row_widgets.clear()
 
-        self.inner.grid_columnconfigure(0, weight=1, minsize=self.COLS["name"])
-        self.inner.grid_columnconfigure(1, weight=0, minsize=self.COLS["type"])
-        self.inner.grid_columnconfigure(2, weight=0, minsize=self.COLS["uom"])
-        self.inner.grid_columnconfigure(3, weight=0, minsize=self.COLS["plan"])
-        self.inner.grid_columnconfigure(4, weight=0, minsize=self.COLS["qty"])
-        self.inner.grid_columnconfigure(5, weight=0, minsize=self.COLS["workers"])
+        row_y = 0
+        row_h = 28
+        total_w = sum(self.COL_WIDTHS)
 
-        row_no = 0
         for row in self._filtered_rows:
             row_kind = row["row_kind"]
 
             if row_kind == "title":
-                lbl = tk.Label(
+                lbl = self._make_label(
                     self.inner,
-                    text=f"{row.get('display_name', '')}",
+                    row.get("display_name", ""),
                     bg="#dceeff",
                     fg="#0b5394",
-                    font=("Segoe UI", 9, "bold"),
-                    bd=1,
-                    relief="solid",
+                    bold=True,
                     anchor="w",
                     padx=8,
-                    pady=5,
+                    pady=4,
                 )
-                lbl.grid(row=row_no, column=0, columnspan=6, sticky="nsew")
-                row_no += 1
+                lbl.place(x=0, y=row_y, width=total_w, height=30)
+                row_y += 30
                 continue
 
             if row_kind == "group":
-                lbl = tk.Label(
+                lbl = self._make_label(
                     self.inner,
-                    text=f"   {row.get('display_name', '')}",
+                    f"   {row.get('display_name', '')}",
                     bg="#eef5ff",
                     fg="#1a3d7c",
-                    font=("Segoe UI", 9, "bold"),
-                    bd=1,
-                    relief="solid",
+                    bold=True,
                     anchor="w",
                     padx=10,
                     pady=4,
                 )
-                lbl.grid(row=row_no, column=0, columnspan=6, sticky="nsew")
-                row_no += 1
+                lbl.place(x=0, y=row_y, width=total_w, height=28)
+                row_y += 28
                 continue
 
-            bg = "#ffffff" if row_no % 2 == 0 else "#f7f9fc"
+            bg = "#ffffff" if ((row_y // row_h) % 2 == 0) else "#f7f9fc"
 
-            self._cell(
+            w_name = self._make_label(
                 self.inner,
                 f"      {row.get('display_name', '')}",
-                row_no,
-                0,
-                bg,
+                bg=bg,
                 anchor="w",
             )
-            self._cell(
+            w_type = self._make_label(
                 self.inner,
                 row.get("work_type_name") or "",
-                row_no,
-                1,
-                bg,
+                bg=bg,
                 anchor="w",
             )
-            self._cell(
+            w_uom = self._make_label(
                 self.inner,
                 row.get("uom_code") or "",
-                row_no,
-                2,
-                bg,
+                bg=bg,
                 anchor="center",
                 padx=4,
             )
-            self._cell(
+            w_plan = self._make_label(
                 self.inner,
                 _fmt_qty(row.get("plan_qty")),
-                row_no,
-                3,
-                bg,
+                bg=bg,
                 anchor="e",
-                padx=6,
             )
 
-            ent_qty = ttk.Entry(self.inner, width=12, justify="right")
-            ent_qty.grid(row=row_no, column=4, sticky="nsew", padx=2, pady=2)
+            ent_qty_wrap = tk.Frame(self.inner, bg=bg, bd=1, relief="solid")
+            ent_qty = ttk.Entry(ent_qty_wrap, justify="right")
+            ent_qty.pack(fill="both", expand=True, padx=3, pady=3)
 
-            ent_workers = ttk.Entry(self.inner, width=8, justify="center")
-            ent_workers.grid(row=row_no, column=5, sticky="nsew", padx=2, pady=2)
+            ent_workers_wrap = tk.Frame(self.inner, bg=bg, bd=1, relief="solid")
+            ent_workers = ttk.Entry(ent_workers_wrap, justify="center")
+            ent_workers.pack(fill="both", expand=True, padx=3, pady=3)
+
+            self._place_widget_row(
+                [w_name, w_type, w_uom, w_plan, ent_qty_wrap, ent_workers_wrap],
+                row_y,
+                height=row_h,
+            )
 
             self._row_widgets[row["task_id"]] = {
                 "qty": ent_qty,
                 "workers": ent_workers,
+                "qty_wrap": ent_qty_wrap,
+                "workers_wrap": ent_workers_wrap,
+                "widgets": [w_name, w_type, w_uom, w_plan, ent_qty_wrap, ent_workers_wrap],
                 "row": row,
+                "base_bg": bg,
             }
 
-            row_no += 1
+            self._bind_mousewheel_recursive(ent_qty)
+            self._bind_mousewheel_recursive(ent_workers)
+            self._bind_mousewheel_recursive(ent_qty_wrap)
+            self._bind_mousewheel_recursive(ent_workers_wrap)
+            self._bind_entry_nav(ent_qty, ent_workers, row["task_id"])
+
+            row_y += row_h
+
+        self.inner.configure(width=total_w, height=max(row_y, 10))
+
+    def _set_row_highlight(self, task_id: int, loaded: bool):
+        item = self._row_widgets.get(task_id)
+        if not item:
+            return
+
+        bg = "#e8f5e9" if loaded else item.get("base_bg", "#ffffff")
+
+        row = item["row"]
+        widgets = item["widgets"]
+
+        texts = [
+            f"      {row.get('display_name', '')}",
+            row.get("work_type_name") or "",
+            row.get("uom_code") or "",
+            _fmt_qty(row.get("plan_qty")),
+        ]
+
+        for w, txt in zip(widgets[:4], texts):
+            try:
+                w.configure(bg=bg, text=txt)
+            except Exception:
+                pass
+
+        for wrap in (item["qty_wrap"], item["workers_wrap"]):
+            try:
+                wrap.configure(bg=bg)
+            except Exception:
+                pass
 
     def _update_summary(self):
         total_tasks = sum(1 for r in self._all_rows if r["row_kind"] == "task")
         shown_tasks = sum(1 for r in self._filtered_rows if r["row_kind"] == "task")
+        loaded_cnt = len([k for k in self._loaded_fact_map.keys() if k in self._row_widgets])
         self.lbl_summary.config(
-            text=f"Всего работ: {total_tasks}  |  Показано: {shown_tasks}"
+            text=f"Всего работ: {total_tasks}  |  Показано: {shown_tasks}  |  Загружено фактов: {loaded_cnt}"
         )
 
     # ─────────────────────────────────────────────────────
-    # actions
+    # LOAD EXISTING FACTS
+    # ─────────────────────────────────────────────────────
+    def _load_existing_facts_into_form(self):
+        try:
+            self._loaded_fact_map = self._load_existing_facts()
+        except Exception as e:
+            logger.exception("TaskFactBatchDialog load existing facts error")
+            messagebox.showwarning(
+                "Факт",
+                f"Не удалось загрузить существующий факт:\n{e}",
+                parent=self,
+            )
+            self._loaded_fact_map = {}
+
+        for task_id, item in self._row_widgets.items():
+            item["qty"].delete(0, "end")
+            item["workers"].delete(0, "end")
+
+            data = self._loaded_fact_map.get(task_id)
+            if data:
+                if data.get("fact_qty") is not None:
+                    item["qty"].insert(0, _fmt_qty(data.get("fact_qty")))
+                if data.get("workers_count") is not None:
+                    item["workers"].insert(0, str(int(data.get("workers_count"))))
+                self._set_row_highlight(task_id, True)
+            else:
+                self._set_row_highlight(task_id, False)
+
+        self._update_summary()
+
+    # ─────────────────────────────────────────────────────
+    # ACTIONS
     # ─────────────────────────────────────────────────────
     def _set_today(self):
         self.var_fact_date.set(_fmt_date(_today()))
+        self._load_existing_facts_into_form()
 
     def _clear_inputs(self):
-        for item in self._row_widgets.values():
+        for task_id, item in self._row_widgets.items():
             item["qty"].delete(0, "end")
             item["workers"].delete(0, "end")
+            self._set_row_highlight(task_id, False)
+
+    def _clear_visible_inputs(self):
+        for task_id in self._visible_task_ids():
+            item = self._row_widgets.get(task_id)
+            if not item:
+                continue
+            item["qty"].delete(0, "end")
+            item["workers"].delete(0, "end")
+            self._set_row_highlight(task_id, False)
 
     def _collect_data(self) -> List[Dict[str, Any]]:
         fact_date = _parse_date(self.var_fact_date.get())
@@ -2420,7 +2601,7 @@ class TaskFactBatchDialog(tk.Toplevel):
         self._safe_destroy()
 
     # ─────────────────────────────────────────────────────
-    # misc
+    # MISC
     # ─────────────────────────────────────────────────────
     def _safe_destroy(self):
         if self._destroyed:
@@ -2456,9 +2637,16 @@ class TaskFactBatchDialog(tk.Toplevel):
     def _on_inner_configure(self, _e=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
-    def _on_canvas_configure(self, e=None):
+    def _on_canvas_configure(self, _e=None):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _bind_mousewheel_recursive(self, widget):
         try:
-            self.canvas.itemconfigure(self.inner_id, width=e.width)
+            widget.bind("<MouseWheel>", self._on_mousewheel, add="+")
+            widget.bind("<Button-4>", self._on_mousewheel, add="+")
+            widget.bind("<Button-5>", self._on_mousewheel, add="+")
+            for child in widget.winfo_children():
+                self._bind_mousewheel_recursive(child)
         except Exception:
             pass
 
