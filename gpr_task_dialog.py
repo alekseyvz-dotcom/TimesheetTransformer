@@ -1489,11 +1489,11 @@ class TaskEditDialogPro(tk.Toplevel):
     def _fact_fill_remaining(self):
         if not self._has_fact_tab:
             return
-
+    
         plan_qty = _safe_float(self.ent_qty.get())
         if plan_qty is None:
             plan_qty = _safe_float(self.init.get("plan_qty"))
-
+    
         if plan_qty is None or plan_qty <= 0:
             messagebox.showinfo(
                 "Факт",
@@ -1501,29 +1501,29 @@ class TaskEditDialogPro(tk.Toplevel):
                 parent=self,
             )
             return
-
+    
         total_fact = sum(_safe_float(x.get("fact_qty")) or 0 for x in self._facts)
         remain = max(0.0, plan_qty - total_fact)
-
+    
         self.ent_fact_qty.delete(0, "end")
-        self.ent_fact_workers.delete(0, "end")
-        self.ent_fact_comment.delete(0, "end")
+        self.ent_fact_qty.insert(0, _fmt_qty(remain))
 
     def _fact_clear_form(self):
         if not self._has_fact_tab:
             return
-
+    
         self._fact_edit_idx = None
         self.ent_fact_date.delete(0, "end")
         self.ent_fact_date.insert(0, _fmt_date(_today()))
         self.ent_fact_qty.delete(0, "end")
+        self.ent_fact_workers.delete(0, "end")
         self.ent_fact_comment.delete(0, "end")
-
+    
         if self.cmb_fact_period["values"]:
             self.cmb_fact_period.current(0)
-
+    
         self.btn_fact_add.config(text="Добавить факт")
-
+    
         try:
             self.fact_tree.selection_remove(self.fact_tree.selection())
         except tk.TclError:
@@ -2322,6 +2322,25 @@ def open_task_dialog(
         uoms,
         init=init,
         user_id=user_id,
+    )
+    parent.wait_window(dlg)
+    return dlg.result
+
+def open_task_fact_batch_dialog(
+    parent,
+    tasks: List[Dict[str, Any]],
+    user_id: Optional[int] = None,
+    fact_date: Optional[date] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Открывает диалог массового ввода факта,
+    ждёт закрытия и возвращает result или None.
+    """
+    dlg = TaskFactBatchDialog(
+        parent,
+        tasks=tasks,
+        user_id=user_id,
+        fact_date=fact_date,
     )
     parent.wait_window(dlg)
     return dlg.result
