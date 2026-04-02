@@ -1833,9 +1833,14 @@ class TaskEditDialogPro(tk.Toplevel):
 class TaskFactBatchDialog(tk.Toplevel):
     """
     Массовый ввод факта по всем работам ГПР.
-    Показывает только строки row_kind='task', но умеет фильтровать по
-    текущему титулу / группе, вычисленным из плоского списка задач.
+    Отображение сделано в виде плоского дерева:
+      - title
+      - group
+      - task
+    Факт вводится только по task-строкам.
     """
+
+    ROW_H = 26
 
     def __init__(
         self,
@@ -1853,7 +1858,7 @@ class TaskFactBatchDialog(tk.Toplevel):
         self._destroyed = False
 
         self.title("📈 Массовое заполнение факта")
-        self.minsize(1100, 650)
+        self.minsize(1120, 700)
         self.resizable(True, True)
 
         self.var_fact_date = tk.StringVar(value=_fmt_date(fact_date or _today()))
@@ -1876,20 +1881,38 @@ class TaskFactBatchDialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
 
     def _prepare_rows(self, tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        rows = []
+        rows: List[Dict[str, Any]] = []
+
         cur_title = ""
         cur_group = ""
 
         for t in tasks:
             row_kind = (t.get("row_kind") or "task").strip()
+            name = (t.get("name") or "").strip()
 
             if row_kind == "title":
-                cur_title = (t.get("name") or "").strip()
+                cur_title = name
                 cur_group = ""
+                rows.append(
+                    {
+                        "row_kind": "title",
+                        "title_name": cur_title,
+                        "group_name": "",
+                        "display_name": name,
+                    }
+                )
                 continue
 
             if row_kind == "group":
-                cur_group = (t.get("name") or "").strip()
+                cur_group = name
+                rows.append(
+                    {
+                        "row_kind": "group",
+                        "title_name": cur_title,
+                        "group_name": cur_group,
+                        "display_name": name,
+                    }
+                )
                 continue
 
             if row_kind != "task":
@@ -1897,21 +1920,22 @@ class TaskFactBatchDialog(tk.Toplevel):
 
             tid = t.get("id")
             if not tid:
-                # массовый факт — только для уже сохранённых задач
                 continue
 
             rows.append(
                 {
+                    "row_kind": "task",
                     "task_id": int(tid),
                     "title_name": cur_title,
                     "group_name": cur_group,
+                    "display_name": name,
                     "work_type_name": t.get("work_type_name") or "",
-                    "task_name": t.get("name") or "",
                     "uom_code": t.get("uom_code") or "",
                     "plan_qty": t.get("plan_qty"),
                     "task": t,
                 }
             )
+
         return rows
 
     def _build_ui(self):
@@ -1946,9 +1970,9 @@ class TaskFactBatchDialog(tk.Toplevel):
         self.cmb_period.pack(side="left", padx=(6, 14))
         self.cmb_period.current(0)
 
-        ttk.Button(row1, text="Сохранить", command=self._on_ok).pack(side="right", padx=2)
+        ttk.Button(row1, text="Очистить ввод", command=self._clear_inputs).pack(side="right", padx=2)
         ttk.Button(row1, text="Отмена", command=self._on_cancel).pack(side="right", padx=2)
-        ttk.Button(row1, text="Очистить ввод", command=self._clear_inputs).pack(side="right", padx=12)
+        ttk.Button(row1, text="Сохранить", command=self._on_ok).pack(side="right", padx=2)
 
         row2 = tk.Frame(top, bg=C["panel"])
         row2.pack(fill="x", pady=(8, 2))
@@ -1991,7 +2015,12 @@ class TaskFactBatchDialog(tk.Toplevel):
         table_host = tk.Frame(self, bg=C["panel"])
         table_host.pack(fill="both", expand=True, padx=10, pady=(0, 8))
 
-        self.canvas = tk.Canvas(table_host, bg="white", highlightthickness=1, highlightbackground=C["border"])
+        self.canvas = tk.Canvas(
+            table_host,
+            bg="white",
+            highlightthickness=1,
+            highlightbackground=C["border"],
+        )
         self.vsb = ttk.Scrollbar(table_host, orient="vertical", command=self.canvas.yview)
         self.hsb = ttk.Scrollbar(table_host, orient="horizontal", command=self.canvas.xview)
 
@@ -2012,8 +2041,8 @@ class TaskFactBatchDialog(tk.Toplevel):
         self.canvas.bind("<Button-5>", self._on_mousewheel)
 
     def _fill_filters(self):
-        titles = sorted({r["title_name"] for r in self._all_rows if r["title_name"]})
-        groups = sorted({r["group_name"] for r in self._all_rows if r["group_name"]})
+        titles = sorted({r["title_name"] for r in self._all_rows if r.get("title_name")})
+        groups = sorted({r["group_name"] for r in self._all_rows if r.get("group_name")})
 
         self.cmb_title["values"] = ["Все"] + titles
         self.cmb_group["values"] = ["Все"] + groups
@@ -2021,73 +2050,201 @@ class TaskFactBatchDialog(tk.Toplevel):
         self.cmb_title.current(0)
         self.cmb_group.current(0)
 
+    def _apply_filter(self):
+        q = (self.var_search.get() or "").strip().lower()
+        title_filter = (self.var_title.get() or "Все").strip()
+        group_filter = (self.var_group.get() or "Все").strip()
+
+        result: List[Dict[str, Any]] = []
+        visible_titles = set()
+        visible_groups = set()
+
+        for row in self._all_rows:
+            row_kind = row["row_kind"]
+
+            if row_kind == "task":
+                if title_filter != "Все" and (row.get("title_name") or "") != title_filter:
+                    continue
+                if group_filter != "Все" and (row.get("group_name") or "") != group_filter:
+                    continue
+
+                if q:
+                    hay = " ".join(
+                        [
+                            row.get("title_name") or "",
+                            row.get("group_name") or "",
+                            row.get("work_type_name") or "",
+                            row.get("display_name") or "",
+                            row.get("uom_code") or "",
+                        ]
+                    ).lower()
+                    if q not in hay:
+                        continue
+
+                result.append(row)
+                if row.get("title_name"):
+                    visible_titles.add(row["title_name"])
+                if row.get("group_name"):
+                    visible_groups.add((row.get("title_name") or "", row["group_name"]))
+
+        final_rows: List[Dict[str, Any]] = []
+        added_titles = set()
+        added_groups = set()
+
+        for row in self._all_rows:
+            row_kind = row["row_kind"]
+
+            if row_kind == "title":
+                title_name = row.get("display_name") or ""
+                if title_name in visible_titles and title_name not in added_titles:
+                    final_rows.append(row)
+                    added_titles.add(title_name)
+
+            elif row_kind == "group":
+                key = (row.get("title_name") or "", row.get("display_name") or "")
+                if key in visible_groups and key not in added_groups:
+                    final_rows.append(row)
+                    added_groups.add(key)
+
+            elif row_kind == "task":
+                if row in result:
+                    final_rows.append(row)
+
+        self._filtered_rows = final_rows
+        self._build_table()
+        self._update_summary()
+
     def _build_table(self):
         for child in self.inner.winfo_children():
             child.destroy()
         self._row_widgets.clear()
 
         headers = [
-            ("Титул", 24),
-            ("Группа", 24),
-            ("Тип работ", 18),
-            ("Вид работ", 34),
-            ("Ед.", 8),
-            ("План", 12),
-            ("Факт объём", 12),
-            ("Факт людей", 12),
+            ("Работа", 60, "w"),
+            ("Тип работ", 18, "w"),
+            ("Ед.", 8, "center"),
+            ("План", 12, "center"),
+            ("Факт объём", 12, "center"),
+            ("Людей", 10, "center"),
         ]
 
-        for c, (text, width) in enumerate(headers):
+        for c, (text, width, anchor) in enumerate(headers):
             lbl = tk.Label(
                 self.inner,
                 text=text,
-                bg="#dfe8f5",
+                bg="#dbe5f1",
                 fg="#123",
                 font=("Segoe UI", 9, "bold"),
                 relief="solid",
                 bd=1,
                 width=width,
-                anchor="center",
-                padx=4,
-                pady=4,
+                anchor=anchor,
+                padx=6,
+                pady=5,
             )
             lbl.grid(row=0, column=c, sticky="nsew")
 
-        for r_idx, row in enumerate(self._filtered_rows, start=1):
-            bg = "#ffffff" if r_idx % 2 else "#f8fafc"
+        row_no = 1
+        for row in self._filtered_rows:
+            row_kind = row["row_kind"]
 
-            values = [
-                row.get("title_name") or "",
-                row.get("group_name") or "",
-                row.get("work_type_name") or "",
-                row.get("task_name") or "",
-                row.get("uom_code") or "",
-                _fmt_qty(row.get("plan_qty")),
-            ]
-
-            for c_idx, val in enumerate(values):
-                anchor = "w"
-                if c_idx in (4, 5):
-                    anchor = "center"
+            if row_kind == "title":
                 lbl = tk.Label(
                     self.inner,
-                    text=val,
-                    bg=bg,
-                    fg="#222",
-                    font=("Segoe UI", 9),
+                    text=f"🟦  {row.get('display_name', '')}",
+                    bg="#dff1ff",
+                    fg="#0b5394",
+                    font=("Segoe UI", 9, "bold"),
                     relief="solid",
                     bd=1,
-                    anchor=anchor,
-                    padx=4,
-                    pady=3,
+                    anchor="w",
+                    padx=8,
+                    pady=4,
                 )
-                lbl.grid(row=r_idx, column=c_idx, sticky="nsew")
+                lbl.grid(row=row_no, column=0, columnspan=6, sticky="nsew")
+                row_no += 1
+                continue
+
+            if row_kind == "group":
+                lbl = tk.Label(
+                    self.inner,
+                    text=f"📁  {row.get('display_name', '')}",
+                    bg="#eef5ff",
+                    fg="#1a3d7c",
+                    font=("Segoe UI", 9, "bold"),
+                    relief="solid",
+                    bd=1,
+                    anchor="w",
+                    padx=14,
+                    pady=4,
+                )
+                lbl.grid(row=row_no, column=0, columnspan=6, sticky="nsew")
+                row_no += 1
+                continue
+
+            bg = "#ffffff" if row_no % 2 else "#f8fafc"
+
+            lbl_name = tk.Label(
+                self.inner,
+                text=f"     {row.get('display_name', '')}",
+                bg=bg,
+                fg="#222",
+                font=("Segoe UI", 9),
+                relief="solid",
+                bd=1,
+                anchor="w",
+                padx=6,
+                pady=3,
+            )
+            lbl_name.grid(row=row_no, column=0, sticky="nsew")
+
+            lbl_type = tk.Label(
+                self.inner,
+                text=row.get("work_type_name") or "",
+                bg=bg,
+                fg="#222",
+                font=("Segoe UI", 9),
+                relief="solid",
+                bd=1,
+                anchor="w",
+                padx=6,
+                pady=3,
+            )
+            lbl_type.grid(row=row_no, column=1, sticky="nsew")
+
+            lbl_uom = tk.Label(
+                self.inner,
+                text=row.get("uom_code") or "",
+                bg=bg,
+                fg="#222",
+                font=("Segoe UI", 9),
+                relief="solid",
+                bd=1,
+                anchor="center",
+                padx=4,
+                pady=3,
+            )
+            lbl_uom.grid(row=row_no, column=2, sticky="nsew")
+
+            lbl_plan = tk.Label(
+                self.inner,
+                text=_fmt_qty(row.get("plan_qty")),
+                bg=bg,
+                fg="#222",
+                font=("Segoe UI", 9),
+                relief="solid",
+                bd=1,
+                anchor="center",
+                padx=4,
+                pady=3,
+            )
+            lbl_plan.grid(row=row_no, column=3, sticky="nsew")
 
             ent_qty = ttk.Entry(self.inner, width=14)
-            ent_qty.grid(row=r_idx, column=6, sticky="nsew", padx=1, pady=1)
+            ent_qty.grid(row=row_no, column=4, sticky="nsew", padx=2, pady=2)
 
-            ent_workers = ttk.Entry(self.inner, width=12)
-            ent_workers.grid(row=r_idx, column=7, sticky="nsew", padx=1, pady=1)
+            ent_workers = ttk.Entry(self.inner, width=10)
+            ent_workers.grid(row=row_no, column=5, sticky="nsew", padx=2, pady=2)
 
             self._row_widgets[row["task_id"]] = {
                 "qty": ent_qty,
@@ -2095,45 +2252,20 @@ class TaskFactBatchDialog(tk.Toplevel):
                 "row": row,
             }
 
-        for c in range(len(headers)):
-            self.inner.grid_columnconfigure(c, weight=0)
+            row_no += 1
 
-    def _apply_filter(self):
-        q = (self.var_search.get() or "").strip().lower()
-        title_filter = (self.var_title.get() or "Все").strip()
-        group_filter = (self.var_group.get() or "Все").strip()
-
-        result = []
-        for row in self._all_rows:
-            if title_filter != "Все" and (row.get("title_name") or "") != title_filter:
-                continue
-            if group_filter != "Все" and (row.get("group_name") or "") != group_filter:
-                continue
-
-            if q:
-                hay = " ".join(
-                    [
-                        row.get("title_name") or "",
-                        row.get("group_name") or "",
-                        row.get("work_type_name") or "",
-                        row.get("task_name") or "",
-                        row.get("uom_code") or "",
-                    ]
-                ).lower()
-                if q not in hay:
-                    continue
-
-            result.append(row)
-
-        self._filtered_rows = result
-        self._build_table()
-        self._update_summary()
+        self.inner.grid_columnconfigure(0, minsize=520)
+        self.inner.grid_columnconfigure(1, minsize=180)
+        self.inner.grid_columnconfigure(2, minsize=60)
+        self.inner.grid_columnconfigure(3, minsize=90)
+        self.inner.grid_columnconfigure(4, minsize=110)
+        self.inner.grid_columnconfigure(5, minsize=90)
 
     def _update_summary(self):
-        total = len(self._all_rows)
-        shown = len(self._filtered_rows)
+        total_tasks = sum(1 for r in self._all_rows if r["row_kind"] == "task")
+        shown_tasks = sum(1 for r in self._filtered_rows if r["row_kind"] == "task")
         self.lbl_summary.config(
-            text=f"Всего работ: {total}  |  Показано: {shown}"
+            text=f"Всего работ: {total_tasks}  |  Показано: {shown_tasks}"
         )
 
     def _set_today(self):
@@ -2162,13 +2294,13 @@ class TaskFactBatchDialog(tk.Toplevel):
 
             if qty is None or qty <= 0:
                 raise ValueError(
-                    f"Задача «{item['row'].get('task_name', '')}»: "
+                    f"Задача «{item['row'].get('display_name', '')}»: "
                     f"введите корректный факт объёма больше 0"
                 )
 
             if workers is None or workers <= 0 or int(workers) != workers:
                 raise ValueError(
-                    f"Задача «{item['row'].get('task_name', '')}»: "
+                    f"Задача «{item['row'].get('display_name', '')}»: "
                     f"введите корректное количество людей больше 0"
                 )
 
@@ -2287,7 +2419,7 @@ class TaskFactBatchDialog(tk.Toplevel):
 
     def _on_canvas_configure(self, e=None):
         try:
-            self.canvas.itemconfigure(self.inner_id, width=max(e.width, 900))
+            self.canvas.itemconfigure(self.inner_id, width=max(e.width, 1000))
         except Exception:
             pass
 
@@ -2302,7 +2434,7 @@ class TaskFactBatchDialog(tk.Toplevel):
         except Exception:
             pass
         return "break"
-
+        
 # ═══════════════════════════════════════════════════════════════
 #  API — фабрика для вызова из GprPage
 # ═══════════════════════════════════════════════════════════════
