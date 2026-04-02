@@ -179,6 +179,7 @@ class _TaskFactService:
                            f.fact_date,
                            f.period_type,
                            f.fact_qty,
+                           f.workers_count,
                            COALESCE(f.comment, '') AS comment,
                            f.created_at,
                            COALESCE(u.full_name, '') AS creator_name
@@ -210,7 +211,7 @@ class _TaskFactService:
         """Сохраняет весь список фактов задачи."""
         if not task_id:
             return
-
+    
         conn = None
         try:
             conn = _conn()
@@ -225,30 +226,36 @@ class _TaskFactService:
                 )
                 existing_ids = {int(r["id"]) for r in cur.fetchall()}
                 kept_ids = set()
-
+    
                 for f in facts:
                     fact_date = _to_date(f.get("fact_date"))
                     if not fact_date:
                         raise ValueError("Не указана дата факта")
-
+    
                     period_type = (f.get("period_type") or "day").strip()
                     if period_type not in ("day", "week"):
                         period_type = "day"
-
+    
                     fact_qty = _safe_float(f.get("fact_qty"))
                     if fact_qty is None or fact_qty <= 0:
                         raise ValueError("Объём факта должен быть больше 0")
-
+    
+                    workers_count = _safe_float(f.get("workers_count"))
+                    if workers_count is None or workers_count <= 0 or int(workers_count) != workers_count:
+                        raise ValueError("Количество людей должно быть целым числом больше 0")
+                    workers_count = int(workers_count)
+    
                     comment = (f.get("comment") or "").strip() or None
-
+    
                     cur.execute(
                         """
                         INSERT INTO public.gpr_task_facts
-                            (task_id, fact_date, period_type, fact_qty, comment, created_by)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                            (task_id, fact_date, period_type, fact_qty, workers_count, comment, created_by)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (task_id, fact_date, period_type)
                         DO UPDATE SET
                             fact_qty = EXCLUDED.fact_qty,
+                            workers_count = EXCLUDED.workers_count,
                             comment = EXCLUDED.comment
                         RETURNING id
                         """,
@@ -257,6 +264,7 @@ class _TaskFactService:
                             fact_date,
                             period_type,
                             fact_qty,
+                            workers_count,
                             comment,
                             user_id,
                         ),
@@ -264,7 +272,7 @@ class _TaskFactService:
                     row = cur.fetchone()
                     if row:
                         kept_ids.add(int(row["id"]))
-
+    
                 ids_to_delete = list(existing_ids - kept_ids)
                 if ids_to_delete:
                     cur.execute(
@@ -275,13 +283,12 @@ class _TaskFactService:
                         """,
                         (task_id, ids_to_delete),
                     )
-
+    
         except Exception:
             logger.exception("save_task_facts error")
             raise
         finally:
             _release(conn)
-
 
 # ═══════════════════════════════════════════════════════════════
 #  Константы
@@ -943,7 +950,11 @@ class TaskEditDialogPro(tk.Toplevel):
         tk.Label(row1, text="Объём:", bg=C["panel"], font=("Segoe UI", 9)).pack(side="left")
         self.ent_fact_qty = ttk.Entry(row1, width=14, font=("Segoe UI", 9))
         self.ent_fact_qty.pack(side="left", padx=(4, 12))
-
+        
+        tk.Label(row1, text="Людей:", bg=C["panel"], font=("Segoe UI", 9)).pack(side="left")
+        self.ent_fact_workers = ttk.Entry(row1, width=10, font=("Segoe UI", 9))
+        self.ent_fact_workers.pack(side="left", padx=(4, 12))
+        
         ttk.Button(row1, text="Остаток", command=self._fact_fill_remaining).pack(side="left")
 
         row2 = tk.Frame(form, bg=C["panel"])
@@ -992,7 +1003,7 @@ class TaskEditDialogPro(tk.Toplevel):
         )
         list_frame.pack(fill="both", expand=True, padx=12, pady=(4, 8))
 
-        cols = ("date", "period", "qty", "comment", "creator")
+        cols = ("date", "period", "qty", "workers", "comment", "creator")
         self.fact_tree = ttk.Treeview(
             list_frame,
             columns=cols,
@@ -1005,7 +1016,8 @@ class TaskEditDialogPro(tk.Toplevel):
             ("date", "Дата", 90, "center"),
             ("period", "Период", 110, "center"),
             ("qty", "Объём", 90, "e"),
-            ("comment", "Комментарий", 260, "w"),
+            ("workers", "Людей", 70, "center"),
+            ("comment", "Комментарий", 220, "w"),
             ("creator", "Кто внёс", 140, "w"),
         ]:
             self.fact_tree.heading(c, text=t)
@@ -1494,7 +1506,8 @@ class TaskEditDialogPro(tk.Toplevel):
         remain = max(0.0, plan_qty - total_fact)
 
         self.ent_fact_qty.delete(0, "end")
-        self.ent_fact_qty.insert(0, _fmt_qty(remain))
+        self.ent_fact_workers.delete(0, "end")
+        self.ent_fact_comment.delete(0, "end")
 
     def _fact_clear_form(self):
         if not self._has_fact_tab:
@@ -1547,7 +1560,11 @@ class TaskEditDialogPro(tk.Toplevel):
 
         self.ent_fact_qty.delete(0, "end")
         self.ent_fact_qty.insert(0, _fmt_qty(row.get("fact_qty")))
-
+        
+        self.ent_fact_workers.delete(0, "end")
+        if row.get("workers_count") is not None:
+            self.ent_fact_workers.insert(0, str(int(row.get("workers_count"))))
+        
         self.ent_fact_comment.delete(0, "end")
         self.ent_fact_comment.insert(0, row.get("comment") or "")
 
@@ -1556,19 +1573,24 @@ class TaskEditDialogPro(tk.Toplevel):
     def _fact_add_or_update(self):
         if not self._has_fact_tab:
             return
-
+    
         try:
             fact_date = _parse_date(self.ent_fact_date.get())
-
+    
             period_label = (self.cmb_fact_period.get() or "").strip()
             period_type = FACT_PERIOD_FROM_LABEL.get(period_label, "day")
-
+    
             fact_qty = _safe_float(self.ent_fact_qty.get())
             if fact_qty is None or fact_qty <= 0:
                 raise ValueError("Введите корректный объём факта больше 0")
-
+    
+            workers_count = _safe_float(self.ent_fact_workers.get())
+            if workers_count is None or workers_count <= 0 or int(workers_count) != workers_count:
+                raise ValueError("Введите корректное количество людей больше 0")
+            workers_count = int(workers_count)
+    
             comment = (self.ent_fact_comment.get() or "").strip()
-
+    
             duplicate_idx = None
             for i, row in enumerate(self._facts):
                 if i == self._fact_edit_idx:
@@ -1579,7 +1601,7 @@ class TaskEditDialogPro(tk.Toplevel):
                 ):
                     duplicate_idx = i
                     break
-
+    
             if duplicate_idx is not None:
                 if not messagebox.askyesno(
                     "Факт",
@@ -1588,16 +1610,16 @@ class TaskEditDialogPro(tk.Toplevel):
                 ):
                     return
                 self._fact_edit_idx = duplicate_idx
-
+    
             plan_qty = _safe_float(self.ent_qty.get())
             if plan_qty is None:
                 plan_qty = _safe_float(self.init.get("plan_qty"))
-
+    
             projected_total = sum(_safe_float(x.get("fact_qty")) or 0 for x in self._facts)
             if self._fact_edit_idx is not None:
                 projected_total -= _safe_float(self._facts[self._fact_edit_idx].get("fact_qty")) or 0
             projected_total += fact_qty
-
+    
             if plan_qty and plan_qty > 0 and projected_total > plan_qty:
                 if not messagebox.askyesno(
                     "Факт",
@@ -1608,15 +1630,16 @@ class TaskEditDialogPro(tk.Toplevel):
                     parent=self,
                 ):
                     return
-
+    
             row = {
                 "fact_date": fact_date,
                 "period_type": period_type,
                 "fact_qty": fact_qty,
+                "workers_count": workers_count,
                 "comment": comment,
                 "creator_name": "Текущий пользователь",
             }
-
+    
             if self._fact_edit_idx is None:
                 self._facts.append(row)
             else:
@@ -1628,19 +1651,19 @@ class TaskEditDialogPro(tk.Toplevel):
                 if old.get("creator_name"):
                     row["creator_name"] = old["creator_name"]
                 self._facts[self._fact_edit_idx] = row
-
+    
             self._facts.sort(
                 key=lambda x: (
                     _to_date(x.get("fact_date")) or _today(),
                     0 if (x.get("period_type") or "day") == "day" else 1,
                 )
             )
-
+    
             self._render_facts()
             self._fact_clear_form()
             self._mark_dirty()
             self._refresh_overview()
-
+    
         except Exception as e:
             messagebox.showwarning("Факт", str(e), parent=self)
 
@@ -1678,13 +1701,13 @@ class TaskEditDialogPro(tk.Toplevel):
     def _render_facts(self):
         if not self._has_fact_tab:
             return
-
+    
         self.fact_tree.delete(*self.fact_tree.get_children())
-
+    
         for row in self._facts:
             period_code = (row.get("period_type") or "day").strip()
             period_label = FACT_PERIODS.get(period_code, period_code)
-
+    
             self.fact_tree.insert(
                 "",
                 "end",
@@ -1692,33 +1715,40 @@ class TaskEditDialogPro(tk.Toplevel):
                     _fmt_date(row.get("fact_date")),
                     period_label,
                     _fmt_qty(row.get("fact_qty")),
+                    row.get("workers_count") if row.get("workers_count") is not None else "",
                     row.get("comment") or "",
                     row.get("creator_name") or "",
                 ),
             )
-
+    
         self._update_fact_summary()
 
     def _update_fact_summary(self):
         if not self._has_fact_tab:
             return
-
+    
         total_fact = sum(_safe_float(x.get("fact_qty")) or 0 for x in self._facts)
+        total_workers = sum(int(_safe_float(x.get("workers_count")) or 0) for x in self._facts)
+    
         plan_qty = _safe_float(self.ent_qty.get())
         if plan_qty is None:
             plan_qty = _safe_float(self.init.get("plan_qty"))
-
+    
         if plan_qty and plan_qty > 0:
             pct = min(100.0, total_fact / plan_qty * 100.0)
             remain = max(0.0, plan_qty - total_fact)
             text = (
                 f"Накопительный факт: {_fmt_qty(total_fact)}  |  "
+                f"Людей суммарно: {total_workers}  |  "
                 f"Остаток: {_fmt_qty(remain)}  |  "
                 f"Выполнение: {pct:.1f}%"
             )
         else:
-            text = f"Накопительный факт: {_fmt_qty(total_fact)}"
-
+            text = (
+                f"Накопительный факт: {_fmt_qty(total_fact)}  |  "
+                f"Людей суммарно: {total_workers}"
+            )
+    
         self.lbl_fact_summary.config(text=text)
 
     # ══════════════════════════════════════════════════════
