@@ -1673,6 +1673,70 @@ class GprPage(tk.Frame):
 
         self._open_object_by_id(oid)
 
+    def _open_fact_batch(self):
+        if not self.plan_id:
+            messagebox.showinfo("ГПР", "Сначала откройте объект.", parent=self)
+            return
+    
+        task_rows = [t for t in self.tasks if (t.get("row_kind") or "task") == "task" and t.get("id")]
+        if not task_rows:
+            messagebox.showinfo(
+                "ГПР",
+                "Нет сохранённых работ для массового ввода факта.",
+                parent=self,
+            )
+            return
+    
+        uid = (self.app_ref.current_user or {}).get("id")
+    
+        try:
+            from gpr_task_dialog import open_task_fact_batch_dialog
+        except ImportError as e:
+            logger.exception("Cannot import batch fact dialog")
+            messagebox.showerror(
+                "ГПР",
+                f"Не удалось открыть диалог массового ввода факта:\n{e}",
+                parent=self,
+            )
+            return
+    
+        result = open_task_fact_batch_dialog(
+            self,
+            tasks=self.tasks,
+            user_id=uid,
+            fact_date=_today(),
+        )
+    
+        if not result or not result.get("saved"):
+            return
+    
+        try:
+            tids = [
+                t["id"] for t in self.tasks
+                if t.get("id") and (t.get("row_kind") or "task") == "task"
+            ]
+            self.fact_info = GprService.load_task_fact_info(tids)
+            self.facts = {
+                task_id: float(v.get("fact_qty_total") or 0)
+                for task_id, v in self.fact_info.items()
+            }
+    
+            self._apply_filter()
+            self._update_summary()
+    
+            messagebox.showinfo(
+                "ГПР",
+                f"Сохранено записей факта: {result.get('count', 0)}",
+                parent=self,
+            )
+        except Exception as e:
+            logger.exception("Refresh facts after batch save error")
+            messagebox.showwarning(
+                "ГПР",
+                f"Факт сохранён, но не удалось обновить отображение:\n{e}",
+                parent=self,
+            )
+
     # ══════════════════════════════════════════════════════
     #  EDITOR TAB
     # ══════════════════════════════════════════════════════
@@ -1741,6 +1805,7 @@ class GprPage(tk.Frame):
         )
     
         self.btn_template = self._tb_btn(bar, "📋 Из шаблона…", self._apply_template)
+        self.btn_fact_batch = self._tb_btn(bar, "📈 Заполнить факт", self._open_fact_batch)
         self.btn_export = self._tb_btn(bar, "📥 Экспорт Excel", self._export_excel)
     
         tk.Frame(bar, bg=C["border"], width=1).pack(
