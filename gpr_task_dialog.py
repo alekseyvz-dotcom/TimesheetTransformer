@@ -1832,13 +1832,21 @@ class TaskEditDialogPro(tk.Toplevel):
 
 class TaskFactBatchDialog(tk.Toplevel):
     """
-    Массовый ввод факта по всем работам ГПР.
-    Отображение сделано в виде плоского дерева:
-      - title
-      - group
-      - task
-    Факт вводится только по task-строкам.
+    PRO: массовый ввод факта по всем работам ГПР.
+    - фиксированная шапка
+    - прокручивается только тело
+    - древовидное отображение title/group/task
+    - ввод только по task
     """
+
+    COLS = {
+        "name": 560,
+        "type": 190,
+        "uom": 60,
+        "plan": 95,
+        "qty": 120,
+        "workers": 90,
+    }
 
     def __init__(
         self,
@@ -1857,7 +1865,7 @@ class TaskFactBatchDialog(tk.Toplevel):
 
         self.title("📈 Массовое заполнение факта")
         self.minsize(1180, 720)
-        self.geometry("1220x760")
+        self.geometry("1240x780")
         self.resizable(True, True)
         self.configure(bg=C["bg"])
 
@@ -1879,9 +1887,11 @@ class TaskFactBatchDialog(tk.Toplevel):
         self.after(20, self._center)
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
 
+    # ─────────────────────────────────────────────────────
+    # data
+    # ─────────────────────────────────────────────────────
     def _prepare_rows(self, tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
-
         cur_title = ""
         cur_group = ""
 
@@ -1934,9 +1944,11 @@ class TaskFactBatchDialog(tk.Toplevel):
                     "task": t,
                 }
             )
-
         return rows
 
+    # ─────────────────────────────────────────────────────
+    # ui
+    # ─────────────────────────────────────────────────────
     def _build_ui(self):
         top = tk.LabelFrame(
             self,
@@ -2017,13 +2029,21 @@ class TaskFactBatchDialog(tk.Toplevel):
         host = tk.Frame(self, bg=C["panel"], bd=1, relief="solid")
         host.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
+        # header
+        self.header = tk.Frame(host, bg="#dbe5f1")
+        self.header.pack(fill="x", side="top")
+
+        # body
+        body_wrap = tk.Frame(host, bg="white")
+        body_wrap.pack(fill="both", expand=True, side="top")
+
         self.canvas = tk.Canvas(
-            host,
+            body_wrap,
             bg="white",
             highlightthickness=0,
             bd=0,
         )
-        self.vsb = ttk.Scrollbar(host, orient="vertical", command=self.canvas.yview)
+        self.vsb = ttk.Scrollbar(body_wrap, orient="vertical", command=self.canvas.yview)
 
         self.inner = tk.Frame(self.canvas, bg="white")
         self.inner_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
@@ -2040,6 +2060,46 @@ class TaskFactBatchDialog(tk.Toplevel):
         self.canvas.bind("<Button-4>", self._on_mousewheel)
         self.canvas.bind("<Button-5>", self._on_mousewheel)
 
+        self._build_header()
+
+    def _build_header(self):
+        for child in self.header.winfo_children():
+            child.destroy()
+
+        self.header.grid_columnconfigure(0, weight=1, minsize=self.COLS["name"])
+        self.header.grid_columnconfigure(1, weight=0, minsize=self.COLS["type"])
+        self.header.grid_columnconfigure(2, weight=0, minsize=self.COLS["uom"])
+        self.header.grid_columnconfigure(3, weight=0, minsize=self.COLS["plan"])
+        self.header.grid_columnconfigure(4, weight=0, minsize=self.COLS["qty"])
+        self.header.grid_columnconfigure(5, weight=0, minsize=self.COLS["workers"])
+
+        headers = [
+            ("Работа", 0, "w"),
+            ("Тип работ", 1, "w"),
+            ("Ед.", 2, "center"),
+            ("План", 3, "center"),
+            ("Факт объём", 4, "center"),
+            ("Людей", 5, "center"),
+        ]
+
+        for text, col, anchor in headers:
+            lbl = tk.Label(
+                self.header,
+                text=text,
+                bg="#dbe5f1",
+                fg="#123",
+                font=("Segoe UI", 9, "bold"),
+                bd=1,
+                relief="solid",
+                anchor=anchor,
+                padx=6,
+                pady=5,
+            )
+            lbl.grid(row=0, column=col, sticky="nsew")
+
+    # ─────────────────────────────────────────────────────
+    # filter
+    # ─────────────────────────────────────────────────────
     def _fill_filters(self):
         titles = sorted({r["title_name"] for r in self._all_rows if r.get("title_name")})
         groups = sorted({r["group_name"] for r in self._all_rows if r.get("group_name")})
@@ -2060,8 +2120,7 @@ class TaskFactBatchDialog(tk.Toplevel):
         visible_groups = set()
 
         for row in self._all_rows:
-            row_kind = row["row_kind"]
-            if row_kind != "task":
+            if row["row_kind"] != "task":
                 continue
 
             if title_filter != "Все" and (row.get("title_name") or "") != title_filter:
@@ -2115,22 +2174,9 @@ class TaskFactBatchDialog(tk.Toplevel):
         self._build_table()
         self._update_summary()
 
-    def _hdr(self, parent, text, col, anchor="center"):
-        lbl = tk.Label(
-            parent,
-            text=text,
-            bg="#dbe5f1",
-            fg="#123",
-            font=("Segoe UI", 9, "bold"),
-            bd=1,
-            relief="solid",
-            anchor=anchor,
-            padx=6,
-            pady=5,
-        )
-        lbl.grid(row=0, column=col, sticky="nsew")
-        return lbl
-
+    # ─────────────────────────────────────────────────────
+    # table
+    # ─────────────────────────────────────────────────────
     def _cell(self, parent, text, row, col, bg, anchor="w", bold=False, fg="#222", padx=6):
         lbl = tk.Label(
             parent,
@@ -2152,21 +2198,21 @@ class TaskFactBatchDialog(tk.Toplevel):
             child.destroy()
         self._row_widgets.clear()
 
-        self._hdr(self.inner, "Работа", 0, "w")
-        self._hdr(self.inner, "Тип работ", 1, "w")
-        self._hdr(self.inner, "Ед.", 2, "center")
-        self._hdr(self.inner, "План", 3, "center")
-        self._hdr(self.inner, "Факт объём", 4, "center")
-        self._hdr(self.inner, "Людей", 5, "center")
+        self.inner.grid_columnconfigure(0, weight=1, minsize=self.COLS["name"])
+        self.inner.grid_columnconfigure(1, weight=0, minsize=self.COLS["type"])
+        self.inner.grid_columnconfigure(2, weight=0, minsize=self.COLS["uom"])
+        self.inner.grid_columnconfigure(3, weight=0, minsize=self.COLS["plan"])
+        self.inner.grid_columnconfigure(4, weight=0, minsize=self.COLS["qty"])
+        self.inner.grid_columnconfigure(5, weight=0, minsize=self.COLS["workers"])
 
-        row_no = 1
+        row_no = 0
         for row in self._filtered_rows:
             row_kind = row["row_kind"]
 
             if row_kind == "title":
                 lbl = tk.Label(
                     self.inner,
-                    text=f"■  {row.get('display_name', '')}",
+                    text=f"{row.get('display_name', '')}",
                     bg="#dceeff",
                     fg="#0b5394",
                     font=("Segoe UI", 9, "bold"),
@@ -2174,7 +2220,7 @@ class TaskFactBatchDialog(tk.Toplevel):
                     relief="solid",
                     anchor="w",
                     padx=8,
-                    pady=4,
+                    pady=5,
                 )
                 lbl.grid(row=row_no, column=0, columnspan=6, sticky="nsew")
                 row_no += 1
@@ -2183,21 +2229,21 @@ class TaskFactBatchDialog(tk.Toplevel):
             if row_kind == "group":
                 lbl = tk.Label(
                     self.inner,
-                    text=f"▸  {row.get('display_name', '')}",
+                    text=f"   {row.get('display_name', '')}",
                     bg="#eef5ff",
                     fg="#1a3d7c",
                     font=("Segoe UI", 9, "bold"),
                     bd=1,
                     relief="solid",
                     anchor="w",
-                    padx=18,
+                    padx=10,
                     pady=4,
                 )
                 lbl.grid(row=row_no, column=0, columnspan=6, sticky="nsew")
                 row_no += 1
                 continue
 
-            bg = "#ffffff" if row_no % 2 else "#f7f9fc"
+            bg = "#ffffff" if row_no % 2 == 0 else "#f7f9fc"
 
             self._cell(
                 self.inner,
@@ -2248,13 +2294,6 @@ class TaskFactBatchDialog(tk.Toplevel):
 
             row_no += 1
 
-        self.inner.grid_columnconfigure(0, weight=1, minsize=520)
-        self.inner.grid_columnconfigure(1, weight=0, minsize=180)
-        self.inner.grid_columnconfigure(2, weight=0, minsize=60)
-        self.inner.grid_columnconfigure(3, weight=0, minsize=90)
-        self.inner.grid_columnconfigure(4, weight=0, minsize=110)
-        self.inner.grid_columnconfigure(5, weight=0, minsize=90)
-
     def _update_summary(self):
         total_tasks = sum(1 for r in self._all_rows if r["row_kind"] == "task")
         shown_tasks = sum(1 for r in self._filtered_rows if r["row_kind"] == "task")
@@ -2262,6 +2301,9 @@ class TaskFactBatchDialog(tk.Toplevel):
             text=f"Всего работ: {total_tasks}  |  Показано: {shown_tasks}"
         )
 
+    # ─────────────────────────────────────────────────────
+    # actions
+    # ─────────────────────────────────────────────────────
     def _set_today(self):
         self.var_fact_date.set(_fmt_date(_today()))
 
@@ -2377,6 +2419,9 @@ class TaskFactBatchDialog(tk.Toplevel):
         self.result = None
         self._safe_destroy()
 
+    # ─────────────────────────────────────────────────────
+    # misc
+    # ─────────────────────────────────────────────────────
     def _safe_destroy(self):
         if self._destroyed:
             return
@@ -2458,10 +2503,6 @@ def open_task_fact_batch_dialog(
     user_id: Optional[int] = None,
     fact_date: Optional[date] = None,
 ) -> Optional[Dict[str, Any]]:
-    """
-    Открывает диалог массового ввода факта,
-    ждёт закрытия и возвращает result или None.
-    """
     dlg = TaskFactBatchDialog(
         parent,
         tasks=tasks,
