@@ -92,7 +92,7 @@ SPECIAL_CODES = {
     "О": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отсутствие"},
     "П": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Простой / прочее"},
     "КВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Командировка выходного дня"},
-    "снег": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Снег"},
+    "СНЕГ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Снег"},
     
     # Для РВ логичнее учитывать часы как фактические часы работы.
     # При необходимости можно перенастроить.
