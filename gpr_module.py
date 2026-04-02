@@ -303,6 +303,67 @@ class GprService:
                 )
                 return [dict(r) for r in cur.fetchall()]
 
+    @staticmethod
+    def load_task_fact_info(task_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+        if not task_ids:
+            return {}
+    
+        with _DBConn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    WITH qty AS (
+                        SELECT
+                            task_id,
+                            COALESCE(SUM(fact_qty), 0) AS fact_qty_total
+                        FROM public.gpr_task_facts
+                        WHERE task_id = ANY(%s)
+                        GROUP BY task_id
+                    ),
+                    last_fact AS (
+                        SELECT DISTINCT ON (task_id)
+                            task_id,
+                            workers_count,
+                            fact_date,
+                            id
+                        FROM public.gpr_task_facts
+                        WHERE task_id = ANY(%s)
+                        ORDER BY task_id, fact_date DESC, id DESC
+                    ),
+                    agg AS (
+                        SELECT
+                            task_id,
+                            MAX(workers_count) AS workers_max,
+                            COALESCE(SUM(workers_count), 0) AS workers_sum
+                        FROM public.gpr_task_facts
+                        WHERE task_id = ANY(%s)
+                        GROUP BY task_id
+                    )
+                    SELECT
+                        q.task_id,
+                        q.fact_qty_total,
+                        lf.workers_count AS workers_last,
+                        a.workers_max,
+                        a.workers_sum
+                    FROM qty q
+                    LEFT JOIN last_fact lf ON lf.task_id = q.task_id
+                    LEFT JOIN agg a ON a.task_id = q.task_id
+                    """
+                    ,
+                    (task_ids, task_ids, task_ids),
+                )
+    
+                out = {}
+                for r in cur.fetchall():
+                    d = dict(r)
+                    out[int(d["task_id"])] = {
+                        "fact_qty_total": float(d.get("fact_qty_total") or 0),
+                        "workers_last": int(d["workers_last"]) if d.get("workers_last") is not None else None,
+                        "workers_max": int(d["workers_max"]) if d.get("workers_max") is not None else None,
+                        "workers_sum": int(d["workers_sum"]) if d.get("workers_sum") is not None else 0,
+                    }
+                return out
+
     # ── plans ──
     @staticmethod
     def get_or_create_current_plan(
@@ -381,20 +442,11 @@ class GprService:
 
     @staticmethod
     def load_task_facts_cumulative(task_ids: List[int]) -> Dict[int, float]:
-        if not task_ids:
-            return {}
-        with _DBConn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT task_id, COALESCE(SUM(fact_qty), 0) AS total
-                    FROM public.gpr_task_facts
-                    WHERE task_id = ANY(%s)
-                    GROUP BY task_id
-                """,
-                    (task_ids,),
-                )
-                return {r[0]: float(r[1]) for r in cur.fetchall()}
+        info = GprService.load_task_fact_info(task_ids)
+        return {
+            task_id: float(v.get("fact_qty_total") or 0)
+            for task_id, v in info.items()
+        }
 
     @staticmethod
     def replace_plan_tasks(
@@ -936,7 +988,7 @@ class GanttCanvas(tk.Frame):
         super().__init__(master, bg=C["panel"])
         self.day_px = day_px
         self._tree = linked_tree
-
+    
         self.hdr = tk.Canvas(
             self, height=self.HEADER_H, bg="#e8eaed", highlightthickness=0
         )
@@ -944,23 +996,24 @@ class GanttCanvas(tk.Frame):
         self.hsb = ttk.Scrollbar(
             self, orient="horizontal", command=self._xview
         )
-
+    
         self.hdr.grid(row=0, column=0, sticky="ew")
         self.body.grid(row=1, column=0, sticky="nsew")
         self.hsb.grid(row=2, column=0, sticky="ew")
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
-
+    
         self.body.configure(xscrollcommand=self._on_xscroll)
-
+    
         self._range: Tuple[date, date] = _quarter_range()
         self._rows: List[Dict[str, Any]] = []
         self._facts: Dict[int, float] = {}
-
+        self._fact_info: Dict[int, Dict[str, Any]] = {}
+    
         self._heavy_redraw_pending: Optional[str] = None
         self._is_mapped = False
         self._header_cache_key = None
-
+    
         self.body.bind("<Configure>", self._on_configure)
         self.body.bind("<MouseWheel>", self._wheel)
         self.body.bind("<Button-4>", self._wheel)
@@ -983,9 +1036,10 @@ class GanttCanvas(tk.Frame):
         self._header_cache_key = None
         self._schedule_heavy_redraw()
 
-    def set_data(self, rows, facts=None):
+    def set_data(self, rows, facts=None, fact_info=None):
         self._rows = rows or []
         self._facts = facts or {}
+        self._fact_info = fact_info or {}
         self._schedule_heavy_redraw()
 
     def _schedule_heavy_redraw(self):
@@ -1142,16 +1196,16 @@ class GanttCanvas(tk.Frame):
         d0, d1 = self._range
         if d1 < d0:
             return
-
+    
         days = (d1 - d0).days + 1
         tw = max(1, days * self.day_px)
         body_h = self.body.winfo_height()
         if body_h < 10:
             body_h = 600
-
+    
         self.body.delete("all")
         self.body.configure(scrollregion=(0, 0, tw, body_h))
-
+    
         td = _today()
         if d0 <= td <= d1:
             tx = (td - d0).days * self.day_px + self.day_px // 2
@@ -1159,38 +1213,36 @@ class GanttCanvas(tk.Frame):
                 tx, 0, tx, body_h,
                 fill=C["error"], width=1, dash=(4, 2)
             )
-
+    
         step = 7 if self.day_px >= 10 else 14
         for i in range(0, days, step):
             x = i * self.day_px
             self.body.create_line(x, 0, x, body_h, fill="#eeeeee")
-
+    
         positions = self._get_tree_row_positions()
         if not positions:
             return
-
+    
         for row_idx, t in enumerate(self._rows):
             if row_idx >= len(positions) or positions[row_idx] is None:
                 continue
-
+    
             y0, y1 = positions[row_idx]
-
+    
             if y1 < -5 or y0 > body_h + 5:
                 continue
-
+    
             row_kind = (t.get("row_kind") or "task").strip()
-
-            # Подложка строк
+    
             if row_kind == "group":
                 bg = "#eef5ff"
             elif row_kind == "title":
                 bg = "#dff1ff"
             else:
                 bg = "#ffffff" if row_idx % 2 == 0 else "#f8f9fa"
-
+    
             self.body.create_rectangle(0, y0, tw, y1, fill=bg, outline="")
-
-            # Специальные строки: только подпись, без бара
+    
             if row_kind in ("group", "title"):
                 fg = "#1a3d7c" if row_kind == "group" else "#0b5394"
                 prefix = "📁 " if row_kind == "group" else "🟦 "
@@ -1203,36 +1255,39 @@ class GanttCanvas(tk.Frame):
                     fill=fg,
                 )
                 continue
-
+    
             ts = _to_date(t.get("plan_start"))
             tf = _to_date(t.get("plan_finish"))
             if not ts or not tf:
                 continue
             if tf < d0 or ts > d1:
                 continue
-
+    
             s2 = max(ts, d0)
             f2 = min(tf, d1)
             bx0 = (s2 - d0).days * self.day_px
             bx1 = ((f2 - d0).days + 1) * self.day_px
-
+    
             st = (t.get("status") or "planned").strip()
             col, _, _ = STATUS_COLORS.get(st, ("#90caf9", "#555", ""))
-
+    
             by0 = y0 + 4
             by1 = y1 - 4
             if by1 - by0 < 4:
                 by0 = y0 + 2
                 by1 = y1 - 2
-
+    
             self.body.create_rectangle(
                 bx0 + 1, by0, bx1 - 1, by1,
                 fill=col, outline="#5f6368"
             )
-
+    
             tid = t.get("id")
             pq = _safe_float(t.get("plan_qty"))
             fq = self._facts.get(tid, 0) if tid else 0
+            fact_info = self._fact_info.get(tid, {}) if tid else {}
+            workers_last = fact_info.get("workers_last")
+    
             if pq and pq > 0 and fq > 0:
                 pct = min(1.0, fq / pq)
                 fw = max(2, int((bx1 - bx0 - 2) * pct))
@@ -1240,7 +1295,7 @@ class GanttCanvas(tk.Frame):
                     bx0 + 1, by0, bx0 + 1 + fw, by1,
                     fill="#388e3c", outline=""
                 )
-
+    
             if t.get("is_milestone"):
                 cx = bx0 + 6
                 cy = (y0 + y1) / 2
@@ -1249,14 +1304,47 @@ class GanttCanvas(tk.Frame):
                     cx + 14, cy, cx + 7, cy + 5,
                     fill="#1a73e8", outline=""
                 )
-
+    
             bar_w = bx1 - bx0
+    
+            info_parts = []
+            if fq and pq and pq > 0:
+                info_parts.append(f"{_fmt_qty(fq)}/{_fmt_qty(pq)}")
+            elif fq:
+                info_parts.append(_fmt_qty(fq))
+    
+            if workers_last:
+                info_parts.append(f"{workers_last}чел")
+    
+            info_text = " · ".join(info_parts)
+    
+            if info_text and bar_w > 90:
+                self.body.create_text(
+                    bx1 - 4,
+                    (y0 + y1) / 2,
+                    text=info_text,
+                    anchor="e",
+                    font=("Segoe UI", 7),
+                    fill="#222"
+                )
+    
             if bar_w > 60:
                 nm = (t.get("name") or "")[:30]
                 self.body.create_text(
                     bx0 + 4, (y0 + y1) / 2,
-                    text=nm, anchor="w",
-                    font=("Segoe UI", 7), fill="#333"
+                    text=nm,
+                    anchor="w",
+                    font=("Segoe UI", 7),
+                    fill="#333"
+                )
+            elif workers_last and bar_w > 26:
+                self.body.create_text(
+                    (bx0 + bx1) / 2,
+                    (y0 + y1) / 2,
+                    text=f"{workers_last}",
+                    anchor="center",
+                    font=("Segoe UI", 7, "bold"),
+                    fill="#222"
                 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -1268,28 +1356,29 @@ class GprPage(tk.Frame):
     def __init__(self, master, app_ref):
         super().__init__(master, bg=C["bg"])
         self.app_ref = app_ref
-
+    
         self.objects: List[Dict[str, Any]] = []
         self.work_types: List[Dict[str, Any]] = []
         self.uoms: List[Dict[str, Any]] = []
-
+    
         self.object_db_id: Optional[int] = None
         self.plan_info: Optional[Dict[str, Any]] = None
         self.plan_id: Optional[int] = None
-
+    
         self.tasks: List[Dict[str, Any]] = []
         self.tasks_filtered: List[Dict[str, Any]] = []
         self.facts: Dict[int, float] = {}
-
+        self.fact_info: Dict[int, Dict[str, Any]] = {}
+    
         self.registry_rows: List[Dict[str, Any]] = []
         self.registry_filtered: List[Dict[str, Any]] = []
-
+    
         self._new_task_counter = 0
-
+    
         q = _quarter_range()
         self.range_from: date = q[0]
         self.range_to: date = q[1]
-
+    
         self._build_ui()
         self._load_refs()
         self._refresh_registry()
@@ -1601,25 +1690,25 @@ class GprPage(tk.Frame):
         )
         top.pack(fill="x", padx=10, pady=(8, 4))
         top.grid_columnconfigure(1, weight=1)
-
+    
         tk.Label(
             top, text="Объект:", bg=C["panel"], font=("Segoe UI", 9)
         ).grid(row=0, column=0, sticky="e", padx=(0, 6))
-
+    
         self.cmb_obj = _AutoCombo(top, width=60, font=("Segoe UI", 9))
         self.cmb_obj.grid(row=0, column=1, sticky="ew", pady=3)
-
+    
         btn_f = tk.Frame(top, bg=C["panel"])
         btn_f.grid(row=0, column=2, padx=(8, 0))
         self._accent_btn(btn_f, "▶  Открыть", self._open_object)
-
+    
         tk.Label(
             top, text="Диапазон:", bg=C["panel"], font=("Segoe UI", 9)
         ).grid(row=1, column=0, sticky="e", padx=(0, 6))
-
+    
         range_f = tk.Frame(top, bg=C["panel"])
         range_f.grid(row=1, column=1, sticky="w", pady=3)
-
+    
         self.lbl_range = tk.Label(
             range_f,
             text="",
@@ -1628,17 +1717,17 @@ class GprPage(tk.Frame):
             font=("Segoe UI", 9),
         )
         self.lbl_range.pack(side="left")
-
+    
         ttk.Button(
             range_f, text="Изменить…", command=self._change_range
         ).pack(side="left", padx=(12, 0))
         ttk.Button(
             range_f, text="По работам", command=self._fit_range
         ).pack(side="left", padx=(6, 0))
-
+    
         bar = tk.Frame(parent, bg=C["accent_light"], pady=5)
         bar.pack(fill="x", padx=10)
-
+    
         self.btn_add = self._tb_btn(bar, "➕ Добавить", self._add_task)
         self.btn_group = self._tb_btn(bar, "📁 Группа", self._add_group)
         self.btn_title = self._tb_btn(bar, "🟦 Титул", self._add_title)
@@ -1646,28 +1735,28 @@ class GprPage(tk.Frame):
         self.btn_delete = self._tb_btn(bar, "🗑 Удалить", self._delete_selected)
         self.btn_up = self._tb_btn(bar, "⬆ Вверх", self._move_selected_up)
         self.btn_down = self._tb_btn(bar, "⬇ Вниз", self._move_selected_down)
-
+    
         tk.Frame(bar, bg=C["border"], width=1).pack(
             side="left", fill="y", padx=8
         )
-
+    
         self.btn_template = self._tb_btn(bar, "📋 Из шаблона…", self._apply_template)
         self.btn_export = self._tb_btn(bar, "📥 Экспорт Excel", self._export_excel)
-
+    
         tk.Frame(bar, bg=C["border"], width=1).pack(
             side="left", fill="y", padx=8
         )
-
+    
         self._tb_btn(bar, "🔍−", lambda: self._zoom(-2))
         self._tb_btn(bar, "🔍+", lambda: self._zoom(2))
-
+    
         self.btn_save = self._accent_btn(bar, "💾  СОХРАНИТЬ", self._save)
         self.btn_save.pack_forget()
         self.btn_save.pack(side="right", padx=(4, 8))
-
+    
         fbar = tk.Frame(parent, bg=C["bg"], pady=4)
         fbar.pack(fill="x", padx=10)
-
+    
         tk.Label(
             fbar, text="Фильтр тип:", bg=C["bg"], font=("Segoe UI", 8)
         ).pack(side="left")
@@ -1679,7 +1768,7 @@ class GprPage(tk.Frame):
         self.cmb_filt_wt.bind(
             "<<ComboboxSelected>>", lambda _e: self._apply_filter()
         )
-
+    
         tk.Label(
             fbar, text="Статус:", bg=C["bg"], font=("Segoe UI", 8)
         ).pack(side="left")
@@ -1694,7 +1783,7 @@ class GprPage(tk.Frame):
         self.cmb_filt_st.bind(
             "<<ComboboxSelected>>", lambda _e: self._apply_filter()
         )
-
+    
         tk.Label(
             fbar, text="Поиск:", bg=C["bg"], font=("Segoe UI", 8)
         ).pack(side="left")
@@ -1702,7 +1791,7 @@ class GprPage(tk.Frame):
         ent_s = ttk.Entry(fbar, textvariable=self.var_search, width=24)
         ent_s.pack(side="left", padx=(4, 0))
         ent_s.bind("<KeyRelease>", lambda _e: self._apply_filter())
-
+    
         self.lbl_summary = tk.Label(
             parent,
             text="",
@@ -1712,7 +1801,7 @@ class GprPage(tk.Frame):
             anchor="w",
         )
         self.lbl_summary.pack(fill="x", padx=14, pady=(2, 0))
-
+    
         leg = tk.Frame(parent, bg=C["bg"])
         leg.pack(fill="x", padx=14, pady=(0, 2))
         for code in STATUS_LIST:
@@ -1734,17 +1823,17 @@ class GprPage(tk.Frame):
                 font=("Segoe UI", 7),
                 fg=C["text2"],
             ).pack(side="left")
-
+    
         pw = tk.PanedWindow(
             parent, orient="horizontal", sashrelief="raised", bg=C["bg"]
         )
         pw.pack(fill="both", expand=True, padx=10, pady=(4, 4))
-
+    
         left = tk.Frame(pw, bg=C["panel"])
         right = tk.Frame(pw, bg=C["panel"])
-        pw.add(left, minsize=480)
+        pw.add(left, minsize=560)
         pw.add(right, minsize=400)
-
+    
         self.tree_top_spacer = tk.Frame(
             left,
             bg="#d6dbe0",
@@ -1754,15 +1843,15 @@ class GprPage(tk.Frame):
         )
         self.tree_top_spacer.pack(side="top", fill="x")
         self.tree_top_spacer.pack_propagate(False)
-
+    
         tree_wrap = tk.Frame(left, bg=C["panel"])
         tree_wrap.pack(side="top", fill="both", expand=True)
-
+    
         style = ttk.Style(self)
         style.configure("GPR.Treeview", rowheight=24)
         style.configure("GPR.Treeview.Heading", font=("Segoe UI", 9, "bold"))
-
-        cols = ("type", "name", "start", "finish", "uom", "qty", "status")
+    
+        cols = ("type", "name", "start", "finish", "uom", "qty", "workers", "status")
         self.tree = ttk.Treeview(
             tree_wrap,
             columns=cols,
@@ -1770,7 +1859,7 @@ class GprPage(tk.Frame):
             selectmode="browse",
             style="GPR.Treeview",
         )
-
+    
         heads = {
             "type": ("Тип работ", 130),
             "name": ("Вид работ", 260),
@@ -1778,25 +1867,26 @@ class GprPage(tk.Frame):
             "finish": ("Конец", 85),
             "uom": ("Ед.", 50),
             "qty": ("Объём", 75),
+            "workers": ("Людей", 70),
             "status": ("Статус", 100),
         }
-
+    
         for c, (t, w) in heads.items():
             self.tree.heading(c, text=t)
             anc = (
                 "center"
-                if c in ("start", "finish", "uom", "status")
+                if c in ("start", "finish", "uom", "workers", "status")
                 else ("e" if c == "qty" else "w")
             )
             self.tree.column(c, width=w, anchor=anc)
-
+    
         vsb = ttk.Scrollbar(
             tree_wrap, orient="vertical", command=self._on_tree_scroll
         )
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
-
+    
         self.tree.bind("<Double-1>", lambda _e: self._edit_selected())
         self.tree.bind("<Return>", lambda _e: self._edit_selected())
         self.tree.bind("<MouseWheel>", self._on_tree_wheel)
@@ -1804,15 +1894,15 @@ class GprPage(tk.Frame):
         self.tree.bind("<Button-5>", self._on_tree_wheel)
         self.tree.bind("<Control-Up>", lambda _e: self._move_selected_up())
         self.tree.bind("<Control-Down>", lambda _e: self._move_selected_down())
-
+    
         self.gantt = GanttCanvas(right, day_px=20, linked_tree=self.tree)
         self.gantt.pack(fill="both", expand=True)
-
+    
         self.after_idle(self._sync_tree_header_spacer)
-
+    
         bot = tk.Frame(parent, bg=C["border"], height=1)
         bot.pack(fill="x", padx=10)
-
+    
         self.lbl_bottom = tk.Label(
             parent,
             text="Выберите объект в реестре или откройте его вручную",
@@ -1824,7 +1914,6 @@ class GprPage(tk.Frame):
             pady=2,
         )
         self.lbl_bottom.pack(fill="x", padx=0, pady=(0, 6))
-
     # ══════════════════════════════════════════════════════
     #  COMMON
     # ══════════════════════════════════════════════════════
@@ -2020,34 +2109,39 @@ class GprPage(tk.Frame):
     def _open_object_by_id(self, oid: int):
         self.object_db_id = oid
         uid = (self.app_ref.current_user or {}).get("id")
-
+    
         try:
             self.plan_info = GprService.get_or_create_current_plan(oid, uid)
             self.plan_id = int(self.plan_info["id"])
             self.tasks = GprService.load_plan_tasks(self.plan_id)
-
+    
             for t in self.tasks:
                 t["row_kind"] = (t.get("row_kind") or "task").strip()
-
+    
             tids = [
                 t["id"] for t in self.tasks
                 if t.get("id") and (t.get("row_kind") or "task") == "task"
             ]
-            self.facts = GprService.load_task_facts_cumulative(tids)
-
+    
+            self.fact_info = GprService.load_task_fact_info(tids)
+            self.facts = {
+                task_id: float(v.get("fact_qty_total") or 0)
+                for task_id, v in self.fact_info.items()
+            }
+    
         except Exception as e:
             logger.exception("GPR open error")
             messagebox.showerror(
                 "ГПР", f"Не удалось открыть ГПР:\n{e}", parent=self
             )
             return
-
+    
         obj = next((o for o in self.objects if int(o["id"]) == oid), None)
         if obj:
             sn = (obj.get("short_name") or "").strip()
             addr = (obj.get("address") or "").strip()
             name = sn if sn else addr
-
+    
             label = None
             for i, o in enumerate(self.objects):
                 if int(o["id"]) == oid:
@@ -2059,14 +2153,14 @@ class GprPage(tk.Frame):
                     break
         else:
             name = str(oid)
-
+    
         self._update_plan_info()
         self._apply_filter()
         self._update_summary()
         self.lbl_bottom.config(
             text=f"Объект: {name}  |  Строк: {len(self.tasks)}"
         )
-
+    
         self.nb_main.select(self.tab_editor)
 
     # ══════════════════════════════════════════════════════
@@ -2116,21 +2210,29 @@ class GprPage(tk.Frame):
 
     def _render(self):
         self.tree.delete(*self.tree.get_children())
-
+    
         for t in self.tasks_filtered:
             iid = self._gen_iid(t)
             row_kind = (t.get("row_kind") or "task").strip()
-
+    
             if row_kind == "group":
-                values = ("", f"📁 {t.get('name', '')}", "", "", "", "", "")
+                values = ("", f"📁 {t.get('name', '')}", "", "", "", "", "", "")
                 self.tree.insert("", "end", iid=iid, values=values, tags=("group",))
             elif row_kind == "title":
-                values = ("", f"🟦 {t.get('name', '')}", "", "", "", "", "")
+                values = ("", f"🟦 {t.get('name', '')}", "", "", "", "", "", "")
                 self.tree.insert("", "end", iid=iid, values=values, tags=("title",))
             else:
                 st_label = STATUS_LABELS.get(
                     t.get("status", ""), t.get("status", "")
                 )
+    
+                tid = t.get("id")
+                workers_last = ""
+                if tid is not None:
+                    info = self.fact_info.get(tid) or {}
+                    if info.get("workers_last") is not None:
+                        workers_last = str(info["workers_last"])
+    
                 self.tree.insert(
                     "",
                     "end",
@@ -2142,19 +2244,20 @@ class GprPage(tk.Frame):
                         _fmt_date(t.get("plan_finish")),
                         t.get("uom_code") or "",
                         _fmt_qty(t.get("plan_qty")),
+                        workers_last,
                         st_label,
                     ),
                     tags=("task",),
                 )
-
+    
         self.tree.tag_configure("group", font=("Segoe UI", 9, "bold"))
         self.tree.tag_configure(
             "title",
             font=("Segoe UI", 9, "bold"),
             background="#e3f2fd",
         )
-
-        self.gantt.set_data(self.tasks_filtered, self.facts)
+    
+        self.gantt.set_data(self.tasks_filtered, self.facts, self.fact_info)
         self.after_idle(self._sync_tree_header_spacer)
         self.after_idle(self.gantt.redraw_bars_only)
 
@@ -2166,7 +2269,7 @@ class GprPage(tk.Frame):
         if dlg.result:
             self.range_from, self.range_to = dlg.result
             self._update_range_label()
-            self.gantt.set_data(self.tasks_filtered, self.facts)
+            self.gantt.set_data(self.tasks_filtered, self.facts, self.fact_info)
 
     def _fit_range(self):
         task_rows = [t for t in self.tasks if (t.get("row_kind") or "task") == "task"]
@@ -2175,7 +2278,7 @@ class GprPage(tk.Frame):
                 "ГПР", "Нет работ для определения диапазона.", parent=self
             )
             return
-
+    
         starts = [
             _to_date(t["plan_start"])
             for t in task_rows
@@ -2186,19 +2289,19 @@ class GprPage(tk.Frame):
             for t in task_rows
             if _to_date(t.get("plan_finish"))
         ]
-
+    
         if not starts or not finishes:
             messagebox.showinfo(
                 "ГПР", "Нет работ с валидными датами.", parent=self
             )
             return
-
+    
         d0 = min(starts)
         d1 = max(finishes)
         self.range_from = d0 - timedelta(days=7)
         self.range_to = d1 + timedelta(days=7)
         self._update_range_label()
-        self.gantt.set_data(self.tasks_filtered, self.facts)
+        self.gantt.set_data(self.tasks_filtered, self.facts, self.fact_info)
 
     def _zoom(self, delta):
         self.gantt.day_px = max(6, min(50, self.gantt.day_px + delta))
@@ -2374,10 +2477,10 @@ class GprPage(tk.Frame):
                 "ГПР", "Выберите работу для редактирования.", parent=self
             )
             return
-
+    
         t0 = self.tasks[idx]
         row_kind = (t0.get("row_kind") or "task").strip()
-
+    
         if row_kind in ("group", "title"):
             title = "Группа" if row_kind == "group" else "Титульная строка"
             name = simpledialog.askstring(
@@ -2392,11 +2495,11 @@ class GprPage(tk.Frame):
             self._apply_filter()
             self._update_summary()
             return
-
+    
         result = self._open_task_dialog(init=t0)
         if not result:
             return
-
+    
         upd = dict(result)
         upd["id"] = t0.get("id")
         upd["row_kind"] = "task"
@@ -2411,14 +2514,14 @@ class GprPage(tk.Frame):
         )
         upd["plan_start"] = _to_date(upd.get("plan_start")) or _today()
         upd["plan_finish"] = _to_date(upd.get("plan_finish")) or _today()
-
+    
         task_id = t0.get("id")
         assignments = upd.pop("_assignments", None)
         facts_payload = upd.pop("_facts", None)
         facts_changed = bool(upd.pop("_facts_changed", False))
-
+    
         uid = (self.app_ref.current_user or {}).get("id")
-
+    
         if task_id and assignments is not None:
             try:
                 from gpr_task_dialog import _EmployeeService
@@ -2434,18 +2537,23 @@ class GprPage(tk.Frame):
                     f"Ошибка сохранения назначений:\n{e}",
                     parent=self,
                 )
-
+    
         if task_id and facts_changed:
             try:
                 from gpr_task_dialog import _TaskFactService
                 _TaskFactService.save_task_facts(task_id, facts_payload or [], uid)
-
-                fact_map = GprService.load_task_facts_cumulative([task_id])
-                if task_id in fact_map:
-                    self.facts[task_id] = fact_map[task_id]
+    
+                fact_info_map = GprService.load_task_fact_info([task_id])
+    
+                if task_id in fact_info_map:
+                    self.fact_info[task_id] = fact_info_map[task_id]
+                    self.facts[task_id] = float(
+                        fact_info_map[task_id].get("fact_qty_total") or 0
+                    )
                 else:
+                    self.fact_info.pop(task_id, None)
                     self.facts.pop(task_id, None)
-
+    
             except ImportError:
                 logger.warning("gpr_task_dialog not available — facts not saved")
             except Exception as e:
@@ -2455,7 +2563,7 @@ class GprPage(tk.Frame):
                     f"Ошибка сохранения факта:\n{e}",
                     parent=self,
                 )
-
+    
         self.tasks[idx] = upd
         self._apply_filter()
         self._update_summary()
@@ -2590,45 +2698,51 @@ class GprPage(tk.Frame):
                 "ГПР", "Сначала откройте объект.", parent=self
             )
             return
-
+    
         errors = []
         for i, t in enumerate(self.tasks):
             row_kind = (t.get("row_kind") or "task").strip()
             name = (t.get("name") or "").strip()
-
+    
             if not name:
                 errors.append(f"Строка {i + 1}: нет названия")
                 continue
-
+    
             if row_kind != "task":
                 continue
-
+    
             ds = _to_date(t.get("plan_start"))
             df = _to_date(t.get("plan_finish"))
             if not ds or not df:
                 errors.append(f"«{name}»: невалидные даты")
             elif df < ds:
                 errors.append(f"«{name}»: окончание раньше начала")
-
+    
         if errors:
             msg = "Ошибки валидации:\n\n" + "\n".join(errors[:10])
             if len(errors) > 10:
                 msg += f"\n\n...и ещё {len(errors) - 10} ошибок"
             messagebox.showwarning("ГПР", msg, parent=self)
             return
-
+    
         uid = (self.app_ref.current_user or {}).get("id")
         try:
             GprService.replace_plan_tasks(self.plan_id, uid, self.tasks)
             self.tasks = GprService.load_plan_tasks(self.plan_id)
             for t in self.tasks:
                 t["row_kind"] = (t.get("row_kind") or "task").strip()
-
+    
             tids = [
                 t["id"] for t in self.tasks
                 if t.get("id") and (t.get("row_kind") or "task") == "task"
             ]
-            self.facts = GprService.load_task_facts_cumulative(tids)
+    
+            self.fact_info = GprService.load_task_fact_info(tids)
+            self.facts = {
+                task_id: float(v.get("fact_qty_total") or 0)
+                for task_id, v in self.fact_info.items()
+            }
+    
             self.plan_info = GprService.get_or_create_current_plan(
                 self.object_db_id, uid
             )
@@ -2656,17 +2770,17 @@ class GprPage(tk.Frame):
         Создаёт второй лист Excel с диаграммой Ганта.
         Использует текущий диапазон self.range_from / self.range_to.
         """
-        rows = self.tasks  # если нужно экспортировать только отфильтрованные: self.tasks_filtered or self.tasks
-
+        rows = self.tasks
+    
         ws = wb.create_sheet("Диаграмма Ганта")
-
+    
         d0 = _to_date(self.range_from) or _today()
         d1 = _to_date(self.range_to) or d0
         if d1 < d0:
             d0, d1 = d1, d0
-
+    
         days = (d1 - d0).days + 1
-
+    
         fixed_cols = [
             ("№", 6),
             ("Тип работ", 18),
@@ -2674,22 +2788,22 @@ class GprPage(tk.Frame):
             ("Начало", 12),
             ("Окончание", 12),
             ("Статус", 16),
+            ("Людей", 10),
         ]
         gantt_col_start = len(fixed_cols) + 1
         total_cols = len(fixed_cols) + days
-
+    
         addr = (obj or {}).get("address", "") if obj else ""
         title = f"Диаграмма Ганта: {obj_name}"
         if addr:
             title += f" — {addr}"
-
-        # ── Стили ─────────────────────────────────────────────
+    
         thin_side = Side(style="thin", color="D0D0D0")
         thin_border = Border(
             left=thin_side, right=thin_side,
             top=thin_side, bottom=thin_side
         )
-
+    
         header_fill = PatternFill("solid", fgColor="D6DCE4")
         month_fill = PatternFill("solid", fgColor="D6DBE0")
         weekday_fill = PatternFill("solid", fgColor="F3F4F6")
@@ -2697,7 +2811,7 @@ class GprPage(tk.Frame):
         group_fill = PatternFill("solid", fgColor="EEF5FF")
         title_fill = PatternFill("solid", fgColor="DFF1FF")
         progress_fill = PatternFill("solid", fgColor="388E3C")
-
+    
         status_fill = {
             "planned": self._xl_fill("#90caf9"),
             "in_progress": self._xl_fill("#ffcc80"),
@@ -2705,26 +2819,24 @@ class GprPage(tk.Frame):
             "paused": self._xl_fill("#fff176"),
             "canceled": self._xl_fill("#ef9a9a"),
         }
-
+    
         month_names = {
             1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
             5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
             9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь",
         }
         weekday_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-
-        # ── Заголовок ────────────────────────────────────────
+    
         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=total_cols)
         c = ws.cell(1, 1, title)
         c.font = Font(bold=True, size=12)
         c.alignment = Alignment(horizontal="left", vertical="center")
-
+    
         month_row = 2
         day_row = 3
         week_row = 4
         data_row = 5
-
-        # ── Левые заголовки ──────────────────────────────────
+    
         for col_idx, (caption, width) in enumerate(fixed_cols, start=1):
             ws.column_dimensions[get_column_letter(col_idx)].width = width
             ws.merge_cells(
@@ -2736,63 +2848,60 @@ class GprPage(tk.Frame):
             cell.fill = header_fill
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             cell.border = thin_border
-
-        # ── Заголовок месяцев ────────────────────────────────
+    
         cur = date(d0.year, d0.month, 1)
         while cur <= d1:
             month_last_day = calendar.monthrange(cur.year, cur.month)[1]
             ms = max(cur, d0)
             me = min(date(cur.year, cur.month, month_last_day), d1)
-
+    
             c0 = gantt_col_start + (ms - d0).days
             c1 = gantt_col_start + (me - d0).days
-
+    
             if c0 != c1:
                 ws.merge_cells(
                     start_row=month_row, start_column=c0,
                     end_row=month_row, end_column=c1
                 )
-
+    
             mcell = ws.cell(month_row, c0, f"{month_names[cur.month]} {cur.year}")
             mcell.font = Font(bold=True, size=10)
             mcell.fill = month_fill
             mcell.alignment = Alignment(horizontal="center", vertical="center")
-
+    
             if cur.month == 12:
                 cur = date(cur.year + 1, 1, 1)
             else:
                 cur = date(cur.year, cur.month + 1, 1)
-
-        # ── Дни и дни недели ────────────────────────────────
+    
         for i in range(days):
             col = gantt_col_start + i
             dt = d0 + timedelta(days=i)
-
+    
             ws.column_dimensions[get_column_letter(col)].width = 3.2
             fill = weekend_fill if dt.weekday() >= 5 else weekday_fill
-
+    
             day_cell = ws.cell(day_row, col, dt.day)
             day_cell.font = Font(bold=True, size=8)
             day_cell.fill = fill
             day_cell.alignment = Alignment(horizontal="center", vertical="center")
             day_cell.border = thin_border
-
+    
             wd_cell = ws.cell(week_row, col, weekday_names[dt.weekday()])
             wd_cell.font = Font(size=8)
             wd_cell.fill = fill
             wd_cell.alignment = Alignment(horizontal="center", vertical="center")
             wd_cell.border = thin_border
-
-        # ── Данные ───────────────────────────────────────────
+    
         excel_no = 0
         last_row = data_row - 1
-
+    
         for row_num, t in enumerate(rows, start=data_row):
             last_row = row_num
             ws.row_dimensions[row_num].height = 20
-
+    
             row_kind = (t.get("row_kind") or "task").strip()
-
+    
             if row_kind == "group":
                 for col in range(1, total_cols + 1):
                     ws.cell(row_num, col).fill = group_fill
@@ -2800,7 +2909,7 @@ class GprPage(tk.Frame):
                 ws.cell(row_num, 3, t.get("name", "")).font = Font(bold=True)
                 ws.cell(row_num, 3).alignment = Alignment(horizontal="left", vertical="center")
                 continue
-
+    
             if row_kind == "title":
                 for col in range(1, total_cols + 1):
                     ws.cell(row_num, col).fill = title_fill
@@ -2808,14 +2917,21 @@ class GprPage(tk.Frame):
                 ws.cell(row_num, 3, t.get("name", "")).font = Font(bold=True)
                 ws.cell(row_num, 3).alignment = Alignment(horizontal="left", vertical="center")
                 continue
-
+    
             excel_no += 1
-
+    
             ds = _to_date(t.get("plan_start"))
             df = _to_date(t.get("plan_finish"))
             st_code = (t.get("status") or "planned").strip()
             st_label = STATUS_LABELS.get(st_code, st_code)
-
+    
+            tid = t.get("id")
+            workers_last = ""
+            if tid is not None:
+                info = self.fact_info.get(tid) or {}
+                if info.get("workers_last") is not None:
+                    workers_last = info["workers_last"]
+    
             left_values = [
                 excel_no,
                 t.get("work_type_name", ""),
@@ -2823,53 +2939,51 @@ class GprPage(tk.Frame):
                 _fmt_date(ds) if ds else "",
                 _fmt_date(df) if df else "",
                 st_label,
+                workers_last,
             ]
-
+    
             for col_idx, val in enumerate(left_values, start=1):
                 cell = ws.cell(row_num, col_idx, val)
                 cell.border = thin_border
-                if col_idx in (1, 4, 5, 6):
+                if col_idx in (1, 4, 5, 6, 7):
                     cell.alignment = Alignment(horizontal="center", vertical="center")
                 else:
                     cell.alignment = Alignment(horizontal="left", vertical="center")
-
+    
             st_fill = status_fill.get(st_code)
             if st_fill:
                 ws.cell(row_num, 6).fill = st_fill
-
-            # Полоса Ганта
+    
             if not ds or not df:
                 continue
             if df < d0 or ds > d1:
                 continue
-
+    
             clip_start = max(ds, d0)
             clip_finish = min(df, d1)
-
+    
             col_start = gantt_col_start + (clip_start - d0).days
             col_finish = gantt_col_start + (clip_finish - d0).days
-
+    
             bar_fill = status_fill.get(st_code, self._xl_fill("#90caf9"))
-
+    
             for col in range(col_start, col_finish + 1):
                 cell = ws.cell(row_num, col)
                 cell.fill = bar_fill
                 cell.border = thin_border
-
-            # Прогресс по факту (зелёная часть)
+    
             pq = _safe_float(t.get("plan_qty"))
-            tid = t.get("id")
             fq = self.facts.get(tid, 0) if tid else 0.0
-
+    
             if pq and pq > 0 and fq > 0:
                 pct = max(0.0, min(1.0, fq / pq))
                 total_task_days = max(1, (df - ds).days + 1)
                 progress_days = max(1, min(total_task_days, int(round(total_task_days * pct))))
                 progress_finish = ds + timedelta(days=progress_days - 1)
-
+    
                 p0 = max(ds, d0)
                 p1 = min(progress_finish, d1)
-
+    
                 if p1 >= p0:
                     pcol0 = gantt_col_start + (p0 - d0).days
                     pcol1 = gantt_col_start + (p1 - d0).days
@@ -2877,16 +2991,14 @@ class GprPage(tk.Frame):
                         cell = ws.cell(row_num, col)
                         cell.fill = progress_fill
                         cell.border = thin_border
-
-            # Веха
+    
             if t.get("is_milestone"):
                 milestone_date = min(max(ds, d0), d1)
                 mcol = gantt_col_start + (milestone_date - d0).days
                 mcell = ws.cell(row_num, mcol, "◆")
                 mcell.font = Font(bold=True, color="1A73E8")
                 mcell.alignment = Alignment(horizontal="center", vertical="center")
-
-        # ── Линия "сегодня" ─────────────────────────────────
+    
         td = _today()
         if d0 <= td <= d1:
             today_col = gantt_col_start + (td - d0).days
@@ -2900,24 +3012,22 @@ class GprPage(tk.Frame):
                     top=old_border.top,
                     bottom=old_border.bottom
                 )
-
-        # ── Легенда ─────────────────────────────────────────
+    
         legend_row = last_row + 2
         ws.cell(legend_row, 1, "Легенда:").font = Font(bold=True)
-
+    
         lc = 2
         for code in STATUS_LIST:
             ws.cell(legend_row, lc, " ").fill = status_fill[code]
             ws.cell(legend_row, lc).border = thin_border
             ws.cell(legend_row, lc + 1, STATUS_LABELS[code])
             lc += 2
-
+    
         ws.cell(legend_row + 1, 2, " ").fill = progress_fill
         ws.cell(legend_row + 1, 2).border = thin_border
         ws.cell(legend_row + 1, 3, "Фактическое выполнение")
-
-        # ── Фиксация области ───────────────────────────────
-        ws.freeze_panes = ws.cell(data_row, gantt_col_start) 
+    
+        ws.freeze_panes = ws.cell(data_row, gantt_col_start)
     
     def _export_excel(self):
         if not self.tasks:
@@ -2925,7 +3035,7 @@ class GprPage(tk.Frame):
                 "ГПР", "Нет данных для выгрузки.", parent=self
             )
             return
-
+    
         if not HAS_OPENPYXL:
             messagebox.showwarning(
                 "ГПР",
@@ -2934,7 +3044,7 @@ class GprPage(tk.Frame):
                 parent=self,
             )
             return
-
+    
         obj = next(
             (o for o in self.objects if int(o["id"]) == self.object_db_id),
             None,
@@ -2943,13 +3053,13 @@ class GprPage(tk.Frame):
             obj_name = obj.get("short_name") or obj.get("address") or "объект"
         else:
             obj_name = "объект"
-
+    
         default_name = f"ГПР_{obj_name}_{_today().strftime('%Y%m%d')}.xlsx"
         default_name = "".join(
             c if c.isalnum() or c in "._- ()" else "_"
             for c in default_name
         )
-
+    
         path = filedialog.asksaveasfilename(
             parent=self,
             title="Сохранить ГПР в Excel",
@@ -2959,22 +3069,22 @@ class GprPage(tk.Frame):
         )
         if not path:
             return
-
+    
         try:
             wb = Workbook()
             ws = wb.active
             ws.title = "ГПР"
-
+    
             if obj:
                 addr = obj.get("address", "")
-                ws.merge_cells("A1:K1")
+                ws.merge_cells("A1:L1")
                 title_cell = ws.cell(1, 1, f"ГПР: {obj_name} — {addr}")
                 title_cell.font = Font(bold=True, size=12)
                 title_cell.alignment = Alignment(horizontal="left")
                 data_start_row = 3
             else:
                 data_start_row = 1
-
+    
             headers = [
                 "№",
                 "Тип работ",
@@ -2987,9 +3097,10 @@ class GprPage(tk.Frame):
                 "Статус",
                 "Факт (накоп.)",
                 "% выполнения",
+                "Людей",
             ]
-            widths = [6, 22, 36, 8, 14, 14, 14, 14, 16, 14, 14]
-
+            widths = [6, 22, 36, 8, 14, 14, 14, 14, 16, 14, 14, 10]
+    
             hdr_row = data_start_row
             for i, h in enumerate(headers, 1):
                 cell = ws.cell(hdr_row, i, h)
@@ -3000,12 +3111,12 @@ class GprPage(tk.Frame):
                     vertical="center",
                     wrap_text=True,
                 )
-
+    
             for i, w in enumerate(widths, 1):
                 ws.column_dimensions[get_column_letter(i)].width = w
-
+    
             ws.freeze_panes = f"A{hdr_row + 1}"
-
+    
             status_fill = {
                 "planned": PatternFill("solid", fgColor="D6EAFF"),
                 "in_progress": PatternFill("solid", fgColor="FFF3CD"),
@@ -3013,40 +3124,46 @@ class GprPage(tk.Frame):
                 "paused": PatternFill("solid", fgColor="FFF9C4"),
                 "canceled": PatternFill("solid", fgColor="F8D7DA"),
             }
-
+    
             excel_no = 0
             for row_num, t in enumerate(self.tasks, start=hdr_row + 1):
                 row_kind = (t.get("row_kind") or "task").strip()
-
+    
                 if row_kind == "group":
                     ws.cell(row_num, 2, "ГРУППА").font = Font(bold=True)
                     ws.cell(row_num, 3, t.get("name", "")).font = Font(bold=True)
-                    for c in range(1, 12):
+                    for c in range(1, 13):
                         ws.cell(row_num, c).fill = PatternFill("solid", fgColor="EEF5FF")
                     continue
-
+    
                 if row_kind == "title":
                     ws.cell(row_num, 2, "ТИТУЛ").font = Font(bold=True)
                     ws.cell(row_num, 3, t.get("name", "")).font = Font(bold=True)
-                    for c in range(1, 12):
+                    for c in range(1, 13):
                         ws.cell(row_num, c).fill = PatternFill("solid", fgColor="DFF1FF")
                     continue
-
+    
                 excel_no += 1
                 ds = _to_date(t.get("plan_start"))
                 df = _to_date(t.get("plan_finish"))
                 dur = (df - ds).days + 1 if ds and df else ""
-
+    
                 pq = _safe_float(t.get("plan_qty"))
                 tid = t.get("id")
                 fq = self.facts.get(tid, 0) if tid else 0
                 pct = ""
                 if pq and pq > 0:
                     pct = f"{min(100.0, fq / pq * 100):.1f}%"
-
+    
+                workers_last = ""
+                if tid is not None:
+                    info = self.fact_info.get(tid) or {}
+                    if info.get("workers_last") is not None:
+                        workers_last = info["workers_last"]
+    
                 st_code = t.get("status", "planned")
                 st_label = STATUS_LABELS.get(st_code, st_code)
-
+    
                 values = [
                     excel_no,
                     t.get("work_type_name", ""),
@@ -3059,8 +3176,9 @@ class GprPage(tk.Frame):
                     st_label,
                     _fmt_qty(fq) if fq else "",
                     pct,
+                    workers_last,
                 ]
-
+    
                 for col, val in enumerate(values, 1):
                     cell = ws.cell(row_num, col, val)
                     cell.alignment = Alignment(
@@ -3070,7 +3188,7 @@ class GprPage(tk.Frame):
                         fill = status_fill.get(st_code)
                         if fill:
                             cell.fill = fill
-
+    
             last_row = hdr_row + len(self.tasks) + 1
             task_count = sum(
                 1 for t in self.tasks if (t.get("row_kind") or "task") == "task"
@@ -3079,7 +3197,7 @@ class GprPage(tk.Frame):
                 1 for t in self.tasks
                 if (t.get("row_kind") or "task") == "task" and t.get("status") == "done"
             )
-
+    
             ws.cell(last_row, 2, f"Итого работ: {task_count}").font = Font(bold=True)
             ws.cell(last_row, 9, f"Выполнено: {done_cnt}").font = Font(bold=True)
             ws.cell(
@@ -3087,9 +3205,9 @@ class GprPage(tk.Frame):
                 2,
                 f"Выгружено: {_today().strftime('%d.%m.%Y')}",
             ).font = Font(italic=True, size=8, color="888888")
-
+    
             self._export_excel_gantt_sheet(wb, obj, obj_name)
-
+    
             wb.save(path)
             messagebox.showinfo(
                 "ГПР",
@@ -3097,7 +3215,7 @@ class GprPage(tk.Frame):
                 f"Листы: 'ГПР' и 'Диаграмма Ганта'",
                 parent=self
             )
-
+    
         except PermissionError:
             messagebox.showerror(
                 "ГПР",
