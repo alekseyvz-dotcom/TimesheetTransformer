@@ -1830,6 +1830,478 @@ class TaskEditDialogPro(tk.Toplevel):
         self.result = None
         self._safe_destroy()
 
+class TaskFactBatchDialog(tk.Toplevel):
+    """
+    Массовый ввод факта по всем работам ГПР.
+    Показывает только строки row_kind='task', но умеет фильтровать по
+    текущему титулу / группе, вычисленным из плоского списка задач.
+    """
+
+    def __init__(
+        self,
+        parent,
+        tasks: List[Dict[str, Any]],
+        user_id: Optional[int] = None,
+        fact_date: Optional[date] = None,
+    ):
+        super().__init__(parent)
+        self.transient(parent)
+
+        self.tasks_src = tasks or []
+        self.user_id = user_id
+        self.result: Optional[Dict[str, Any]] = None
+        self._destroyed = False
+
+        self.title("📈 Массовое заполнение факта")
+        self.minsize(1100, 650)
+        self.resizable(True, True)
+
+        self.var_fact_date = tk.StringVar(value=_fmt_date(fact_date or _today()))
+        self.var_period = tk.StringVar(value=FACT_PERIODS["day"])
+        self.var_search = tk.StringVar(value="")
+        self.var_title = tk.StringVar(value="Все")
+        self.var_group = tk.StringVar(value="Все")
+
+        self._all_rows: List[Dict[str, Any]] = self._prepare_rows(self.tasks_src)
+        self._filtered_rows: List[Dict[str, Any]] = []
+
+        self._row_widgets: Dict[int, Dict[str, Any]] = {}
+
+        self._build_ui()
+        self._fill_filters()
+        self._apply_filter()
+
+        self.grab_set()
+        self.after(20, self._center)
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+    def _prepare_rows(self, tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        rows = []
+        cur_title = ""
+        cur_group = ""
+
+        for t in tasks:
+            row_kind = (t.get("row_kind") or "task").strip()
+
+            if row_kind == "title":
+                cur_title = (t.get("name") or "").strip()
+                cur_group = ""
+                continue
+
+            if row_kind == "group":
+                cur_group = (t.get("name") or "").strip()
+                continue
+
+            if row_kind != "task":
+                continue
+
+            tid = t.get("id")
+            if not tid:
+                # массовый факт — только для уже сохранённых задач
+                continue
+
+            rows.append(
+                {
+                    "task_id": int(tid),
+                    "title_name": cur_title,
+                    "group_name": cur_group,
+                    "work_type_name": t.get("work_type_name") or "",
+                    "task_name": t.get("name") or "",
+                    "uom_code": t.get("uom_code") or "",
+                    "plan_qty": t.get("plan_qty"),
+                    "task": t,
+                }
+            )
+        return rows
+
+    def _build_ui(self):
+        top = tk.LabelFrame(
+            self,
+            text=" Параметры ввода ",
+            bg=C["panel"],
+            fg=C["accent"],
+            font=("Segoe UI", 9, "bold"),
+            padx=10,
+            pady=8,
+        )
+        top.pack(fill="x", padx=10, pady=(10, 6))
+
+        row1 = tk.Frame(top, bg=C["panel"])
+        row1.pack(fill="x", pady=2)
+
+        tk.Label(row1, text="Дата факта:", bg=C["panel"], font=("Segoe UI", 9)).pack(side="left")
+        self.ent_fact_date = ttk.Entry(row1, textvariable=self.var_fact_date, width=12)
+        self.ent_fact_date.pack(side="left", padx=(6, 10))
+
+        ttk.Button(row1, text="Сегодня", command=self._set_today).pack(side="left", padx=(0, 14))
+
+        tk.Label(row1, text="Период:", bg=C["panel"], font=("Segoe UI", 9)).pack(side="left")
+        self.cmb_period = ttk.Combobox(
+            row1,
+            state="readonly",
+            width=14,
+            values=FACT_PERIOD_LABELS,
+            textvariable=self.var_period,
+        )
+        self.cmb_period.pack(side="left", padx=(6, 14))
+        self.cmb_period.current(0)
+
+        ttk.Button(row1, text="Сохранить", command=self._on_ok).pack(side="right", padx=2)
+        ttk.Button(row1, text="Отмена", command=self._on_cancel).pack(side="right", padx=2)
+        ttk.Button(row1, text="Очистить ввод", command=self._clear_inputs).pack(side="right", padx=12)
+
+        row2 = tk.Frame(top, bg=C["panel"])
+        row2.pack(fill="x", pady=(8, 2))
+
+        tk.Label(row2, text="Поиск:", bg=C["panel"], font=("Segoe UI", 9)).pack(side="left")
+        ent_search = ttk.Entry(row2, textvariable=self.var_search, width=28)
+        ent_search.pack(side="left", padx=(6, 12))
+        ent_search.bind("<KeyRelease>", lambda _e: self._apply_filter())
+
+        tk.Label(row2, text="Титул:", bg=C["panel"], font=("Segoe UI", 9)).pack(side="left")
+        self.cmb_title = ttk.Combobox(
+            row2,
+            state="readonly",
+            width=28,
+            textvariable=self.var_title,
+        )
+        self.cmb_title.pack(side="left", padx=(6, 12))
+        self.cmb_title.bind("<<ComboboxSelected>>", lambda _e: self._apply_filter())
+
+        tk.Label(row2, text="Группа:", bg=C["panel"], font=("Segoe UI", 9)).pack(side="left")
+        self.cmb_group = ttk.Combobox(
+            row2,
+            state="readonly",
+            width=28,
+            textvariable=self.var_group,
+        )
+        self.cmb_group.pack(side="left", padx=(6, 12))
+        self.cmb_group.bind("<<ComboboxSelected>>", lambda _e: self._apply_filter())
+
+        self.lbl_summary = tk.Label(
+            self,
+            text="",
+            bg=C["bg"],
+            fg=C["text2"],
+            font=("Segoe UI", 8),
+            anchor="w",
+        )
+        self.lbl_summary.pack(fill="x", padx=14, pady=(0, 4))
+
+        table_host = tk.Frame(self, bg=C["panel"])
+        table_host.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+
+        self.canvas = tk.Canvas(table_host, bg="white", highlightthickness=1, highlightbackground=C["border"])
+        self.vsb = ttk.Scrollbar(table_host, orient="vertical", command=self.canvas.yview)
+        self.hsb = ttk.Scrollbar(table_host, orient="horizontal", command=self.canvas.xview)
+
+        self.inner = tk.Frame(self.canvas, bg="white")
+        self.inner_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+
+        self.canvas.configure(yscrollcommand=self.vsb.set, xscrollcommand=self.hsb.set)
+
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.vsb.pack(side="right", fill="y")
+        self.hsb.pack(side="bottom", fill="x")
+
+        self.inner.bind("<Configure>", self._on_inner_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind("<Button-4>", self._on_mousewheel)
+        self.canvas.bind("<Button-5>", self._on_mousewheel)
+
+    def _fill_filters(self):
+        titles = sorted({r["title_name"] for r in self._all_rows if r["title_name"]})
+        groups = sorted({r["group_name"] for r in self._all_rows if r["group_name"]})
+
+        self.cmb_title["values"] = ["Все"] + titles
+        self.cmb_group["values"] = ["Все"] + groups
+
+        self.cmb_title.current(0)
+        self.cmb_group.current(0)
+
+    def _build_table(self):
+        for child in self.inner.winfo_children():
+            child.destroy()
+        self._row_widgets.clear()
+
+        headers = [
+            ("Титул", 24),
+            ("Группа", 24),
+            ("Тип работ", 18),
+            ("Вид работ", 34),
+            ("Ед.", 8),
+            ("План", 12),
+            ("Факт объём", 12),
+            ("Факт людей", 12),
+        ]
+
+        for c, (text, width) in enumerate(headers):
+            lbl = tk.Label(
+                self.inner,
+                text=text,
+                bg="#dfe8f5",
+                fg="#123",
+                font=("Segoe UI", 9, "bold"),
+                relief="solid",
+                bd=1,
+                width=width,
+                anchor="center",
+                padx=4,
+                pady=4,
+            )
+            lbl.grid(row=0, column=c, sticky="nsew")
+
+        for r_idx, row in enumerate(self._filtered_rows, start=1):
+            bg = "#ffffff" if r_idx % 2 else "#f8fafc"
+
+            values = [
+                row.get("title_name") or "",
+                row.get("group_name") or "",
+                row.get("work_type_name") or "",
+                row.get("task_name") or "",
+                row.get("uom_code") or "",
+                _fmt_qty(row.get("plan_qty")),
+            ]
+
+            for c_idx, val in enumerate(values):
+                anchor = "w"
+                if c_idx in (4, 5):
+                    anchor = "center"
+                lbl = tk.Label(
+                    self.inner,
+                    text=val,
+                    bg=bg,
+                    fg="#222",
+                    font=("Segoe UI", 9),
+                    relief="solid",
+                    bd=1,
+                    anchor=anchor,
+                    padx=4,
+                    pady=3,
+                )
+                lbl.grid(row=r_idx, column=c_idx, sticky="nsew")
+
+            ent_qty = ttk.Entry(self.inner, width=14)
+            ent_qty.grid(row=r_idx, column=6, sticky="nsew", padx=1, pady=1)
+
+            ent_workers = ttk.Entry(self.inner, width=12)
+            ent_workers.grid(row=r_idx, column=7, sticky="nsew", padx=1, pady=1)
+
+            self._row_widgets[row["task_id"]] = {
+                "qty": ent_qty,
+                "workers": ent_workers,
+                "row": row,
+            }
+
+        for c in range(len(headers)):
+            self.inner.grid_columnconfigure(c, weight=0)
+
+    def _apply_filter(self):
+        q = (self.var_search.get() or "").strip().lower()
+        title_filter = (self.var_title.get() or "Все").strip()
+        group_filter = (self.var_group.get() or "Все").strip()
+
+        result = []
+        for row in self._all_rows:
+            if title_filter != "Все" and (row.get("title_name") or "") != title_filter:
+                continue
+            if group_filter != "Все" and (row.get("group_name") or "") != group_filter:
+                continue
+
+            if q:
+                hay = " ".join(
+                    [
+                        row.get("title_name") or "",
+                        row.get("group_name") or "",
+                        row.get("work_type_name") or "",
+                        row.get("task_name") or "",
+                        row.get("uom_code") or "",
+                    ]
+                ).lower()
+                if q not in hay:
+                    continue
+
+            result.append(row)
+
+        self._filtered_rows = result
+        self._build_table()
+        self._update_summary()
+
+    def _update_summary(self):
+        total = len(self._all_rows)
+        shown = len(self._filtered_rows)
+        self.lbl_summary.config(
+            text=f"Всего работ: {total}  |  Показано: {shown}"
+        )
+
+    def _set_today(self):
+        self.var_fact_date.set(_fmt_date(_today()))
+
+    def _clear_inputs(self):
+        for item in self._row_widgets.values():
+            item["qty"].delete(0, "end")
+            item["workers"].delete(0, "end")
+
+    def _collect_data(self) -> List[Dict[str, Any]]:
+        fact_date = _parse_date(self.var_fact_date.get())
+        period_label = (self.cmb_period.get() or "").strip()
+        period_type = FACT_PERIOD_FROM_LABEL.get(period_label, "day")
+
+        facts = []
+        for task_id, item in self._row_widgets.items():
+            qty_s = (item["qty"].get() or "").strip()
+            workers_s = (item["workers"].get() or "").strip()
+
+            if not qty_s and not workers_s:
+                continue
+
+            qty = _safe_float(qty_s)
+            workers = _safe_float(workers_s)
+
+            if qty is None or qty <= 0:
+                raise ValueError(
+                    f"Задача «{item['row'].get('task_name', '')}»: "
+                    f"введите корректный факт объёма больше 0"
+                )
+
+            if workers is None or workers <= 0 or int(workers) != workers:
+                raise ValueError(
+                    f"Задача «{item['row'].get('task_name', '')}»: "
+                    f"введите корректное количество людей больше 0"
+                )
+
+            facts.append(
+                {
+                    "task_id": int(task_id),
+                    "fact_date": fact_date,
+                    "period_type": period_type,
+                    "fact_qty": qty,
+                    "workers_count": int(workers),
+                    "comment": None,
+                }
+            )
+
+        return facts
+
+    def _save_batch(self, facts: List[Dict[str, Any]]):
+        if not facts:
+            return
+
+        conn = None
+        try:
+            conn = _conn()
+            with conn, conn.cursor() as cur:
+                for f in facts:
+                    cur.execute(
+                        """
+                        INSERT INTO public.gpr_task_facts
+                            (task_id, fact_date, period_type, fact_qty, workers_count, comment, created_by)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (task_id, fact_date, period_type)
+                        DO UPDATE SET
+                            fact_qty = EXCLUDED.fact_qty,
+                            workers_count = EXCLUDED.workers_count,
+                            comment = EXCLUDED.comment
+                        """,
+                        (
+                            f["task_id"],
+                            f["fact_date"],
+                            f["period_type"],
+                            f["fact_qty"],
+                            f["workers_count"],
+                            f.get("comment"),
+                            self.user_id,
+                        ),
+                    )
+        except Exception:
+            logger.exception("TaskFactBatchDialog._save_batch error")
+            raise
+        finally:
+            _release(conn)
+
+    def _on_ok(self):
+        try:
+            facts = self._collect_data()
+            if not facts:
+                if not messagebox.askyesno(
+                    "Факт",
+                    "Нет заполненных строк. Закрыть окно?",
+                    parent=self,
+                ):
+                    return
+                self.result = {"saved": False, "count": 0}
+                self._safe_destroy()
+                return
+
+            self._save_batch(facts)
+
+            self.result = {
+                "saved": True,
+                "count": len(facts),
+                "fact_date": _parse_date(self.var_fact_date.get()),
+            }
+            self._safe_destroy()
+
+        except Exception as e:
+            messagebox.showwarning("Массовый ввод факта", str(e), parent=self)
+
+    def _on_cancel(self):
+        self.result = None
+        self._safe_destroy()
+
+    def _safe_destroy(self):
+        if self._destroyed:
+            return
+        self._destroyed = True
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
+
+    def _center(self):
+        self.update_idletasks()
+        w = self.winfo_width()
+        h = self.winfo_height()
+        if self.master and self.master.winfo_exists():
+            pw = self.master.winfo_width()
+            ph = self.master.winfo_height()
+            px = self.master.winfo_rootx()
+            py = self.master.winfo_rooty()
+            x = px + (pw - w) // 2
+            y = py + (ph - h) // 2
+        else:
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x = (sw - w) // 2
+            y = (sh - h) // 2
+        self.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def _on_inner_configure(self, _e=None):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, e=None):
+        try:
+            self.canvas.itemconfigure(self.inner_id, width=max(e.width, 900))
+        except Exception:
+            pass
+
+    def _on_mousewheel(self, event):
+        try:
+            if event.delta:
+                self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            elif getattr(event, "num", None) == 4:
+                self.canvas.yview_scroll(-1, "units")
+            elif getattr(event, "num", None) == 5:
+                self.canvas.yview_scroll(1, "units")
+        except Exception:
+            pass
+        return "break"
 
 # ═══════════════════════════════════════════════════════════════
 #  API — фабрика для вызова из GprPage
