@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 import tkinter as tk
 from tkinter import ttk, messagebox
+from tkcalendar import DateEntry
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 from datetime import datetime, date, timedelta
@@ -571,6 +572,7 @@ def load_all_meal_orders(
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
     department: Optional[str] = None,
+    team_name: Optional[str] = None,
     address_substr: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     conn = None
@@ -583,6 +585,7 @@ def load_all_meal_orders(
             if date_from:
                 where_clauses.append("mo.date >= %s")
                 params.append(date_from)
+
             if date_to:
                 where_clauses.append("mo.date <= %s")
                 params.append(date_to)
@@ -590,6 +593,10 @@ def load_all_meal_orders(
             if department and department.strip() and department.strip().lower() != "все":
                 where_clauses.append("d.name = %s")
                 params.append(department.strip())
+
+            if team_name and team_name.strip() and team_name.strip().lower() != "все":
+                where_clauses.append("COALESCE(mo.team_name, '') = %s")
+                params.append(team_name.strip())
 
             if address_substr and address_substr.strip():
                 where_clauses.append("COALESCE(mo.fact_address, o.address) ILIKE %s")
@@ -604,19 +611,17 @@ def load_all_meal_orders(
                     mo.id,
                     mo.date,
                     mo.created_at,
-                    COALESCE(d.name, '')        AS department,
-                    COALESCE(mo.team_name, '')  AS team_name,
-                    COALESCE(o.excel_id, '')    AS object_id,
-                    COALESCE(mo.fact_address, o.address, '')     AS object_address,
-                    COUNT(moi.id)               AS employees_count,
-                    COALESCE(au.full_name,
-                             au.username,
-                             '')                 AS user_name
+                    COALESCE(d.name, '') AS department,
+                    COALESCE(mo.team_name, '') AS team_name,
+                    COALESCE(o.excel_id, '') AS object_id,
+                    COALESCE(mo.fact_address, o.address, '') AS object_address,
+                    COUNT(moi.id) AS employees_count,
+                    COALESCE(au.full_name, au.username, '') AS user_name
                 FROM meal_orders mo
                 JOIN meal_order_items moi ON moi.order_id = mo.id
-                LEFT JOIN departments d    ON d.id = mo.department_id
-                LEFT JOIN objects o        ON o.id = mo.object_id
-                LEFT JOIN app_users au     ON au.id = mo.user_id
+                LEFT JOIN departments d ON d.id = mo.department_id
+                LEFT JOIN objects o ON o.id = mo.object_id
+                LEFT JOIN app_users au ON au.id = mo.user_id
                 {where_sql}
                 GROUP BY
                     mo.id,
@@ -625,6 +630,7 @@ def load_all_meal_orders(
                     d.name,
                     mo.team_name,
                     o.excel_id,
+                    mo.fact_address,
                     o.address,
                     au.full_name,
                     au.username
@@ -633,6 +639,42 @@ def load_all_meal_orders(
             cur.execute(sql, params)
             rows = cur.fetchall()
             return [dict(r) for r in rows]
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+def load_meal_order_teams(department: Optional[str] = None) -> List[str]:
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            params = []
+            where_sql = """
+                WHERE COALESCE(mo.team_name, '') <> ''
+            """
+
+            if department and department.strip() and department.strip().lower() != "все":
+                where_sql += " AND d.name = %s"
+                params.append(department.strip())
+
+            sql = f"""
+                SELECT DISTINCT mo.team_name
+                FROM meal_orders mo
+                LEFT JOIN departments d ON d.id = mo.department_id
+                {where_sql}
+                ORDER BY mo.team_name
+            """
+
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+            teams = ["Все"]
+            for row in rows:
+                team_name = row[0] if isinstance(row, (tuple, list)) else row["team_name"]
+                if team_name:
+                    teams.append(team_name)
+
+            return teams
     finally:
         if conn:
             release_db_connection(conn)
@@ -651,15 +693,15 @@ def load_user_meal_orders(user_id: int) -> List[Dict[str, Any]]:
                     mo.id,
                     mo.date,
                     mo.created_at,
-                    COALESCE(d.name, '')      AS department,
+                    COALESCE(d.name, '') AS department,
                     COALESCE(mo.team_name, '') AS team_name,
-                    COALESCE(o.excel_id, '')  AS object_id,
-                    COALESCE(mo.fact_address, o.address, '')   AS object_address,
-                    COUNT(moi.id)             AS employees_count
+                    COALESCE(o.excel_id, '') AS object_id,
+                    COALESCE(mo.fact_address, o.address, '') AS object_address,
+                    COUNT(moi.id) AS employees_count
                 FROM meal_orders mo
                 JOIN meal_order_items moi ON moi.order_id = mo.id
-                LEFT JOIN departments d    ON d.id = mo.department_id
-                LEFT JOIN objects o        ON o.id = mo.object_id
+                LEFT JOIN departments d ON d.id = mo.department_id
+                LEFT JOIN objects o ON o.id = mo.object_id
                 WHERE mo.user_id = %s
                 GROUP BY
                     mo.id,
@@ -668,6 +710,7 @@ def load_user_meal_orders(user_id: int) -> List[Dict[str, Any]]:
                     d.name,
                     mo.team_name,
                     o.excel_id,
+                    mo.fact_address,
                     o.address
                 ORDER BY mo.date DESC, mo.id DESC
                 """,
@@ -683,6 +726,7 @@ def get_details_from_db(
     filter_date: Optional[str] = None,
     filter_address: Optional[str] = None,
     filter_department: Optional[str] = None,
+    filter_team: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     conn = None
     try:
@@ -700,8 +744,12 @@ def get_details_from_db(
                 params.append(f"%{filter_address}%")
 
             if filter_department and filter_department.lower() != "все":
-                where_clauses.append("d.name = %s")
+                where_clauses.append("d_order.name = %s")
                 params.append(filter_department)
+
+            if filter_team and filter_team.lower() != "все":
+                where_clauses.append("COALESCE(mo.team_name, '') = %s")
+                params.append(filter_team)
 
             where_sql = ""
             if where_clauses:
@@ -709,30 +757,25 @@ def get_details_from_db(
 
             sql = f"""
                 SELECT
-                    mo.date::text        AS date,
-                    COALESCE(mo.fact_address, o.address, '')       AS address,
-                    COALESCE(o.excel_id, '')        AS object_excel_id,
-            
-                    -- Подразделение из заявки
-                    COALESCE(d_order.name, '')     AS department,
-            
-                    -- Подразделение сотрудника из справочника (1С)
-                    COALESCE(d_emp.name, '')       AS employee_department,
-            
-                    COALESCE(mo.team_name, '')    AS team_name,
-                    COALESCE(moi.fio_text, '')    AS fio,
-                    COALESCE(moi.tbn_text, '')    AS tbn,
+                    mo.date::text AS date,
+                    COALESCE(mo.fact_address, o.address, '') AS address,
+                    COALESCE(o.excel_id, '') AS object_excel_id,
+                    COALESCE(d_order.name, '') AS department,
+                    COALESCE(d_emp.name, '') AS employee_department,
+                    COALESCE(mo.team_name, '') AS team_name,
+                    COALESCE(moi.fio_text, '') AS fio,
+                    COALESCE(moi.tbn_text, '') AS tbn,
                     COALESCE(moi.position_text, '') AS position,
                     COALESCE(mti.name, moi.meal_type_text, '') AS meal_type,
-                    COALESCE(moi.comment, '')     AS comment,
-                    COALESCE(moi.quantity, 1)     AS quantity
+                    COALESCE(moi.comment, '') AS comment,
+                    COALESCE(moi.quantity, 1) AS quantity
                 FROM meal_orders mo
                 JOIN meal_order_items moi ON moi.order_id = mo.id
-                LEFT JOIN objects o       ON o.id = mo.object_id
+                LEFT JOIN objects o ON o.id = mo.object_id
                 LEFT JOIN departments d_order ON d_order.id = mo.department_id
-                LEFT JOIN employees e        ON e.id = moi.employee_id
-                LEFT JOIN departments d_emp  ON d_emp.id = e.department_id
-                LEFT JOIN meal_types mti  ON mti.id = moi.meal_type_id
+                LEFT JOIN employees e ON e.id = moi.employee_id
+                LEFT JOIN departments d_emp ON d_emp.id = e.department_id
+                LEFT JOIN meal_types mti ON mti.id = moi.meal_type_id
                 {where_sql}
                 ORDER BY mo.date, o.address, d_order.name, mo.team_name, moi.fio_text
             """
@@ -761,7 +804,7 @@ def get_details_from_db(
                     "address": address,
                     "object_id": object_excel_id,
                     "department": department,
-                    "employee_department": employee_department,  # из employees (1С)
+                    "employee_department": employee_department,
                     "team_name": team_name,
                     "fio": fio,
                     "tbn": tbn,
@@ -1295,7 +1338,7 @@ class EmployeeRow:
         self.lbl_num.config(text=f"{row + 1}.")
 
     def destroy(self):
-        self.frame.destroy()
+        super().destroy()
 
     def apply_zebra(self, row_idx: int):
         bg = self.ZEBRA_ODD if (row_idx % 2 == 1) else self.ZEBRA_EVEN
@@ -2861,15 +2904,15 @@ class MyMealsOrdersPage(tk.Frame):
         page.app_ref = self.app_ref
         page.pack(fill="both", expand=True)
 
-
 class AllMealsOrdersPage(tk.Frame):
     def __init__(self, master, app_ref=None):
         super().__init__(master, bg="#f7f7f7")
         self.app_ref = app_ref
         self.tree = None
         self._orders: List[Dict[str, Any]] = []
+
         self._build_ui()
-        self._load_data()  # стартовая загрузка без фильтра (или за сегодня/месяц при желании)
+        self._load_data()
 
     def _build_ui(self):
         top = tk.Frame(self, bg="#f7f7f7")
@@ -2880,26 +2923,43 @@ class AllMealsOrdersPage(tk.Frame):
             text="Реестр заявок (все пользователи)",
             font=("Segoe UI", 12, "bold"),
             bg="#f7f7f7",
-        ).grid(row=0, column=0, columnspan=8, sticky="w")
+        ).grid(row=0, column=0, columnspan=12, sticky="w")
 
         tk.Label(top, text="Дата с:", bg="#f7f7f7").grid(row=1, column=0, sticky="w", pady=(4, 0))
-        self.ent_date_from = ttk.Entry(top, width=12)
+        self.ent_date_from = DateEntry(
+            top,
+            width=12,
+            date_pattern="yyyy-mm-dd",
+            locale="ru_RU",
+        )
         self.ent_date_from.grid(row=1, column=1, sticky="w", padx=(4, 8), pady=(4, 0))
+        self.ent_date_from.delete(0, tk.END)
 
         tk.Label(top, text="по:", bg="#f7f7f7").grid(row=1, column=2, sticky="w", pady=(4, 0))
-        self.ent_date_to = ttk.Entry(top, width=12)
+        self.ent_date_to = DateEntry(
+            top,
+            width=12,
+            date_pattern="yyyy-mm-dd",
+            locale="ru_RU",
+        )
         self.ent_date_to.grid(row=1, column=3, sticky="w", padx=(4, 8), pady=(4, 0))
-        
-        tk.Label(top, text="Подразделение:", bg="#f7f7f7").grid(row=1, column=4, sticky="w", pady=(4, 0))
-        self.cmb_dep_filter = ttk.Combobox(top, state="readonly", width=40)
-        self.cmb_dep_filter.grid(row=1, column=5, sticky="w", padx=(4, 8), pady=(4, 0))
+        self.ent_date_to.delete(0, tk.END)
 
-        tk.Label(top, text="Адрес (часть):", bg="#f7f7f7").grid(row=1, column=6, sticky="w", pady=(4, 0))
+        tk.Label(top, text="Подразделение:", bg="#f7f7f7").grid(row=1, column=4, sticky="w", pady=(4, 0))
+        self.cmb_dep_filter = ttk.Combobox(top, state="readonly", width=28)
+        self.cmb_dep_filter.grid(row=1, column=5, sticky="w", padx=(4, 8), pady=(4, 0))
+        self.cmb_dep_filter.bind("<<ComboboxSelected>>", self._on_department_changed)
+
+        tk.Label(top, text="Бригада:", bg="#f7f7f7").grid(row=1, column=6, sticky="w", pady=(4, 0))
+        self.cmb_team_filter = ttk.Combobox(top, state="readonly", width=28)
+        self.cmb_team_filter.grid(row=1, column=7, sticky="w", padx=(4, 8), pady=(4, 0))
+
+        tk.Label(top, text="Адрес (часть):", bg="#f7f7f7").grid(row=1, column=8, sticky="w", pady=(4, 0))
         self.ent_address_filter = ttk.Entry(top, width=24)
-        self.ent_address_filter.grid(row=1, column=7, sticky="w", padx=(4, 8), pady=(4, 0))
+        self.ent_address_filter.grid(row=1, column=9, sticky="w", padx=(4, 8), pady=(4, 0))
 
         btn_frame = tk.Frame(top, bg="#f7f7f7")
-        btn_frame.grid(row=0, column=9, rowspan=2, sticky="e")
+        btn_frame.grid(row=0, column=10, rowspan=2, sticky="e", padx=(12, 0))
 
         ttk.Button(
             btn_frame,
@@ -2915,11 +2975,18 @@ class AllMealsOrdersPage(tk.Frame):
 
         ttk.Button(
             btn_frame,
+            text="Сбросить фильтры",
+            command=self._reset_filters,
+        ).pack(side="right", padx=4)
+
+        ttk.Button(
+            btn_frame,
             text="Обновить",
             command=self._load_data,
         ).pack(side="right", padx=4)
 
         self._init_dep_filter()
+        self._init_team_filter()
 
         frame = tk.Frame(self, bg="#f7f7f7")
         frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
@@ -2941,11 +3008,11 @@ class AllMealsOrdersPage(tk.Frame):
         self.tree.heading("created_at", text="Создана")
 
         self.tree.column("date", width=90, anchor="center")
-        self.tree.column("object", width=260, anchor="w")
-        self.tree.column("department", width=150, anchor="w")
-        self.tree.column("team", width=200, anchor="w")
-        self.tree.column("count", width=80, anchor="center")
-        self.tree.column("user", width=160, anchor="w")
+        self.tree.column("object", width=300, anchor="w")
+        self.tree.column("department", width=180, anchor="w")
+        self.tree.column("team", width=220, anchor="w")
+        self.tree.column("count", width=90, anchor="center")
+        self.tree.column("user", width=180, anchor="w")
         self.tree.column("created_at", width=140, anchor="center")
 
         vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
@@ -2986,7 +3053,7 @@ class AllMealsOrdersPage(tk.Frame):
 
     def _update_delete_button_state(self):
         role = self._get_current_role()
-        is_admin = (role == "admin")
+        is_admin = role == "admin"
         state = "normal" if is_admin else "disabled"
         try:
             self.btn_delete.configure(state=state)
@@ -2997,8 +3064,26 @@ class AllMealsOrdersPage(tk.Frame):
         txt_from = (self.ent_date_from.get() or "").strip()
         txt_to = (self.ent_date_to.get() or "").strip()
 
-        d_from = parse_date_any(txt_from) if txt_from else None
-        d_to = parse_date_any(txt_to) if txt_to else None
+        d_from = None
+        d_to = None
+
+        if txt_from:
+            try:
+                d_from = self.ent_date_from.get_date()
+            except Exception:
+                try:
+                    d_from = datetime.strptime(txt_from, "%Y-%m-%d").date()
+                except Exception:
+                    d_from = None
+
+        if txt_to:
+            try:
+                d_to = self.ent_date_to.get_date()
+            except Exception:
+                try:
+                    d_to = datetime.strptime(txt_to, "%Y-%m-%d").date()
+                except Exception:
+                    d_to = None
 
         return d_from, d_to
 
@@ -3009,10 +3094,13 @@ class AllMealsOrdersPage(tk.Frame):
             with conn.cursor() as cur:
                 cur.execute("SELECT name FROM departments ORDER BY name;")
                 rows = cur.fetchall()
+
                 deps = ["Все"]
-                for (name,) in rows:
+                for row in rows:
+                    name = row[0] if isinstance(row, (tuple, list)) else row["name"]
                     if name:
                         deps.append(name)
+
                 self.cmb_dep_filter["values"] = deps
                 self.cmb_dep_filter.set("Все")
         except Exception:
@@ -3021,6 +3109,44 @@ class AllMealsOrdersPage(tk.Frame):
         finally:
             if conn:
                 release_db_connection(conn)
+
+    def _init_team_filter(self, department: Optional[str] = None):
+        try:
+            teams = load_meal_order_teams(department=department)
+            self.cmb_team_filter["values"] = teams
+            self.cmb_team_filter.set("Все")
+        except Exception:
+            self.cmb_team_filter["values"] = ["Все"]
+            self.cmb_team_filter.set("Все")
+
+    def _on_department_changed(self, event=None):
+        department = (self.cmb_dep_filter.get() or "").strip()
+        self._init_team_filter(department=department)
+
+    def _reset_filters(self):
+        try:
+            self.ent_date_from.delete(0, tk.END)
+        except Exception:
+            pass
+
+        try:
+            self.ent_date_to.delete(0, tk.END)
+        except Exception:
+            pass
+
+        try:
+            self.cmb_dep_filter.set("Все")
+        except Exception:
+            pass
+
+        self._init_team_filter()
+
+        try:
+            self.ent_address_filter.delete(0, tk.END)
+        except Exception:
+            pass
+
+        self._load_data()
 
     def _load_data(self):
         self.tree.delete(*self.tree.get_children())
@@ -3037,14 +3163,23 @@ class AllMealsOrdersPage(tk.Frame):
             return
 
         dep_filter = (self.cmb_dep_filter.get() or "").strip() if hasattr(self, "cmb_dep_filter") else ""
+        team_filter = (self.cmb_team_filter.get() or "").strip() if hasattr(self, "cmb_team_filter") else ""
         addr_filter = (self.ent_address_filter.get() or "").strip() if hasattr(self, "ent_address_filter") else ""
+
+        if dep_filter.lower() == "все":
+            dep_filter = None
+        if team_filter.lower() == "все":
+            team_filter = None
+        if not addr_filter:
+            addr_filter = None
 
         try:
             orders = load_all_meal_orders(
                 date_from=date_from,
                 date_to=date_to,
-                department=dep_filter or None,
-                address_substr=addr_filter or None,
+                department=dep_filter,
+                team_name=team_filter,
+                address_substr=addr_filter,
             )
         except Exception as e:
             messagebox.showerror(
@@ -3058,9 +3193,12 @@ class AllMealsOrdersPage(tk.Frame):
 
         for o in orders:
             oid = o["id"]
+
             date_val = o.get("date")
             if isinstance(date_val, datetime):
                 date_str = date_val.date().strftime("%Y-%m-%d")
+            elif isinstance(date_val, date):
+                date_str = date_val.strftime("%Y-%m-%d")
             else:
                 date_str = str(date_val or "")
 
@@ -3072,6 +3210,7 @@ class AllMealsOrdersPage(tk.Frame):
             team = o.get("team_name") or ""
             cnt = o.get("employees_count") or 0
             user_name = o.get("user_name") or ""
+
             created_at = o.get("created_at")
             if isinstance(created_at, datetime):
                 created_str = created_at.strftime("%d.%m.%Y %H:%M")
@@ -3099,7 +3238,15 @@ class AllMealsOrdersPage(tk.Frame):
                 return
 
             dep_filter = (self.cmb_dep_filter.get() or "").strip() if hasattr(self, "cmb_dep_filter") else ""
+            team_filter = (self.cmb_team_filter.get() or "").strip() if hasattr(self, "cmb_team_filter") else ""
             addr_filter = (self.ent_address_filter.get() or "").strip() if hasattr(self, "ent_address_filter") else ""
+
+            if dep_filter.lower() == "все":
+                dep_filter = None
+            if team_filter.lower() == "все":
+                team_filter = None
+            if not addr_filter:
+                addr_filter = None
 
             filter_date_str: Optional[str] = None
             if date_from and date_to and date_from == date_to:
@@ -3114,8 +3261,9 @@ class AllMealsOrdersPage(tk.Frame):
             try:
                 raw_orders = get_details_from_db(
                     filter_date=filter_date_str,
-                    filter_address=addr_filter or None,
-                    filter_department=dep_filter or None,
+                    filter_address=addr_filter,
+                    filter_department=dep_filter,
+                    filter_team=team_filter,
                 )
             except Exception as e:
                 messagebox.showerror(
@@ -3132,7 +3280,7 @@ class AllMealsOrdersPage(tk.Frame):
                     parent=self,
                 )
                 return
-                
+
             orders: List[Dict[str, Any]] = []
             for o in raw_orders:
                 d_str = o.get("date") or ""
@@ -3156,7 +3304,7 @@ class AllMealsOrdersPage(tk.Frame):
                 return
 
             price_map = get_meal_type_price_map()
-            
+
             freq: Dict[tuple, int] = {}
             for o in orders:
                 fio = (o.get("fio") or "").strip()
@@ -3210,7 +3358,7 @@ class AllMealsOrdersPage(tk.Frame):
             ]
 
             end_col = len(headers)
-            # Шапка
+
             period_str = ""
             if date_from:
                 period_str += f"с {date_from.strftime('%Y-%m-%d')} "
@@ -3219,6 +3367,7 @@ class AllMealsOrdersPage(tk.Frame):
             period_str = period_str.strip() or "все даты"
 
             dep_str = dep_filter or "Все"
+            team_str = team_filter or "Все"
             addr_str = addr_filter or "(любой адрес)"
 
             ws.append([f"Реестр питания ({period_str})"])
@@ -3227,13 +3376,16 @@ class AllMealsOrdersPage(tk.Frame):
             ws.append([f"Подразделение: {dep_str}"])
             ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=end_col)
 
-            ws.append([f"Адрес содержит: {addr_str}"])
+            ws.append([f"Бригада: {team_str}"])
             ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=end_col)
+
+            ws.append([f"Адрес содержит: {addr_str}"])
+            ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=end_col)
 
             ws.append([])
 
             ws.append(["Свод по объектам, типам питания и стоимости"])
-            ws.merge_cells(start_row=5, start_column=1, end_row=5, end_column=4)
+            ws.merge_cells(start_row=6, start_column=1, end_row=6, end_column=end_col)
             ws.append(["Адрес", "Тип питания", "Кол-во человек", "Сумма, руб."])
 
             for addr, by_type in summary.items():
@@ -3246,7 +3398,6 @@ class AllMealsOrdersPage(tk.Frame):
                     ])
 
             ws.append([])
-
             ws.append(headers)
 
             for order, mark in zip(orders, duplicates_mark):
@@ -3272,26 +3423,11 @@ class AllMealsOrdersPage(tk.Frame):
                     mark,
                 ])
 
-            widths = [
-                12,  # Дата
-                40,  # Адрес
-                15,  # ID объекта
-                25,  # Подразделение
-                28,  # Подразделение сотрудника (из 1С)
-                25,  # Наименование бригады
-                30,  # ФИО
-                15,  # Табельный №
-                25,  # Должность
-                18,  # Тип питания
-                12,  # Цена, руб.
-                14,  # Сумма, руб.
-                40,  # Комментарий
-                12,  # Дубликаты
-            ]
+            widths = [12, 40, 15, 25, 28, 25, 30, 15, 25, 18, 12, 14, 40, 12]
             for col, width in enumerate(widths, start=1):
                 ws.column_dimensions[get_column_letter(col)].width = width
 
-            ws.freeze_panes = "A7"
+            ws.freeze_panes = "A8"
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -3364,6 +3500,8 @@ class AllMealsOrdersPage(tk.Frame):
         date_val = info.get("date")
         if isinstance(date_val, datetime):
             date_str = date_val.date().strftime("%Y-%m-%d")
+        elif isinstance(date_val, date):
+            date_str = date_val.strftime("%Y-%m-%d")
         else:
             date_str = str(date_val or "")
 
@@ -3545,6 +3683,8 @@ class MealPlanningPage(tk.Frame):
 
         self.tree.bind("<Double-1>", self.on_row_double_click)
 
+        self._init_dep_filter()
+
     def export_supplier_order(self):
         try:
             filter_date = self.ent_filter_date.get().strip()
@@ -3642,6 +3782,20 @@ class MealPlanningPage(tk.Frame):
                 "Заявка поставщика",
                 f"Ошибка формирования Excel:\n{e}",
             )
+
+    def _init_dep_filter(self):
+        conn = None
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cur:
+                cur.execute("SELECT name FROM departments ORDER BY name;")
+                rows = cur.fetchall()
+                deps = ["Все"] + [row[0] for row in rows if row[0]]
+                self.cmb_filter_dep["values"] = deps
+                self.cmb_filter_dep.set("Все")
+        finally:
+            if conn:
+                release_db_connection(conn)
 
     def load_registry(self):
         try:
