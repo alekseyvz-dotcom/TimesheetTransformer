@@ -1338,7 +1338,7 @@ class EmployeeRow:
         self.lbl_num.config(text=f"{row + 1}.")
 
     def destroy(self):
-        super().destroy()
+        self.frame.destroy()
 
     def apply_zebra(self, row_idx: int):
         bg = self.ZEBRA_ODD if (row_idx % 2 == 1) else self.ZEBRA_EVEN
