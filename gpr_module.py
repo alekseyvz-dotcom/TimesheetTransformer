@@ -15,7 +15,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor, execute_values
 
 try:
-    from openpyxl import Workbook
+    from openpyxl import Workbook, load_workbook
     from openpyxl.utils import get_column_letter
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -193,6 +193,209 @@ def _mouse_delta(event) -> int:
         return -1 if event.num == 4 else 1
     return 0
 
+class GprExcelImportService:
+    REQUIRED_HEADERS = {
+        "type": "Тип работ",
+        "name": "Вид работ",
+        "uom": "Ед. изм.",
+        "qty": "Объём план",
+        "start": "Начало",
+        "finish": "Окончание",
+        "status": "Статус",
+    }
+
+    @staticmethod
+    def _norm(s: Any) -> str:
+        return " ".join(str(s or "").strip().lower().split())
+
+    @staticmethod
+    def _build_work_type_map(work_types: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        out = {}
+        for w in work_types:
+            name = GprExcelImportService._norm(w.get("name"))
+            code = GprExcelImportService._norm(w.get("code"))
+            if name:
+                out[name] = w
+            if code:
+                out[code] = w
+        return out
+
+    @staticmethod
+    def _build_uom_map(uoms: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        out = {}
+        for u in uoms:
+            code = GprExcelImportService._norm(u.get("code"))
+            name = GprExcelImportService._norm(u.get("name"))
+            pair = GprExcelImportService._norm(f"{u.get('code', '')} — {u.get('name', '')}")
+            if code:
+                out[code] = u
+            if name:
+                out[name] = u
+            if pair:
+                out[pair] = u
+        return out
+
+    @staticmethod
+    def _build_status_map() -> Dict[str, str]:
+        out = {}
+        for code in STATUS_LIST:
+            out[GprExcelImportService._norm(code)] = code
+            out[GprExcelImportService._norm(STATUS_LABELS.get(code, code))] = code
+        return out
+
+    @staticmethod
+    def _find_header_row(ws) -> Tuple[int, Dict[str, int]]:
+        for row_idx in range(1, min(ws.max_row, 20) + 1):
+            row_values = [ws.cell(row_idx, c).value for c in range(1, ws.max_column + 1)]
+            normalized = {
+                GprExcelImportService._norm(v): i
+                for i, v in enumerate(row_values, start=1)
+                if str(v or "").strip()
+            }
+
+            found = {}
+            ok = True
+            for key, title in GprExcelImportService.REQUIRED_HEADERS.items():
+                col = normalized.get(GprExcelImportService._norm(title))
+                if not col:
+                    ok = False
+                    break
+                found[key] = col
+
+            if ok:
+                return row_idx, found
+
+        raise ValueError("Не найден заголовок таблицы на листе 'ГПР'")
+
+    @staticmethod
+    def import_tasks_from_excel(path: str, work_types: List[Dict[str, Any]], uoms: List[Dict[str, Any]]) -> Dict[str, Any]:
+        if not HAS_OPENPYXL:
+            raise RuntimeError("Для импорта необходима библиотека openpyxl")
+
+        wb = load_workbook(path, data_only=True)
+        if "ГПР" not in wb.sheetnames:
+            raise ValueError("В файле отсутствует лист 'ГПР'")
+
+        ws = wb["ГПР"]
+
+        header_row, cols = GprExcelImportService._find_header_row(ws)
+        wt_map = GprExcelImportService._build_work_type_map(work_types)
+        uom_map = GprExcelImportService._build_uom_map(uoms)
+        status_map = GprExcelImportService._build_status_map()
+
+        tasks = []
+        errors = []
+
+        for row_idx in range(header_row + 1, ws.max_row + 1):
+            raw_type = ws.cell(row_idx, cols["type"]).value
+            raw_name = ws.cell(row_idx, cols["name"]).value
+            raw_uom = ws.cell(row_idx, cols["uom"]).value
+            raw_qty = ws.cell(row_idx, cols["qty"]).value
+            raw_start = ws.cell(row_idx, cols["start"]).value
+            raw_finish = ws.cell(row_idx, cols["finish"]).value
+            raw_status = ws.cell(row_idx, cols["status"]).value
+
+            if all(not str(v or "").strip() for v in [raw_type, raw_name, raw_uom, raw_qty, raw_start, raw_finish, raw_status]):
+                continue
+
+            type_text = str(raw_type or "").strip()
+            name_text = str(raw_name or "").strip()
+            
+            if not name_text:
+                errors.append(f"Строка {row_idx}: пустое поле 'Вид работ'")
+                continue
+            
+            type_norm = GprExcelImportService._norm(type_text)
+            
+            if type_norm in ("группа", "group"):
+                tasks.append({
+                    "id": None,
+                    "row_kind": "group",
+                    "work_type_id": int(work_types[0]["id"]) if work_types else 1,
+                    "work_type_name": "",
+                    "name": name_text,
+                    "uom_code": None,
+                    "plan_qty": None,
+                    "plan_start": _today(),
+                    "plan_finish": _today(),
+                    "status": "planned",
+                    "is_milestone": False,
+                    "sort_order": len(tasks) * 10,
+                })
+                continue
+            
+            if type_norm in ("титул", "title"):
+                tasks.append({
+                    "id": None,
+                    "row_kind": "title",
+                    "work_type_id": int(work_types[0]["id"]) if work_types else 1,
+                    "work_type_name": "",
+                    "name": name_text,
+                    "uom_code": None,
+                    "plan_qty": None,
+                    "plan_start": _today(),
+                    "plan_finish": _today(),
+                    "status": "planned",
+                    "is_milestone": False,
+                    "sort_order": len(tasks) * 10,
+                })
+                continue
+
+            wt = wt_map.get(type_norm)
+            if not wt:
+                errors.append(f"Строка {row_idx}: тип работ '{type_text}' не найден в справочнике")
+                continue
+
+            uom_code = None
+            if str(raw_uom or "").strip():
+                uom = uom_map.get(GprExcelImportService._norm(raw_uom))
+                if not uom:
+                    errors.append(f"Строка {row_idx}: единица измерения '{raw_uom}' не найдена в справочнике")
+                    continue
+                uom_code = uom["code"]
+
+            qty = _safe_float(raw_qty) if raw_qty not in (None, "") else None
+
+            ds = _to_date(raw_start)
+            df = _to_date(raw_finish)
+
+            if not ds:
+                errors.append(f"Строка {row_idx}: неверная дата начала '{raw_start}'")
+                continue
+            if not df:
+                errors.append(f"Строка {row_idx}: неверная дата окончания '{raw_finish}'")
+                continue
+            if df < ds:
+                errors.append(f"Строка {row_idx}: окончание раньше начала")
+                continue
+
+            status = "planned"
+            if str(raw_status or "").strip():
+                status = status_map.get(GprExcelImportService._norm(raw_status))
+                if not status:
+                    errors.append(f"Строка {row_idx}: неизвестный статус '{raw_status}'")
+                    continue
+
+            tasks.append({
+                "id": None,
+                "row_kind": "task",
+                "work_type_id": int(wt["id"]),
+                "work_type_name": wt["name"],
+                "name": name_text,
+                "uom_code": uom_code,
+                "plan_qty": qty,
+                "plan_start": ds,
+                "plan_finish": df,
+                "status": status,
+                "is_milestone": False,
+                "sort_order": len(tasks) * 10,
+            })
+
+        return {
+            "tasks": tasks,
+            "errors": errors,
+            "count": len(tasks),
+        }
 
 # ═══════════════════════════════════════════════════════════════
 #  SERVICE LAYER
@@ -1806,6 +2009,7 @@ class GprPage(tk.Frame):
     
         self.btn_template = self._tb_btn(bar, "📋 Из шаблона…", self._apply_template)
         self.btn_fact_batch = self._tb_btn(bar, "📈 Заполнить факт", self._open_fact_batch)
+        self.btn_import = self._tb_btn(bar, "📤 Импорт Excel", self._import_excel)
         self.btn_export = self._tb_btn(bar, "📥 Экспорт Excel", self._export_excel)
     
         tk.Frame(bar, bg=C["border"], width=1).pack(
@@ -2830,6 +3034,86 @@ class GprPage(tk.Frame):
             fgColor=(color or "FFFFFF").replace("#", "").upper()
         )
 
+def _import_excel(self):
+    if not self.plan_id:
+        messagebox.showinfo("ГПР", "Сначала откройте объект.", parent=self)
+        return
+
+    if not HAS_OPENPYXL:
+        messagebox.showwarning(
+            "ГПР",
+            "Для импорта необходима библиотека openpyxl.\n"
+            "Установите: pip install openpyxl",
+            parent=self,
+        )
+        return
+
+    path = filedialog.askopenfilename(
+        parent=self,
+        title="Выбрать Excel-файл для импорта ГПР",
+        filetypes=[("Excel", "*.xlsx"), ("Все файлы", "*.*")],
+    )
+    if not path:
+        return
+
+    try:
+        result = GprExcelImportService.import_tasks_from_excel(
+            path=path,
+            work_types=self.work_types,
+            uoms=self.uoms,
+        )
+    except Exception as e:
+        logger.exception("GPR excel import parse error")
+        messagebox.showerror(
+            "ГПР",
+            f"Ошибка чтения Excel:\n{e}",
+            parent=self,
+        )
+        return
+
+    errors = result.get("errors") or []
+    tasks = result.get("tasks") or []
+
+    if errors:
+        preview = "\n".join(errors[:15])
+        if len(errors) > 15:
+            preview += f"\n... и ещё {len(errors) - 15} ошибок"
+        messagebox.showwarning(
+            "ГПР",
+            f"Импорт невозможен. Обнаружены ошибки:\n\n{preview}",
+            parent=self,
+        )
+        return
+
+    if not tasks:
+        messagebox.showinfo(
+            "ГПР",
+            "В файле не найдено строк для импорта.",
+            parent=self,
+        )
+        return
+
+    if self.tasks:
+        ok = messagebox.askyesno(
+            "ГПР",
+            f"Импортировать {len(tasks)} строк и заменить текущий список работ?",
+            parent=self,
+        )
+        if not ok:
+            return
+
+    self.tasks = tasks
+    self._recalc_sort_order()
+    self._apply_filter()
+    self._update_summary()
+
+    messagebox.showinfo(
+        "ГПР",
+        f"Импорт выполнен.\nЗагружено строк: {len(tasks)}\n\n"
+        "Проверьте данные и нажмите 'СОХРАНИТЬ'.",
+        parent=self,
+    )
+    
     def _export_excel_gantt_sheet(self, wb, obj, obj_name: str) -> None:
         """
         Создаёт второй лист Excel с диаграммой Ганта.
