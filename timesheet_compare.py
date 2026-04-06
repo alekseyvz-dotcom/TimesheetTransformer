@@ -70,9 +70,21 @@ def fio_sort_key(fio: Any) -> str:
 def normalize_val(val: Any) -> str:
     if val is None:
         return ""
+
+    # Сначала пытаемся нормализовать как число
+    try:
+        n = timesheet_transformer.to_number_value(val)
+    except Exception:
+        n = None
+
+    if n is not None:
+        if float(n).is_integer():
+            return str(int(float(n)))
+        return str(float(n)).rstrip("0").rstrip(".")
+
+    # Иначе нормализуем как строковый код
     s = str(val).strip().lower().replace(",", ".")
-    if s.endswith(".0"):
-        s = s[:-2]
+    s = " ".join(s.split())
     return "" if s == "none" else s
 
 
@@ -630,14 +642,15 @@ class TimesheetComparePage(tk.Frame):
     # ──────────────────────────────────────────────────────────
 
     def _sum_days(self, days: List, count: int) -> float:
-        """Суммирует числовые значения дней (для итоговых колонок)."""
+        """Суммирует только числовые дневные значения."""
         total = 0.0
         for i in range(min(count, len(days))):
-            v = normalize_val(days[i])
             try:
-                total += float(v)
+                n = timesheet_transformer.to_number_value(days[i])
             except Exception:
-                pass
+                n = None
+            if n is not None:
+                total += float(n)
         return total
 
     def _render_compare_from_groups(self):
