@@ -265,6 +265,78 @@ class CancelledError(Exception):
     pass
 
 # ---------------- Утилиты парсинга ----------------
+
+def split_slash_tokens(s: Any) -> List[str]:
+    s = clean_spaces(s)
+    if not s:
+        return []
+    return [part.strip() for part in str(s).split("/") if part.strip()]
+
+def extract_code_tokens(s: Any) -> List[str]:
+    parts = split_slash_tokens(s)
+    tokens: List[str] = []
+    for part in parts:
+        m = re.search(r"([A-Za-zА-Яа-яЁё]+)", part)
+        if m:
+            tokens.append(m.group(1).upper())
+    if tokens:
+        return tokens
+
+    one = extract_code_token(s)
+    return [one] if one else []
+
+def working_hours_by_code(code_val: Any, hours_val: Any) -> Optional[float]:
+    """
+    Возвращает только часы, относящиеся к рабочим кодам.
+    Примеры:
+    - code='Я', hours='11' -> 11
+    - code='Я/ДО', hours='10/1' -> 10
+    - code='ДО/Я', hours='1/10' -> 10
+    - code='ДО', hours='4' -> None
+    """
+    code_tokens = extract_code_tokens(code_val)
+
+    # Если кодов нет, оставляем старую логику
+    if not code_tokens:
+        n = to_number_value(hours_val)
+        return n if n is not None else None
+
+    hour_parts = split_slash_tokens(hours_val)
+
+    # Если код один и часы не составные — обычный сценарий
+    if len(code_tokens) == 1 and len(hour_parts) <= 1:
+        code = code_tokens[0]
+        if is_non_working_code(code):
+            return None
+        n = to_number_value(hours_val)
+        return n if n is not None else None
+
+    # Пытаемся сопоставить кодовые и часовые части по позициям
+    total = 0.0
+    got = False
+    max_len = min(len(code_tokens), len(hour_parts))
+
+    for i in range(max_len):
+        code = code_tokens[i].upper().strip()
+        if is_non_working_code(code):
+            continue
+        n = token_to_number(hour_parts[i])
+        if n is not None:
+            total += float(n)
+            got = True
+
+    if got:
+        return total
+
+    # Если не удалось сопоставить по частям, fallback:
+    # если есть хотя бы один рабочий код, но часы не разделены,
+    # берем общее число как раньше
+    if any(not is_non_working_code(code) for code in code_tokens):
+        n = to_number_value(hours_val)
+        return n if n is not None else None
+
+    return None
+
 def only_digits(s: str) -> str:
     return "".join(ch for ch in str(s or "") if ch.isdigit())
 
