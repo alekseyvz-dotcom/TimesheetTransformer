@@ -480,27 +480,60 @@ def _s_val(val) -> str:
     return str(val).strip()
 
 
+def _parse_excel_date(val) -> Opt[date]:
+    """Преобразует значение из Excel в date."""
+    if val is None or val == "":
+        return None
+
+    if isinstance(val, datetime):
+        return val.date()
+
+    if isinstance(val, date):
+        return val
+
+    s = _s_val(val)
+    if not s:
+        return None
+
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d.%m.%y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            pass
+
+    return None
+
+
 def import_employees_from_excel(path: Path) -> int:
     """
     Импортирует сотрудников из Excel-файла (как 'ШТАТ на ...').
     Обновляет таблицы departments и employees.
+    Дополнительно импортирует:
+      - дату приема
+      - график работы
     """
-    if not path.exists(): raise FileNotFoundError(f"Файл не найден: {path}")
+    if not path.exists():
+        raise FileNotFoundError(f"Файл не найден: {path}")
+
     wb = load_workbook(path, read_only=True, data_only=True)
     ws = wb.active
+
     header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
     hdr = [_s_val(c).lower() for c in header_row]
 
     def col_idx(substr: str) -> Opt[int]:
         substr = substr.lower()
         for i, h in enumerate(hdr):
-            if substr in h: return i
+            if substr in h:
+                return i
         return None
 
     idx_tbn = col_idx("табельный номер")
     idx_fio = col_idx("сотрудник")
     idx_pos = col_idx("должность")
     idx_dep = col_idx("подразделение")
+    idx_hire_date = col_idx("дата приема")
+    idx_schedule = col_idx("график работы")
     idx_dismissal = col_idx("увольн")
 
     if idx_fio is None or idx_tbn is None:
@@ -513,33 +546,90 @@ def import_employees_from_excel(path: Path) -> int:
         with conn:
             with conn.cursor() as cur:
                 for row in ws.iter_rows(min_row=2, values_only=True):
-                    if not row: continue
+                    if not row:
+                        continue
+
                     fio = _s_val(row[idx_fio]) if idx_fio < len(row) else ""
                     tbn = _s_val(row[idx_tbn]) if idx_tbn < len(row) else ""
                     pos = _s_val(row[idx_pos]) if idx_pos is not None and idx_pos < len(row) else ""
                     dep_name = _s_val(row[idx_dep]) if idx_dep is not None and idx_dep < len(row) else ""
+                    schedule = _s_val(row[idx_schedule]) if idx_schedule is not None and idx_schedule < len(row) else ""
+
+                    hire_date_raw = row[idx_hire_date] if idx_hire_date is not None and idx_hire_date < len(row) else None
+                    hire_date_val = _parse_excel_date(hire_date_raw)
+
                     dismissal_raw = row[idx_dismissal] if idx_dismissal is not None and idx_dismissal < len(row) else None
-                    if not fio and not tbn: continue
                     is_fired = bool(dismissal_raw and _s_val(dismissal_raw))
+
+                    if not fio and not tbn:
+                        continue
+
                     department_id = None
                     if dep_name:
                         cur.execute("SELECT id FROM departments WHERE name = %s", (dep_name,))
                         r = cur.fetchone()
-                        if r: department_id = r[0]
+                        if r:
+                            department_id = r[0]
                         else:
-                            cur.execute("INSERT INTO departments (name) VALUES (%s) RETURNING id", (dep_name,))
+                            cur.execute(
+                                "INSERT INTO departments (name) VALUES (%s) RETURNING id",
+                                (dep_name,)
+                            )
                             department_id = cur.fetchone()[0]
 
-                    cur.execute("SELECT id FROM employees WHERE tbn = %s", (tbn,)) if tbn else cur.execute("SELECT id FROM employees WHERE fio = %s", (fio,))
-                    r = cur.fetchone()
-                    if r:
-                        cur.execute("UPDATE employees SET fio = %s, tbn = %s, position = %s, department_id = %s, is_fired = %s WHERE id = %s", (fio or None, tbn or None, pos or None, department_id, is_fired, r[0]))
+                    if tbn:
+                        cur.execute("SELECT id FROM employees WHERE tbn = %s", (tbn,))
                     else:
-                        cur.execute("INSERT INTO employees (fio, tbn, position, department_id, is_fired) VALUES (%s, %s, %s, %s, %s)", (fio or None, tbn or None, pos or None, department_id, is_fired))
+                        cur.execute("SELECT id FROM employees WHERE fio = %s", (fio,))
+                    r = cur.fetchone()
+
+                    if r:
+                        cur.execute(
+                            """
+                            UPDATE employees
+                            SET fio = %s,
+                                tbn = %s,
+                                position = %s,
+                                department_id = %s,
+                                is_fired = %s,
+                                hire_date = %s,
+                                work_schedule = %s
+                            WHERE id = %s
+                            """,
+                            (
+                                fio or None,
+                                tbn or None,
+                                pos or None,
+                                department_id,
+                                is_fired,
+                                hire_date_val,
+                                schedule or None,
+                                r[0],
+                            ),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            INSERT INTO employees
+                                (fio, tbn, position, department_id, is_fired, hire_date, work_schedule)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            (
+                                fio or None,
+                                tbn or None,
+                                pos or None,
+                                department_id,
+                                is_fired,
+                                hire_date_val,
+                                schedule or None,
+                            ),
+                        )
+
                     processed += 1
     finally:
         if conn:
             release_db_connection(conn)
+
     return processed
 
 def import_objects_from_excel(path: Path) -> int:
@@ -1497,7 +1587,8 @@ def open_settings_window(parent: tk.Tk):
         text="Загрузка сотрудников из Excel в базу данных:\n"
         "Ожидается файл со штатным расписанием\n"
         "(колонки: 'Табельный номер (с префиксами)', 'Сотрудник', "
-        "'Должность', 'Подразделение', 'Дата увольнения').",
+        "'Должность', 'Подразделение', 'Дата приема', 'График работы', "
+        "'Дата увольнения').",
     ).grid(row=row_idx, column=0, columnspan=3, sticky="w", padx=6, pady=(6, 4))
     row_idx += 1
 
