@@ -76,6 +76,10 @@ class VirtualTimesheetGrid(tk.Frame):
         self._edit_row: Optional[int] = None
         self._edit_day: Optional[int] = None
 
+        self._tooltip: Optional[tk.Toplevel] = None
+        self._tooltip_label: Optional[tk.Label] = None
+        self._tooltip_row: Optional[int] = None
+
         # Цвета в стилистике новой оболочки
         self.BORDER = "#c9d3df"
         self.HEADER_BG = "#e7edf4"
@@ -127,6 +131,8 @@ class VirtualTimesheetGrid(tk.Frame):
 
         self.body.bind("<Configure>", self._on_body_configure)
         self.body.bind("<Button-1>", self._on_click)
+        self.body.bind("<Motion>", self._on_mouse_move)
+        self.body.bind("<Leave>", self._on_mouse_leave)
         self.body.bind("<Map>", lambda _e: self.after(60, self.refresh))
 
         if OS_NAME == "Linux":
@@ -150,6 +156,7 @@ class VirtualTimesheetGrid(tk.Frame):
     # ------------------------------------------------------------------
 
     def set_rows(self, rows: List[Dict[str, Any]]):
+        self._hide_tooltip()
         self._end_edit(commit=True)
         self.model_rows = rows or []
     
@@ -173,6 +180,7 @@ class VirtualTimesheetGrid(tk.Frame):
         return set(self.selected_indices)
 
     def refresh(self):
+        self._hide_tooltip()
         self._update_weekends_cache()
         self._update_scrollregion()
         self._draw_header()
@@ -317,16 +325,88 @@ class VirtualTimesheetGrid(tk.Frame):
             except Exception:
                 pass
 
+    def _show_tooltip(self, text: str, x_root: int, y_root: int):
+        text = str(text or "").strip()
+        if not text:
+            self._hide_tooltip()
+            return
+
+        if self._tooltip is None or not self._tooltip.winfo_exists():
+            self._tooltip = tk.Toplevel(self)
+            self._tooltip.wm_overrideredirect(True)
+            self._tooltip.attributes("-topmost", True)
+
+            self._tooltip_label = tk.Label(
+                self._tooltip,
+                text=text,
+                justify="left",
+                bg="#fffedb",
+                fg="#1f2937",
+                relief="solid",
+                bd=1,
+                padx=8,
+                pady=4,
+                font=self.font_small,
+            )
+            self._tooltip_label.pack()
+        else:
+            if self._tooltip_label is not None:
+                self._tooltip_label.config(text=text)
+
+        self._tooltip.geometry(f"+{x_root + 14}+{y_root + 12}")
+
+    def _hide_tooltip(self):
+        self._tooltip_row = None
+        if self._tooltip is not None:
+            try:
+                self._tooltip.destroy()
+            except Exception:
+                pass
+        self._tooltip = None
+        self._tooltip_label = None
+
+    def _on_mouse_move(self, event):
+        row_index, col_data = self._hit_test(event.x, event.y)
+
+        if row_index is None or not col_data:
+            self._hide_tooltip()
+            return
+
+        kind, _extra = col_data
+
+        if kind != "fio":
+            self._hide_tooltip()
+            return
+
+        if not (0 <= row_index < len(self.model_rows)):
+            self._hide_tooltip()
+            return
+
+        rec = self.model_rows[row_index]
+        schedule = str(rec.get("work_schedule") or "").strip()
+        if not schedule:
+            schedule = "не указан"
+
+        text = f"График: {schedule}"
+
+        self._tooltip_row = row_index
+        self._show_tooltip(text, event.x_root, event.y_root)
+
+    def _on_mouse_leave(self, _event):
+        self._hide_tooltip()
+
     # ------------------------------------------------------------------
     # Scrolling
     # ------------------------------------------------------------------
 
     def _yview(self, *args):
+        self._hide_tooltip()
         self._end_edit(commit=True)
         self.body.yview(*args)
         self._refresh()
 
     def _xview(self, *args):
+        self._hide_tooltip()
         self._end_edit(commit=True)
         self.body.xview(*args)
 
@@ -335,6 +415,7 @@ class VirtualTimesheetGrid(tk.Frame):
         self.header.xview_moveto(f1)
 
     def _scroll_generic(self, _event, units: int, orient: str):
+        self._hide_tooltip()
         self._end_edit(commit=True)
         if orient == "y":
             self.body.yview_scroll(units, "units")
@@ -373,6 +454,7 @@ class VirtualTimesheetGrid(tk.Frame):
         return row, None
 
     def _on_click(self, event):
+        self._hide_tooltip()
         self.body.focus_set()
 
         row_index, col_data = self._hit_test(event.x, event.y)
