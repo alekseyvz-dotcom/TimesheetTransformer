@@ -886,7 +886,7 @@ def load_all_timesheet_headers(
 # Справочники
 # ============================================================
 
-def load_employees_from_db() -> List[Tuple[str, str, str, str]]:
+def load_employees_from_db() -> List[Tuple[str, str, str, str, str]]:
     with db_cursor() as (_conn, cur):
         cur.execute(
             """
@@ -894,7 +894,8 @@ def load_employees_from_db() -> List[Tuple[str, str, str, str]]:
                 e.fio,
                 e.tbn,
                 e.position,
-                d.name AS dep
+                d.name AS dep,
+                e.work_schedule
             FROM employees e
             LEFT JOIN departments d ON d.id = e.department_id
             WHERE COALESCE(e.is_fired, FALSE) = FALSE
@@ -907,6 +908,7 @@ def load_employees_from_db() -> List[Tuple[str, str, str, str]]:
                 normalize_tbn(r[1]),
                 normalize_spaces(r[2] or ""),
                 normalize_spaces(r[3] or ""),
+                normalize_spaces(r[4] or ""),
             )
             for r in cur.fetchall()
         ]
