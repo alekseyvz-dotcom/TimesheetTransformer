@@ -472,15 +472,15 @@ class TimesheetPage(tk.Frame):
         self.out_dir = self._resolve_output_dir()
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
-        self.employees: List[Tuple[str, str, str, str]] = []
+        self.employees: List[Tuple[str, str, str, str, str]] = []
         self.objects_full: List[Tuple[str, str, str]] = []
 
         self.emp_names: List[str] = []
         self.departments: List[str] = ["Все"]
         self.address_options: List[str] = []
 
-        self._fio_to_employees: dict[str, list[tuple[str, str, str, str]]] = {}
-        self._employee_display_to_data: dict[str, tuple[str, str, str, str]] = {}
+        self._fio_to_employees: dict[str, list[tuple[str, str, str, str, str]]] = {}
+        self._employee_display_to_data: dict[str, tuple[str, str, str, str, str]] = {}
         self.allowed_fio_names: set[str] = set()
 
         self.model_rows_all: List[Dict[str, Any]] = []
@@ -657,13 +657,13 @@ class TimesheetPage(tk.Frame):
         self,
         fio: str,
         department: Optional[str] = None,
-    ) -> Optional[Tuple[str, str, str, str]]:
+    ) -> Optional[Tuple[str, str, str, str, str]]:
         fio_norm = normalize_spaces(fio)
         dep_norm = normalize_spaces(department or "")
         matches = []
 
         for emp in self.employees:
-            emp_fio, emp_tbn, emp_pos, emp_dep = emp
+            emp_fio, emp_tbn, emp_pos, emp_dep, emp_schedule = emp
             if normalize_spaces(emp_fio) != fio_norm:
                 continue
             if dep_norm and dep_norm != "Все" and normalize_spaces(emp_dep) != dep_norm:
@@ -676,6 +676,27 @@ class TimesheetPage(tk.Frame):
         fio_norm = normalize_spaces(fio)
         matches = [row for row in self.model_rows_all if normalize_spaces(row.get("fio") or "") == fio_norm]
         return matches[0] if len(matches) == 1 else None
+
+    def _get_employee_work_schedule(self, fio: str, tbn: str) -> str:
+        fio_norm = normalize_spaces(fio)
+        tbn_norm = normalize_tbn(tbn)
+
+        # 1. Сначала ищем по табельному номеру — это самый надежный вариант
+        if tbn_norm:
+            for emp_fio, emp_tbn, _emp_pos, _emp_dep, emp_schedule in self.employees:
+                if normalize_tbn(emp_tbn) == tbn_norm:
+                    return normalize_spaces(emp_schedule or "")
+
+        # 2. Если табельного нет — ищем по ФИО
+        matches = []
+        for emp_fio, emp_tbn, _emp_pos, _emp_dep, emp_schedule in self.employees:
+            if normalize_spaces(emp_fio) == fio_norm:
+                matches.append(normalize_spaces(emp_schedule or ""))
+
+        if len(matches) == 1:
+            return matches[0]
+
+        return ""
 
     def _grid_selected(self) -> set[int]:
         if hasattr(self, "grid"):
@@ -790,12 +811,14 @@ class TimesheetPage(tk.Frame):
             fio = normalize_spaces(emp[0])
             self._fio_to_employees.setdefault(fio, []).append(emp)
 
-        self.emp_names = sorted({normalize_spaces(fio) for fio, _, _, _ in self.employees if normalize_spaces(fio)})
+        self.emp_names = sorted(
+            {normalize_spaces(fio) for fio, _, _, _, _ in self.employees if normalize_spaces(fio)}
+        )
 
         deps = sorted(
             {
                 normalize_spaces(dep)
-                for _, _, _, dep in self.employees
+                for _, _, _, dep, _ in self.employees
                 if normalize_spaces(dep)
             }
         )
@@ -837,11 +860,11 @@ class TimesheetPage(tk.Frame):
         else:
             allowed = [emp for emp in self.employees if normalize_spaces(emp[3]) == dep_sel]
 
-        for fio, tbn, pos, dep in allowed:
+        for fio, tbn, pos, dep, work_schedule in allowed:
             display = self._resolve_employee_display(fio, tbn)
-            self._employee_display_to_data[display] = (fio, tbn, pos, dep)
+            self._employee_display_to_data[display] = (fio, tbn, pos, dep, work_schedule)
 
-        self.allowed_fio_names = {normalize_spaces(fio) for fio, _, _, _ in allowed if normalize_spaces(fio)}
+        self.allowed_fio_names = {normalize_spaces(fio) for fio, _, _, _, _ in allowed if normalize_spaces(fio)}
 
     # --------------------------------------------------------
     # UI
@@ -1569,6 +1592,11 @@ class TimesheetPage(tk.Frame):
                     )
                     self._active_header_id = resolved_header_id
 
+            for rec in loaded_rows:
+                rec["work_schedule"] = self._get_employee_work_schedule(
+                    rec.get("fio", ""),
+                    rec.get("tbn", ""),
+                )
             self.model_rows_all.extend(loaded_rows)
             self._recalc_all_row_totals()
             self._apply_filter()
@@ -1746,12 +1774,17 @@ class TimesheetPage(tk.Frame):
         def process_batch():
             nonlocal added_count
             try:
-                for fio, tbn, _pos, _dep in candidates:
+                for fio, tbn, _pos, _dep, work_schedule in candidates:
                     if dlg.cancelled:
                         break
                     key = make_row_key(fio, tbn)
                     if key not in existing:
-                        self.model_rows_all.append({"fio": fio, "tbn": tbn, "hours": [None] * 31})
+                        self.model_rows_all.append({
+                            "fio": fio,
+                            "tbn": tbn,
+                            "hours": [None] * 31,
+                            "work_schedule": work_schedule or "",
+                        })
                         existing.add(key)
                         added_count += 1
                     dlg.step()
@@ -1791,11 +1824,16 @@ class TimesheetPage(tk.Frame):
         existing = {make_row_key(r.get("fio", ""), r.get("tbn", "")) for r in self.model_rows_all}
         added_count = 0
 
-        for fio, tbn, _pos, _dep in selected_emps:
+        for fio, tbn, _pos, _dep, work_schedule in selected_emps:
             key = make_row_key(fio, tbn)
             if key in existing:
                 continue
-            self.model_rows_all.append({"fio": fio, "tbn": tbn, "hours": [None] * 31})
+            self.model_rows_all.append({
+                "fio": fio,
+                "tbn": tbn,
+                "hours": [None] * 31,
+                "work_schedule": work_schedule or "",
+            })
             existing.add(key)
             added_count += 1
 
@@ -2029,8 +2067,13 @@ class TimesheetPage(tk.Frame):
                     if emp is None:
                         ambiguous += 1
                         continue
-                    fio, tbn, _pos, _dep = emp
-                    rec = {"fio": fio, "tbn": tbn or "", "hours": [None] * 31}
+                    fio, tbn, _pos, _dep, work_schedule = emp
+                    rec = {
+                        "fio": fio,
+                        "tbn": tbn or "",
+                        "hours": [None] * 31,
+                        "work_schedule": work_schedule or "",
+                    }
                     self.model_rows_all.append(rec)
                     added += 1
 
@@ -2130,7 +2173,18 @@ class TimesheetPage(tk.Frame):
                     continue
 
                 hours_raw = [normalize_spaces(str(ws.cell(r, c).value or "")) or None for c in range(8, 8 + 31)]
-                imported.append(normalize_row_record({"fio": fio, "tbn": tbn, "hours": hours_raw}, year, month))
+                imported.append(
+                    normalize_row_record(
+                        {
+                            "fio": fio,
+                            "tbn": tbn,
+                            "hours": hours_raw,
+                            "work_schedule": self._get_employee_work_schedule(fio, tbn),
+                        },
+                        year,
+                        month,
+                    )
+                )
 
             if not imported:
                 messagebox.showinfo("Импорт", "Подходящих строк не найдено.", parent=self)
@@ -2220,7 +2274,11 @@ class TimesheetPage(tk.Frame):
                 return
 
             current_year, current_month = self.get_year_month()
-            found_rows = deduplicate_timesheet_rows(found_rows, current_year, current_month)
+            for rec in found_rows:
+                rec["work_schedule"] = self._get_employee_work_schedule(
+                    rec.get("fio", ""),
+                    rec.get("tbn", ""),
+                )
 
             if mode == "replace":
                 self.model_rows_all.clear()
