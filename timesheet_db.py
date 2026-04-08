@@ -587,6 +587,53 @@ def load_timesheet_rows_by_header_id(header_id: int) -> List[Dict[str, Any]]:
             )
         return result
 
+def load_timesheet_rows_with_schedule_by_header_id(header_id: int) -> List[Dict[str, Any]]:
+    rows = load_timesheet_rows_by_header_id(header_id)
+    if not rows:
+        return []
+
+    with db_cursor() as (_conn, cur):
+        cur.execute(
+            """
+            SELECT fio, tbn, work_schedule
+            FROM public.employees
+            WHERE COALESCE(is_fired, FALSE) = FALSE
+            """
+        )
+        emp_rows = cur.fetchall()
+
+    schedule_by_tbn: dict[str, str] = {}
+    schedules_by_fio: dict[str, List[str]] = {}
+
+    for fio, tbn, work_schedule in emp_rows:
+        fio_norm = normalize_spaces(fio or "")
+        tbn_norm = normalize_tbn(tbn)
+        schedule_norm = normalize_spaces(work_schedule or "")
+
+        if tbn_norm:
+            schedule_by_tbn[tbn_norm] = schedule_norm
+
+        if fio_norm:
+            schedules_by_fio.setdefault(fio_norm, []).append(schedule_norm)
+
+    result: List[Dict[str, Any]] = []
+    for row in rows:
+        fio_norm = normalize_spaces(row.get("fio") or "")
+        tbn_norm = normalize_tbn(row.get("tbn"))
+        work_schedule = ""
+
+        if tbn_norm and tbn_norm in schedule_by_tbn:
+            work_schedule = schedule_by_tbn[tbn_norm]
+        else:
+            matches = schedules_by_fio.get(fio_norm, [])
+            if len(matches) == 1:
+                work_schedule = matches[0]
+
+        enriched = dict(row)
+        enriched["work_schedule"] = work_schedule
+        result.append(enriched)
+
+    return result
 
 # ============================================================
 # Проверка дублей сотрудников между табелями
@@ -996,6 +1043,7 @@ __all__ = [
     "load_timesheet_rows_from_db",
     "load_timesheet_rows_for_copy_from_db",
     "load_timesheet_rows_by_header_id",
+    "load_timesheet_rows_with_schedule_by_header_id",
     "find_duplicate_employees_for_timesheet",
     "load_brigadier_assignments_for_department",
     "load_brigadier_names_for_department",
