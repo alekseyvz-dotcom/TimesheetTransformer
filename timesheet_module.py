@@ -52,6 +52,7 @@ from timesheet_db import (
     load_objects_short_for_timesheet,
     load_timesheet_full_by_header_id,
     load_timesheet_rows_by_header_id,
+    load_timesheet_rows_with_schedule_by_header_id,
     load_timesheet_rows_for_copy_from_db,
     load_timesheet_rows_from_db,
     load_user_timesheet_headers,
@@ -2985,19 +2986,29 @@ class MyTimesheetsPage(tk.Frame):
             ws.title = "Мои табели"
 
             header = (
-                ["Год", "Месяц", "Адрес", "ID объекта", "Подразделение", "ФИО", "Табельный №", "ФИО бригадира"]
+                [
+                    "Год",
+                    "Месяц",
+                    "Адрес",
+                    "ID объекта",
+                    "Подразделение",
+                    "ФИО",
+                    "Табельный №",
+                    "ФИО бригадира",
+                    "График работы",
+                ]
                 + [str(i) for i in range(1, 32)]
                 + ["Итого дней", "Итого часов", "В т.ч. ночных", "Переработка день", "Переработка ночь"]
             )
             ws.append(header)
 
-            widths = [6, 10, 40, 14, 22, 28, 12, 28] + [6] * 31 + [10, 12, 16, 16, 16]
+            widths = [6, 10, 40, 14, 22, 28, 12, 28, 28] + [6] * 31 + [10, 12, 16, 16, 16]
             for i, w in enumerate(widths, 1):
                 ws.column_dimensions[get_column_letter(i)].width = w
 
             total_rows = 0
             for h in self._headers:
-                rows_data = load_timesheet_rows_by_header_id(int(h["id"]))
+                rows_data = load_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
                 brig_map = load_brigadiers_map_for_header(int(h["id"]))
 
                 for r in rows_data:
@@ -3014,6 +3025,7 @@ class MyTimesheetsPage(tk.Frame):
                             r.get("fio", ""),
                             r.get("tbn", ""),
                             brig_fio,
+                            r.get("work_schedule", ""),
                         ]
                         + (r.get("hours_raw") or [None] * 31)
                         + [
@@ -3363,19 +3375,29 @@ class TimesheetRegistryPage(tk.Frame):
             ws.title = "Реестр табелей"
 
             header_row = (
-                ["Год", "Месяц", "Адрес", "ID объекта", "Подразделение", "Пользователь", "ФИО", "Табельный №"]
+                [
+                    "Год",
+                    "Месяц",
+                    "Адрес",
+                    "ID объекта",
+                    "Подразделение",
+                    "Пользователь",
+                    "ФИО",
+                    "Табельный №",
+                    "График работы",
+                ]
                 + [str(i) for i in range(1, 32)]
                 + ["Итого_дней", "Итого_часов", "В т.ч. ночных", "Переработка_день", "Переработка_ночь"]
             )
             ws.append(header_row)
 
-            widths = [6, 10, 40, 14, 22, 22, 28, 12] + [6] * 31 + [10, 14, 16, 16, 16]
+            widths = [6, 10, 40, 14, 22, 22, 28, 12, 28] + [6] * 31 + [10, 14, 16, 16, 16]
             for i, w in enumerate(widths, 1):
                 ws.column_dimensions[get_column_letter(i)].width = w
 
             total_rows = 0
             for h in self._headers:
-                rows = load_timesheet_rows_by_header_id(int(h["id"]))
+                rows = load_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
                 user_display = h.get("full_name") or h.get("username") or ""
                 for r in rows:
                     ws.append(
@@ -3388,6 +3410,7 @@ class TimesheetRegistryPage(tk.Frame):
                             user_display,
                             r["fio"],
                             r["tbn"],
+                            r.get("work_schedule", ""),
                         ]
                         + (r.get("hours_raw") or [None] * 31)
                         + [
