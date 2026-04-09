@@ -276,19 +276,19 @@ class TimesheetPlanFactData:
                 "as_of_date": None,
             }
     
-        df_date = df_date.copy()
-        df_date["work_date"] = pd.to_datetime(df_date["work_date"])
+        actual_date = self._get_actual_last_date(df_date)
+        if actual_date is None:
+            return {
+                "plan_total": 0,
+                "fact_total": 0,
+                "absent_total": 0,
+                "attendance_pct": 0.0,
+                "days_count": 0,
+                "objects_count": 0,
+                "as_of_date": None,
+            }
     
-        today = pd.Timestamp(datetime.today().date())
-    
-        # Берём последнюю дату из выборки, которая не больше сегодняшней
-        df_actual = df_date[df_date["work_date"] <= today].sort_values("work_date")
-    
-        if not df_actual.empty:
-            last_row = df_actual.iloc[-1]
-        else:
-            # если весь период в будущем — берём первую дату периода
-            last_row = df_date.sort_values("work_date").iloc[0]
+        last_row = df_date[pd.to_datetime(df_date["work_date"]) == actual_date].iloc[-1]
     
         return {
             "plan_total": int(last_row["plan_count"]),
@@ -306,10 +306,15 @@ class TimesheetPlanFactData:
             return pd.DataFrame(columns=[
                 "object_name", "plan_count", "fact_count", "absent_count", "attendance_pct"
             ])
-
-        last_date = df["work_date"].max()
-        df_last = df[df["work_date"] == last_date].copy()
-
+    
+        actual_date = self._get_actual_last_date(df)
+        if actual_date is None:
+            return pd.DataFrame(columns=[
+                "object_name", "plan_count", "fact_count", "absent_count", "attendance_pct"
+            ])
+    
+        df_last = df[pd.to_datetime(df["work_date"]) == actual_date].copy()
+    
         grp = (
             df_last.groupby("object_name", as_index=False)
                   .agg({
@@ -319,14 +324,14 @@ class TimesheetPlanFactData:
                   })
                   .sort_values(["plan_count", "fact_count"], ascending=False)
         )
-
+    
         grp["attendance_pct"] = grp.apply(
             lambda r: round(r["fact_count"] / r["plan_count"] * 100.0, 1)
             if r["plan_count"] > 0 else 0.0,
             axis=1
         )
         return grp
-
+    
     def get_plan_fact_by_position(self) -> pd.DataFrame:
         df = self.get_plan_fact_daily()
         if df.empty:
@@ -338,10 +343,20 @@ class TimesheetPlanFactData:
                 "absent_count",
                 "attendance_pct",
             ])
-
-        last_date = df["work_date"].max()
-        df_last = df[df["work_date"] == last_date].copy()
-
+    
+        actual_date = self._get_actual_last_date(df)
+        if actual_date is None:
+            return pd.DataFrame(columns=[
+                "department_name",
+                "position_name",
+                "plan_count",
+                "fact_count",
+                "absent_count",
+                "attendance_pct",
+            ])
+    
+        df_last = df[pd.to_datetime(df["work_date"]) == actual_date].copy()
+    
         grp = (
             df_last.groupby(["department_name", "position_name"], as_index=False)
                   .agg({
@@ -351,7 +366,7 @@ class TimesheetPlanFactData:
                   })
                   .sort_values(["plan_count", "fact_count"], ascending=False)
         )
-
+    
         grp["attendance_pct"] = grp.apply(
             lambda r: round(r["fact_count"] / r["plan_count"] * 100.0, 1)
             if r["plan_count"] > 0 else 0.0,
@@ -359,6 +374,23 @@ class TimesheetPlanFactData:
         )
         return grp
 
+    def _get_actual_last_date(self, df: pd.DataFrame) -> Optional[pd.Timestamp]:
+        if df is None or df.empty:
+            return None
+    
+        df = df.copy()
+        df["work_date"] = pd.to_datetime(df["work_date"])
+        today = pd.Timestamp(datetime.today().date())
+    
+        df_actual = df[(df["work_date"] <= today) & (df["fact_count"] > 0)]
+        if not df_actual.empty:
+            return df_actual["work_date"].max()
+    
+        df_past = df[df["work_date"] <= today]
+        if not df_past.empty:
+            return df_past["work_date"].max()
+    
+        return df["work_date"].min()
 
 class TimesheetPlanFactPage(ttk.Frame):
     def __init__(self, master, app_ref=None):
