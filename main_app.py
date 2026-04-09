@@ -115,6 +115,7 @@ objects = None
 Settings = None
 timesheet_module = None
 analytics_module = None
+timesheet_plan_fact_module = None
 timesheet_transformer = None
 employees_module = None
 timesheet_compare = None
@@ -131,7 +132,7 @@ EstimateResourceDecoder = None
 def perform_heavy_imports():
     global BudgetAnalyzer, EstimateResourceDecoder, _assets_logo, _LOGO_BASE64, SpecialOrders, \
            meals_module, objects, Settings, timesheet_module, \
-           analytics_module, timesheet_transformer, employees_module, \
+           analytics_module, timesheet_plan_fact_module, timesheet_transformer, employees_module, \
            timesheet_compare, meals_employees_module, lodging_module, \
            meals_reports_module, employee_card_module, payroll_module, \
            brigades_module, gpr_module, gpr_task_dialog, gpr_dictionaries
@@ -150,6 +151,7 @@ def perform_heavy_imports():
     import gpr_dictionaries as gpr_dictionaries
     import gpr_task_dialog as gpr_task_dialog
     import analytics_module
+    import timesheet_plan_fact_page as timesheet_plan_fact_module
     import employees as employees_module
     import timesheet_compare
     import meals_employees as meals_employees_module
@@ -552,6 +554,7 @@ class HomePage(tk.Frame):
         "transport": lambda p, app: SpecialOrders.create_page(p, app),
         "meals_order": lambda p, app: meals_module.create_meals_order_page(p, app),
         "analytics_dashboard": lambda p, app: analytics_module.AnalyticsPage(p, app),
+        "timesheet_plan_fact": lambda p, app: timesheet_plan_fact_module.TimesheetPlanFactPage(p, app),
         "objects_registry": lambda p, app: objects.ObjectsRegistryPage(p, app),
         "lodging_registry": lambda p, app: lodging_module.create_lodging_registry_page(p, app),
         "employee_card": lambda p, app: employee_card_module.create_employee_card_page(p, app),
@@ -641,6 +644,7 @@ class HomePage(tk.Frame):
             ("Проживание", "lodging_registry"),
             ("Карточка сотрудника", "employee_card"),
             ("Аналитика", "analytics_dashboard"),
+            ("План / факт по табелю", "timesheet_plan_fact"),
         ]
 
         visible = [(t, k) for t, k in actions if self._has_access(k)]
@@ -1430,6 +1434,7 @@ class MainApp(tk.Tk):
             "objects_registry": ("Реестр", "Объекты"),
             "employee_card": ("Карточка сотрудника", ""),
             "analytics_dashboard": ("Операционная аналитика", ""),
+            "timesheet_plan_fact": ("План / факт по табелю", ""),
             "payroll": ("Затраты (ФОТ)", ""),
             "budget": ("Анализ смет", ""),
             "estimate_resource_decoder": ("Раскрытие ресурсов сметы", ""),
@@ -1618,6 +1623,7 @@ class MainApp(tk.Tk):
             "employee_card": lambda p: employee_card_module.create_employee_card_page(p, self),
 
             "analytics_dashboard": lambda p: analytics_module.AnalyticsPage(p, self),
+            "timesheet_plan_fact": lambda p: timesheet_plan_fact_module.TimesheetPlanFactPage(p, self),
             "payroll": lambda p: payroll_module.create_payroll_page(p, self),
 
             "budget": lambda p: BudgetAnalyzer.create_page(p),
@@ -1705,6 +1711,7 @@ if __name__ == "__main__":
                 gpr_task_dialog,
                 gpr_dictionaries,
                 analytics_module,
+                timesheet_plan_fact_module,
                 employees_module,
                 timesheet_compare,
                 meals_employees_module,
