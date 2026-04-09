@@ -68,8 +68,9 @@ class TimesheetPlanFactData:
     def get_plan_fact_daily(self) -> pd.DataFrame:
         query = """
         WITH matched_employees AS (
+            -- Обогащение строк табеля данными из справочника сотрудников
             SELECT
-                NULLIF(btrim(e.tbn), '') AS tbn_norm,
+                NULLIF(btrim(e.tbn), '')  AS tbn_norm,
                 e.position,
                 e.department_id,
                 ROW_NUMBER() OVER (
@@ -78,24 +79,25 @@ class TimesheetPlanFactData:
                 ) AS rn
             FROM employees e
         ),
-
+    
         base_rows AS (
+            -- Базовый набор: все строки табелей за нужный период
             SELECT
-                th.id AS header_id,
+                th.id          AS header_id,
                 th.object_db_id,
                 th.year,
                 th.month,
-                COALESCE(o.address, '—') AS object_name,
-                COALESCE(dep_emp.name, dep_hdr.name, NULLIF(th.department, ''), '—') AS department_name,
-                COALESCE(me.position, '—') AS position_name,
-                tr.fio,
-                tr.tbn,
-                tr.hours_raw,
+                COALESCE(o.address, '—')                                          AS object_name,
+                COALESCE(dep_emp.name, dep_hdr.name,
+                         NULLIF(btrim(th.department), ''), '—')                   AS department_name,
+                COALESCE(me.position, '—')                                        AS position_name,
                 CASE
                     WHEN NULLIF(btrim(tr.tbn), '') IS NOT NULL
                         THEN 'tbn:' || btrim(tr.tbn)
-                    ELSE 'fio:' || lower(regexp_replace(btrim(tr.fio), '\\s+', ' ', 'g'))
-                END AS person_key
+                    ELSE 'fio:' || lower(regexp_replace(btrim(tr.fio),
+                                                        '\\s+', ' ', 'g'))
+                END AS person_key,
+                tr.hours_raw
             FROM timesheet_headers th
             JOIN timesheet_rows tr
               ON tr.header_id = th.id
@@ -108,69 +110,98 @@ class TimesheetPlanFactData:
              AND me.rn = 1
             LEFT JOIN departments dep_emp
               ON dep_emp.id = me.department_id
-            WHERE make_date(th.year, th.month, 1) <= %s
+            WHERE make_date(th.year, th.month, 1) <= %s   -- end_date
               AND (
                     date_trunc('month', make_date(th.year, th.month, 1))
                     + interval '1 month - 1 day'
-                  )::date >= %s
+                  )::date >= %s                            -- start_date
               {object_filter}
         ),
-
-        plan_monthly AS (
-            SELECT
+    
+        /*
+         * КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ:
+         * Разворачиваем каждую строку табеля по дням.
+         * Для одного person_key может быть несколько строк в base_rows
+         * (разные header_id одного объекта/подразделения).
+         * Используем MAX(worked_flag) через DISTINCT ON / агрегацию,
+         * чтобы не задваивать человека.
+         *
+         * Логика worked_flag:
+         *   1 = в ячейке дня есть число > 0  (человек вышел)
+         *   0 = NULL / пусто / буква / 0
+         */
+        daily_person_flags AS (
+            SELECT DISTINCT ON (
+                work_date,
                 object_db_id,
                 object_name,
                 department_name,
                 position_name,
-                COUNT(DISTINCT person_key)::int AS plan_count
-            FROM base_rows
-            GROUP BY
-                object_db_id,
-                object_name,
-                department_name,
-                position_name
-        ),
-
-        fact_daily_raw AS (
-            SELECT
+                person_key
+            )
                 (
                     make_date(br.year, br.month, 1)
                     + (gs.day_num - 1) * interval '1 day'
-                )::date AS work_date,
+                )::date                                      AS work_date,
                 br.object_db_id,
                 br.object_name,
                 br.department_name,
                 br.position_name,
                 br.person_key,
-                br.hours_raw[gs.day_num] AS raw_day_value,
+                /*
+                 * Если у одного person_key несколько header-ов,
+                 * берём MAX — достаточно хоть одного выхода в этот день.
+                 * DISTINCT ON + ORDER BY worked_flag DESC даёт нам
+                 * строку с максимальным флагом для каждой комбинации.
+                 */
                 CASE
-                    WHEN br.hours_raw[gs.day_num] IS NULL THEN 0
-                    WHEN btrim(br.hours_raw[gs.day_num]) = '' THEN 0
+                    WHEN br.hours_raw[gs.day_num] IS NULL           THEN 0
+                    WHEN btrim(br.hours_raw[gs.day_num]) = ''       THEN 0
                     WHEN substring(
-                        replace(br.hours_raw[gs.day_num], ',', '.')
-                        FROM '([0-9]+(?:\\.[0-9]+)?)'
-                    ) IS NOT NULL
+                             replace(br.hours_raw[gs.day_num], ',', '.')
+                             FROM '([0-9]+(?:\.[0-9]+)?)'
+                         ) IS NOT NULL
                      AND substring(
-                        replace(br.hours_raw[gs.day_num], ',', '.')
-                        FROM '([0-9]+(?:\\.[0-9]+)?)'
-                    )::numeric > 0
+                             replace(br.hours_raw[gs.day_num], ',', '.')
+                             FROM '([0-9]+(?:\.[0-9]+)?)'
+                         )::numeric > 0
                     THEN 1
                     ELSE 0
-                END AS worked_flag
+                END                                          AS worked_flag
             FROM base_rows br
             CROSS JOIN LATERAL generate_series(1, 31) AS gs(day_num)
-            WHERE gs.day_num <= EXTRACT(
-                      DAY FROM (
-                          date_trunc('month', make_date(br.year, br.month, 1))
-                          + interval '1 month - 1 day'
-                      )
-                  )
+            WHERE
+                -- не выходим за пределы реального месяца
+                gs.day_num <= EXTRACT(
+                    DAY FROM (
+                        date_trunc('month', make_date(br.year, br.month, 1))
+                        + interval '1 month - 1 day'
+                    )
+                )
+                -- фильтр по выбранному диапазону дат
               AND (
                     make_date(br.year, br.month, 1)
                     + (gs.day_num - 1) * interval '1 day'
-                  )::date BETWEEN %s AND %s
+                  )::date BETWEEN %s AND %s                  -- start_date, end_date
+            ORDER BY
+                work_date,
+                object_db_id,
+                object_name,
+                department_name,
+                position_name,
+                person_key,
+                worked_flag DESC   -- при дублях берём строку с выходом (1 > 0)
         ),
-
+    
+        /*
+         * Агрегация по дням:
+         * plan  = все уникальные люди в табелях этого объекта/подразд./должн. в этот день
+         * fact  = те из них, у кого worked_flag = 1
+         *
+         * "План" здесь означает: сколько людей числится в табеле на данный день
+         * (т.е. табель за этот месяц существует и человек в нём есть).
+         * "Факт" = те из них, у кого стоят часы > 0.
+         */
         fact_daily AS (
             SELECT
                 work_date,
@@ -178,8 +209,9 @@ class TimesheetPlanFactData:
                 object_name,
                 department_name,
                 position_name,
-                COUNT(DISTINCT person_key) FILTER (WHERE worked_flag = 1)::int AS fact_count
-            FROM fact_daily_raw
+                COUNT(DISTINCT person_key)::int                                   AS plan_count,
+                COUNT(DISTINCT person_key) FILTER (WHERE worked_flag = 1)::int    AS fact_count
+            FROM daily_person_flags
             GROUP BY
                 work_date,
                 object_db_id,
@@ -187,42 +219,42 @@ class TimesheetPlanFactData:
                 department_name,
                 position_name
         )
-
+    
         SELECT
             fd.work_date,
             fd.object_db_id,
             fd.object_name,
             fd.department_name,
             fd.position_name,
-            pm.plan_count,
+            fd.plan_count,
             fd.fact_count,
-            GREATEST(pm.plan_count - fd.fact_count, 0)::int AS absent_count,
+            GREATEST(fd.plan_count - fd.fact_count, 0)::int   AS absent_count,
             CASE
-                WHEN pm.plan_count > 0
-                THEN ROUND(fd.fact_count::numeric / pm.plan_count::numeric * 100, 1)
+                WHEN fd.plan_count > 0
+                THEN ROUND(
+                         fd.fact_count::numeric
+                         / fd.plan_count::numeric * 100, 1
+                     )
                 ELSE 0
-            END AS attendance_pct
+            END                                                AS attendance_pct
         FROM fact_daily fd
-        JOIN plan_monthly pm
-          ON pm.object_db_id = fd.object_db_id
-         AND pm.object_name = fd.object_name
-         AND pm.department_name = fd.department_name
-         AND pm.position_name = fd.position_name
         ORDER BY
             fd.work_date,
             fd.object_name,
             fd.department_name,
             fd.position_name;
         """
-
+    
         params: List[Any] = [self.end_date, self.start_date]
         object_filter = ""
         if self.object_type_filter:
             object_filter = "AND o.short_name = %s"
             params.append(self.object_type_filter)
         params.extend([self.start_date, self.end_date])
-
-        rows = self._execute_query(query.format(object_filter=object_filter), tuple(params))
+    
+        rows = self._execute_query(
+            query.format(object_filter=object_filter), tuple(params)
+        )
         df = pd.DataFrame(rows)
         if not df.empty:
             df["work_date"] = pd.to_datetime(df["work_date"])
