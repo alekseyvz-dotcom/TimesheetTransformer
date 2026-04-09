@@ -69,12 +69,11 @@ class TimesheetPlanFactData:
         query = """
         WITH matched_employees AS (
             SELECT
-                e.id,
-                e.tbn,
+                NULLIF(btrim(e.tbn), '') AS tbn_norm,
                 e.position,
                 e.department_id,
                 ROW_NUMBER() OVER (
-                    PARTITION BY COALESCE(NULLIF(e.tbn, ''), '__EMPTY__')
+                    PARTITION BY NULLIF(btrim(e.tbn), '')
                     ORDER BY e.id
                 ) AS rn
             FROM employees e
@@ -89,10 +88,17 @@ class TimesheetPlanFactData:
                 COALESCE(o.address, '—') AS object_name,
                 COALESCE(dep_emp.name, dep_hdr.name, NULLIF(th.department, ''), '—') AS department_name,
                 COALESCE(me.position, '—') AS position_name,
+
                 tr.fio,
                 tr.tbn,
-                COALESCE(NULLIF(tr.tbn, ''), tr.fio) AS person_key,
-                tr.hours_raw
+                tr.hours_raw,
+
+                CASE
+                    WHEN NULLIF(btrim(tr.tbn), '') IS NOT NULL
+                        THEN 'tbn:' || btrim(tr.tbn)
+                    ELSE 'fio:' || lower(regexp_replace(btrim(tr.fio), '\\s+', ' ', 'g'))
+                END AS person_key
+
             FROM timesheet_headers th
             JOIN timesheet_rows tr
               ON tr.header_id = th.id
@@ -101,7 +107,7 @@ class TimesheetPlanFactData:
             LEFT JOIN departments dep_hdr
               ON dep_hdr.id = th.department_id
             LEFT JOIN matched_employees me
-              ON me.tbn = tr.tbn
+              ON me.tbn_norm = NULLIF(btrim(tr.tbn), '')
              AND me.rn = 1
             LEFT JOIN departments dep_emp
               ON dep_emp.id = me.department_id
@@ -139,14 +145,23 @@ class TimesheetPlanFactData:
                 br.department_name,
                 br.position_name,
                 br.person_key,
+                br.hours_raw[gs.day_num] AS raw_day_value,
+
                 CASE
                     WHEN br.hours_raw[gs.day_num] IS NULL THEN 0
                     WHEN btrim(br.hours_raw[gs.day_num]) = '' THEN 0
-                    WHEN replace(btrim(br.hours_raw[gs.day_num]), ',', '.') ~ '^[-+]?[0-9]*\\.?[0-9]+$'
-                         AND replace(btrim(br.hours_raw[gs.day_num]), ',', '.')::numeric > 0
+                    WHEN substring(
+                        replace(br.hours_raw[gs.day_num], ',', '.')
+                        FROM '([0-9]+(?:\\.[0-9]+)?)'
+                    ) IS NOT NULL
+                     AND substring(
+                        replace(br.hours_raw[gs.day_num], ',', '.')
+                        FROM '([0-9]+(?:\\.[0-9]+)?)'
+                    )::numeric > 0
                     THEN 1
                     ELSE 0
                 END AS worked_flag
+
             FROM base_rows br
             CROSS JOIN LATERAL generate_series(1, 31) AS gs(day_num)
             WHERE gs.day_num <= EXTRACT(
@@ -186,7 +201,7 @@ class TimesheetPlanFactData:
             fd.position_name,
             pm.plan_count,
             fd.fact_count,
-            (pm.plan_count - fd.fact_count)::int AS absent_count,
+            GREATEST(pm.plan_count - fd.fact_count, 0)::int AS absent_count,
             CASE
                 WHEN pm.plan_count > 0
                 THEN ROUND(fd.fact_count::numeric / pm.plan_count::numeric * 100, 1)
@@ -217,8 +232,8 @@ class TimesheetPlanFactData:
         if not df.empty:
             df["work_date"] = pd.to_datetime(df["work_date"])
             for col in ("plan_count", "fact_count", "absent_count"):
-                df[col] = df[col].astype(int)
-            df["attendance_pct"] = df["attendance_pct"].astype(float)
+                df[col] = df[col].fillna(0).astype(int)
+            df["attendance_pct"] = df["attendance_pct"].fillna(0).astype(float)
         return df
 
     def get_plan_fact_by_date(self) -> pd.DataFrame:
@@ -239,23 +254,7 @@ class TimesheetPlanFactData:
         )
 
         grp["attendance_pct"] = grp.apply(
-            lambda r: round(r["fact_count"] / r["plan_count"] * 100.0, 1)
-            if r["plan_count"] > 0 else 0.0,
-            axis=1
-        )
-        return grp
-
-    def get_plan_fact_kpi(self) -> Dict[str, Any]:
-        df_date = self.get_plan_fact_by_date()
-        df_det = self.get_plan_fact_daily()
-
-        if df_date.empty:
-            return {
-                "plan_total": 0,
-                "fact_total": 0,
-                "absent_total": 0,
-                "attendance_pct": 0.0,
-                "days_count": 0,
+            lambda r: round(r "days_count": 0,
                 "objects_count": 0,
                 "as_of_date": None,
             }
