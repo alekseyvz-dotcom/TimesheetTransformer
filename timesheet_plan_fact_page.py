@@ -81,7 +81,10 @@ class TimesheetPlanFactData:
         ),
         expanded AS (
             SELECT
-                make_date(th.year, th.month, gs.day_num) AS work_date,
+                (
+                    make_date(th.year, th.month, 1)
+                    + (gs.day_num - 1) * interval '1 day'
+                )::date AS work_date,
                 th.object_db_id,
                 COALESCE(o.address, '—') AS object_name,
                 COALESCE(dep_emp.name, dep_hdr.name, NULLIF(th.department, ''), '—') AS department_name,
@@ -117,7 +120,10 @@ class TimesheetPlanFactData:
                           + interval '1 month - 1 day'
                       )
                   )
-              AND make_date(th.year, th.month, gs.day_num) BETWEEN %s AND %s
+              AND (
+                    make_date(th.year, th.month, 1)
+                    + (gs.day_num - 1) * interval '1 day'
+                  )::date BETWEEN %s AND %s
               {object_filter}
         )
         SELECT
@@ -147,13 +153,13 @@ class TimesheetPlanFactData:
             department_name,
             position_name;
         """
-
+    
         params: List[Any] = [self.start_date, self.end_date]
         object_filter = ""
         if self.object_type_filter:
             object_filter = "AND o.short_name = %s"
             params.append(self.object_type_filter)
-
+    
         rows = self._execute_query(query.format(object_filter=object_filter), tuple(params))
         df = pd.DataFrame(rows)
         if not df.empty:
