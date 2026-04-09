@@ -20,14 +20,14 @@ def set_db_pool(db_pool: pool.SimpleConnectionPool):
 
 
 PALETTE = {
-    "primary":    "#1565C0",
-    "success":    "#2E7D32",
-    "warning":    "#E65100",
-    "accent":     "#6A1B9A",
-    "neutral":    "#546E7A",
-    "bg_card":    "#F5F7FA",
-    "positive":   "#2E7D32",
-    "negative":   "#C62828",
+    "primary": "#1565C0",
+    "success": "#2E7D32",
+    "warning": "#E65100",
+    "accent": "#6A1B9A",
+    "neutral": "#546E7A",
+    "bg_card": "#F5F7FA",
+    "positive": "#2E7D32",
+    "negative": "#C62828",
     "text_muted": "#78909C",
 }
 
@@ -79,28 +79,20 @@ class TimesheetPlanFactData:
                 ) AS rn
             FROM employees e
         ),
-        expanded AS (
+
+        base_rows AS (
             SELECT
-                (
-                    make_date(th.year, th.month, 1)
-                    + (gs.day_num - 1) * interval '1 day'
-                )::date AS work_date,
+                th.id AS header_id,
                 th.object_db_id,
+                th.year,
+                th.month,
                 COALESCE(o.address, '—') AS object_name,
                 COALESCE(dep_emp.name, dep_hdr.name, NULLIF(th.department, ''), '—') AS department_name,
                 COALESCE(me.position, '—') AS position_name,
                 tr.fio,
                 tr.tbn,
-                tr.hours_raw[gs.day_num] AS day_raw,
-                1 AS plan_cnt,
-                CASE
-                    WHEN tr.hours_raw[gs.day_num] IS NULL THEN 0
-                    WHEN btrim(tr.hours_raw[gs.day_num]) = '' THEN 0
-                    WHEN replace(btrim(tr.hours_raw[gs.day_num]), ',', '.') ~ '^[-+]?[0-9]*\\.?[0-9]+$'
-                         AND replace(btrim(tr.hours_raw[gs.day_num]), ',', '.')::numeric > 0
-                    THEN 1
-                    ELSE 0
-                END AS fact_cnt
+                COALESCE(NULLIF(tr.tbn, ''), tr.fio) AS person_key,
+                tr.hours_raw
             FROM timesheet_headers th
             JOIN timesheet_rows tr
               ON tr.header_id = th.id
@@ -113,53 +105,113 @@ class TimesheetPlanFactData:
              AND me.rn = 1
             LEFT JOIN departments dep_emp
               ON dep_emp.id = me.department_id
+            WHERE make_date(th.year, th.month, 1) <= %s
+              AND (
+                    date_trunc('month', make_date(th.year, th.month, 1))
+                    + interval '1 month - 1 day'
+                  )::date >= %s
+              {object_filter}
+        ),
+
+        plan_monthly AS (
+            SELECT
+                object_db_id,
+                object_name,
+                department_name,
+                position_name,
+                COUNT(DISTINCT person_key)::int AS plan_count
+            FROM base_rows
+            GROUP BY
+                object_db_id,
+                object_name,
+                department_name,
+                position_name
+        ),
+
+        fact_daily_raw AS (
+            SELECT
+                (
+                    make_date(br.year, br.month, 1)
+                    + (gs.day_num - 1) * interval '1 day'
+                )::date AS work_date,
+                br.object_db_id,
+                br.object_name,
+                br.department_name,
+                br.position_name,
+                br.person_key,
+                CASE
+                    WHEN br.hours_raw[gs.day_num] IS NULL THEN 0
+                    WHEN btrim(br.hours_raw[gs.day_num]) = '' THEN 0
+                    WHEN replace(btrim(br.hours_raw[gs.day_num]), ',', '.') ~ '^[-+]?[0-9]*\\.?[0-9]+$'
+                         AND replace(btrim(br.hours_raw[gs.day_num]), ',', '.')::numeric > 0
+                    THEN 1
+                    ELSE 0
+                END AS worked_flag
+            FROM base_rows br
             CROSS JOIN LATERAL generate_series(1, 31) AS gs(day_num)
             WHERE gs.day_num <= EXTRACT(
                       DAY FROM (
-                          date_trunc('month', make_date(th.year, th.month, 1))
+                          date_trunc('month', make_date(br.year, br.month, 1))
                           + interval '1 month - 1 day'
                       )
                   )
               AND (
-                    make_date(th.year, th.month, 1)
+                    make_date(br.year, br.month, 1)
                     + (gs.day_num - 1) * interval '1 day'
                   )::date BETWEEN %s AND %s
-              {object_filter}
+        ),
+
+        fact_daily AS (
+            SELECT
+                work_date,
+                object_db_id,
+                object_name,
+                department_name,
+                position_name,
+                COUNT(DISTINCT person_key) FILTER (WHERE worked_flag = 1)::int AS fact_count
+            FROM fact_daily_raw
+            GROUP BY
+                work_date,
+                object_db_id,
+                object_name,
+                department_name,
+                position_name
         )
+
         SELECT
-            work_date,
-            object_db_id,
-            object_name,
-            department_name,
-            position_name,
-            SUM(plan_cnt)::int AS plan_count,
-            SUM(fact_cnt)::int AS fact_count,
-            SUM(plan_cnt - fact_cnt)::int AS absent_count,
+            fd.work_date,
+            fd.object_db_id,
+            fd.object_name,
+            fd.department_name,
+            fd.position_name,
+            pm.plan_count,
+            fd.fact_count,
+            (pm.plan_count - fd.fact_count)::int AS absent_count,
             CASE
-                WHEN SUM(plan_cnt) > 0
-                THEN ROUND(SUM(fact_cnt)::numeric / SUM(plan_cnt)::numeric * 100, 1)
+                WHEN pm.plan_count > 0
+                THEN ROUND(fd.fact_count::numeric / pm.plan_count::numeric * 100, 1)
                 ELSE 0
             END AS attendance_pct
-        FROM expanded
-        GROUP BY
-            work_date,
-            object_db_id,
-            object_name,
-            department_name,
-            position_name
+        FROM fact_daily fd
+        JOIN plan_monthly pm
+          ON pm.object_db_id = fd.object_db_id
+         AND pm.object_name = fd.object_name
+         AND pm.department_name = fd.department_name
+         AND pm.position_name = fd.position_name
         ORDER BY
-            work_date,
-            object_name,
-            department_name,
-            position_name;
+            fd.work_date,
+            fd.object_name,
+            fd.department_name,
+            fd.position_name;
         """
-    
-        params: List[Any] = [self.start_date, self.end_date]
+
+        params: List[Any] = [self.end_date, self.start_date]
         object_filter = ""
         if self.object_type_filter:
             object_filter = "AND o.short_name = %s"
             params.append(self.object_type_filter)
-    
+        params.extend([self.start_date, self.end_date])
+
         rows = self._execute_query(query.format(object_filter=object_filter), tuple(params))
         df = pd.DataFrame(rows)
         if not df.empty:
@@ -168,81 +220,6 @@ class TimesheetPlanFactData:
                 df[col] = df[col].astype(int)
             df["attendance_pct"] = df["attendance_pct"].astype(float)
         return df
-
-    def get_plan_fact_kpi(self) -> Dict[str, Any]:
-        df = self.get_plan_fact_daily()
-        if df.empty:
-            return {
-                "plan_total": 0,
-                "fact_total": 0,
-                "absent_total": 0,
-                "attendance_pct": 0.0,
-                "days_count": 0,
-                "objects_count": 0,
-            }
-
-        plan_total = int(df["plan_count"].sum())
-        fact_total = int(df["fact_count"].sum())
-        absent_total = int(df["absent_count"].sum())
-        attendance_pct = round(fact_total / plan_total * 100.0, 1) if plan_total > 0 else 0.0
-        days_count = int(df["work_date"].nunique())
-        objects_count = int(df["object_name"].nunique())
-
-        return {
-            "plan_total": plan_total,
-            "fact_total": fact_total,
-            "absent_total": absent_total,
-            "attendance_pct": attendance_pct,
-            "days_count": days_count,
-            "objects_count": objects_count,
-        }
-
-    def get_plan_fact_by_object(self) -> pd.DataFrame:
-        df = self.get_plan_fact_daily()
-        if df.empty:
-            return pd.DataFrame(columns=[
-                "object_name", "plan_count", "fact_count", "absent_count", "attendance_pct"
-            ])
-
-        grp = (
-            df.groupby("object_name", as_index=False)
-              .agg({
-                  "plan_count": "sum",
-                  "fact_count": "sum",
-                  "absent_count": "sum",
-              })
-        )
-        grp["attendance_pct"] = grp.apply(
-            lambda r: round(r["fact_count"] / r["plan_count"] * 100.0, 1)
-            if r["plan_count"] > 0 else 0.0,
-            axis=1
-        )
-        grp = grp.sort_values(["plan_count", "fact_count"], ascending=False)
-        return grp
-
-    def get_plan_fact_by_position(self) -> pd.DataFrame:
-        df = self.get_plan_fact_daily()
-        if df.empty:
-            return pd.DataFrame(columns=[
-                "department_name", "position_name",
-                "plan_count", "fact_count", "absent_count", "attendance_pct"
-            ])
-
-        grp = (
-            df.groupby(["department_name", "position_name"], as_index=False)
-              .agg({
-                  "plan_count": "sum",
-                  "fact_count": "sum",
-                  "absent_count": "sum",
-              })
-        )
-        grp["attendance_pct"] = grp.apply(
-            lambda r: round(r["fact_count"] / r["plan_count"] * 100.0, 1)
-            if r["plan_count"] > 0 else 0.0,
-            axis=1
-        )
-        grp = grp.sort_values(["plan_count", "fact_count"], ascending=False)
-        return grp
 
     def get_plan_fact_by_date(self) -> pd.DataFrame:
         df = self.get_plan_fact_daily()
@@ -253,18 +230,101 @@ class TimesheetPlanFactData:
 
         grp = (
             df.groupby("work_date", as_index=False)
-              .agg({
-                  "plan_count": "sum",
-                  "fact_count": "sum",
-                  "absent_count": "sum",
-              })
+            .agg({
+                "plan_count": "sum",
+                "fact_count": "sum",
+                "absent_count": "sum",
+            })
+            .sort_values("work_date")
         )
+
         grp["attendance_pct"] = grp.apply(
             lambda r: round(r["fact_count"] / r["plan_count"] * 100.0, 1)
             if r["plan_count"] > 0 else 0.0,
             axis=1
         )
-        grp = grp.sort_values("work_date")
+        return grp
+
+    def get_plan_fact_kpi(self) -> Dict[str, Any]:
+        df_date = self.get_plan_fact_by_date()
+        df_det = self.get_plan_fact_daily()
+
+        if df_date.empty:
+            return {
+                "plan_total": 0,
+                "fact_total": 0,
+                "absent_total": 0,
+                "attendance_pct": 0.0,
+                "days_count": 0,
+                "objects_count": 0,
+                "as_of_date": None,
+            }
+
+        last_row = df_date.sort_values("work_date").iloc[-1]
+
+        return {
+            "plan_total": int(last_row["plan_count"]),
+            "fact_total": int(last_row["fact_count"]),
+            "absent_total": int(last_row["absent_count"]),
+            "attendance_pct": float(last_row["attendance_pct"]),
+            "days_count": int(df_date["work_date"].nunique()),
+            "objects_count": int(df_det["object_name"].nunique()) if not df_det.empty else 0,
+            "as_of_date": pd.to_datetime(last_row["work_date"]),
+        }
+
+    def get_plan_fact_by_object(self) -> pd.DataFrame:
+        df = self.get_plan_fact_daily()
+        if df.empty:
+            return pd.DataFrame(columns=[
+                "object_name", "plan_count", "fact_count", "absent_count", "attendance_pct"
+            ])
+
+        last_date = df["work_date"].max()
+        df_last = df[df["work_date"] == last_date].copy()
+
+        grp = (
+            df_last.groupby("object_name", as_index=False)
+            .agg({
+                "plan_count": "sum",
+                "fact_count": "sum",
+                "absent_count": "sum",
+            })
+            .sort_values(["plan_count", "fact_count"], ascending=False)
+        )
+
+        grp["attendance_pct"] = grp.apply(
+            lambda r: round(r["fact_count"] / r["plan_count"] * 100.0, 1)
+            if r["plan_count"] > 0 else 0.0,
+            axis=1
+        )
+        return grp
+
+    def get_plan_fact_by_position(self) -> pd.DataFrame:
+        df = self.get_plan_fact_daily()
+        if df.empty:
+            return pd.DataFrame(columns=[
+                "department_name", "position_name",
+                "plan_count", "fact_count", "absent_count", "attendance_pct"
+            ])
+
+        last_date = df["work_date"].max()
+        df_last = df[df["work_date"] == last_date].copy()
+
+        grp = (
+            df_last.groupby(["department_name", "position_name"], as_index=False)
+            .agg({
+                "plan_count": "sum",
+                "fact_count": "sum",
+                "absent_count": "sum",
+            })
+            .sort_values(["plan_count", "fact_count"], ascending=False)
+        )
+
+        grp["attendance_pct"] = grp.apply(
+            lambda r: round(r["fact_count"] / r["plan_count"] * 100.0, 1)
+            if r["plan_count"] > 0 else 0.0,
+            axis=1
+        )
         return grp
 
 
@@ -448,20 +508,19 @@ class TimesheetPlanFactPage(ttk.Frame):
 
         kpi = dp.get_plan_fact_kpi()
 
-        # KPI
         kpi_frame = tk.Frame(self.inner, bg="#F0F2F5")
         kpi_frame.pack(fill="x", padx=10, pady=10)
 
         cards = [
             ("План (в табеле)",
              f"{kpi.get('plan_total', 0):,}".replace(",", " "),
-             "чел.-дн.", PALETTE["primary"]),
+             "чел.", PALETTE["primary"]),
             ("Факт (с часами)",
              f"{kpi.get('fact_total', 0):,}".replace(",", " "),
-             "чел.-дн.", PALETTE["success"]),
+             "чел.", PALETTE["success"]),
             ("Не вышли",
              f"{kpi.get('absent_total', 0):,}".replace(",", " "),
-             "чел.-дн.", PALETTE["negative"]),
+             "чел.", PALETTE["negative"]),
             ("Явка",
              f"{kpi.get('attendance_pct', 0):.1f}",
              "%", PALETTE["accent"]),
@@ -478,7 +537,6 @@ class TimesheetPlanFactPage(ttk.Frame):
             card.grid(row=0, column=i, padx=5, pady=4, sticky="nsew")
             kpi_frame.grid_columnconfigure(i, weight=1)
 
-        # Верхний блок
         top = ttk.Frame(self.inner)
         top.pack(fill="both", expand=True, padx=10, pady=(0, 8))
 
@@ -561,7 +619,6 @@ class TimesheetPlanFactPage(ttk.Frame):
         else:
             ttk.Label(right, text="Нет данных.").pack(pady=20)
 
-        # Средний блок
         mid = ttk.LabelFrame(self.inner, text="Итоги по датам")
         mid.pack(fill="both", expand=True, padx=10, pady=(0, 8))
 
@@ -600,7 +657,6 @@ class TimesheetPlanFactPage(ttk.Frame):
         else:
             ttk.Label(mid, text="Нет данных.").pack(pady=20)
 
-        # Нижний блок
         bottom = ttk.LabelFrame(self.inner, text="Детализация по дням / объектам / должностям")
         bottom.pack(fill="both", expand=True, padx=10, pady=(0, 8))
 
