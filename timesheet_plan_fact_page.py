@@ -88,17 +88,14 @@ class TimesheetPlanFactData:
                 COALESCE(o.address, '—') AS object_name,
                 COALESCE(dep_emp.name, dep_hdr.name, NULLIF(th.department, ''), '—') AS department_name,
                 COALESCE(me.position, '—') AS position_name,
-
                 tr.fio,
                 tr.tbn,
                 tr.hours_raw,
-
                 CASE
                     WHEN NULLIF(btrim(tr.tbn), '') IS NOT NULL
                         THEN 'tbn:' || btrim(tr.tbn)
                     ELSE 'fio:' || lower(regexp_replace(btrim(tr.fio), '\\s+', ' ', 'g'))
                 END AS person_key
-
             FROM timesheet_headers th
             JOIN timesheet_rows tr
               ON tr.header_id = th.id
@@ -146,7 +143,6 @@ class TimesheetPlanFactData:
                 br.position_name,
                 br.person_key,
                 br.hours_raw[gs.day_num] AS raw_day_value,
-
                 CASE
                     WHEN br.hours_raw[gs.day_num] IS NULL THEN 0
                     WHEN btrim(br.hours_raw[gs.day_num]) = '' THEN 0
@@ -161,7 +157,6 @@ class TimesheetPlanFactData:
                     THEN 1
                     ELSE 0
                 END AS worked_flag
-
             FROM base_rows br
             CROSS JOIN LATERAL generate_series(1, 31) AS gs(day_num)
             WHERE gs.day_num <= EXTRACT(
@@ -245,16 +240,32 @@ class TimesheetPlanFactData:
 
         grp = (
             df.groupby("work_date", as_index=False)
-            .agg({
-                "plan_count": "sum",
-                "fact_count": "sum",
-                "absent_count": "sum",
-            })
-            .sort_values("work_date")
+              .agg({
+                  "plan_count": "sum",
+                  "fact_count": "sum",
+                  "absent_count": "sum",
+              })
+              .sort_values("work_date")
         )
 
         grp["attendance_pct"] = grp.apply(
-            lambda r: round(r "days_count": 0,
+            lambda r: round(r["fact_count"] / r["plan_count"] * 100.0, 1)
+            if r["plan_count"] > 0 else 0.0,
+            axis=1
+        )
+        return grp
+
+    def get_plan_fact_kpi(self) -> Dict[str, Any]:
+        df_date = self.get_plan_fact_by_date()
+        df_det = self.get_plan_fact_daily()
+
+        if df_date.empty:
+            return {
+                "plan_total": 0,
+                "fact_total": 0,
+                "absent_total": 0,
+                "attendance_pct": 0.0,
+                "days_count": 0,
                 "objects_count": 0,
                 "as_of_date": None,
             }
@@ -283,12 +294,12 @@ class TimesheetPlanFactData:
 
         grp = (
             df_last.groupby("object_name", as_index=False)
-            .agg({
-                "plan_count": "sum",
-                "fact_count": "sum",
-                "absent_count": "sum",
-            })
-            .sort_values(["plan_count", "fact_count"], ascending=False)
+                  .agg({
+                      "plan_count": "sum",
+                      "fact_count": "sum",
+                      "absent_count": "sum",
+                  })
+                  .sort_values(["plan_count", "fact_count"], ascending=False)
         )
 
         grp["attendance_pct"] = grp.apply(
@@ -302,8 +313,12 @@ class TimesheetPlanFactData:
         df = self.get_plan_fact_daily()
         if df.empty:
             return pd.DataFrame(columns=[
-                "department_name", "position_name",
-                "plan_count", "fact_count", "absent_count", "attendance_pct"
+                "department_name",
+                "position_name",
+                "plan_count",
+                "fact_count",
+                "absent_count",
+                "attendance_pct",
             ])
 
         last_date = df["work_date"].max()
@@ -311,12 +326,12 @@ class TimesheetPlanFactData:
 
         grp = (
             df_last.groupby(["department_name", "position_name"], as_index=False)
-            .agg({
-                "plan_count": "sum",
-                "fact_count": "sum",
-                "absent_count": "sum",
-            })
-            .sort_values(["plan_count", "fact_count"], ascending=False)
+                  .agg({
+                      "plan_count": "sum",
+                      "fact_count": "sum",
+                      "absent_count": "sum",
+                  })
+                  .sort_values(["plan_count", "fact_count"], ascending=False)
         )
 
         grp["attendance_pct"] = grp.apply(
@@ -455,18 +470,29 @@ class TimesheetPlanFactPage(ttk.Frame):
         inner.pack(fill="both", expand=True)
 
         tk.Label(
-            inner, text=title, font=("Segoe UI", 9),
-            fg=PALETTE["text_muted"], bg="white", wraplength=160, justify="center"
+            inner,
+            text=title,
+            font=("Segoe UI", 9),
+            fg=PALETTE["text_muted"],
+            bg="white",
+            wraplength=160,
+            justify="center"
         ).pack()
 
         tk.Label(
-            inner, text=value, font=("Segoe UI", 20, "bold"),
-            fg=color, bg="white"
+            inner,
+            text=value,
+            font=("Segoe UI", 20, "bold"),
+            fg=color,
+            bg="white"
         ).pack(pady=(4, 0))
 
         tk.Label(
-            inner, text=unit, font=("Segoe UI", 8),
-            fg=PALETTE["text_muted"], bg="white"
+            inner,
+            text=unit,
+            font=("Segoe UI", 8),
+            fg=PALETTE["text_muted"],
+            bg="white"
         ).pack()
 
         return card
@@ -511,24 +537,12 @@ class TimesheetPlanFactPage(ttk.Frame):
         kpi_frame.pack(fill="x", padx=10, pady=10)
 
         cards = [
-            ("План (в табеле)",
-             f"{kpi.get('plan_total', 0):,}".replace(",", " "),
-             "чел.", PALETTE["primary"]),
-            ("Факт (с часами)",
-             f"{kpi.get('fact_total', 0):,}".replace(",", " "),
-             "чел.", PALETTE["success"]),
-            ("Не вышли",
-             f"{kpi.get('absent_total', 0):,}".replace(",", " "),
-             "чел.", PALETTE["negative"]),
-            ("Явка",
-             f"{kpi.get('attendance_pct', 0):.1f}",
-             "%", PALETTE["accent"]),
-            ("Дней в выборке",
-             str(int(kpi.get("days_count", 0))),
-             "дн.", PALETTE["neutral"]),
-            ("Объектов",
-             str(int(kpi.get("objects_count", 0))),
-             "шт.", PALETTE["neutral"]),
+            ("План (в табеле)", f"{kpi.get('plan_total', 0):,}".replace(",", " "), "чел.", PALETTE["primary"]),
+            ("Факт (с часами)", f"{kpi.get('fact_total', 0):,}".replace(",", " "), "чел.", PALETTE["success"]),
+            ("Не вышли", f"{kpi.get('absent_total', 0):,}".replace(",", " "), "чел.", PALETTE["negative"]),
+            ("Явка", f"{kpi.get('attendance_pct', 0):.1f}", "%", PALETTE["accent"]),
+            ("Дней в выборке", str(int(kpi.get("days_count", 0))), "дн.", PALETTE["neutral"]),
+            ("Объектов", str(int(kpi.get("objects_count", 0))), "шт.", PALETTE["neutral"]),
         ]
 
         for i, (title, value, unit, color) in enumerate(cards):
