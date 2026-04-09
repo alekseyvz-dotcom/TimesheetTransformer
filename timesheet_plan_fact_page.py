@@ -276,11 +276,19 @@ class TimesheetPlanFactData:
                 "as_of_date": None,
             }
     
-        df_with_fact = df_date[df_date["fact_count"] > 0]
-        if df_with_fact.empty:
-            last_row = df_date.sort_values("work_date").iloc[-1]
+        df_date = df_date.copy()
+        df_date["work_date"] = pd.to_datetime(df_date["work_date"])
+    
+        today = pd.Timestamp(datetime.today().date())
+    
+        # Берём последнюю дату из выборки, которая не больше сегодняшней
+        df_actual = df_date[df_date["work_date"] <= today].sort_values("work_date")
+    
+        if not df_actual.empty:
+            last_row = df_actual.iloc[-1]
         else:
-            last_row = df_with_fact.sort_values("work_date").iloc[-1]
+            # если весь период в будущем — берём первую дату периода
+            last_row = df_date.sort_values("work_date").iloc[0]
     
         return {
             "plan_total": int(last_row["plan_count"]),
