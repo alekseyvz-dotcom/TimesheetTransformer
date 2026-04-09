@@ -643,14 +643,13 @@ class SkudMappingReviewDialog(tk.Toplevel):
 # Выбор сотрудников
 # ============================================================
 
-
 class SelectEmployeesDialog(tk.Toplevel):
-    def __init__(self, parent, employees: Sequence[Tuple[str, str, str, str]], current_dep: str):
+    def __init__(self, parent, employees: Sequence[Tuple], current_dep: str):
         super().__init__(parent)
         self.parent = parent
         self.employees = list(employees)
         self.current_dep = normalize_spaces(current_dep)
-        self.result: Optional[List[Tuple[str, str, str, str]]] = None
+        self.result: Optional[List[Tuple]] = None
 
         self.title("Выбор сотрудников")
         self.resizable(True, True)
@@ -734,6 +733,19 @@ class SelectEmployeesDialog(tk.Toplevel):
         self._update_selected_count()
         center_toplevel(self, parent)
 
+    def _unpack_employee(self, emp: Tuple) -> Tuple[str, str, str, str]:
+        """
+        Поддерживает и старый формат:
+            (fio, tbn, pos, dep)
+        и новый формат:
+            (fio, tbn, pos, dep, work_schedule)
+        """
+        fio = normalize_spaces(emp[0] if len(emp) > 0 else "")
+        tbn = normalize_spaces(emp[1] if len(emp) > 1 else "")
+        pos = normalize_spaces(emp[2] if len(emp) > 2 else "")
+        dep = normalize_spaces(emp[3] if len(emp) > 3 else "")
+        return fio, tbn, pos, dep
+
     def _update_selected_count(self):
         try:
             self.lbl_selected.config(text=f"Выбрано: {len(self._selected_indices)}")
@@ -748,7 +760,9 @@ class SelectEmployeesDialog(tk.Toplevel):
         self.tree.delete(*self.tree.get_children())
         self._filtered_indices.clear()
 
-        for idx, (fio, tbn, pos, dep) in enumerate(self.employees):
+        for idx, emp in enumerate(self.employees):
+            fio, tbn, pos, dep = self._unpack_employee(emp)
+
             if only_dep and dep_sel and dep_sel != "Все":
                 if normalize_spaces(dep) != dep_sel:
                     continue
@@ -796,7 +810,7 @@ class SelectEmployeesDialog(tk.Toplevel):
 
         self._toggle_index(emp_index)
 
-        fio, tbn, pos, dep = self.employees[emp_index]
+        fio, tbn, pos, dep = self._unpack_employee(self.employees[emp_index])
         checked = emp_index in self._selected_indices
         display_fio = f"[{'x' if checked else ' '}] {fio}"
         self.tree.item(
@@ -830,7 +844,6 @@ class SelectEmployeesDialog(tk.Toplevel):
     def _on_cancel(self):
         self.result = None
         self.destroy()
-
 
 # ============================================================
 # Пакетное добавление
