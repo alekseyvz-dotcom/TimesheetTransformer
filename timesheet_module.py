@@ -1825,10 +1825,15 @@ class TimesheetPage(tk.Frame):
         existing = {make_row_key(r.get("fio", ""), r.get("tbn", "")) for r in self.model_rows_all}
         added_count = 0
 
-        for fio, tbn, _pos, _dep, work_schedule in selected_emps:
+        for emp in selected_emps:
+            fio = normalize_spaces(emp[0] if len(emp) > 0 else "")
+            tbn = normalize_tbn(emp[1] if len(emp) > 1 else "")
+            work_schedule = normalize_spaces(emp[4] if len(emp) > 4 else self._get_employee_work_schedule(fio, tbn))
+
             key = make_row_key(fio, tbn)
             if key in existing:
                 continue
+
             self.model_rows_all.append({
                 "fio": fio,
                 "tbn": tbn,
