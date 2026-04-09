@@ -37,6 +37,11 @@ class TimesheetPlanFactData:
         self.start_date = start_date
         self.end_date = end_date
         self.object_type_filter = object_type_filter or ""
+        self._daily_cache: Optional[pd.DataFrame] = None
+        self._date_cache: Optional[pd.DataFrame] = None
+        self._object_cache: Optional[pd.DataFrame] = None
+        self._position_cache: Optional[pd.DataFrame] = None
+        self._kpi_cache: Optional[Dict[str, Any]] = None
 
     def _execute_query(self, query: str, params: tuple = None) -> List[Dict[str, Any]]:
         if not db_connection_pool:
@@ -65,8 +70,8 @@ class TimesheetPlanFactData:
         """)
         return [r["short_name"] for r in rows]
 
-    def get_plan_fact_daily(self) -> pd.DataFrame:
-        query = """
+    def _build_person_day_cte(self) -> str:
+        return """
         WITH matched_employees AS (
             SELECT
                 NULLIF(btrim(e.tbn), '') AS tbn_norm,
@@ -78,13 +83,13 @@ class TimesheetPlanFactData:
                 ) AS rn
             FROM employees e
         ),
-    
+
         base_rows AS (
             SELECT
                 th.object_db_id,
                 th.year,
                 th.month,
-                COALESCE(o.address, '—')  AS object_name,
+                COALESCE(o.address, '—') AS object_name,
                 COALESCE(
                     dep_emp.name,
                     dep_hdr.name,
@@ -95,8 +100,7 @@ class TimesheetPlanFactData:
                 CASE
                     WHEN NULLIF(btrim(tr.tbn), '') IS NOT NULL
                         THEN 'tbn:' || btrim(tr.tbn)
-                    ELSE 'fio:' || lower(regexp_replace(
-                             btrim(tr.fio), '\\s+', ' ', 'g'))
+                    ELSE 'fio:' || lower(regexp_replace(btrim(tr.fio), '\\s+', ' ', 'g'))
                 END AS person_key,
                 tr.hours_raw
             FROM timesheet_headers th
@@ -118,7 +122,7 @@ class TimesheetPlanFactData:
                   )::date >= %s
               {object_filter}
         ),
-    
+
         daily_person AS (
             SELECT
                 (
@@ -144,7 +148,7 @@ class TimesheetPlanFactData:
                     + (gs.day_num - 1) * interval '1 day'
                   )::date BETWEEN %s AND %s
         ),
-    
+
         daily_person_flags AS (
             SELECT
                 work_date,
@@ -177,17 +181,34 @@ class TimesheetPlanFactData:
                 department_name,
                 position_name,
                 person_key
-        ),
-    
-        fact_daily AS (
+        )
+        """
+
+    def _build_params(self) -> Tuple[str, List[Any]]:
+        params: List[Any] = [self.end_date, self.start_date]
+        object_filter = ""
+        if self.object_type_filter:
+            object_filter = "AND o.short_name = %s"
+            params.append(self.object_type_filter)
+        params.extend([self.start_date, self.end_date])
+        return object_filter, params
+
+    def get_plan_fact_daily(self) -> pd.DataFrame:
+        if self._daily_cache is not None:
+            return self._daily_cache.copy()
+
+        object_filter, params = self._build_params()
+
+        query = self._build_person_day_cte() + """
+        , fact_daily AS (
             SELECT
                 work_date,
                 object_db_id,
                 object_name,
                 department_name,
                 position_name,
-                COUNT(*)::int                                 AS plan_count,
-                COUNT(*) FILTER (WHERE worked_flag = 1)::int  AS fact_count
+                COUNT(*)::int AS plan_count,
+                COUNT(*) FILTER (WHERE worked_flag = 1)::int AS fact_count
             FROM daily_person_flags
             GROUP BY
                 work_date,
@@ -196,48 +217,43 @@ class TimesheetPlanFactData:
                 department_name,
                 position_name
         )
-    
         SELECT
-            fd.work_date,
-            fd.object_db_id,
-            fd.object_name,
-            fd.department_name,
-            fd.position_name,
-            fd.plan_count,
-            fd.fact_count,
-            GREATEST(fd.plan_count - fd.fact_count, 0)::int AS absent_count,
+            work_date,
+            object_db_id,
+            object_name,
+            department_name,
+            position_name,
+            plan_count,
+            fact_count,
+            GREATEST(plan_count - fact_count, 0)::int AS absent_count,
             CASE
-                WHEN fd.plan_count > 0
-                THEN ROUND(fd.fact_count::numeric / fd.plan_count::numeric * 100, 1)
+                WHEN plan_count > 0
+                THEN ROUND(fact_count::numeric / plan_count::numeric * 100, 1)
                 ELSE 0
             END AS attendance_pct
-        FROM fact_daily fd
+        FROM fact_daily
         ORDER BY
-            fd.work_date,
-            fd.object_name,
-            fd.department_name,
-            fd.position_name;
+            work_date,
+            object_name,
+            department_name,
+            position_name;
         """
-    
-        params: List[Any] = [self.end_date, self.start_date]
-        object_filter = ""
-        if self.object_type_filter:
-            object_filter = "AND o.short_name = %s"
-            params.append(self.object_type_filter)
-        params.extend([self.start_date, self.end_date])
-    
-        rows = self._execute_query(
-            query.format(object_filter=object_filter), tuple(params)
-        )
+
+        rows = self._execute_query(query.format(object_filter=object_filter), tuple(params))
         df = pd.DataFrame(rows)
         if not df.empty:
             df["work_date"] = pd.to_datetime(df["work_date"])
             for col in ("plan_count", "fact_count", "absent_count"):
                 df[col] = df[col].fillna(0).astype(int)
             df["attendance_pct"] = df["attendance_pct"].fillna(0).astype(float)
+
+        self._daily_cache = df.copy()
         return df
 
     def get_plan_fact_by_date(self) -> pd.DataFrame:
+        if self._date_cache is not None:
+            return self._date_cache.copy()
+
         df = self.get_plan_fact_daily()
         if df.empty:
             return pd.DataFrame(columns=[
@@ -259,12 +275,35 @@ class TimesheetPlanFactData:
             if r["plan_count"] > 0 else 0.0,
             axis=1
         )
+
+        self._date_cache = grp.copy()
         return grp
 
+    def _get_actual_last_date(self, df: pd.DataFrame) -> Optional[pd.Timestamp]:
+        if df is None or df.empty:
+            return None
+
+        df = df.copy()
+        df["work_date"] = pd.to_datetime(df["work_date"])
+        today = pd.Timestamp(datetime.today().date())
+
+        df_actual = df[(df["work_date"] <= today) & (df["fact_count"] > 0)]
+        if not df_actual.empty:
+            return df_actual["work_date"].max()
+
+        df_past = df[df["work_date"] <= today]
+        if not df_past.empty:
+            return df_past["work_date"].max()
+
+        return df["work_date"].min()
+
     def get_plan_fact_kpi(self) -> Dict[str, Any]:
+        if self._kpi_cache is not None:
+            return dict(self._kpi_cache)
+
         df_date = self.get_plan_fact_by_date()
         df_det = self.get_plan_fact_daily()
-    
+
         if df_date.empty:
             return {
                 "plan_total": 0,
@@ -275,7 +314,7 @@ class TimesheetPlanFactData:
                 "objects_count": 0,
                 "as_of_date": None,
             }
-    
+
         actual_date = self._get_actual_last_date(df_date)
         if actual_date is None:
             return {
@@ -287,10 +326,10 @@ class TimesheetPlanFactData:
                 "objects_count": 0,
                 "as_of_date": None,
             }
-    
+
         last_row = df_date[pd.to_datetime(df_date["work_date"]) == actual_date].iloc[-1]
-    
-        return {
+
+        result = {
             "plan_total": int(last_row["plan_count"]),
             "fact_total": int(last_row["fact_count"]),
             "absent_total": int(last_row["absent_count"]),
@@ -299,98 +338,110 @@ class TimesheetPlanFactData:
             "objects_count": int(df_det["object_name"].nunique()) if not df_det.empty else 0,
             "as_of_date": pd.to_datetime(last_row["work_date"]),
         }
+        self._kpi_cache = dict(result)
+        return result
 
     def get_plan_fact_by_object(self) -> pd.DataFrame:
-        df = self.get_plan_fact_daily()
-        if df.empty:
-            return pd.DataFrame(columns=[
-                "object_name", "plan_count", "fact_count", "absent_count", "attendance_pct"
-            ])
-    
-        actual_date = self._get_actual_last_date(df)
-        if actual_date is None:
-            return pd.DataFrame(columns=[
-                "object_name", "plan_count", "fact_count", "absent_count", "attendance_pct"
-            ])
-    
-        df_last = df[pd.to_datetime(df["work_date"]) == actual_date].copy()
-    
-        grp = (
-            df_last.groupby("object_name", as_index=False)
-                  .agg({
-                      "plan_count": "sum",
-                      "fact_count": "sum",
-                      "absent_count": "sum",
-                  })
-                  .sort_values(["plan_count", "fact_count"], ascending=False)
-        )
-    
-        grp["attendance_pct"] = grp.apply(
-            lambda r: round(r["fact_count"] / r["plan_count"] * 100.0, 1)
-            if r["plan_count"] > 0 else 0.0,
-            axis=1
-        )
-        return grp
-    
-    def get_plan_fact_by_position(self) -> pd.DataFrame:
-        df = self.get_plan_fact_daily()
-        if df.empty:
-            return pd.DataFrame(columns=[
-                "department_name",
-                "position_name",
-                "plan_count",
-                "fact_count",
-                "absent_count",
-                "attendance_pct",
-            ])
-    
-        actual_date = self._get_actual_last_date(df)
-        if actual_date is None:
-            return pd.DataFrame(columns=[
-                "department_name",
-                "position_name",
-                "plan_count",
-                "fact_count",
-                "absent_count",
-                "attendance_pct",
-            ])
-    
-        df_last = df[pd.to_datetime(df["work_date"]) == actual_date].copy()
-    
-        grp = (
-            df_last.groupby(["department_name", "position_name"], as_index=False)
-                  .agg({
-                      "plan_count": "sum",
-                      "fact_count": "sum",
-                      "absent_count": "sum",
-                  })
-                  .sort_values(["plan_count", "fact_count"], ascending=False)
-        )
-    
-        grp["attendance_pct"] = grp.apply(
-            lambda r: round(r["fact_count"] / r["plan_count"] * 100.0, 1)
-            if r["plan_count"] > 0 else 0.0,
-            axis=1
-        )
-        return grp
+        if self._object_cache is not None:
+            return self._object_cache.copy()
 
-    def _get_actual_last_date(self, df: pd.DataFrame) -> Optional[pd.Timestamp]:
-        if df is None or df.empty:
-            return None
-    
-        df = df.copy()
-        df["work_date"] = pd.to_datetime(df["work_date"])
-        today = pd.Timestamp(datetime.today().date())
-    
-        df_actual = df[(df["work_date"] <= today) & (df["fact_count"] > 0)]
-        if not df_actual.empty:
-            return df_actual["work_date"].max()
-    
-        df_past = df[df["work_date"] <= today]
-        if not df_past.empty:
-            return df_past["work_date"].max()
-    
-        return df["work_date"].min()
+        df_daily = self.get_plan_fact_daily()
+        actual_date = self._get_actual_last_date(df_daily)
+        if actual_date is None:
+            return pd.DataFrame(columns=[
+                "object_name", "plan_count", "fact_count", "absent_count", "attendance_pct"
+            ])
+
+        object_filter, params = self._build_params()
+        params.extend([actual_date.date()])
+
+        query = self._build_person_day_cte() + """
+        SELECT
+            object_name,
+            COUNT(DISTINCT person_key)::int AS plan_count,
+            COUNT(DISTINCT person_key) FILTER (WHERE worked_flag = 1)::int AS fact_count,
+            GREATEST(
+                COUNT(DISTINCT person_key)
+                - COUNT(DISTINCT person_key) FILTER (WHERE worked_flag = 1),
+                0
+            )::int AS absent_count,
+            CASE
+                WHEN COUNT(DISTINCT person_key) > 0
+                THEN ROUND(
+                    COUNT(DISTINCT person_key) FILTER (WHERE worked_flag = 1)::numeric
+                    / COUNT(DISTINCT person_key)::numeric * 100, 1
+                )
+                ELSE 0
+            END AS attendance_pct
+        FROM daily_person_flags
+        WHERE work_date = %s
+        GROUP BY object_name
+        ORDER BY plan_count DESC, fact_count DESC, object_name;
+        """
+
+        rows = self._execute_query(query.format(object_filter=object_filter), tuple(params))
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            for col in ("plan_count", "fact_count", "absent_count"):
+                df[col] = df[col].fillna(0).astype(int)
+            df["attendance_pct"] = df["attendance_pct"].fillna(0).astype(float)
+
+        self._object_cache = df.copy()
+        return df
+
+    def get_plan_fact_by_position(self) -> pd.DataFrame:
+        if self._position_cache is not None:
+            return self._position_cache.copy()
+
+        df_daily = self.get_plan_fact_daily()
+        actual_date = self._get_actual_last_date(df_daily)
+        if actual_date is None:
+            return pd.DataFrame(columns=[
+                "department_name",
+                "position_name",
+                "plan_count",
+                "fact_count",
+                "absent_count",
+                "attendance_pct",
+            ])
+
+        object_filter, params = self._build_params()
+        params.extend([actual_date.date()])
+
+        query = self._build_person_day_cte() + """
+        SELECT
+            department_name,
+            position_name,
+            COUNT(DISTINCT person_key)::int AS plan_count,
+            COUNT(DISTINCT person_key) FILTER (WHERE worked_flag = 1)::int AS fact_count,
+            GREATEST(
+                COUNT(DISTINCT person_key)
+                - COUNT(DISTINCT person_key) FILTER (WHERE worked_flag = 1),
+                0
+            )::int AS absent_count,
+            CASE
+                WHEN COUNT(DISTINCT person_key) > 0
+                THEN ROUND(
+                    COUNT(DISTINCT person_key) FILTER (WHERE worked_flag = 1)::numeric
+                    / COUNT(DISTINCT person_key)::numeric * 100, 1
+                )
+                ELSE 0
+            END AS attendance_pct
+        FROM daily_person_flags
+        WHERE work_date = %s
+        GROUP BY department_name, position_name
+        ORDER BY plan_count DESC, fact_count DESC, department_name, position_name;
+        """
+
+        rows = self._execute_query(query.format(object_filter=object_filter), tuple(params))
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            for col in ("plan_count", "fact_count", "absent_count"):
+                df[col] = df[col].fillna(0).astype(int)
+            df["attendance_pct"] = df["attendance_pct"].fillna(0).astype(float)
+
+        self._position_cache = df.copy()
+        return df
 
 class TimesheetPlanFactPage(ttk.Frame):
     def __init__(self, master, app_ref=None):
