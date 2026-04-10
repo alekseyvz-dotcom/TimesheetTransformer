@@ -126,6 +126,7 @@ brigades_module = None
 gpr_module = None
 gpr_task_dialog = None
 gpr_dictionaries = None
+work_schedules_manager = None
 EstimateResourceDecoder = None
 
 
@@ -135,7 +136,7 @@ def perform_heavy_imports():
            analytics_module, timesheet_plan_fact_module, timesheet_transformer, employees_module, \
            timesheet_compare, meals_employees_module, lodging_module, \
            meals_reports_module, employee_card_module, payroll_module, \
-           brigades_module, gpr_module, gpr_task_dialog, gpr_dictionaries
+           brigades_module, gpr_module, gpr_task_dialog, gpr_dictionaries, work_schedules_manager
 
     import BudgetAnalyzer
     import estimate_resource_decoder as EstimateResourceDecoder
@@ -156,6 +157,7 @@ def perform_heavy_imports():
     import timesheet_compare
     import meals_employees as meals_employees_module
     import lodging_module as lodging_module
+    import work_schedules_manager as work_schedules_manager
     import brigades_module as brigades_module
     import payroll_module as payroll_module
     import employee_card as employee_card_module
@@ -1433,6 +1435,7 @@ class MainApp(tk.Tk):
             "object_create": ("Создать/Редактировать", "Объекты"),
             "objects_registry": ("Реестр", "Объекты"),
             "employee_card": ("Карточка сотрудника", ""),
+            "work_schedules": ("Графики работы", "Импорт и хранение календарей графиков"),
             "analytics_dashboard": ("Операционная аналитика", ""),
             "timesheet_plan_fact": ("План / факт по табелю", ""),
             "payroll": ("Затраты (ФОТ)", ""),
@@ -1621,6 +1624,7 @@ class MainApp(tk.Tk):
             "objects_registry": lambda p: objects.ObjectsRegistryPage(p, self),
 
             "employee_card": lambda p: employee_card_module.create_employee_card_page(p, self),
+            "work_schedules": lambda p: work_schedules_manager.create_work_schedules_page(p, self),
 
             "analytics_dashboard": lambda p: analytics_module.AnalyticsPage(p, self),
             "timesheet_plan_fact": lambda p: timesheet_plan_fact_module.TimesheetPlanFactPage(p, self),
@@ -1719,6 +1723,7 @@ if __name__ == "__main__":
                 employee_card_module,
                 payroll_module,
                 brigades_module,
+                work_schedules_manager,
             ]
             for module in modules_to_init:
                 if module and hasattr(module, "set_db_pool"):
