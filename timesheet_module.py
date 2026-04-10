@@ -86,6 +86,11 @@ except Exception:
     get_selected_department_from_config = None
     set_selected_department_in_config = None
 
+try:
+    from work_schedules_manager import get_schedule_days_map
+except Exception:
+    get_schedule_days_map = None
+
 # Приводим цвета модуля к новой светлой оболочке
 TS_COLORS = dict(TS_COLORS)
 TS_COLORS["bg"] = "#edf1f5"
@@ -490,6 +495,7 @@ class TimesheetPage(tk.Frame):
 
         self.var_filter = tk.StringVar()
         self.var_brigadier = tk.StringVar(value="Все")
+        self.var_show_schedule = tk.BooleanVar(value=False)
         self._brig_assign: dict[str, str | None] = {}
         self._brig_names: dict[str, str] = {}
 
@@ -698,6 +704,50 @@ class TimesheetPage(tk.Frame):
             return matches[0]
 
         return ""
+
+    def _build_schedule_days_map_for_row(self, rec: Dict[str, Any], year: int, month: int) -> Dict[int, Dict[str, Any]]:
+        if not callable(get_schedule_days_map):
+            return {}
+
+        schedule_name = normalize_spaces(rec.get("work_schedule") or "")
+        if not schedule_name:
+            return {}
+
+        try:
+            result = get_schedule_days_map(schedule_name, year, month)
+            return result if isinstance(result, dict) else {}
+        except Exception:
+            logger.exception(
+                "Не удалось загрузить карту графика для сотрудника %s (%s), график=%r, %s-%s",
+                rec.get("fio", ""),
+                rec.get("tbn", ""),
+                schedule_name,
+                year,
+                month,
+            )
+            return {}
+
+    def _apply_schedule_maps_to_rows(self, rows: List[Dict[str, Any]]):
+        year, month = self.get_year_month()
+        enabled = bool(self.var_show_schedule.get())
+
+        for rec in rows:
+            if enabled:
+                rec["schedule_days_map"] = self._build_schedule_days_map_for_row(rec, year, month)
+            else:
+                rec["schedule_days_map"] = {}
+
+    def _on_toggle_schedule_highlight(self):
+        enabled = bool(self.var_show_schedule.get())
+
+        try:
+            if hasattr(self, "grid"):
+                self.grid.set_schedule_highlight_enabled(enabled)
+        except Exception:
+            logger.exception("Не удалось переключить режим подсветки графиков в гриде")
+
+        self._apply_schedule_maps_to_rows(self.model_rows_all)
+        self._apply_filter()
 
     def _grid_selected(self) -> set[int]:
         if hasattr(self, "grid"):
@@ -1139,6 +1189,15 @@ class TimesheetPage(tk.Frame):
         )
         self.cmb_brigadier.pack(side="left", padx=(4, 0))
         self.cmb_brigadier.bind("<<ComboboxSelected>>", lambda _e: self._apply_filter())
+        
+        tk.Frame(bar, bg=border_color, width=1).pack(side="left", fill="y", padx=12)
+
+        ttk.Checkbutton(
+            bar,
+            text="Подсвечивать графики",
+            variable=self.var_show_schedule,
+            command=self._on_toggle_schedule_highlight,
+        ).pack(side="left", padx=(0, 4))
     
         def _on_filter_key(_e=None):
             try:
@@ -1173,6 +1232,10 @@ class TimesheetPage(tk.Frame):
             read_only=self.read_only,
         )
         self.grid.grid(row=0, column=0, sticky="nsew")
+        try:
+            self.grid.set_schedule_highlight_enabled(bool(self.var_show_schedule.get()))
+        except Exception:
+            pass
     
         # Для notebook / вкладок нужно несколько отложенных refresh
         self.after(60, self.grid.refresh)
@@ -1598,6 +1661,8 @@ class TimesheetPage(tk.Frame):
                     rec.get("fio", ""),
                     rec.get("tbn", ""),
                 )
+
+            self._apply_schedule_maps_to_rows(loaded_rows)
             self.model_rows_all.extend(loaded_rows)
             self._recalc_all_row_totals()
             self._apply_filter()
@@ -1780,12 +1845,14 @@ class TimesheetPage(tk.Frame):
                         break
                     key = make_row_key(fio, tbn)
                     if key not in existing:
-                        self.model_rows_all.append({
+                        new_rec = {
                             "fio": fio,
                             "tbn": tbn,
                             "hours": [None] * 31,
                             "work_schedule": work_schedule or "",
-                        })
+                        }
+                        self._apply_schedule_maps_to_rows([new_rec])
+                        self.model_rows_all.append(new_rec)
                         existing.add(key)
                         added_count += 1
                     dlg.step()
@@ -1834,12 +1901,14 @@ class TimesheetPage(tk.Frame):
             if key in existing:
                 continue
 
-            self.model_rows_all.append({
+            new_rec = {
                 "fio": fio,
                 "tbn": tbn,
                 "hours": [None] * 31,
                 "work_schedule": work_schedule or "",
-            })
+            }
+            self._apply_schedule_maps_to_rows([new_rec])
+            self.model_rows_all.append(new_rec)
             existing.add(key)
             added_count += 1
 
@@ -2080,6 +2149,7 @@ class TimesheetPage(tk.Frame):
                         "hours": [None] * 31,
                         "work_schedule": work_schedule or "",
                     }
+                    self._apply_schedule_maps_to_rows([rec])
                     self.model_rows_all.append(rec)
                     added += 1
 
@@ -2197,6 +2267,7 @@ class TimesheetPage(tk.Frame):
                 return
 
             imported = deduplicate_timesheet_rows(imported, year, month)
+            self._apply_schedule_maps_to_rows(imported)
 
             replace_mode = (
                 messagebox.askyesno("Импорт", "Заменить текущий список?", parent=self)
@@ -2285,6 +2356,8 @@ class TimesheetPage(tk.Frame):
                     rec.get("fio", ""),
                     rec.get("tbn", ""),
                 )
+
+            self._apply_schedule_maps_to_rows(found_rows)
 
             if mode == "replace":
                 self.model_rows_all.clear()
