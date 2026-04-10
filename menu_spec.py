@@ -31,6 +31,7 @@ MENU_SPEC: List[MenuSection] = [
             MenuEntry("page", "Реестр табелей", key="timesheet_registry", perm="page.timesheet_registry", group="timesheets", title="Объектный табель: Реестр табелей"),
             MenuEntry("page", "Работники", key="workers", perm="page.workers", group="timesheets", title="Объектный табель: Работники"),
             MenuEntry("page", "Сравнение с 1С", key="timesheet_compare", perm="page.timesheet_compare", group="timesheets", title="Объектный табель: Сравнение с 1С"),
+            MenuEntry("page", "Графики работы", key="work_schedules", perm="page.work_schedules", group="timesheets", title="Сотрудники: графики работы"),
         ],
     ),
     MenuSection(
