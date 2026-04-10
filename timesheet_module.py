@@ -850,14 +850,17 @@ class TimesheetPage(tk.Frame):
             return {}
 
         cache_key = (schedule_name, int(year), int(month))
-        cached = self._schedule_map_cache.get(cache_key)
-        if isinstance(cached, dict):
-            return cached
+
+        if cache_key in self._schedule_map_cache:
+            cached = self._schedule_map_cache.get(cache_key)
+            return cached if isinstance(cached, dict) else {}
 
         try:
             result = get_schedule_days_map(schedule_name, year, month)
             if not isinstance(result, dict):
                 result = {}
+
+            # Кэшируем только после успешной загрузки
             self._schedule_map_cache[cache_key] = result
             return result
         except Exception:
@@ -869,7 +872,6 @@ class TimesheetPage(tk.Frame):
                 year,
                 month,
             )
-            self._schedule_map_cache[cache_key] = {}
             return {}
 
     def _apply_schedule_maps_to_rows(self, rows: List[Dict[str, Any]]):
@@ -933,18 +935,15 @@ class TimesheetPage(tk.Frame):
         except Exception:
             logger.exception("Не удалось переключить режим подсветки графиков в гриде")
 
-        def done():
+        try:
+            self._apply_schedule_maps_to_rows(self.model_rows_all)
             self._apply_filter()
             self._set_status_text(
                 "Подсветка графиков включена" if enabled else "Подсветка графиков выключена",
                 fg="#bbdefb",
             )
-
-        self._apply_schedule_maps_to_rows_batched(
-            self.model_rows_all,
-            on_done=done,
-            batch_size=25,
-        )
+        except Exception:
+            logger.exception("Ошибка применения карт графиков")
 
     def _grid_selected(self) -> set[int]:
         if hasattr(self, "grid"):
