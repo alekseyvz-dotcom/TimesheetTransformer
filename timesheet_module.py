@@ -938,10 +938,7 @@ class TimesheetPage(tk.Frame):
         try:
             self._apply_schedule_maps_to_rows(self.model_rows_all)
             self._apply_filter()
-            self._set_status_text(
-                "Подсветка графиков включена" if enabled else "Подсветка графиков выключена",
-                fg="#bbdefb",
-            )
+            
         except Exception:
             logger.exception("Ошибка применения карт графиков")
 
