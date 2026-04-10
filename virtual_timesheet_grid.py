@@ -80,6 +80,8 @@ class VirtualTimesheetGrid(tk.Frame):
         self._tooltip_label: Optional[tk.Label] = None
         self._tooltip_row: Optional[int] = None
 
+        self.show_schedule_highlight: bool = False
+
         # Цвета в стилистике новой оболочки
         self.BORDER = "#c9d3df"
         self.HEADER_BG = "#e7edf4"
@@ -94,6 +96,10 @@ class VirtualTimesheetGrid(tk.Frame):
         self.MUTED = "#6b7280"
         self.DELETE_BG = "#fbe9e7"
         self.DELETE_TEXT = "#9a3412"
+        self.SCHEDULE_WORK_BG = "#e8f5e9"
+        self.SCHEDULE_OFF_BG = "#eef2f7"
+        self.SCHEDULE_MISSING_BG = "#fff8db"
+        self.SCHEDULE_EXTRA_BG = "#fdeaea"
 
         self.font_header = tkfont.Font(family="Segoe UI", size=9, weight="bold")
         self.font_cell = tkfont.Font(family="Segoe UI", size=9)
@@ -178,6 +184,10 @@ class VirtualTimesheetGrid(tk.Frame):
 
     def get_selected_indices(self) -> Set[int]:
         return set(self.selected_indices)
+
+    def set_schedule_highlight_enabled(self, enabled: bool):
+        self.show_schedule_highlight = bool(enabled)
+        self.refresh()
 
     def refresh(self):
         self._hide_tooltip()
@@ -324,6 +334,42 @@ class VirtualTimesheetGrid(tk.Frame):
                 self.on_selection_change(set(self.selected_indices))
             except Exception:
                 pass
+
+    def _get_schedule_cell_bg(
+        self,
+        rec: Dict[str, Any],
+        day_num: int,
+        day_index: int,
+        selected: bool,
+        base_bg: str,
+        cell_value: Any,
+    ) -> str:
+        if selected:
+            return self.SELECT_BG
+
+        if not self.show_schedule_highlight:
+            return self._weekend_map.get(day_index, base_bg)
+
+        schedule_map = rec.get("schedule_days_map") or {}
+        if not isinstance(schedule_map, dict):
+            return self._weekend_map.get(day_index, base_bg)
+
+        day_info = schedule_map.get(day_num)
+        if not isinstance(day_info, dict):
+            return self._weekend_map.get(day_index, base_bg)
+
+        is_workday = bool(day_info.get("is_workday"))
+        has_value = cell_value is not None and str(cell_value).strip() != ""
+
+        # Рабочий день по графику, но часов нет в табеле
+        if is_workday and not has_value:
+            return self.SCHEDULE_MISSING_BG
+
+        # Выходной по графику, но часы в табеле есть
+        if (not is_workday) and has_value:
+            return self.SCHEDULE_EXTRA_BG
+
+        return self.SCHEDULE_WORK_BG if is_workday else self.SCHEDULE_OFF_BG 
 
     def _show_tooltip(self, text: str, x_root: int, y_root: int):
         text = str(text or "").strip()
@@ -803,10 +849,16 @@ class VirtualTimesheetGrid(tk.Frame):
                     bg = self.DISABLED_BG
                     fill = self.MUTED
                 else:
-                    if not selected:
-                        bg = self._weekend_map.get(di, base_bg)
                     val = hours[di] if di < len(hours) else None
                     text = "" if val is None else str(val)
+                    bg = self._get_schedule_cell_bg(
+                        rec=rec,
+                        day_num=day_num,
+                        day_index=di,
+                        selected=selected,
+                        base_bg=base_bg,
+                        cell_value=val,
+                    )
 
             elif kind == "del":
                 anchor = "center"
