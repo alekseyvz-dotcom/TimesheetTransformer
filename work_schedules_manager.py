@@ -130,13 +130,23 @@ def _parse_schedule_excel(path: Path) -> Tuple[str, int, List[Tuple[date, bool, 
     wb = load_workbook(path, data_only=True, read_only=False)
     ws = wb.active
 
-    title = _normalize_spaces(_s(ws.cell(1, 1).value))
+    title = ""
+    for row_idx in range(1, 6):
+        candidate = _normalize_spaces(_s(ws.cell(row_idx, 1).value))
+        if not candidate:
+            continue
+        if "год" in candidate.lower():
+            title = candidate
+            break
+        if not title:
+            title = candidate
+
     schedule_name, year = _extract_schedule_name_and_year(title)
 
     if not schedule_name:
-        raise RuntimeError("Не удалось определить название графика из A1.")
+        raise RuntimeError("Не удалось определить название графика из A1:A5.")
     if not year:
-        raise RuntimeError("Не удалось определить год графика из A1 (ожидалось '... за 2026 год').")
+        raise RuntimeError("Не удалось определить год графика из A1:A5 (ожидалось '... за 2026 год').")
 
     month_rows = _find_month_rows(ws)
     if len(month_rows) < 12:
@@ -170,7 +180,6 @@ def _parse_schedule_excel(path: Path) -> Tuple[str, int, List[Tuple[date, bool, 
             items.append((work_dt, is_workday, planned_hours, raw_value))
 
     return schedule_name, year, items
-
 
 # ------------------------------------------------------------
 # DB API
