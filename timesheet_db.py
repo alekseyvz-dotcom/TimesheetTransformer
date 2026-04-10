@@ -875,6 +875,7 @@ def load_all_timesheet_headers(
     department: Optional[str],
     object_addr_substr: Optional[str],
     object_id_substr: Optional[str],
+    user_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     where: List[str] = ["1=1"]
     params: List[Any] = []
@@ -901,6 +902,9 @@ def load_all_timesheet_headers(
     if object_id_norm:
         where.append("COALESCE(h.object_id, '') ILIKE %s")
         params.append(f"%{object_id_norm}%")
+    if user_id is not None:
+        where.append("h.user_id = %s")
+        params.append(int(user_id))
 
     where_sql = " AND ".join(where)
 
