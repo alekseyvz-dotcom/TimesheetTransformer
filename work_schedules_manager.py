@@ -336,6 +336,12 @@ class WorkSchedulesPage(tk.Frame):
     def __init__(self, master):
         super().__init__(master, bg="#f7f9fb")
         self._unique_employee_schedules: List[str] = []
+        self._loaded_rows: List[Dict[str, Any]] = []
+        self._loaded_by_name: Dict[str, List[Dict[str, Any]]] = {}
+        self._left_filtered_items: List[str] = []
+
+        self.var_search = tk.StringVar()
+
         self._build_ui()
         self.reload_all()
 
@@ -359,22 +365,82 @@ class WorkSchedulesPage(tk.Frame):
         mid = tk.PanedWindow(self, orient="horizontal", sashrelief="flat", bg="#d5dde6")
         mid.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
-        # Левая часть: уникальные графики из employees
+        # -------------------------------------------------
+        # Левая часть
+        # -------------------------------------------------
         left = tk.LabelFrame(
             mid,
-            text="Уникальные графики из сотрудников",
+            text="Графики сотрудников",
             bg="#f7f9fb",
             fg="#1f2937",
             padx=6,
             pady=6,
         )
-        mid.add(left, minsize=280)
+        mid.add(left, minsize=380)
+
+        search_wrap = tk.Frame(left, bg="#f7f9fb")
+        search_wrap.pack(fill="x", pady=(0, 6))
+
+        tk.Label(
+            search_wrap,
+            text="Поиск:",
+            bg="#f7f9fb",
+            fg="#374151",
+            font=("Segoe UI", 9),
+        ).pack(side="left")
+
+        ent = ttk.Entry(search_wrap, textvariable=self.var_search)
+        ent.pack(side="left", fill="x", expand=True, padx=(6, 6))
+        ent.bind("<KeyRelease>", lambda _e: self._refresh_left_list())
+
+        ttk.Button(search_wrap, text="Очистить", command=self._clear_search).pack(side="left")
+
+        legend = tk.Label(
+            left,
+            text="✅ загружен хотя бы за один год    ⚠ не загружен",
+            bg="#f7f9fb",
+            fg="#6b7280",
+            font=("Segoe UI", 8),
+            anchor="w",
+        )
+        legend.pack(fill="x", pady=(0, 4))
+
+        list_wrap = tk.Frame(left, bg="#f7f9fb")
+        list_wrap.pack(fill="both", expand=True)
 
         self.lst_employee_schedules = tk.Listbox(left, exportselection=False)
-        self.lst_employee_schedules.pack(fill="both", expand=True)
+        self.lst_employee_schedules = tk.Listbox(
+            list_wrap,
+            exportselection=False,
+            activestyle="none",
+            font=("Segoe UI", 9),
+        )
+        self.lst_employee_schedules.pack(side="left", fill="both", expand=True)
+
+        left_vsb = ttk.Scrollbar(list_wrap, orient="vertical", command=self.lst_employee_schedules.yview)
+        left_vsb.pack(side="right", fill="y")
+        self.lst_employee_schedules.configure(yscrollcommand=left_vsb.set)
+
         self.lst_employee_schedules.bind("<<ListboxSelect>>", lambda _e: self._sync_selected_schedule_name())
 
-        # Правая часть: загруженные графики
+        self.lbl_left_details = tk.Label(
+            left,
+            text="Выберите график слева",
+            justify="left",
+            anchor="nw",
+            bg="#f7f9fb",
+            fg="#374151",
+            font=("Segoe UI", 9),
+            relief="solid",
+            bd=1,
+            padx=8,
+            pady=6,
+        )
+        self.lbl_left_details.pack(fill="x", pady=(6, 0))
+
+        # -------------------------------------------------
+        # Правая часть
+        # -------------------------------------------------
         right = tk.LabelFrame(
             mid,
             text="Загруженные графики",
@@ -383,10 +449,11 @@ class WorkSchedulesPage(tk.Frame):
             padx=6,
             pady=6,
         )
-        mid.add(right, minsize=650)
+        mid.add(right, minsize=760)
 
         columns = ("id", "schedule_name", "year", "days_count", "source_filename", "updated_at")
         self.tree = ttk.Treeview(right, columns=columns, show="headings", height=16)
+
         self.tree.heading("id", text="ID")
         self.tree.heading("schedule_name", text="Название графика")
         self.tree.heading("year", text="Год")
@@ -395,7 +462,7 @@ class WorkSchedulesPage(tk.Frame):
         self.tree.heading("updated_at", text="Обновлён")
 
         self.tree.column("id", width=50, anchor="center", stretch=False)
-        self.tree.column("schedule_name", width=320, anchor="w")
+        self.tree.column("schedule_name", width=350, anchor="w")
         self.tree.column("year", width=70, anchor="center", stretch=False)
         self.tree.column("days_count", width=70, anchor="center", stretch=False)
         self.tree.column("source_filename", width=180, anchor="w")
@@ -407,18 +474,76 @@ class WorkSchedulesPage(tk.Frame):
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self._sync_tree_to_left())
+
+    def _clear_search(self):
+        self.var_search.set("")
+        self._refresh_left_list()
+
+    def _format_left_item(self, schedule_name: str) -> str:
+        rows = self._loaded_by_name.get(schedule_name, [])
+        if rows:
+            return f"✅ {schedule_name}"
+        return f"⚠ {schedule_name}"
+
+    def _extract_schedule_name_from_left_item(self, item_text: str) -> str:
+        text = _normalize_spaces(item_text)
+        if text.startswith("✅ "):
+            return _normalize_spaces(text[2:])
+        if text.startswith("⚠ "):
+            return _normalize_spaces(text[2:])
+        return text
+
+    def _refresh_left_list(self):
+        query = _normalize_spaces(self.var_search.get() or "").lower()
+
+        current_selected_name = self._get_selected_employee_schedule()
+
+        self.lst_employee_schedules.delete(0, "end")
+        self._left_filtered_items.clear()
+
+        for name in self._unique_employee_schedules:
+            if query and query not in name.lower():
+                continue
+
+            item_text = self._format_left_item(name)
+            self._left_filtered_items.append(item_text)
+            self.lst_employee_schedules.insert("end", item_text)
+
+            idx = self.lst_employee_schedules.size() - 1
+            if self._loaded_by_name.get(name):
+                self.lst_employee_schedules.itemconfig(idx, fg="#166534")
+            else:
+                self.lst_employee_schedules.itemconfig(idx, fg="#b45309")
+
+        if current_selected_name:
+            for i, item_text in enumerate(self._left_filtered_items):
+                if self._extract_schedule_name_from_left_item(item_text) == current_selected_name:
+                    self.lst_employee_schedules.selection_clear(0, "end")
+                    self.lst_employee_schedules.selection_set(i)
+                    self.lst_employee_schedules.see(i)
+                    break
+
+        self._update_left_details()
+
     def reload_all(self):
         try:
             self._unique_employee_schedules = get_unique_employee_schedule_names()
-            self.lst_employee_schedules.delete(0, "end")
-            for name in self._unique_employee_schedules:
-                self.lst_employee_schedules.insert("end", name)
+            self._loaded_rows = get_work_schedules_list()
+
+            self._loaded_by_name.clear()
+            for row in self._loaded_rows:
+                name = _normalize_spaces(row.get("schedule_name") or "")
+                if not name:
+                    continue
+                self._loaded_by_name.setdefault(name, []).append(row)
+
+            self._refresh_left_list()
 
             for item in self.tree.get_children():
                 self.tree.delete(item)
 
-            rows = get_work_schedules_list()
-            for row in rows:
+            for row in self._loaded_rows:
                 updated_at = row.get("updated_at")
                 updated_str = updated_at.strftime("%d.%m.%Y %H:%M") if isinstance(updated_at, datetime) else ""
                 self.tree.insert(
@@ -435,9 +560,18 @@ class WorkSchedulesPage(tk.Frame):
                     ),
                 )
 
+            loaded_unique_count = len(self._loaded_by_name)
+            not_loaded_count = max(0, len(self._unique_employee_schedules) - loaded_unique_count)
+
             self.lbl_info.config(
-                text=f"Графиков у сотрудников: {len(self._unique_employee_schedules)} | Загружено шаблонов: {len(rows)}"
+                text=(
+                    f"Графиков у сотрудников: {len(self._unique_employee_schedules)} | "
+                    f"Загружено уникальных: {loaded_unique_count} | "
+                    f"Не загружено: {not_loaded_count}"
+                )
             )
+
+            self._update_left_details()
         except Exception as e:
             messagebox.showerror("Графики", f"Ошибка загрузки:\n{e}", parent=self)
 
@@ -446,13 +580,83 @@ class WorkSchedulesPage(tk.Frame):
             sel = self.lst_employee_schedules.curselection()
             if not sel:
                 return ""
-            return _normalize_spaces(self.lst_employee_schedules.get(sel[0]))
+            raw = self.lst_employee_schedules.get(sel[0])
+            return self._extract_schedule_name_from_left_item(raw)
         except Exception:
             return ""
 
+    def _update_left_details(self):
+        schedule_name = self._get_selected_employee_schedule()
+        if not schedule_name:
+            self.lbl_left_details.config(text="Выберите график слева")
+            return
+
+        rows = self._loaded_by_name.get(schedule_name, [])
+        if not rows:
+            text = (
+                f"График:\n{schedule_name}\n\n"
+                f"Статус: НЕ ЗАГРУЖЕН\n"
+                f"Загрузок по годам: нет"
+            )
+        else:
+            years = sorted({int(r.get('year') or 0) for r in rows if r.get("year")})
+            years_text = ", ".join(str(y) for y in years) if years else "—"
+
+            text = (
+                f"График:\n{schedule_name}\n\n"
+                f"Статус: ЗАГРУЖЕН\n"
+                f"Загружен за годы: {years_text}\n"
+                f"Количество загруженных версий: {len(rows)}"
+            )
+
+        self.lbl_left_details.config(text=text)
+
     def _sync_selected_schedule_name(self):
-        # Пока просто placeholder на будущее
-        pass
+        schedule_name = self._get_selected_employee_schedule()
+        self._update_left_details()
+
+        if not schedule_name:
+            return
+
+        matched_iid = None
+        matched_rows = self._loaded_by_name.get(schedule_name, [])
+        if matched_rows:
+            latest_row = sorted(
+                matched_rows,
+                key=lambda r: (
+                    int(r.get("year") or 0),
+                    r.get("updated_at") or datetime.min,
+                ),
+                reverse=True,
+            )[0]
+            matched_iid = str(latest_row["id"])
+
+        self.tree.selection_remove(*self.tree.selection())
+        if matched_iid and self.tree.exists(matched_iid):
+            self.tree.selection_set(matched_iid)
+            self.tree.focus(matched_iid)
+            self.tree.see(matched_iid)
+
+    def _sync_tree_to_left(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+
+        item_id = sel[0]
+        values = self.tree.item(item_id, "values")
+        if not values:
+            return
+
+        schedule_name = _normalize_spaces(values[1])
+
+        for i, item_text in enumerate(self._left_filtered_items):
+            if self._extract_schedule_name_from_left_item(item_text) == schedule_name:
+                self.lst_employee_schedules.selection_clear(0, "end")
+                self.lst_employee_schedules.selection_set(i)
+                self.lst_employee_schedules.see(i)
+                break
+
+        self._update_left_details()
 
     def _on_import_excel(self):
         selected_schedule_name = self._get_selected_employee_schedule()
@@ -470,12 +674,20 @@ class WorkSchedulesPage(tk.Frame):
                 Path(path),
                 forced_schedule_name=selected_schedule_name or None,
             )
+
+            bind_info = (
+                f"\nПривязка к графику сотрудников: {selected_schedule_name}"
+                if selected_schedule_name
+                else ""
+            )
+
             messagebox.showinfo(
                 "Графики",
                 "Импорт завершён.\n\n"
                 f"График: {info['schedule_name']}\n"
                 f"Год: {info['year']}\n"
-                f"Загружено дней: {info['days_loaded']}",
+                f"Загружено дней: {info['days_loaded']}"
+                f"{bind_info}",
                 parent=self,
             )
             self.reload_all()
