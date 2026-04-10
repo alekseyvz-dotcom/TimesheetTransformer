@@ -4,7 +4,7 @@ import logging
 import tempfile
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -656,8 +656,8 @@ class TimesheetPage(tk.Frame):
         win = tk.Toplevel(self)
         win.title("Подождите")
         win.transient(self.winfo_toplevel())
-        win.grab_set()
         win.resizable(False, False)
+        win.protocol("WM_DELETE_WINDOW", lambda: None)
 
         frame = tk.Frame(win, bg="#ffffff", padx=18, pady=16)
         frame.pack(fill="both", expand=True)
@@ -898,6 +898,7 @@ class TimesheetPage(tk.Frame):
             return
 
         self._show_schedule_progress("Анализируются данные...", maximum=total)
+        self.update_idletasks()
 
         state = {"index": 0}
 
