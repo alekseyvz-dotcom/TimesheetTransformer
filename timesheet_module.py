@@ -146,6 +146,29 @@ MEDIUM_BLACK = Side(style="medium", color="000000")
 BORDER_THIN = Border(left=THIN_BLACK, right=THIN_BLACK, top=THIN_BLACK, bottom=THIN_BLACK)
 BORDER_EMPTY = Border()
 
+def _load_timesheet_users_for_registry() -> List[Tuple[int, str]]:
+    try:
+        with db_cursor(dict_rows=True) as (_conn, cur):
+            cur.execute(
+                """
+                SELECT DISTINCT
+                    u.id,
+                    COALESCE(NULLIF(u.full_name, ''), u.username) AS display_name
+                FROM timesheet_headers h
+                JOIN app_users u ON u.id = h.user_id
+                ORDER BY COALESCE(NULLIF(u.full_name, ''), u.username)
+                """
+            )
+            result: List[Tuple[int, str]] = []
+            for row in cur.fetchall():
+                uid = int(row.get("id"))
+                display = normalize_spaces(row.get("display_name") or "")
+                if display:
+                    result.append((uid, display))
+            return result
+    except Exception:
+        logger.exception("Не удалось загрузить список пользователей для реестра табелей")
+        return []
 
 def _excel_safe_value(value: Any) -> Any:
     return "" if value is None else value
@@ -3348,17 +3371,20 @@ class TimesheetRegistryPage(tk.Frame):
         self.tree = None
         self._headers: List[Dict[str, Any]] = []
         self._all_departments: List[str] = []
+        self._all_users: List[Tuple[int, str]] = []
 
         self.var_year = tk.StringVar(value=str(datetime.now().year))
         self.var_month = tk.StringVar(value="Все")
         self.var_dep = tk.StringVar(value="Все")
         self.var_obj_addr = tk.StringVar()
         self.var_obj_id = tk.StringVar()
+        self.var_user = tk.StringVar(value="Все")
 
         self._filter_job = None
 
         self._build_ui()
         self._load_departments()
+        self._load_users()
         self._load_data()
 
     def _build_ui(self):
@@ -3419,12 +3445,23 @@ class TimesheetRegistryPage(tk.Frame):
         row1.pack(fill="x")
 
         tk.Label(row1, text="Объект (адрес):", font=("Segoe UI", 9), bg=TS_COLORS["panel"]).pack(side="left", padx=(0, 4))
-        ttk.Entry(row1, width=40, textvariable=self.var_obj_addr, font=("Segoe UI", 9)).pack(side="left")
+        ttk.Entry(row1, width=32, textvariable=self.var_obj_addr, font=("Segoe UI", 9)).pack(side="left")
         self.var_obj_addr.trace_add("write", self._on_text_filter_changed)
 
         tk.Label(row1, text="ID объекта:", font=("Segoe UI", 9), bg=TS_COLORS["panel"]).pack(side="left", padx=(16, 4))
-        ttk.Entry(row1, width=16, textvariable=self.var_obj_id, font=("Segoe UI", 9)).pack(side="left")
+        ttk.Entry(row1, width=14, textvariable=self.var_obj_id, font=("Segoe UI", 9)).pack(side="left")
         self.var_obj_id.trace_add("write", self._on_text_filter_changed)
+
+        tk.Label(row1, text="Пользователь:", font=("Segoe UI", 9), bg=TS_COLORS["panel"]).pack(side="left", padx=(16, 4))
+        self._cmb_user = ttk.Combobox(
+            row1,
+            state="readonly",
+            width=24,
+            textvariable=self.var_user,
+            values=["Все"],
+        )
+        self._cmb_user.pack(side="left")
+        self._cmb_user.bind("<<ComboboxSelected>>", lambda _e: self._load_data())
 
         tk.Button(
             btn_frame,
@@ -3521,6 +3558,18 @@ class TimesheetRegistryPage(tk.Frame):
         if not self.var_dep.get() or self.var_dep.get() == "Все":
             self.var_dep.set("Все")
 
+    def _load_users(self):
+        self._all_users = _load_timesheet_users_for_registry()
+        values = ["Все"] + [name for _uid, name in self._all_users]
+        try:
+            self._cmb_user.configure(values=values)
+        except Exception:
+            pass
+
+        current = normalize_spaces(self.var_user.get() or "Все")
+        if current not in values:
+            self.var_user.set("Все")
+
     def _on_text_filter_changed(self, *_):
         if self._filter_job is not None:
             self.after_cancel(self._filter_job)
@@ -3541,6 +3590,7 @@ class TimesheetRegistryPage(tk.Frame):
         self.var_dep.set("Все")
         self.var_obj_addr.set("")
         self.var_obj_id.set("")
+        self.var_user.set("Все")
         self._load_data()
 
     def _load_data(self):
@@ -3574,6 +3624,14 @@ class TimesheetRegistryPage(tk.Frame):
         addr_sub = normalize_spaces(self.var_obj_addr.get() or "") or None
         oid_sub = normalize_spaces(self.var_obj_id.get() or "") or None
 
+        selected_user_name = normalize_spaces(self.var_user.get() or "")
+        selected_user_id = None
+        if selected_user_name and selected_user_name != "Все":
+            for uid, display_name in self._all_users:
+                if normalize_spaces(display_name) == selected_user_name:
+                    selected_user_id = int(uid)
+                    break
+
         try:
             headers = load_all_timesheet_headers(
                 year=year,
@@ -3581,6 +3639,7 @@ class TimesheetRegistryPage(tk.Frame):
                 department=dep,
                 object_addr_substr=addr_sub,
                 object_id_substr=oid_sub,
+                user_id=selected_user_id,
             )
         except Exception as e:
             messagebox.showerror("Реестр табелей", f"Ошибка загрузки из БД:\n{e}", parent=self)
