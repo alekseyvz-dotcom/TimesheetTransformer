@@ -823,7 +823,7 @@ class TimesheetPage(tk.Frame):
 
     def _clear_schedule_cache(self):
         self._schedule_map_cache.clear()
-
+        tbn_norm = normalize_tbn(tbn)
         # 1. Сначала ищем по табельному номеру — это самый надежный вариант
         if tbn_norm:
             for emp_fio, emp_tbn, _emp_pos, _emp_dep, emp_schedule in self.employees:
