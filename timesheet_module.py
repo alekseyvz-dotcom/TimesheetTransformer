@@ -821,9 +821,6 @@ class TimesheetPage(tk.Frame):
         fio_norm = normalize_spaces(fio)
         tbn_norm = normalize_tbn(tbn)
 
-    def _clear_schedule_cache(self):
-        self._schedule_map_cache.clear()
-        tbn_norm = normalize_tbn(tbn)
         # 1. Сначала ищем по табельному номеру — это самый надежный вариант
         if tbn_norm:
             for emp_fio, emp_tbn, _emp_pos, _emp_dep, emp_schedule in self.employees:
@@ -840,6 +837,9 @@ class TimesheetPage(tk.Frame):
             return matches[0]
 
         return ""
+
+    def _clear_schedule_cache(self):
+        self._schedule_map_cache.clear()
 
     def _build_schedule_days_map_for_row(self, rec: Dict[str, Any], year: int, month: int) -> Dict[int, Dict[str, Any]]:
         if not callable(get_schedule_days_map):
