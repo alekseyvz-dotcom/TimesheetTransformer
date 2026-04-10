@@ -475,6 +475,10 @@ class TimesheetPage(tk.Frame):
         self._fit_job = None
         self._filter_job = None
 
+        self._schedule_progress_win: Optional[tk.Toplevel] = None
+        self._schedule_progress_label: Optional[tk.Label] = None
+        self._schedule_progressbar: Optional[ttk.Progressbar] = None
+
         self.out_dir = self._resolve_output_dir()
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -498,6 +502,8 @@ class TimesheetPage(tk.Frame):
         self.var_show_schedule = tk.BooleanVar(value=False)
         self._brig_assign: dict[str, str | None] = {}
         self._brig_names: dict[str, str] = {}
+
+        self._schedule_map_cache: dict[tuple[str, int, int], dict[int, dict[str, Any]]] = {}
 
         self._load_spr_data_from_db()
         self._build_ui()
@@ -621,6 +627,110 @@ class TimesheetPage(tk.Frame):
         except Exception:
             pass
 
+    def _show_schedule_progress(self, text: str = "Анализируются данные...", maximum: int = 100):
+        self._close_schedule_progress()
+
+        win = tk.Toplevel(self)
+        win.title("Подождите")
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+        win.resizable(False, False)
+
+        frame = tk.Frame(win, bg="#ffffff", padx=18, pady=16)
+        frame.pack(fill="both", expand=True)
+
+        lbl = tk.Label(
+            frame,
+            text=text,
+            font=("Segoe UI", 10, "bold"),
+            bg="#ffffff",
+            fg="#1f2937",
+        )
+        lbl.pack(anchor="w", pady=(0, 10))
+
+        sub = tk.Label(
+            frame,
+            text="Выполняется обработка графиков сотрудников...",
+            font=("Segoe UI", 9),
+            bg="#ffffff",
+            fg="#6b7280",
+        )
+        sub.pack(anchor="w", pady=(0, 10))
+
+        pb = ttk.Progressbar(
+            frame,
+            orient="horizontal",
+            mode="determinate",
+            maximum=max(1, int(maximum)),
+            length=360,
+        )
+        pb.pack(fill="x")
+
+        info = tk.Label(
+            frame,
+            text="0%",
+            font=("Segoe UI", 8),
+            bg="#ffffff",
+            fg="#6b7280",
+        )
+        info.pack(anchor="e", pady=(8, 0))
+
+        self._schedule_progress_win = win
+        self._schedule_progress_label = info
+        self._schedule_progressbar = pb
+
+        win.update_idletasks()
+
+        try:
+            parent = self.winfo_toplevel()
+            px = parent.winfo_rootx()
+            py = parent.winfo_rooty()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            ww = win.winfo_width()
+            wh = win.winfo_height()
+            x = px + max(0, (pw - ww) // 2)
+            y = py + max(0, (ph - wh) // 2)
+            win.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+        win.update()
+
+    def _update_schedule_progress(self, value: int, maximum: int, text: Optional[str] = None):
+        try:
+            if self._schedule_progressbar is not None:
+                self._schedule_progressbar.configure(maximum=max(1, int(maximum)))
+                self._schedule_progressbar["value"] = max(0, min(int(value), int(maximum)))
+
+            if self._schedule_progress_label is not None:
+                pct = int((value / maximum) * 100) if maximum else 0
+                suffix = f"{value}/{maximum} ({pct}%)"
+                if text:
+                    self._schedule_progress_label.config(text=f"{text} — {suffix}")
+                else:
+                    self._schedule_progress_label.config(text=suffix)
+
+            if self._schedule_progress_win is not None:
+                self._schedule_progress_win.update_idletasks()
+        except Exception:
+            pass
+
+    def _close_schedule_progress(self):
+        try:
+            if self._schedule_progress_win is not None:
+                try:
+                    self._schedule_progress_win.grab_release()
+                except Exception:
+                    pass
+                self._schedule_progress_win.destroy()
+        except Exception:
+            pass
+
+        self._schedule_progress_win = None
+        self._schedule_progress_label = None
+        self._schedule_progressbar = None
+
     def _mark_dirty(self):
         if self.read_only:
             return
@@ -688,6 +798,9 @@ class TimesheetPage(tk.Frame):
         fio_norm = normalize_spaces(fio)
         tbn_norm = normalize_tbn(tbn)
 
+    def _clear_schedule_cache(self):
+        self._schedule_map_cache.clear()
+
         # 1. Сначала ищем по табельному номеру — это самый надежный вариант
         if tbn_norm:
             for emp_fio, emp_tbn, _emp_pos, _emp_dep, emp_schedule in self.employees:
@@ -713,9 +826,17 @@ class TimesheetPage(tk.Frame):
         if not schedule_name:
             return {}
 
+        cache_key = (schedule_name, int(year), int(month))
+        cached = self._schedule_map_cache.get(cache_key)
+        if isinstance(cached, dict):
+            return cached
+
         try:
             result = get_schedule_days_map(schedule_name, year, month)
-            return result if isinstance(result, dict) else {}
+            if not isinstance(result, dict):
+                result = {}
+            self._schedule_map_cache[cache_key] = result
+            return result
         except Exception:
             logger.exception(
                 "Не удалось загрузить карту графика для сотрудника %s (%s), график=%r, %s-%s",
@@ -725,6 +846,7 @@ class TimesheetPage(tk.Frame):
                 year,
                 month,
             )
+            self._schedule_map_cache[cache_key] = {}
             return {}
 
     def _apply_schedule_maps_to_rows(self, rows: List[Dict[str, Any]]):
@@ -737,6 +859,47 @@ class TimesheetPage(tk.Frame):
             else:
                 rec["schedule_days_map"] = {}
 
+    def _apply_schedule_maps_to_rows_batched(
+        self,
+        rows: List[Dict[str, Any]],
+        on_done: Optional[Callable[[], None]] = None,
+        batch_size: int = 25,
+    ):
+        year, month = self.get_year_month()
+        enabled = bool(self.var_show_schedule.get())
+        total = len(rows)
+
+        if total == 0:
+            if callable(on_done):
+                on_done()
+            return
+
+        self._show_schedule_progress("Анализируются данные...", maximum=total)
+
+        state = {"index": 0}
+
+        def process_batch():
+            start = state["index"]
+            end = min(start + max(1, int(batch_size)), total)
+
+            for i in range(start, end):
+                rec = rows[i]
+                if enabled:
+                    rec["schedule_days_map"] = self._build_schedule_days_map_for_row(rec, year, month)
+                else:
+                    rec["schedule_days_map"] = {}
+
+            state["index"] = end
+            self._update_schedule_progress(end, total, text="Анализируются данные")
+
+            if end < total:
+                self.after(1, process_batch)
+                return
+
+            self._close_schedule_progress()
+            if callable(on_done):
+                on_done()
+
     def _on_toggle_schedule_highlight(self):
         enabled = bool(self.var_show_schedule.get())
 
@@ -746,8 +909,18 @@ class TimesheetPage(tk.Frame):
         except Exception:
             logger.exception("Не удалось переключить режим подсветки графиков в гриде")
 
-        self._apply_schedule_maps_to_rows(self.model_rows_all)
-        self._apply_filter()
+        def done():
+            self._apply_filter()
+            self._set_status_text(
+                "Подсветка графиков включена" if enabled else "Подсветка графиков выключена",
+                fg="#bbdefb",
+            )
+
+        self._apply_schedule_maps_to_rows_batched(
+            self.model_rows_all,
+            on_done=done,
+            batch_size=25,
+        )
 
     def _grid_selected(self) -> set[int]:
         if hasattr(self, "grid"):
@@ -1394,8 +1567,9 @@ class TimesheetPage(tk.Frame):
         if not self._confirm_leave_with_unsaved():
             self._restore_controls_to_loaded_context()
             return
-
+            
         self._active_header_id = None
+        self._clear_schedule_cache()
         self._load_existing_rows()
 
     def _on_department_select(self):
@@ -1415,6 +1589,7 @@ class TimesheetPage(tk.Frame):
 
         self._refresh_employee_selector_for_department(dep_sel)
         self._active_header_id = None
+        self._clear_schedule_cache()
         self._load_existing_rows()
 
     def _on_address_change(self, ask_user: bool = True):
@@ -1463,6 +1638,7 @@ class TimesheetPage(tk.Frame):
             return
 
         self._active_header_id = None
+        self._clear_schedule_cache()
         self._on_address_change(ask_user=True)
         self._load_existing_rows()
 
@@ -1475,6 +1651,7 @@ class TimesheetPage(tk.Frame):
             return
 
         self._active_header_id = None
+        self._clear_schedule_cache()
         self._load_existing_rows()
 
     def _clear_filter(self):
@@ -1566,6 +1743,7 @@ class TimesheetPage(tk.Frame):
     def _load_existing_rows(self):
         self.model_rows_all.clear()
         self.model_rows = self.model_rows_all
+        self._clear_schedule_cache()
         self._selected_row_keys.clear()
         self._update_selected_count()
         try:
