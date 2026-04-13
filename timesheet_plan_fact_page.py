@@ -1,5 +1,5 @@
-import calendar
 import logging
+import threading
 from datetime import datetime, timedelta, date
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -34,40 +34,6 @@ PALETTE = {
     "offday": "#90A4AE",
     "noschedule": "#8E24AA",
 }
-
-
-def _normalize_text(v: Any) -> str:
-    return str(v or "").strip()
-
-
-def _normalize_fio(v: Any) -> str:
-    return " ".join(_normalize_text(v).lower().split())
-
-
-def _person_key(fio: Any, tbn: Any) -> str:
-    tbn_norm = _normalize_text(tbn)
-    if tbn_norm:
-        return f"tbn:{tbn_norm}"
-    return f"fio:{_normalize_fio(fio)}"
-
-
-def _extract_hours(value: Any) -> float:
-    if value is None:
-        return 0.0
-
-    s = str(value).strip().replace(",", ".")
-    if not s:
-        return 0.0
-
-    import re
-    m = re.search(r"(\d+(?:\.\d+)?)", s)
-    if not m:
-        return 0.0
-
-    try:
-        return float(m.group(1))
-    except Exception:
-        return 0.0
 
 
 class TimesheetPlanFactData:
@@ -108,7 +74,7 @@ class TimesheetPlanFactData:
         )
         return [r["short_name"] for r in rows]
 
-    def _load_timesheet_source(self) -> List[Dict[str, Any]]:
+    def _build_base_cte(self) -> Tuple[str, List[Any]]:
         params: List[Any] = [self.end_date, self.start_date]
         object_filter_sql = ""
 
@@ -117,42 +83,41 @@ class TimesheetPlanFactData:
             params.append(self.object_type_filter)
 
         sql = f"""
-            WITH employee_match AS (
-                SELECT
-                    tr.id AS row_id,
-                    e.id AS employee_id,
-                    e.fio AS emp_fio,
-                    e.tbn AS emp_tbn,
-                    e.position AS emp_position,
-                    e.department_id AS emp_department_id,
-                    e.work_schedule AS emp_work_schedule,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY tr.id
-                        ORDER BY
-                            CASE
-                                WHEN NULLIF(BTRIM(tr.tbn), '') IS NOT NULL
-                                     AND NULLIF(BTRIM(e.tbn), '') = NULLIF(BTRIM(tr.tbn), '')
-                                THEN 1
-                                WHEN NULLIF(BTRIM(tr.tbn), '') IS NULL
-                                     AND LOWER(REGEXP_REPLACE(BTRIM(e.fio), '\\s+', ' ', 'g'))
-                                         = LOWER(REGEXP_REPLACE(BTRIM(tr.fio), '\\s+', ' ', 'g'))
-                                THEN 2
-                                ELSE 100
-                            END,
-                            e.id
-                    ) AS rn
-                FROM timesheet_rows tr
-                LEFT JOIN employees e
-                  ON (
-                        NULLIF(BTRIM(tr.tbn), '') IS NOT NULL
-                        AND NULLIF(BTRIM(e.tbn), '') = NULLIF(BTRIM(tr.tbn), '')
-                     )
-                     OR (
-                        NULLIF(BTRIM(tr.tbn), '') IS NULL
-                        AND LOWER(REGEXP_REPLACE(BTRIM(e.fio), '\\s+', ' ', 'g'))
-                            = LOWER(REGEXP_REPLACE(BTRIM(tr.fio), '\\s+', ' ', 'g'))
-                     )
-            )
+        WITH employee_match AS (
+            SELECT
+                tr.id AS row_id,
+                e.id AS employee_id,
+                e.position AS emp_position,
+                e.department_id AS emp_department_id,
+                e.work_schedule AS emp_work_schedule,
+                ROW_NUMBER() OVER (
+                    PARTITION BY tr.id
+                    ORDER BY
+                        CASE
+                            WHEN NULLIF(BTRIM(tr.tbn), '') IS NOT NULL
+                                 AND NULLIF(BTRIM(e.tbn), '') = NULLIF(BTRIM(tr.tbn), '')
+                            THEN 1
+                            WHEN NULLIF(BTRIM(tr.tbn), '') IS NULL
+                                 AND LOWER(REGEXP_REPLACE(BTRIM(e.fio), '\\s+', ' ', 'g'))
+                                     = LOWER(REGEXP_REPLACE(BTRIM(tr.fio), '\\s+', ' ', 'g'))
+                            THEN 2
+                            ELSE 100
+                        END,
+                        e.id
+                ) AS rn
+            FROM timesheet_rows tr
+            LEFT JOIN employees e
+              ON (
+                    NULLIF(BTRIM(tr.tbn), '') IS NOT NULL
+                    AND NULLIF(BTRIM(e.tbn), '') = NULLIF(BTRIM(tr.tbn), '')
+                 )
+                 OR (
+                    NULLIF(BTRIM(tr.tbn), '') IS NULL
+                    AND LOWER(REGEXP_REPLACE(BTRIM(e.fio), '\\s+', ' ', 'g'))
+                        = LOWER(REGEXP_REPLACE(BTRIM(tr.fio), '\\s+', ' ', 'g'))
+                 )
+        ),
+        src AS (
             SELECT
                 th.id AS header_id,
                 th.object_id,
@@ -161,22 +126,18 @@ class TimesheetPlanFactData:
                 COALESCE(o.short_name, '') AS object_type,
                 th.year,
                 th.month,
-                COALESCE(dep_hdr.name, th.department, '—') AS header_department,
-
                 tr.id AS row_id,
                 tr.fio,
                 tr.tbn,
                 tr.hours_raw,
-                tr.total_days,
-                tr.total_hours,
-                tr.night_hours,
-                tr.overtime_day,
-                tr.overtime_night,
-
-                em.employee_id,
-                COALESCE(em.emp_position, '—') AS position_name,
                 COALESCE(dep_emp.name, dep_hdr.name, th.department, '—') AS department_name,
-                COALESCE(em.emp_work_schedule, '') AS work_schedule_name
+                COALESCE(em.emp_position, '—') AS position_name,
+                COALESCE(em.emp_work_schedule, '') AS work_schedule_name,
+                CASE
+                    WHEN NULLIF(BTRIM(tr.tbn), '') IS NOT NULL
+                        THEN 'tbn:' || BTRIM(tr.tbn)
+                    ELSE 'fio:' || LOWER(REGEXP_REPLACE(BTRIM(tr.fio), '\\s+', ' ', 'g'))
+                END AS person_key
             FROM timesheet_headers th
             JOIN timesheet_rows tr
               ON tr.header_id = th.id
@@ -195,225 +156,216 @@ class TimesheetPlanFactData:
                     + interval '1 month - 1 day'
                   )::date >= %s
               {object_filter_sql}
-            ORDER BY
-                th.year,
-                th.month,
-                object_name,
-                department_name,
-                position_name,
-                tr.fio
-        """
-
-        return self._execute_query(sql, tuple(params))
-
-    def _load_schedule_days(self) -> Dict[Tuple[str, date], Dict[str, Any]]:
-        sql = """
+        ),
+        person_days AS (
             SELECT
-                ws.schedule_name,
-                ws.year,
-                wsd.work_date,
+                (
+                    make_date(src.year, src.month, 1)
+                    + (gs.day_num - 1) * interval '1 day'
+                )::date AS work_date,
+                src.object_id,
+                src.object_db_id,
+                src.object_name,
+                src.object_type,
+                src.department_name,
+                src.position_name,
+                src.fio,
+                src.tbn,
+                src.person_key,
+                src.work_schedule_name,
+                src.hours_raw[gs.day_num] AS raw_val
+            FROM src
+            CROSS JOIN LATERAL generate_series(1, 31) AS gs(day_num)
+            WHERE gs.day_num <= EXTRACT(
+                      DAY FROM (
+                          date_trunc('month', make_date(src.year, src.month, 1))
+                          + interval '1 month - 1 day'
+                      )
+                  )
+              AND (
+                    make_date(src.year, src.month, 1)
+                    + (gs.day_num - 1) * interval '1 day'
+                  )::date BETWEEN %s AND %s
+        ),
+        enriched AS (
+            SELECT
+                pd.work_date,
+                pd.object_id,
+                pd.object_db_id,
+                pd.object_name,
+                pd.object_type,
+                pd.department_name,
+                pd.position_name,
+                pd.fio,
+                pd.tbn,
+                pd.person_key,
+                pd.work_schedule_name,
+                pd.raw_val,
+                CASE
+                    WHEN pd.raw_val IS NULL THEN 0
+                    WHEN BTRIM(pd.raw_val) = '' THEN 0
+                    WHEN substring(replace(pd.raw_val, ',', '.') FROM '([0-9]+(?:\\.[0-9]+)?)') IS NOT NULL
+                    THEN COALESCE(substring(replace(pd.raw_val, ',', '.') FROM '([0-9]+(?:\\.[0-9]+)?)')::numeric, 0)
+                    ELSE 0
+                END AS hours_val,
+                ws.id AS schedule_id,
                 wsd.is_workday,
-                wsd.planned_hours,
-                wsd.raw_value
-            FROM work_schedules ws
-            JOIN work_schedule_days wsd
+                COALESCE(wsd.planned_hours, 0) AS planned_hours
+            FROM person_days pd
+            LEFT JOIN work_schedules ws
+              ON LOWER(BTRIM(ws.schedule_name)) = LOWER(BTRIM(pd.work_schedule_name))
+             AND ws.year = EXTRACT(YEAR FROM pd.work_date)::int
+            LEFT JOIN work_schedule_days wsd
               ON wsd.schedule_id = ws.id
-            WHERE wsd.work_date BETWEEN %s AND %s
+             AND wsd.work_date = pd.work_date
+        )
         """
-        rows = self._execute_query(sql, (self.start_date, self.end_date))
+        params.extend([self.start_date, self.end_date])
+        return sql, params
 
-        result: Dict[Tuple[str, date], Dict[str, Any]] = {}
-        for r in rows:
-            key = (_normalize_text(r["schedule_name"]).lower(), r["work_date"])
-            result[key] = {
-                "is_workday": bool(r["is_workday"]),
-                "planned_hours": float(r["planned_hours"] or 0),
-                "raw_value": r.get("raw_value"),
-            }
-        return result
+    def get_daily_detail(self) -> pd.DataFrame:
+        if self._detail_cache is not None:
+            return self._detail_cache.copy()
 
-    def _build_detail(self) -> pd.DataFrame:
-        source_rows = self._load_timesheet_source()
-        schedule_map = self._load_schedule_days()
+        cte, params = self._build_base_cte()
+        query = cte + """
+        SELECT
+            work_date,
+            object_id,
+            object_db_id,
+            object_name,
+            object_type,
+            department_name,
+            position_name,
+            fio,
+            tbn,
+            person_key,
+            work_schedule_name,
+            raw_val AS day_raw,
+            hours_val AS hours,
+            CASE WHEN hours_val > 0 THEN 1 ELSE 0 END AS worked_flag,
+            CASE WHEN schedule_id IS NULL THEN 1 ELSE 0 END AS no_schedule_flag,
+            CASE WHEN schedule_id IS NOT NULL AND is_workday IS TRUE THEN 1 ELSE 0 END AS plan_flag,
+            CASE WHEN schedule_id IS NOT NULL AND is_workday IS FALSE THEN 1 ELSE 0 END AS off_flag,
+            CASE WHEN schedule_id IS NOT NULL AND is_workday IS TRUE  AND hours_val > 0 THEN 1 ELSE 0 END AS fact_flag,
+            CASE WHEN schedule_id IS NOT NULL AND is_workday IS TRUE  AND hours_val <= 0 THEN 1 ELSE 0 END AS absent_flag,
+            CASE WHEN schedule_id IS NOT NULL AND is_workday IS FALSE AND hours_val > 0 THEN 1 ELSE 0 END AS worked_on_off_flag,
+            is_workday,
+            planned_hours
+        FROM enriched
+        ORDER BY
+            work_date,
+            object_name,
+            department_name,
+            position_name,
+            fio
+        """
 
-        detail_rows: List[Dict[str, Any]] = []
-
-        for row in source_rows:
-            year = int(row["year"])
-            month = int(row["month"])
-            days_in_month = calendar.monthrange(year, month)[1]
-            hours_raw = row.get("hours_raw") or []
-            schedule_name = _normalize_text(row.get("work_schedule_name"))
-            schedule_name_norm = schedule_name.lower()
-
-            for day_num in range(1, days_in_month + 1):
-                work_dt = date(year, month, day_num)
-                if not (self.start_date <= work_dt <= self.end_date):
-                    continue
-
-                raw_val = None
-                if isinstance(hours_raw, list) and len(hours_raw) >= day_num:
-                    raw_val = hours_raw[day_num - 1]
-
-                hours_val = _extract_hours(raw_val)
-                worked_flag = 1 if hours_val > 0 else 0
-
-                sch_info = None
-                if schedule_name_norm:
-                    sch_info = schedule_map.get((schedule_name_norm, work_dt))
-
-                if sch_info is None:
-                    has_schedule = 0
-                    is_workday = None
-                    planned_hours = 0.0
-                    plan_flag = 0
-                    off_flag = 0
-                    no_schedule_flag = 1
-                else:
-                    has_schedule = 1
-                    is_workday = bool(sch_info["is_workday"])
-                    planned_hours = float(sch_info.get("planned_hours") or 0)
-
-                    if is_workday:
-                        plan_flag = 1
-                        off_flag = 0
-                    else:
-                        plan_flag = 0
-                        off_flag = 1
-
-                    no_schedule_flag = 0
-
-                fact_flag = 1 if (plan_flag == 1 and worked_flag == 1) else 0
-                absent_flag = 1 if (plan_flag == 1 and worked_flag == 0) else 0
-                worked_on_off_flag = 1 if (off_flag == 1 and worked_flag == 1) else 0
-
-                detail_rows.append(
-                    {
-                        "work_date": pd.Timestamp(work_dt),
-                        "object_id": row.get("object_id") or row.get("object_db_id"),
-                        "object_db_id": row.get("object_db_id"),
-                        "object_name": row.get("object_name") or "—",
-                        "object_type": row.get("object_type") or "",
-                        "department_name": row.get("department_name") or "—",
-                        "position_name": row.get("position_name") or "—",
-
-                        "fio": row.get("fio") or "",
-                        "tbn": row.get("tbn") or "",
-                        "person_key": _person_key(row.get("fio"), row.get("tbn")),
-
-                        "employee_id": row.get("employee_id"),
-                        "work_schedule_name": schedule_name,
-                        "has_schedule": has_schedule,
-                        "is_workday": is_workday,
-                        "planned_hours": planned_hours,
-
-                        "day_raw": raw_val,
-                        "hours": hours_val,
-                        "worked_flag": worked_flag,
-
-                        "plan_flag": plan_flag,
-                        "off_flag": off_flag,
-                        "fact_flag": fact_flag,
-                        "absent_flag": absent_flag,
-                        "worked_on_off_flag": worked_on_off_flag,
-                        "no_schedule_flag": no_schedule_flag,
-                    }
-                )
-
-        df = pd.DataFrame(detail_rows)
+        rows = self._execute_query(query, tuple(params))
+        df = pd.DataFrame(rows)
 
         if df.empty:
-            return pd.DataFrame(
+            self._detail_cache = pd.DataFrame(
                 columns=[
                     "work_date", "object_id", "object_db_id", "object_name", "object_type",
                     "department_name", "position_name", "fio", "tbn", "person_key",
-                    "employee_id", "work_schedule_name", "has_schedule", "is_workday",
-                    "planned_hours", "day_raw", "hours", "worked_flag", "plan_flag",
-                    "off_flag", "fact_flag", "absent_flag", "worked_on_off_flag",
-                    "no_schedule_flag",
+                    "work_schedule_name", "day_raw", "hours", "worked_flag",
+                    "no_schedule_flag", "plan_flag", "off_flag", "fact_flag",
+                    "absent_flag", "worked_on_off_flag", "is_workday", "planned_hours"
                 ]
             )
+            return self._detail_cache.copy()
 
+        df["work_date"] = pd.to_datetime(df["work_date"])
         int_cols = [
-            "has_schedule", "worked_flag", "plan_flag", "off_flag", "fact_flag",
-            "absent_flag", "worked_on_off_flag", "no_schedule_flag",
+            "worked_flag", "no_schedule_flag", "plan_flag", "off_flag",
+            "fact_flag", "absent_flag", "worked_on_off_flag"
         ]
         for col in int_cols:
             df[col] = df[col].fillna(0).astype(int)
 
-        df["hours"] = df["hours"].fillna(0.0).astype(float)
-        df["planned_hours"] = df["planned_hours"].fillna(0.0).astype(float)
-        return df
+        df["hours"] = pd.to_numeric(df["hours"], errors="coerce").fillna(0.0)
+        df["planned_hours"] = pd.to_numeric(df["planned_hours"], errors="coerce").fillna(0.0)
 
-    def get_daily_detail(self) -> pd.DataFrame:
-        if self._detail_cache is None:
-            self._detail_cache = self._build_detail()
-        return self._detail_cache.copy()
+        self._detail_cache = df.copy()
+        return df
 
     def get_plan_fact_daily(self) -> pd.DataFrame:
         if self._daily_cache is not None:
             return self._daily_cache.copy()
 
-        df = self.get_daily_detail()
-        if df.empty:
-            self._daily_cache = pd.DataFrame(
-                columns=[
-                    "work_date", "object_id", "object_name", "department_name", "position_name",
-                    "plan_count", "off_count", "fact_count", "absent_count",
-                    "worked_on_off_count", "no_schedule_count", "attendance_pct",
-                ]
-            )
-            return self._daily_cache.copy()
+        cte, params = self._build_base_cte()
+        query = cte + """
+        SELECT
+            work_date,
+            object_id,
+            object_name,
+            department_name,
+            position_name,
+            SUM(CASE WHEN schedule_id IS NOT NULL AND is_workday IS TRUE THEN 1 ELSE 0 END)::int AS plan_count,
+            SUM(CASE WHEN schedule_id IS NOT NULL AND is_workday IS FALSE THEN 1 ELSE 0 END)::int AS off_count,
+            SUM(CASE WHEN schedule_id IS NOT NULL AND is_workday IS TRUE  AND hours_val > 0 THEN 1 ELSE 0 END)::int AS fact_count,
+            SUM(CASE WHEN schedule_id IS NOT NULL AND is_workday IS TRUE  AND hours_val <= 0 THEN 1 ELSE 0 END)::int AS absent_count,
+            SUM(CASE WHEN schedule_id IS NOT NULL AND is_workday IS FALSE AND hours_val > 0 THEN 1 ELSE 0 END)::int AS worked_on_off_count,
+            SUM(CASE WHEN schedule_id IS NULL THEN 1 ELSE 0 END)::int AS no_schedule_count,
+            CASE
+                WHEN SUM(CASE WHEN schedule_id IS NOT NULL AND is_workday IS TRUE THEN 1 ELSE 0 END) > 0
+                THEN ROUND(
+                    SUM(CASE WHEN schedule_id IS NOT NULL AND is_workday IS TRUE AND hours_val > 0 THEN 1 ELSE 0 END)::numeric
+                    / SUM(CASE WHEN schedule_id IS NOT NULL AND is_workday IS TRUE THEN 1 ELSE 0 END)::numeric * 100, 1
+                )
+                ELSE 0
+            END AS attendance_pct
+        FROM enriched
+        GROUP BY
+            work_date,
+            object_id,
+            object_name,
+            department_name,
+            position_name
+        ORDER BY
+            work_date,
+            object_name,
+            department_name,
+            position_name
+        """
 
-        grp = (
-            df.groupby(
-                ["work_date", "object_id", "object_name", "department_name", "position_name"],
-                as_index=False
-            )
-            .agg(
-                plan_count=("plan_flag", "sum"),
-                off_count=("off_flag", "sum"),
-                fact_count=("fact_flag", "sum"),
-                absent_count=("absent_flag", "sum"),
-                worked_on_off_count=("worked_on_off_flag", "sum"),
-                no_schedule_count=("no_schedule_flag", "sum"),
-            )
-            .sort_values(["work_date", "object_name", "department_name", "position_name"])
-        )
+        rows = self._execute_query(query, tuple(params))
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df["work_date"] = pd.to_datetime(df["work_date"])
+            for col in [
+                "plan_count", "off_count", "fact_count", "absent_count",
+                "worked_on_off_count", "no_schedule_count"
+            ]:
+                df[col] = df[col].fillna(0).astype(int)
+            df["attendance_pct"] = pd.to_numeric(df["attendance_pct"], errors="coerce").fillna(0.0)
 
-        grp["attendance_pct"] = grp.apply(
-            lambda r: round(r["fact_count"] / r["plan_count"] * 100.0, 1)
-            if r["plan_count"] > 0 else 0.0,
-            axis=1
-        )
-
-        self._daily_cache = grp.copy()
-        return grp
+        self._daily_cache = df.copy()
+        return df
 
     def get_plan_fact_by_date(self) -> pd.DataFrame:
         if self._date_cache is not None:
             return self._date_cache.copy()
 
-        df = self.get_daily_detail()
+        df = self.get_plan_fact_daily()
         if df.empty:
-            self._date_cache = pd.DataFrame(
-                columns=[
-                    "work_date", "plan_count", "off_count", "fact_count", "absent_count",
-                    "worked_on_off_count", "no_schedule_count", "attendance_pct",
-                ]
-            )
+            self._date_cache = pd.DataFrame(columns=[
+                "work_date", "plan_count", "off_count", "fact_count", "absent_count",
+                "worked_on_off_count", "no_schedule_count", "attendance_pct"
+            ])
             return self._date_cache.copy()
 
         grp = (
             df.groupby("work_date", as_index=False)
-            .agg(
-                plan_count=("plan_flag", "sum"),
-                off_count=("off_flag", "sum"),
-                fact_count=("fact_flag", "sum"),
-                absent_count=("absent_flag", "sum"),
-                worked_on_off_count=("worked_on_off_flag", "sum"),
-                no_schedule_count=("no_schedule_flag", "sum"),
-            )
+            .agg({
+                "plan_count": "sum",
+                "off_count": "sum",
+                "fact_count": "sum",
+                "absent_count": "sum",
+                "worked_on_off_count": "sum",
+                "no_schedule_count": "sum",
+            })
             .sort_values("work_date")
         )
 
@@ -430,30 +382,9 @@ class TimesheetPlanFactData:
         if self._object_cache is not None:
             return self._object_cache.copy()
 
-        df = self.get_daily_detail()
+        df = self.get_plan_fact_daily()
         if df.empty:
-            self._object_cache = pd.DataFrame(
-                columns=[
-                    "object_name", "plan_count", "off_count", "fact_count", "absent_count",
-                    "worked_on_off_count", "no_schedule_count", "attendance_pct",
-                ]
-            )
-            return self._object_cache.copy()
-
-        grp = (
-            df.groupby(["object_id", "object_name"], as_index=False)
-            .agg(
-                plan_count=("plan_flag", "sum"),
-                off_count=("off_flag", "sum"),
-                fact_count=("fact_flag", "sum"),
-                absent_count=("absent_flag", "sum"),
-                worked_on_off_count=("worked_on_off_flag", "sum"),
-                no_schedule_count=("no_schedule_flag", "sum"),
-            )
-            .sort_values(["plan_count", "fact_count", "object_name"], ascending=[False, False, True])
-        )
-
-        grp["attendance_pct"] = grp.apply(
+            self._object_cache = grp.apply(
             lambda r: round(r["fact_count"] / r["plan_count"] * 100.0, 1)
             if r["plan_count"] > 0 else 0.0,
             axis=1
@@ -466,27 +397,25 @@ class TimesheetPlanFactData:
         if self._position_cache is not None:
             return self._position_cache.copy()
 
-        df = self.get_daily_detail()
+        df = self.get_plan_fact_daily()
         if df.empty:
-            self._position_cache = pd.DataFrame(
-                columns=[
-                    "department_name", "position_name", "plan_count", "off_count",
-                    "fact_count", "absent_count", "worked_on_off_count",
-                    "no_schedule_count", "attendance_pct",
-                ]
-            )
+            self._position_cache = pd.DataFrame(columns=[
+                "department_name", "position_name", "plan_count", "off_count",
+                "fact_count", "absent_count", "worked_on_off_count",
+                "no_schedule_count", "attendance_pct"
+            ])
             return self._position_cache.copy()
 
         grp = (
             df.groupby(["department_name", "position_name"], as_index=False)
-            .agg(
-                plan_count=("plan_flag", "sum"),
-                off_count=("off_flag", "sum"),
-                fact_count=("fact_flag", "sum"),
-                absent_count=("absent_flag", "sum"),
-                worked_on_off_count=("worked_on_off_flag", "sum"),
-                no_schedule_count=("no_schedule_flag", "sum"),
-            )
+            .agg({
+                "plan_count": "sum",
+                "off_count": "sum",
+                "fact_count": "sum",
+                "absent_count": "sum",
+                "worked_on_off_count": "sum",
+                "no_schedule_count": "sum",
+            })
             .sort_values(
                 ["plan_count", "fact_count", "department_name", "position_name"],
                 ascending=[False, False, True, True]
@@ -506,8 +435,10 @@ class TimesheetPlanFactData:
         if self._kpi_cache is not None:
             return dict(self._kpi_cache)
 
-        df = self.get_daily_detail()
-        if df.empty:
+        df_daily = self.get_plan_fact_daily()
+        df_detail = self.get_daily_detail()
+
+        if df_daily.empty:
             self._kpi_cache = {
                 "plan_total": 0,
                 "off_total": 0,
@@ -522,12 +453,12 @@ class TimesheetPlanFactData:
             }
             return dict(self._kpi_cache)
 
-        plan_total = int(df["plan_flag"].sum())
-        off_total = int(df["off_flag"].sum())
-        fact_total = int(df["fact_flag"].sum())
-        absent_total = int(df["absent_flag"].sum())
-        worked_on_off_total = int(df["worked_on_off_flag"].sum())
-        no_schedule_total = int(df["no_schedule_flag"].sum())
+        plan_total = int(df_daily["plan_count"].sum())
+        off_total = int(df_daily["off_count"].sum())
+        fact_total = int(df_daily["fact_count"].sum())
+        absent_total = int(df_daily["absent_count"].sum())
+        worked_on_off_total = int(df_daily["worked_on_off_count"].sum())
+        no_schedule_total = int(df_daily["no_schedule_count"].sum())
 
         self._kpi_cache = {
             "plan_total": plan_total,
@@ -536,10 +467,10 @@ class TimesheetPlanFactData:
             "absent_total": absent_total,
             "worked_on_off_total": worked_on_off_total,
             "no_schedule_total": no_schedule_total,
-            "attendance_pct": round((fact_total / plan_total) * 100.0, 1) if plan_total > 0 else 0.0,
-            "days_count": int(df["work_date"].nunique()),
-            "objects_count": int(df["object_name"].nunique()),
-            "employees_count": int(df["person_key"].nunique()),
+            "attendance_pct": round(fact_total / plan_total * 100.0, 1) if plan_total > 0 else 0.0,
+            "days_count": int(df_daily["work_date"].nunique()),
+            "objects_count": int(df_detail["object_name"].nunique()) if not df_detail.empty else 0,
+            "employees_count": int(df_detail["person_key"].nunique()) if not df_detail.empty else 0,
         }
         return dict(self._kpi_cache)
 
@@ -549,11 +480,13 @@ class TimesheetPlanFactPage(ttk.Frame):
         super().__init__(master)
         self.app_ref = app_ref
         self.data_provider: Optional[TimesheetPlanFactData] = None
+        self._loading = False
 
         self._build_header()
         self._build_body()
         self.load_filters()
-        self.refresh_data()
+
+        self.after(100, self.refresh_data)
 
     def _build_header(self):
         hdr = ttk.Frame(self, padding="8 6 8 6")
@@ -582,8 +515,11 @@ class TimesheetPlanFactPage(ttk.Frame):
         self.object_type_combo.pack(side="left", padx=4)
         self.object_type_combo.bind("<<ComboboxSelected>>", self.refresh_data)
 
-        ttk.Button(hdr, text="⟳ Обновить", command=self.refresh_data).pack(side="left", padx=10)
-        ttk.Button(hdr, text="📥 Экспорт в Excel", command=self.export_to_excel).pack(side="left", padx=4)
+        self.btn_refresh = ttk.Button(hdr, text="⟳ Обновить", command=self.refresh_data)
+        self.btn_refresh.pack(side="left", padx=10)
+
+        self.btn_export = ttk.Button(hdr, text="📥 Экспорт в Excel", command=self.export_to_excel)
+        self.btn_export.pack(side="left", padx=4)
 
         self.last_update_var = tk.StringVar(value="")
         ttk.Label(
@@ -614,15 +550,38 @@ class TimesheetPlanFactPage(ttk.Frame):
             lambda e: self.canvas.itemconfig(self.canvas_window, width=e.width)
         )
 
+    def _set_loading_state(self, loading: bool, status_text: str = ""):
+        self._loading = loading
+
+        state = "disabled" if loading else "readonly"
+        btn_state = "disabled" if loading else "normal"
+
+        try:
+            self.period_cb.configure(state=state)
+            self.object_type_combo.configure(state=state)
+            self.btn_refresh.configure(state=btn_state)
+            self.btn_export.configure(state=btn_state if self.data_provider else "disabled")
+        except Exception:
+            pass
+
+        if status_text:
+            self.last_update_var.set(status_text)
+
     def _clear_inner(self):
         for w in self.inner.winfo_children():
             w.destroy()
+
+    def _show_loading_placeholder(self, text: str = "Загрузка данных..."):
+        self._clear_inner()
+        box = ttk.Frame(self.inner)
+        box.pack(fill="both", expand=True, padx=20, pady=30)
+        ttk.Label(box, text=text, font=("Segoe UI", 11)).pack(pady=20)
 
     def load_filters(self):
         try:
             types = TimesheetPlanFactData(datetime.now().date(), datetime.now().date(), "").get_object_types()
             self.object_type_combo["values"] = ["Все типы"] + types
-        except Exception as e:
+        except Exception:
             logging.exception("Не удалось загрузить типы объектов")
             self.object_type_combo["values"] = ["Все типы"]
 
@@ -650,22 +609,50 @@ class TimesheetPlanFactPage(ttk.Frame):
         return start.date(), end.date()
 
     def refresh_data(self, event=None):
-        try:
-            start_date, end_date = self.get_dates_from_period()
-            obj_filter = self.object_type_var.get()
-            if obj_filter == "Все типы":
-                obj_filter = ""
+        if self._loading:
+            return
 
-            self.data_provider = TimesheetPlanFactData(start_date, end_date, obj_filter)
-            self._render()
+        start_date, end_date = self.get_dates_from_period()
+        obj_filter = self.object_type_var.get()
+        if obj_filter == "Все типы":
+            obj_filter = ""
 
-            self.last_update_var.set(
-                f"Обновлено: {datetime.now().strftime('%H:%M:%S')}  |  "
-                f"{start_date.strftime('%d.%m.%Y')} — {end_date.strftime('%d.%m.%Y')}"
-            )
-        except Exception as e:
-            logging.exception("Ошибка обновления план/факт")
-            messagebox.showerror("План / факт", f"Не удалось обновить данные:\n{e}")
+        self._set_loading_state(
+            True,
+            f"Загрузка... {start_date.strftime('%d.%m.%Y')} — {end_date.strftime('%d.%m.%Y')}"
+        )
+        self._show_loading_placeholder("Загрузка аналитики план/факт...")
+
+        def worker():
+            try:
+                dp = TimesheetPlanFactData(start_date, end_date, obj_filter)
+
+                dp.get_plan_fact_kpi()
+                dp.get_plan_fact_by_object()
+                dp.get_plan_fact_by_position()
+                dp.get_plan_fact_by_date()
+                dp.get_plan_fact_daily()
+
+                self.after(0, lambda: self._on_data_loaded(dp, start_date, end_date))
+            except Exception as e:
+                logging.exception("Ошибка загрузки план/факт")
+                self.after(0, lambda: self._on_data_error(e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_data_loaded(self, dp: TimesheetPlanFactData, start_date: date, end_date: date):
+        self.data_provider = dp
+        self._render()
+        self._set_loading_state(
+            False,
+            f"Обновлено: {datetime.now().strftime('%H:%M:%S')}  |  "
+            f"{start_date.strftime('%d.%m.%Y')} — {end_date.strftime('%d.%m.%Y')}"
+        )
+
+    def _on_data_error(self, error: Exception):
+        self._set_loading_state(False, "Ошибка загрузки данных")
+        self._show_loading_placeholder("Не удалось загрузить данные.")
+        messagebox.showerror("План / факт", f"Не удалось загрузить данные:\n{error}")
 
     def _create_card(self, parent, title: str, value: str, unit: str, color: str):
         card = tk.Frame(parent, bg="white", highlightbackground="#E0E0E0", highlightthickness=1)
@@ -999,7 +986,6 @@ class TimesheetPlanFactPage(ttk.Frame):
                 stz(dp.get_plan_fact_by_position()).to_excel(writer, sheet_name="По_должностям", index=False)
                 stz(dp.get_plan_fact_by_date()).to_excel(writer, sheet_name="По_датам", index=False)
                 stz(dp.get_plan_fact_daily()).to_excel(writer, sheet_name="Детализация", index=False)
-                stz(dp.get_daily_detail()).to_excel(writer, sheet_name="Сырые_дни", index=False)
 
                 try:
                     from openpyxl.utils import get_column_letter
