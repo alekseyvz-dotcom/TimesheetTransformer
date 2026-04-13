@@ -42,13 +42,14 @@ def _norm_text(v: Any) -> str:
 def _norm_fio(v: Any) -> str:
     return " ".join(_norm_text(v).lower().split())
 
+def _norm_tbn(v: Any) -> str:
+    return " ".join(_norm_text(v).lower().split())
 
 def _person_key(fio: Any, tbn: Any) -> str:
-    tbn_val = _norm_text(tbn)
+    tbn_val = _norm_tbn(tbn)
     if tbn_val:
         return f"tbn:{tbn_val}"
     return f"fio:{_norm_fio(fio)}"
-
 
 def _extract_hours(raw: Any) -> float:
     if raw is None:
@@ -189,7 +190,7 @@ class TimesheetPlanFactData:
                 "work_schedule_name": _norm_text(r.get("work_schedule")),
             }
     
-            tbn_norm = _norm_text(r.get("tbn"))
+            tbn_norm = _norm_tbn(r.get("tbn"))
             fio_norm = _norm_fio(r.get("fio"))
     
             if tbn_norm and tbn_norm not in by_tbn:
@@ -233,39 +234,39 @@ class TimesheetPlanFactData:
         employees_by_tbn: Dict[str, Dict[str, Any]],
         employees_by_fio: Dict[str, Dict[str, Any]],
     ) -> Optional[Dict[str, Any]]:
-        tbn_norm = _norm_text(tbn)
+        tbn_norm = _norm_tbn(tbn)
         if tbn_norm and tbn_norm in employees_by_tbn:
             return employees_by_tbn[tbn_norm]
-
+    
         fio_norm = _norm_fio(fio)
         if fio_norm and fio_norm in employees_by_fio:
             return employees_by_fio[fio_norm]
-
+    
         return None
 
     def _build_day_detail(self) -> pd.DataFrame:
         year = self.selected_date.year
         month = self.selected_date.month
         day_num = self.selected_date.day
-
+    
         timesheet_rows = self._load_timesheet_rows_for_day(year, month, day_num)
         employees_by_tbn, employees_by_fio = self._load_employees()
         schedule_map = self._load_schedule_map_for_month(year, month)
-
+    
         result_rows: List[Dict[str, Any]] = []
-
+    
         for row in timesheet_rows:
             raw_val = row.get("day_value")
             hours = _extract_hours(raw_val)
             worked_flag = 1 if hours > 0 else 0
-
+    
             emp = self._match_employee(
                 row.get("fio"),
                 row.get("tbn"),
                 employees_by_tbn,
                 employees_by_fio,
             )
-
+    
             if emp:
                 employee_id = emp.get("employee_id")
                 department_name = emp.get("department_name") or row.get("header_department") or "—"
@@ -276,11 +277,11 @@ class TimesheetPlanFactData:
                 department_name = row.get("header_department") or "—"
                 position_name = "—"
                 work_schedule_name = ""
-
+    
             schedule_info = None
             if work_schedule_name:
                 schedule_info = schedule_map.get((work_schedule_name.lower(), self.selected_date))
-
+    
             no_schedule_flag = 0
             plan_flag = 0
             off_flag = 0
@@ -289,13 +290,15 @@ class TimesheetPlanFactData:
             worked_on_off_flag = 0
             is_workday = None
             planned_hours = 0.0
-
+    
             if schedule_info is None:
                 no_schedule_flag = 1
+                if worked_flag:
+                    fact_flag = 1
             else:
                 is_workday = bool(schedule_info["is_workday"])
                 planned_hours = float(schedule_info.get("planned_hours") or 0)
-
+    
                 if is_workday:
                     plan_flag = 1
                     if worked_flag:
@@ -306,19 +309,8 @@ class TimesheetPlanFactData:
                     off_flag = 1
                     if worked_flag:
                         worked_on_off_flag = 1
-
-            if row.get("object_name") == "Москва, 1-й Курьяновский пр-д":
-                logging.info(
-                    "DEBUG planfact: date=%s fio=%s tbn=%s day_value=%r hours=%s work_schedule=%s schedule_info=%r",
-                    self.selected_date,
-                    row.get("fio"),
-                    row.get("tbn"),
-                    raw_val,
-                    hours,
-                    work_schedule_name,
-                    schedule_info,
-                )
-
+                        fact_flag = 1
+    
             result_rows.append(
                 {
                     "work_date": pd.Timestamp(self.selected_date),
@@ -346,9 +338,9 @@ class TimesheetPlanFactData:
                     "no_schedule_flag": no_schedule_flag,
                 }
             )
-
+    
         df = pd.DataFrame(result_rows)
-
+    
         if df.empty:
             return pd.DataFrame(columns=[
                 "work_date", "object_id", "object_db_id", "object_name", "object_type",
@@ -358,22 +350,31 @@ class TimesheetPlanFactData:
                 "off_flag", "fact_flag", "absent_flag", "worked_on_off_flag",
                 "no_schedule_flag",
             ])
-
+    
         for col in [
             "worked_flag", "plan_flag", "off_flag", "fact_flag",
             "absent_flag", "worked_on_off_flag", "no_schedule_flag",
         ]:
             df[col] = df[col].fillna(0).astype(int)
-
+    
         df["hours"] = pd.to_numeric(df["hours"], errors="coerce").fillna(0.0)
-
-        dedup_priority = (
+    
+        # Приоритетная строка по человеку:
+        # 1) факт по графику
+        # 2) выход в выходной
+        # 3) план
+        # 4) выходной
+        # 5) без графика
+        df["_priority"] = (
             df["fact_flag"] * 100
             + df["worked_on_off_flag"] * 50
             + df["plan_flag"] * 20
             + df["off_flag"] * 10
+            + (1 - df["no_schedule_flag"])
         )
-        df = df.assign(_priority=dedup_priority)
+    
+        # Оставляем лучшую строку по каждому человеку.
+        # Ключ человека: сначала TBN, если нет — по ФИО.
         df = (
             df.sort_values(
                 ["person_key", "_priority", "hours", "object_name"],
@@ -382,9 +383,9 @@ class TimesheetPlanFactData:
             .drop_duplicates(subset=["person_key"], keep="first")
             .drop(columns=["_priority"])
         )
-
+    
         return df
-
+    
     def get_day_detail(self) -> pd.DataFrame:
         if self._detail_cache is None:
             self._detail_cache = self._build_day_detail()
