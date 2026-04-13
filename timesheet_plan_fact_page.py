@@ -175,13 +175,12 @@ class TimesheetPlanFactData:
             FROM employees e
             LEFT JOIN departments d
               ON d.id = e.department_id
-            WHERE COALESCE(e.is_deleted, FALSE) = FALSE
             """
         )
-
+    
         by_tbn: Dict[str, Dict[str, Any]] = {}
         by_fio: Dict[str, Dict[str, Any]] = {}
-
+    
         for r in rows:
             item = {
                 "employee_id": r.get("id"),
@@ -189,15 +188,15 @@ class TimesheetPlanFactData:
                 "department_name": r.get("department_name") or "—",
                 "work_schedule_name": _norm_text(r.get("work_schedule")),
             }
-
+    
             tbn_norm = _norm_text(r.get("tbn"))
             fio_norm = _norm_fio(r.get("fio"))
-
+    
             if tbn_norm and tbn_norm not in by_tbn:
                 by_tbn[tbn_norm] = item
             if fio_norm and fio_norm not in by_fio:
                 by_fio[fio_norm] = item
-
+    
         return by_tbn, by_fio
 
     def _load_schedule_map_for_month(self, year: int, month: int) -> Dict[Tuple[str, date], Dict[str, Any]]:
