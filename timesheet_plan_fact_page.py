@@ -1,5 +1,6 @@
 import calendar
 import logging
+import re
 import threading
 from datetime import datetime, timedelta, date
 from typing import Optional, List, Dict, Any, Tuple
@@ -53,17 +54,37 @@ def _extract_hours(raw: Any) -> float:
     if raw is None:
         return 0.0
 
-    s = str(raw).strip().replace(",", ".")
+    if isinstance(raw, (int, float)):
+        try:
+            val = float(raw)
+            return val if val > 0 else 0.0
+        except Exception:
+            return 0.0
+
+    s = str(raw).strip().replace(",", ".").lower()
     if not s:
         return 0.0
 
-    import re
-    m = re.search(r"(\d+(?:\.\d+)?)", s)
+    non_work_codes = {
+        "null", "[null]",
+        "в", "вых", "выходной",
+        "б", "больничный",
+        "о", "от", "отп", "отпуск",
+        "к", "ком", "командировка",
+        "п", "пр", "прогул",
+        "н", "нн",
+        "д", "до",
+    }
+    if s in non_work_codes:
+        return 0.0
+
+    m = re.search(r"[-+]?\d+(?:\.\d+)?", s)
     if not m:
         return 0.0
 
     try:
-        return float(m.group(1))
+        val = float(m.group(0))
+        return val if val > 0 else 0.0
     except Exception:
         return 0.0
 
@@ -105,8 +126,8 @@ class TimesheetPlanFactData:
         )
         return [r["short_name"] for r in rows]
 
-    def _load_timesheet_rows_for_month(self, year: int, month: int) -> List[Dict[str, Any]]:
-        params: List[Any] = [year, month]
+    def _load_timesheet_rows_for_day(self, year: int, month: int, day_num: int) -> List[Dict[str, Any]]:
+        params: List[Any] = [day_num, year, month]
         object_filter_sql = ""
 
         if self.object_type_filter:
@@ -126,7 +147,7 @@ class TimesheetPlanFactData:
                 tr.id AS row_id,
                 tr.fio,
                 tr.tbn,
-                tr.hours_raw
+                tr.hours_raw[%s] AS day_value
             FROM timesheet_headers th
             JOIN timesheet_rows tr
               ON tr.header_id = th.id
@@ -154,6 +175,7 @@ class TimesheetPlanFactData:
             FROM employees e
             LEFT JOIN departments d
               ON d.id = e.department_id
+            WHERE COALESCE(e.is_deleted, FALSE) = FALSE
             """
         )
 
@@ -227,18 +249,14 @@ class TimesheetPlanFactData:
         month = self.selected_date.month
         day_num = self.selected_date.day
 
-        timesheet_rows = self._load_timesheet_rows_for_month(year, month)
+        timesheet_rows = self._load_timesheet_rows_for_day(year, month, day_num)
         employees_by_tbn, employees_by_fio = self._load_employees()
         schedule_map = self._load_schedule_map_for_month(year, month)
 
         result_rows: List[Dict[str, Any]] = []
 
         for row in timesheet_rows:
-            hours_raw = row.get("hours_raw") or []
-            raw_val = None
-            if isinstance(hours_raw, list) and len(hours_raw) >= day_num:
-                raw_val = hours_raw[day_num - 1]
-
+            raw_val = row.get("day_value")
             hours = _extract_hours(raw_val)
             worked_flag = 1 if hours > 0 else 0
 
@@ -290,6 +308,18 @@ class TimesheetPlanFactData:
                     if worked_flag:
                         worked_on_off_flag = 1
 
+            if row.get("object_name") == "Москва, 1-й Курьяновский пр-д":
+                logging.info(
+                    "DEBUG planfact: date=%s fio=%s tbn=%s day_value=%r hours=%s work_schedule=%s schedule_info=%r",
+                    self.selected_date,
+                    row.get("fio"),
+                    row.get("tbn"),
+                    raw_val,
+                    hours,
+                    work_schedule_name,
+                    schedule_info,
+                )
+
             result_rows.append(
                 {
                     "work_date": pd.Timestamp(self.selected_date),
@@ -338,8 +368,6 @@ class TimesheetPlanFactData:
 
         df["hours"] = pd.to_numeric(df["hours"], errors="coerce").fillna(0.0)
 
-        # Дедупликация по человеку на выбранную дату
-        # если дублей нет - ничего не изменится
         dedup_priority = (
             df["fact_flag"] * 100
             + df["worked_on_off_flag"] * 50
@@ -495,6 +523,36 @@ class TimesheetPlanFactData:
 
         self._trend_cache = pd.DataFrame(records)
         return self._trend_cache.copy()
+
+    def get_export_summary(self) -> pd.DataFrame:
+        df = self.get_day_detail()
+
+        if df.empty:
+            return pd.DataFrame(columns=[
+                "Объект",
+                "Подразделение",
+                "Должность",
+                "План",
+                "Факт",
+            ])
+
+        result = (
+            df.groupby(["object_name", "department_name", "position_name"], as_index=False)
+            .agg(
+                plan_count=("plan_flag", "sum"),
+                fact_count=("fact_flag", "sum"),
+            )
+            .sort_values(["object_name", "department_name", "position_name"], ascending=[True, True, True])
+            .rename(columns={
+                "object_name": "Объект",
+                "department_name": "Подразделение",
+                "position_name": "Должность",
+                "plan_count": "План",
+                "fact_count": "Факт",
+            })
+        )
+
+        return result
 
 
 class TimesheetPlanFactPage(ttk.Frame):
@@ -947,6 +1005,7 @@ class TimesheetPlanFactPage(ttk.Frame):
                 dp.get_by_position().to_excel(writer, sheet_name="По_должностям", index=False)
                 dp.get_trend(7).to_excel(writer, sheet_name="Динамика_7_дней", index=False)
                 dp.get_day_detail().to_excel(writer, sheet_name="Люди_за_день", index=False)
+                dp.get_export_summary().to_excel(writer, sheet_name="Свод_объект_подр_должн", index=False)
 
             messagebox.showinfo("Экспорт завершён", f"Файл успешно сохранён:\n{path}")
         except Exception as e:
