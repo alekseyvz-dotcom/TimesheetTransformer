@@ -1044,22 +1044,13 @@ def find_fired_employees_in_timesheet(
       * dismissal_date заполнена и <= последнему дню месяца табеля
 
     Сопоставление:
-    - если есть tbn -> ищем по tbn;
-    - если tbn нет -> ищем по fio.
-
-    Возвращает список словарей:
-    {
-        "fio": ...,
-        "tbn": ...,
-        "is_fired": ...,
-        "dismissal_date": ...,
-        "match_type": "tbn" | "fio",
-    }
+    - если у строки табеля есть tbn -> приоритетный матч по tbn;
+    - если tbn нет -> матч по fio.
     """
     import calendar
 
-    pairs_with_tbn: set[str] = set()
-    fio_without_tbn: set[str] = set()
+    input_tbns: set[str] = set()
+    input_fios_without_tbn: set[str] = set()
 
     for fio, tbn in employees:
         fio_norm = normalize_spaces(fio or "")
@@ -1069,79 +1060,67 @@ def find_fired_employees_in_timesheet(
             continue
 
         if tbn_norm:
-            pairs_with_tbn.add(tbn_norm)
+            input_tbns.add(tbn_norm)
         elif fio_norm:
-            fio_without_tbn.add(fio_norm.lower())
+            input_fios_without_tbn.add(fio_norm.lower())
 
-    if not pairs_with_tbn and not fio_without_tbn:
+    if not input_tbns and not input_fios_without_tbn:
         return []
 
-    last_day = calendar.monthrange(int(year), int(month))[1]
+    last_day = date(int(year), int(month), calendar.monthrange(int(year), int(month))[1])
 
     with db_cursor(dict_rows=True) as (_conn, cur):
-        conditions = []
-        params: List[Any] = []
-
-        if pairs_with_tbn:
-            conditions.append("normalize_tbn_key = ANY(%s)")
-            params.append(list(pairs_with_tbn))
-
-        if fio_without_tbn:
-            conditions.append("lower_fio = ANY(%s)")
-            params.append(list(fio_without_tbn))
-
-        where_match_sql = " OR ".join(f"({c})" for c in conditions)
-
         cur.execute(
-            f"""
-            WITH emp AS (
-                SELECT
-                    COALESCE(e.fio, '') AS fio,
-                    COALESCE(e.tbn, '') AS tbn,
-                    COALESCE(e.is_fired, FALSE) AS is_fired,
-                    e.dismissal_date,
-                    LOWER(TRIM(COALESCE(e.fio, ''))) AS lower_fio,
-                    TRIM(COALESCE(e.tbn, '')) AS normalize_tbn_key
-                FROM public.employees e
-            )
+            """
             SELECT
                 fio,
                 tbn,
                 is_fired,
-                dismissal_date,
-                CASE
-                    WHEN normalize_tbn_key <> '' THEN 'tbn'
-                    ELSE 'fio'
-                END AS match_type
-            FROM emp
-            WHERE ({where_match_sql})
-              AND (
-                    is_fired = TRUE
-                    OR dismissal_date IS NOT NULL AND dismissal_date <= %s
-                  )
-            ORDER BY fio, tbn
-            """,
-            params + [date(int(year), int(month), int(last_day))],
+                dismissal_date
+            FROM public.employees
+            WHERE COALESCE(is_fired, FALSE) = TRUE
+               OR dismissal_date IS NOT NULL
+            """
         )
 
         result: List[Dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
 
         for row in cur.fetchall():
-            fio = normalize_spaces(row.get("fio") or "")
-            tbn = normalize_tbn(row.get("tbn"))
-            key = (fio.lower(), tbn)
+            fio_db = normalize_spaces(row.get("fio") or "")
+            tbn_db = normalize_tbn(row.get("tbn"))
+            is_fired = bool(row.get("is_fired"))
+            dismissal_date = row.get("dismissal_date")
+
+            fired_for_period = is_fired or (dismissal_date is not None and dismissal_date <= last_day)
+            if not fired_for_period:
+                continue
+
+            matched = False
+            match_type = ""
+
+            if tbn_db and tbn_db in input_tbns:
+                matched = True
+                match_type = "tbn"
+            elif not tbn_db and fio_db and fio_db.lower() in input_fios_without_tbn:
+                matched = True
+                match_type = "fio"
+
+            if not matched:
+                continue
+
+            key = (fio_db.lower(), tbn_db)
             if key in seen:
                 continue
             seen.add(key)
 
             result.append(
                 {
-                    "fio": fio,
-                    "tbn": tbn,
-                    "is_fired": bool(row.get("is_fired")),
-                    "dismissal_date": row.get("dismissal_date"),
-                    "match_type": row.get("match_type") or "",
+                    "fio": fio_db,
+                    "tbn": tbn_db,
+                    "is_fired": is_fired,
+                    "dismissal_date": dismissal_date,
+                    "match_type": match_type,
                 }
             )
 
