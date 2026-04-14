@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 import logging
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
@@ -1028,6 +1029,123 @@ def find_timesheet_header_id(
             int(user_id),
         )
 
+def find_fired_employees_in_timesheet(
+    employees: Sequence[Tuple[str, str]],
+    year: int,
+    month: int,
+) -> List[Dict[str, Any]]:
+    """
+    Ищет сотрудников из табеля, которые уволены.
+
+    Правило:
+    - сотрудник считается уволенным, если:
+      * is_fired = TRUE
+      ИЛИ
+      * dismissal_date заполнена и <= последнему дню месяца табеля
+
+    Сопоставление:
+    - если есть tbn -> ищем по tbn;
+    - если tbn нет -> ищем по fio.
+
+    Возвращает список словарей:
+    {
+        "fio": ...,
+        "tbn": ...,
+        "is_fired": ...,
+        "dismissal_date": ...,
+        "match_type": "tbn" | "fio",
+    }
+    """
+    import calendar
+
+    pairs_with_tbn: set[str] = set()
+    fio_without_tbn: set[str] = set()
+
+    for fio, tbn in employees:
+        fio_norm = normalize_spaces(fio or "")
+        tbn_norm = normalize_tbn(tbn)
+
+        if not fio_norm and not tbn_norm:
+            continue
+
+        if tbn_norm:
+            pairs_with_tbn.add(tbn_norm)
+        elif fio_norm:
+            fio_without_tbn.add(fio_norm.lower())
+
+    if not pairs_with_tbn and not fio_without_tbn:
+        return []
+
+    last_day = calendar.monthrange(int(year), int(month))[1]
+
+    with db_cursor(dict_rows=True) as (_conn, cur):
+        conditions = []
+        params: List[Any] = []
+
+        if pairs_with_tbn:
+            conditions.append("normalize_tbn_key = ANY(%s)")
+            params.append(list(pairs_with_tbn))
+
+        if fio_without_tbn:
+            conditions.append("lower_fio = ANY(%s)")
+            params.append(list(fio_without_tbn))
+
+        where_match_sql = " OR ".join(f"({c})" for c in conditions)
+
+        cur.execute(
+            f"""
+            WITH emp AS (
+                SELECT
+                    COALESCE(e.fio, '') AS fio,
+                    COALESCE(e.tbn, '') AS tbn,
+                    COALESCE(e.is_fired, FALSE) AS is_fired,
+                    e.dismissal_date,
+                    LOWER(TRIM(COALESCE(e.fio, ''))) AS lower_fio,
+                    TRIM(COALESCE(e.tbn, '')) AS normalize_tbn_key
+                FROM public.employees e
+            )
+            SELECT
+                fio,
+                tbn,
+                is_fired,
+                dismissal_date,
+                CASE
+                    WHEN normalize_tbn_key <> '' THEN 'tbn'
+                    ELSE 'fio'
+                END AS match_type
+            FROM emp
+            WHERE ({where_match_sql})
+              AND (
+                    is_fired = TRUE
+                    OR dismissal_date IS NOT NULL AND dismissal_date <= %s
+                  )
+            ORDER BY fio, tbn
+            """,
+            params + [date(int(year), int(month), int(last_day))],
+        )
+
+        result: List[Dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+
+        for row in cur.fetchall():
+            fio = normalize_spaces(row.get("fio") or "")
+            tbn = normalize_tbn(row.get("tbn"))
+            key = (fio.lower(), tbn)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            result.append(
+                {
+                    "fio": fio,
+                    "tbn": tbn,
+                    "is_fired": bool(row.get("is_fired")),
+                    "dismissal_date": row.get("dismissal_date"),
+                    "match_type": row.get("match_type") or "",
+                }
+            )
+
+        return result
 
 # ============================================================
 # Экспортируемые имена
@@ -1058,4 +1176,5 @@ __all__ = [
     "load_objects_from_db",
     "load_objects_short_for_timesheet",
     "find_timesheet_header_id",
+    "find_fired_employees_in_timesheet",
 ]
