@@ -43,6 +43,7 @@ from timesheet_common import (
 from timesheet_db import (
     db_cursor,
     find_duplicate_employees_for_timesheet,
+    find_fired_employees_in_timesheet,
     find_timesheet_header_id,
     load_all_timesheet_headers,
     load_brigadier_assignments_for_department,
@@ -1738,6 +1739,65 @@ class TimesheetPage(tk.Frame):
         if cur not in options:
             self.var_brigadier.set("Все")
 
+    def _show_fired_employees_warning_on_load(self, fired_rows: List[Dict[str, Any]], year: int, month: int):
+        if not fired_rows:
+            return
+    
+        month_ru = month_name_ru(month) if 1 <= month <= 12 else str(month)
+    
+        before_period = []
+        in_period = []
+        other = []
+    
+        for item in fired_rows:
+            fio = normalize_spaces(item.get("fio") or "")
+            tbn = normalize_tbn(item.get("tbn"))
+            dismissal_date = item.get("dismissal_date")
+    
+            line = f"• {fio}"
+            if tbn:
+                line += f" (таб. № {tbn})"
+            if dismissal_date:
+                line += f" — дата увольнения: {dismissal_date.strftime('%d.%m.%Y')}"
+    
+            if dismissal_date:
+                if dismissal_date.year < year or (dismissal_date.year == year and dismissal_date.month < month):
+                    before_period.append(line)
+                elif dismissal_date.year == year and dismissal_date.month == month:
+                    in_period.append(line)
+                else:
+                    other.append(line)
+            else:
+                other.append(line)
+    
+        parts = [
+            "⚠️ В табеле обнаружены уволенные сотрудники.\n",
+            f"Период табеля: {month_ru} {year} г.\n",
+        ]
+    
+        if before_period:
+            parts.append("Уволены до начала периода:\n" + "\n".join(before_period[:15]))
+            if len(before_period) > 15:
+                parts.append(f"... и ещё {len(before_period) - 15}")
+    
+        if in_period:
+            parts.append("\nУволены в течение периода:\n" + "\n".join(in_period[:15]))
+            if len(in_period) > 15:
+                parts.append(f"... и ещё {len(in_period) - 15}")
+    
+        if other:
+            parts.append("\nПомечены как уволенные:\n" + "\n".join(other[:15]))
+            if len(other) > 15:
+                parts.append(f"... и ещё {len(other) - 15}")
+    
+        parts.append("\nПроверьте корректность строк табеля.")
+    
+        messagebox.showwarning(
+            "Уволенные сотрудники",
+            "\n".join(parts),
+            parent=self,
+        )    
+        
     def _show_suspicious_warning_on_load(self, suspicious: List[Dict[str, Any]]):
         lines = []
         for item in suspicious[:10]:
@@ -1864,6 +1924,27 @@ class TimesheetPage(tk.Frame):
             self.model_rows_all.extend(loaded_rows)
             self._recalc_all_row_totals()
             self._apply_filter()
+
+            employees_for_check = []
+            for rec in self.model_rows_all:
+                fio = normalize_spaces(rec.get("fio") or "")
+                tbn = normalize_tbn(rec.get("tbn"))
+                if fio or tbn:
+                    employees_for_check.append((fio, tbn))
+
+            try:
+                fired_rows = find_fired_employees_in_timesheet(
+                    employees=employees_for_check,
+                    year=year,
+                    month=month,
+                )
+                if fired_rows:
+                    self.after(
+                        250,
+                        lambda rows=fired_rows, y=year, m=month: self._show_fired_employees_warning_on_load(rows, y, m),
+                    )
+            except Exception:
+                logger.exception("Ошибка проверки уволенных сотрудников при открытии табеля")
 
             suspicious = find_suspicious_cells(self.model_rows_all, year, month)
             if suspicious:
