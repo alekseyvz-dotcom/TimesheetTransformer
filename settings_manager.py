@@ -503,7 +503,6 @@ def _parse_excel_date(val) -> Opt[date]:
 
     return None
 
-
 def import_employees_from_excel(path: Path) -> int:
     """
     Импортирует сотрудников из Excel-файла (как 'ШТАТ на ...').
@@ -511,6 +510,7 @@ def import_employees_from_excel(path: Path) -> int:
     Дополнительно импортирует:
       - дату приема
       - график работы
+      - дату увольнения
     """
     if not path.exists():
         raise FileNotFoundError(f"Файл не найден: {path}")
@@ -559,7 +559,8 @@ def import_employees_from_excel(path: Path) -> int:
                     hire_date_val = _parse_excel_date(hire_date_raw)
 
                     dismissal_raw = row[idx_dismissal] if idx_dismissal is not None and idx_dismissal < len(row) else None
-                    is_fired = bool(dismissal_raw and _s_val(dismissal_raw))
+                    dismissal_date_val = _parse_excel_date(dismissal_raw)
+                    is_fired = dismissal_date_val is not None
 
                     if not fio and not tbn:
                         continue
@@ -593,6 +594,7 @@ def import_employees_from_excel(path: Path) -> int:
                                 department_id = %s,
                                 is_fired = %s,
                                 hire_date = %s,
+                                dismissal_date = %s,
                                 work_schedule = %s
                             WHERE id = %s
                             """,
@@ -603,6 +605,7 @@ def import_employees_from_excel(path: Path) -> int:
                                 department_id,
                                 is_fired,
                                 hire_date_val,
+                                dismissal_date_val,
                                 schedule or None,
                                 r[0],
                             ),
@@ -611,8 +614,8 @@ def import_employees_from_excel(path: Path) -> int:
                         cur.execute(
                             """
                             INSERT INTO employees
-                                (fio, tbn, position, department_id, is_fired, hire_date, work_schedule)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                                (fio, tbn, position, department_id, is_fired, hire_date, dismissal_date, work_schedule)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                             """,
                             (
                                 fio or None,
@@ -621,6 +624,7 @@ def import_employees_from_excel(path: Path) -> int:
                                 department_id,
                                 is_fired,
                                 hire_date_val,
+                                dismissal_date_val,
                                 schedule or None,
                             ),
                         )
