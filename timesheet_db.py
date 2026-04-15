@@ -752,25 +752,37 @@ def find_employee_day_conflicts(
     - если передан tbn -> ищем по tbn;
     - если tbn пустой -> ищем по fio.
     """
-
     fio_norm = normalize_spaces(fio or "")
     tbn_norm = normalize_tbn(tbn)
 
     if not fio_norm and not tbn_norm:
         return []
 
-    if day_index < 0 or day_index > 30:
+    if not (0 <= int(day_index) <= 30):
         return []
 
-    where_employee_sql = "COALESCE(r.tbn, '') = %s" if tbn_norm else "LOWER(COALESCE(r.fio, '')) = %s"
-    employee_param = tbn_norm if tbn_norm else fio_norm.lower()
+    day_num = int(day_index) + 1
 
-    params: List[Any] = [int(year), int(month), employee_param, int(day_index + 1)]
+    where_parts = [
+        "h.year = %s",
+        "h.month = %s",
+        "array_length(r.hours_raw, 1) >= %s",
+        "NULLIF(BTRIM(COALESCE(r.hours_raw[%s]::text, '')), '') IS NOT NULL",
+    ]
+    params: List[Any] = [int(year), int(month), day_num, day_num]
 
-    exclude_sql = ""
+    if tbn_norm:
+        where_parts.append("COALESCE(r.tbn, '') = %s")
+        params.append(tbn_norm)
+    else:
+        where_parts.append("LOWER(COALESCE(r.fio, '')) = %s")
+        params.append(fio_norm.lower())
+
     if exclude_header_id is not None:
-        exclude_sql = "AND h.id <> %s"
+        where_parts.append("h.id <> %s")
         params.append(int(exclude_header_id))
+
+    where_sql = "\n              AND ".join(where_parts)
 
     with db_cursor(dict_rows=True) as (_conn, cur):
         cur.execute(
@@ -789,15 +801,10 @@ def find_employee_day_conflicts(
             FROM timesheet_headers h
             JOIN timesheet_rows r ON r.header_id = h.id
             JOIN app_users u ON u.id = h.user_id
-            WHERE h.year = %s
-              AND h.month = %s
-              AND {where_employee_sql}
-              AND array_length(r.hours_raw, 1) >= %s
-              AND NULLIF(BTRIM(COALESCE(r.hours_raw[%s]::text, '')), '') IS NOT NULL
-              {exclude_sql}
+            WHERE {where_sql}
             ORDER BY h.updated_at DESC NULLS LAST, h.id DESC
             """,
-            [int(day_index + 1)] + params[:2] + [employee_param, int(day_index + 1), int(day_index + 1)] + (params[4:] if exclude_header_id is not None else []),
+            [day_num] + params,
         )
 
         result: List[Dict[str, Any]] = []
@@ -1253,4 +1260,5 @@ __all__ = [
     "load_objects_short_for_timesheet",
     "find_timesheet_header_id",
     "find_fired_employees_in_timesheet",
+    "find_employee_day_conflicts",
 ]
