@@ -43,6 +43,7 @@ from timesheet_common import (
 from timesheet_db import (
     db_cursor,
     find_duplicate_employees_for_timesheet,
+    find_employee_day_conflicts,
     find_fired_employees_in_timesheet,
     find_timesheet_header_id,
     load_all_timesheet_headers,
@@ -2031,14 +2032,90 @@ class TimesheetPage(tk.Frame):
     # Изменения грида
     # --------------------------------------------------------
 
+    def _warn_if_employee_has_time_in_other_timesheets(self, rec: Dict[str, Any], day_index: int):
+        fio = normalize_spaces(rec.get("fio") or "")
+        tbn = normalize_tbn(rec.get("tbn"))
+    
+        if not fio and not tbn:
+            return
+    
+        hours_list = rec.get("hours") or []
+        if not (0 <= day_index < len(hours_list)):
+            return
+    
+        current_val = hours_list[day_index]
+        if current_val is None or str(current_val).strip() == "":
+            return
+    
+        year, month = self.get_year_month()
+    
+        try:
+            conflicts = find_employee_day_conflicts(
+                fio=fio,
+                tbn=tbn,
+                year=year,
+                month=month,
+                day_index=day_index,
+                exclude_header_id=self._active_header_id,
+            )
+        except Exception:
+            logger.exception("Ошибка проверки пересечения времени по другим табелям")
+            return
+    
+        if not conflicts:
+            return
+    
+        lines = []
+        for item in conflicts[:10]:
+            obj = normalize_spaces(item.get("object_addr") or "")
+            oid = normalize_spaces(item.get("object_id") or "")
+            dep = normalize_spaces(item.get("department") or "")
+            val = item.get("value")
+            uname = normalize_spaces(item.get("full_name") or item.get("username") or "")
+    
+            obj_part = f"[{oid}] {obj}" if oid and obj else (obj or oid or "Без объекта")
+    
+            line = f"• {obj_part}"
+            if dep:
+                line += f", {dep}"
+            if val is not None and str(val).strip():
+                line += f", время: {val}"
+            if uname:
+                line += f", пользователь: {uname}"
+    
+            lines.append(line)
+    
+        msg = (
+            f"У сотрудника уже проставлено время в другом табеле "
+            f"за {day_index + 1:02d}.{month:02d}.{year}.\n\n"
+            f"Сотрудник: {fio}"
+        )
+        if tbn:
+            msg += f" (таб.№ {tbn})"
+    
+        msg += "\n\nНайдено в табелях:\n" + "\n".join(lines)
+    
+        if len(conflicts) > 10:
+            msg += f"\n... и ещё {len(conflicts) - 10}"
+    
+        messagebox.showwarning(
+            "Пересечение по времени",
+            msg,
+            parent=self,
+        )
+
     def _on_cell_changed(self, row_index: int, day_index: int):
         if 0 <= row_index < len(self.model_rows):
             rec = self.model_rows[row_index]
             self._recalc_row_totals_for_rec(rec)
-
+    
             hours_list = rec.get("hours") or []
             if 0 <= day_index < len(hours_list):
                 raw_value = hours_list[day_index]
+    
+                if raw_value is not None and str(raw_value).strip() != "":
+                    self._warn_if_employee_has_time_in_other_timesheets(rec, day_index)
+    
                 parsed = parse_timesheet_cell(raw_value)
                 if parsed.suspicious:
                     parsed_str = f"{parsed.total_hours:.2f}" if parsed.total_hours is not None else "?"
@@ -2053,7 +2130,7 @@ class TimesheetPage(tk.Frame):
                         f"(например: 825 → 8.25)",
                         parent=self,
                     )
-
+    
         self._grid_refresh(rows_changed=False)
         self._recalc_object_total()
         self._mark_dirty()
