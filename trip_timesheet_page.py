@@ -425,27 +425,23 @@ class TripTimesheetPage(ttk.Frame):
         except Exception as exc:
             messagebox.showerror("Ошибка", f"Не удалось загрузить сотрудников:\n{exc}", parent=self)
             return
-
+    
         existing_keys = {
             (normalize_spaces(r.get("fio") or "").lower(), normalize_tbn(r.get("tbn")))
             for r in self.rows
         }
-
+    
         try:
-            selected = SelectEmployeesDialog.show(
-                self,
-                employees=employees,
-                title="Выбор сотрудников для командировочного табеля",
-            )
-        except TypeError:
-            # если у тебя другой show-интерфейс, ниже можно будет быстро подстроить
-            dlg = SelectEmployeesDialog(self, employees=employees)
+            dlg = SelectEmployeesDialog(self, employees=employees, current_dep="Все")
             self.wait_window(dlg)
             selected = getattr(dlg, "result", None)
-
+        except Exception as exc:
+            messagebox.showerror("Ошибка", f"Не удалось открыть выбор сотрудников:\n{exc}", parent=self)
+            return
+    
         if not selected:
             return
-
+    
         added = 0
         for item in selected:
             if len(item) >= 2:
@@ -453,15 +449,20 @@ class TripTimesheetPage(ttk.Frame):
                 tbn = normalize_tbn(item[1])
             else:
                 continue
-
+    
             key = (fio.lower(), tbn)
             if key in existing_keys:
                 continue
-
-            self.rows.append(self._empty_row(fio=fio, tbn=tbn))
+    
+            row = self._empty_row(fio=fio, tbn=tbn)
+    
+            if len(item) >= 5:
+                row["work_schedule"] = normalize_spaces(item[4] or "")
+    
+            self.rows.append(row)
             existing_keys.add(key)
             added += 1
-
+    
         self._refresh_grid()
         self.var_status.set(f"Добавлено сотрудников: {added}")
         self._check_fired_employees_after_add()
