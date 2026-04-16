@@ -5,7 +5,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -525,6 +525,8 @@ class TripTimesheetPage(tk.Frame):
         self._ts_btn(row1, "Открыть", self._open_timesheet, side="left", padx=(4, 3))
         self._ts_btn(row1, "Добавить сотрудников", self._add_employees, side="left", padx=3)
         self._ts_btn(row1, "Период выбранным", self._set_trip_period_for_selected, side="left", padx=3)
+        self._ts_btn(row1, "Время выбранным", self._fill_hours_for_selected, side="left", padx=3)
+        self._ts_btn(row1, "Время всем", self._fill_hours_for_all, side="left", padx=3)
         self._ts_btn(row1, "Удалить выбранных", self._delete_selected_rows, side="left", padx=3)
         self._ts_btn(row1, "Очистить часы", self._clear_hours_for_selected, side="left", padx=3)
         self._ts_btn(row1, "Проверить дубли", self._check_duplicates, side="left", padx=3)
@@ -800,6 +802,18 @@ class TripTimesheetPage(tk.Frame):
             if cur not in ids:
                 self.cmb_object_id.set("")
 
+    def _auto_open_current_context(self) -> None:
+        object_id, object_addr = self._parse_selected_object()
+        if not object_addr:
+            self._set_rows([])
+            self.current_header_id = None
+            self._loaded_context = self._capture_current_context()
+            self.var_status.set("Выберите объект.")
+            self._update_trip_info_from_selection()
+            return
+    
+        self._open_timesheet()
+    
     # =========================================================
     # Период / объект
     # =========================================================
@@ -1357,6 +1371,128 @@ class TripTimesheetPage(tk.Frame):
         except Exception:
             selected = []
         return sorted(i for i in selected if 0 <= i < len(self._get_visible_rows()))
+
+    def _ask_fill_hour_value(self) -> Optional[float]:
+        value = simpledialog.askstring(
+            "Проставить время",
+            "Введите количество часов.\n\n"
+            "Примеры: 8, 10.5, 11,5",
+            parent=self,
+        )
+        if value is None:
+            return None
+    
+        text = str(value).strip()
+        if not text:
+            return None
+    
+        text = text.replace(",", ".")
+        try:
+            hours = float(text)
+        except ValueError:
+            messagebox.showerror("Ошибка", "Введите корректное числовое значение часов.", parent=self)
+            return None
+    
+        if hours < 0:
+            messagebox.showerror("Ошибка", "Количество часов не может быть отрицательным.", parent=self)
+            return None
+    
+        return hours
+    
+    
+    def _row_has_trip_period(self, rec: Dict[str, Any]) -> bool:
+        return bool(rec.get("trip_date_from") and rec.get("trip_date_to"))
+    
+    
+    def _fill_hours_for_row(self, rec: Dict[str, Any], hour_value: float, year: int, month: int) -> None:
+        days_in_month = month_days(year, month)
+        trip_date_from = rec.get("trip_date_from")
+        trip_date_to = rec.get("trip_date_to")
+    
+        if not (trip_date_from and trip_date_to):
+            return
+    
+        hours = [None] * 31
+        for day in range(1, days_in_month + 1):
+            current_day = date(year, month, day)
+            if trip_date_from <= current_day <= trip_date_to:
+                hours[day - 1] = hour_value
+    
+        rec["hours"] = hours
+        rec["_totals"] = calc_row_totals(hours, year, month)
+    
+    
+    def _apply_hour_value_to_indexes(self, real_indexes: List[int], hour_value: float) -> int:
+        if not real_indexes:
+            return 0
+    
+        year, month = self._get_year_month()
+        skipped_without_period = []
+    
+        applied = 0
+        for idx in real_indexes:
+            if not (0 <= idx < len(self.rows)):
+                continue
+    
+            rec = self.rows[idx]
+            if not self._row_has_trip_period(rec):
+                fio = normalize_spaces(rec.get("fio") or "")
+                tbn = normalize_tbn(rec.get("tbn"))
+                skipped_without_period.append(f"{fio} ({tbn})".strip())
+                continue
+    
+            self._fill_hours_for_row(rec, hour_value, year, month)
+            applied += 1
+    
+        self._refresh_grid()
+        self._update_trip_info_from_selection()
+    
+        if applied:
+            self._mark_dirty()
+            self._schedule_auto_save()
+    
+        if skipped_without_period:
+            messagebox.showwarning(
+                "Проставить время",
+                "Часть строк пропущена, потому что у них не задан период командировки.\n\n"
+                f"Пропущено строк: {len(skipped_without_period)}",
+                parent=self,
+            )
+    
+        return applied
+    
+    
+    def _fill_hours_for_selected(self) -> None:
+        indexes = self._get_selected_row_indexes()
+        if not indexes:
+            messagebox.showinfo("Проставить время", "Не выбраны строки.", parent=self)
+            return
+    
+        hour_value = self._ask_fill_hour_value()
+        if hour_value is None:
+            return
+    
+        real_indexes = [self._visible_to_real_index(i) for i in indexes]
+        real_indexes = [i for i in real_indexes if i is not None]
+    
+        applied = self._apply_hour_value_to_indexes(real_indexes, hour_value)
+        if applied:
+            self.var_status.set(f"Проставлено {hour_value} ч. в выбранные строки: {applied}")
+    
+    
+    def _fill_hours_for_all(self) -> None:
+        if not self.rows:
+            messagebox.showinfo("Проставить время", "В табеле нет строк.", parent=self)
+            return
+    
+        hour_value = self._ask_fill_hour_value()
+        if hour_value is None:
+            return
+    
+        real_indexes = list(range(len(self.rows)))
+        applied = self._apply_hour_value_to_indexes(real_indexes, hour_value)
+        if applied:
+            self.var_status.set(f"Проставлено {hour_value} ч. во все строки: {applied}")
 
     def _delete_selected_rows(self) -> None:
         indexes = self._get_selected_row_indexes()
