@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import date
 import logging
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -58,18 +57,16 @@ def _find_trip_header_id_by_key(
     object_addr: str,
     year: int,
     month: int,
-    user_id: int,
 ) -> Optional[int]:
     cur.execute(
         f"""
         SELECT h.id
         FROM trip_timesheet_headers h
         WHERE {_header_where_sql()}
-          AND h.user_id = %s
         ORDER BY h.updated_at DESC NULLS LAST, h.id DESC
         LIMIT 1
         """,
-        _header_params(object_id, object_addr, year, month) + [int(user_id)],
+        _header_params(object_id, object_addr, year, month),
     )
     row = cur.fetchone()
     if not row:
@@ -108,7 +105,7 @@ def _load_trip_header_meta_by_id(cur, header_id: int) -> Optional[Dict[str, Any]
         "object_addr": row[2] or "",
         "year": int(row[3]),
         "month": int(row[4]),
-        "user_id": int(row[5]),
+        "user_id": int(row[5]) if row[5] is not None else None,
         "object_db_id": row[6],
         "created_at": row[7],
         "updated_at": row[8],
@@ -120,7 +117,6 @@ def upsert_trip_timesheet_header(
     object_addr: str,
     year: int,
     month: int,
-    user_id: int,
 ) -> int:
     object_id_norm = _norm_header_object_id(object_id)
     object_addr_norm = _norm_header_address(object_addr)
@@ -146,7 +142,6 @@ def upsert_trip_timesheet_header(
             object_addr_norm,
             int(year),
             int(month),
-            int(user_id),
         )
 
         if existing_id is not None:
@@ -158,7 +153,6 @@ def upsert_trip_timesheet_header(
                     object_addr = %s,
                     year = %s,
                     month = %s,
-                    user_id = %s,
                     object_db_id = %s,
                     updated_at = now()
                 WHERE id = %s
@@ -168,7 +162,6 @@ def upsert_trip_timesheet_header(
                     object_addr_norm,
                     int(year),
                     int(month),
-                    int(user_id),
                     int(object_db_id),
                     int(existing_id),
                 ),
@@ -178,8 +171,8 @@ def upsert_trip_timesheet_header(
         cur.execute(
             """
             INSERT INTO trip_timesheet_headers
-                (object_id, object_addr, year, month, user_id, object_db_id)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                (object_id, object_addr, year, month, object_db_id)
+            VALUES (%s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -187,7 +180,6 @@ def upsert_trip_timesheet_header(
                 object_addr_norm,
                 int(year),
                 int(month),
-                int(user_id),
                 int(object_db_id),
             ),
         )
@@ -273,7 +265,6 @@ def load_trip_timesheet_rows_from_db(
     object_addr: str,
     year: int,
     month: int,
-    user_id: int,
 ) -> List[Dict[str, Any]]:
     with db_cursor() as (_conn, cur):
         header_id = _find_trip_header_id_by_key(
@@ -282,7 +273,6 @@ def load_trip_timesheet_rows_from_db(
             object_addr,
             int(year),
             int(month),
-            int(user_id),
         )
         if header_id is None:
             return []
@@ -462,7 +452,6 @@ def find_trip_timesheet_header_id(
     object_addr: str,
     year: int,
     month: int,
-    user_id: int,
 ) -> Optional[int]:
     with db_cursor() as (_conn, cur):
         return _find_trip_header_id_by_key(
@@ -471,7 +460,6 @@ def find_trip_timesheet_header_id(
             object_addr,
             int(year),
             int(month),
-            int(user_id),
         )
 
 
@@ -480,7 +468,6 @@ def find_duplicate_employees_for_trip_timesheet(
     object_addr: str,
     year: int,
     month: int,
-    user_id: int,
     employees: Sequence[Tuple[str, str]],
 ) -> List[Dict[str, Any]]:
     with_tbn: set[tuple[str, str]] = set()
@@ -505,19 +492,14 @@ def find_duplicate_employees_for_trip_timesheet(
             f"""
             SELECT
                 h.id AS header_id,
-                h.user_id,
-                u.username,
-                u.full_name,
                 r.fio,
                 r.tbn
             FROM trip_timesheet_headers h
-            JOIN app_users u ON u.id = h.user_id
             JOIN trip_timesheet_rows r ON r.header_id = h.id
             WHERE {_header_where_sql()}
-              AND h.user_id <> %s
             ORDER BY h.id, r.fio, r.tbn
             """,
-            _header_params(object_id, object_addr, year, month) + [int(user_id)],
+            _header_params(object_id, object_addr, year, month),
         )
 
         result: List[Dict[str, Any]] = []
@@ -538,7 +520,6 @@ def find_duplicate_employees_for_trip_timesheet(
 
             dedupe_key = (
                 row.get("header_id"),
-                row.get("user_id"),
                 fio_db.lower(),
                 tbn_db,
             )
@@ -549,9 +530,6 @@ def find_duplicate_employees_for_trip_timesheet(
             result.append(
                 {
                     "header_id": row.get("header_id"),
-                    "user_id": row.get("user_id"),
-                    "username": row.get("username"),
-                    "full_name": row.get("full_name"),
                     "fio": fio_db,
                     "tbn": tbn_db,
                 }
