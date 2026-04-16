@@ -1,5 +1,3 @@
-# main_app.spec  (исправленный/дополненный для gpr_module)
-
 # -*- mode: python ; coding: utf-8 -*-
 import os
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
@@ -16,7 +14,7 @@ a = Analysis(
     pathex=[spec_dir],
     binaries=[],
     datas=[
-        # --- ВАЖНО: Явно добавляем все наши модули как файлы данных ---
+        # --- Наши модули ---
         ('settings_manager.py', '.'),
         ('menu_spec.py', '.'),
         ('meals_module.py', '.'),
@@ -32,6 +30,8 @@ a = Analysis(
         ('BudgetAnalyzer.py', '.'),
         ('estimate_resource_decoder.py', '.'),
         ('timesheet_module.py', '.'),
+        ('timesheet_db.py', '.'),
+        ('timesheet_common.py', '.'),
         ('work_schedules_manager.py', '.'),
         ('employee_card.py', '.'),
         ('analytics_module.py', '.'),
@@ -41,9 +41,13 @@ a = Analysis(
         ('gpr_module.py', '.'),
         ('gpr_dictionaries.py', '.'),
         ('gpr_task_dialog.py', '.'),
+        ('select_employees_dialog.py', '.'),
+        ('trip_timesheet_page.py', '.'),
+        ('trip_timesheet_db.py', '.'),
+        ('trip_period_dialog.py', '.'),
     ] + pandas_datas + psycopg2_datas,
     hiddenimports=[
-        # ВАЖНО: в hiddenimports указывать ИМЕНА МОДУЛЕЙ, без ".py"
+        # --- Наши модули ---
         'settings_manager',
         'menu_spec',
         'analytics_module',
@@ -57,18 +61,25 @@ a = Analysis(
         'timesheet_transformer',
         'timesheet_compare',
         'virtual_timesheet_grid',
+        'timesheet_module',
+        'timesheet_db',
+        'timesheet_common',
         'work_schedules_manager',
         'employees',
         'BudgetAnalyzer',
         'estimate_resource_decoder',
-        'timesheet_module',   
         'employee_card',
         'payroll_module',
         'brigades_module',
         'gpr_module',
         'gpr_dictionaries',
         'gpr_task_dialog',
+        'select_employees_dialog',
+        'trip_timesheet_page',
+        'trip_timesheet_db',
+        'trip_period_dialog',
 
+        # --- Библиотеки ---
         'psycopg2',
         'psycopg2.extras',
 
