@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+import logging
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -21,25 +23,26 @@ from timesheet_common import (
     safe_filename,
 )
 from timesheet_db import (
+    find_fired_employees_in_timesheet,
     load_employees_from_db,
     load_objects_short_for_timesheet,
-    find_fired_employees_in_timesheet,
 )
-from trip_timesheet_db import (
-    upsert_trip_timesheet_header,
-    replace_trip_timesheet_rows,
-    load_trip_timesheet_rows_from_db,
-    find_trip_timesheet_header_id,
-    find_duplicate_employees_for_trip_timesheet,
-)
-
-from trip_period_dialog import TripPeriodDialog
-from virtual_timesheet_grid import VirtualTimesheetGrid
 from timesheet_dialogs import (
     AutoCompleteCombobox,
     SelectEmployeesDialog,
     SelectObjectIdDialog,
 )
+from trip_period_dialog import TripPeriodDialog
+from trip_timesheet_db import (
+    find_duplicate_employees_for_trip_timesheet,
+    find_trip_timesheet_header_id,
+    load_trip_timesheet_rows_from_db,
+    replace_trip_timesheet_rows,
+    upsert_trip_timesheet_header,
+)
+from virtual_timesheet_grid import VirtualTimesheetGrid
+
+logger = logging.getLogger(__name__)
 
 MONTH_NAMES = {
     1: "Январь",
@@ -141,6 +144,7 @@ def _setup_print_sheet_params(ws, *, last_col_letter: str, last_row: int, title_
     ws.oddFooter.center.text = "&\"Segoe UI\"&8 Страница &[Page] из &N"
     ws.oddFooter.right.text = f"&\"Segoe UI\"&8 {datetime.now().strftime('%d.%m.%Y %H:%M')}"
 
+
 def build_printable_trip_timesheet_sheet(
     ws,
     *,
@@ -162,7 +166,6 @@ def build_printable_trip_timesheet_sheet(
     total_cols = len(headers)
     last_col_letter = get_column_letter(total_cols)
 
-    # Заголовок
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=total_cols)
     c = ws["A1"]
     c.value = "КОМАНДИРОВОЧНЫЙ ТАБЕЛЬ"
@@ -203,7 +206,6 @@ def build_printable_trip_timesheet_sheet(
     ws.row_dimensions[4].height = 20
     ws.row_dimensions[5].height = 16
 
-    # Заголовок таблицы
     header_row = 7
     for col_idx, title in enumerate(headers, start=1):
         cell = ws.cell(header_row, col_idx, title)
@@ -211,7 +213,6 @@ def build_printable_trip_timesheet_sheet(
 
     ws.row_dimensions[header_row].height = 30
 
-    # Ширины колонок
     ws.column_dimensions["A"].width = 5
     ws.column_dimensions["B"].width = 30
     ws.column_dimensions["C"].width = 11
@@ -226,7 +227,6 @@ def build_printable_trip_timesheet_sheet(
     ws.column_dimensions[get_column_letter(totals_start_col)].width = 8
     ws.column_dimensions[get_column_letter(totals_start_col + 1)].width = 10
 
-    # Данные
     current_row = header_row + 1
     normalized_rows: list[dict[str, Any]] = []
 
@@ -309,13 +309,13 @@ def build_printable_trip_timesheet_sheet(
     ws.merge_cells(start_row=sign_row, start_column=1, end_row=sign_row, end_column=left_sign_end)
     c = ws.cell(sign_row, 1)
     c.value = f"Составил: {prepared_by or '__________________'}    Подпись: __________________"
-    _apply_print_style(c, h='left', border=BORDER_EMPTY)
+    _apply_print_style(c, h="left", border=BORDER_EMPTY)
 
     if right_sign_start <= total_cols:
         ws.merge_cells(start_row=sign_row, start_column=right_sign_start, end_row=sign_row, end_column=total_cols)
         c = ws.cell(sign_row, right_sign_start)
         c.value = "Дата: __________________"
-        _apply_print_style(c, h='left', border=BORDER_EMPTY)
+        _apply_print_style(c, h="left", border=BORDER_EMPTY)
 
     _setup_print_sheet_params(
         ws,
@@ -323,6 +323,7 @@ def build_printable_trip_timesheet_sheet(
         last_row=sign_row,
         title_rows="$1:$7",
     )
+
 
 class TripTimesheetPage(tk.Frame):
     def __init__(self, master, app, *args, **kwargs):
@@ -344,10 +345,25 @@ class TripTimesheetPage(tk.Frame):
         self.address_options: List[str] = []
 
         self._building_ui = False
+        self._dirty = False
+        self._auto_save_job = None
+        self._auto_save_delay_ms = 8000
+        self._loaded_context: Dict[str, Any] = {}
+        self._suppress_events = False
 
         self._build_ui()
         self._load_reference_data()
+        self._bind_hotkeys()
         self._refresh_grid()
+
+    def destroy(self):
+        if self._auto_save_job is not None:
+            try:
+                self.after_cancel(self._auto_save_job)
+            except Exception:
+                pass
+            self._auto_save_job = None
+        super().destroy()
 
     # =========================================================
     # UI
@@ -508,17 +524,10 @@ class TripTimesheetPage(tk.Frame):
 
         self._ts_btn(row1, "Открыть", self._open_timesheet, side="left", padx=(4, 3))
         self._ts_btn(row1, "Добавить сотрудников", self._add_employees, side="left", padx=3)
+        self._ts_btn(row1, "Период выбранным", self._set_trip_period_for_selected, side="left", padx=3)
         self._ts_btn(row1, "Удалить выбранных", self._delete_selected_rows, side="left", padx=3)
         self._ts_btn(row1, "Очистить часы", self._clear_hours_for_selected, side="left", padx=3)
         self._ts_btn(row1, "Проверить дубли", self._check_duplicates, side="left", padx=3)
-
-        self.btn_export = ttk.Button(
-            actions,
-            text="Выгрузить Excel",
-            command=self._export_to_excel,
-            width=16,
-        )
-        self.btn_export.pack(fill="x")
 
         btn_save = tk.Button(
             actions,
@@ -538,6 +547,14 @@ class TripTimesheetPage(tk.Frame):
         btn_save.pack(fill="x", pady=(0, 4))
         btn_save.bind("<Enter>", lambda _e: btn_save.config(bg="#0d47a1"))
         btn_save.bind("<Leave>", lambda _e: btn_save.config(bg=UI["btn_save_bg"]))
+
+        self.btn_export = ttk.Button(
+            actions,
+            text="Выгрузить Excel",
+            command=self._export_to_excel,
+            width=16,
+        )
+        self.btn_export.pack(fill="x")
 
     def _build_filter_bar(self) -> None:
         bar = tk.Frame(self, bg=UI["bg"], pady=2)
@@ -605,6 +622,139 @@ class TripTimesheetPage(tk.Frame):
         current = date.today().year
         return list(range(current - 3, current + 4))
 
+    def _bind_hotkeys(self) -> None:
+        self.bind_all("<Control-s>", self._hotkey_save, add="+")
+        self.bind_all("<Control-S>", self._hotkey_save, add="+")
+        self.bind_all("<Control-e>", self._hotkey_export, add="+")
+        self.bind_all("<Control-E>", self._hotkey_export, add="+")
+        self.bind_all("<F5>", self._hotkey_reload, add="+")
+        self.bind_all("<Delete>", self._hotkey_delete, add="+")
+
+    def _hotkey_save(self, event=None):
+        if not self.winfo_exists():
+            return
+        if self.focus_displayof() is None:
+            return
+        self._save_timesheet()
+        return "break"
+
+    def _hotkey_export(self, event=None):
+        if not self.winfo_exists():
+            return
+        if self.focus_displayof() is None:
+            return
+        self._export_to_excel()
+        return "break"
+
+    def _hotkey_reload(self, event=None):
+        if not self.winfo_exists():
+            return
+        if self.focus_displayof() is None:
+            return
+        self._open_timesheet()
+        return "break"
+
+    def _hotkey_delete(self, event=None):
+        if not self.winfo_exists():
+            return
+        if self.focus_displayof() is None:
+            return
+        self._delete_selected_rows()
+        return "break"
+
+    # =========================================================
+    # Статус / dirty / автосохранение
+    # =========================================================
+    def _set_status_text(self, text: str) -> None:
+        self.var_status.set(text)
+
+    def _mark_dirty(self) -> None:
+        self._dirty = True
+        self._set_status_text("Есть несохранённые изменения")
+
+    def _mark_saved(self, auto: bool = False) -> None:
+        self._dirty = False
+        now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        if auto:
+            self._set_status_text(f"Последнее авто‑сохранение: {now}")
+        else:
+            self._set_status_text(f"Сохранено: {now}")
+
+    def _mark_save_error(self, text: str) -> None:
+        self._set_status_text(text)
+
+    def _schedule_auto_save(self) -> None:
+        if self._auto_save_job is not None:
+            try:
+                self.after_cancel(self._auto_save_job)
+            except Exception:
+                pass
+            self._auto_save_job = None
+
+        self._auto_save_job = self.after(self._auto_save_delay_ms, self._auto_save_callback)
+
+    def _auto_save_callback(self) -> None:
+        self._auto_save_job = None
+        if not self._dirty:
+            return
+        self._save_timesheet_internal(show_messages=False, is_auto=True)
+
+    def _capture_current_context(self) -> Dict[str, Any]:
+        object_id, object_addr = self._parse_selected_object()
+        year, month = self._get_year_month()
+        return {
+            "year": year,
+            "month": month,
+            "object_id": object_id,
+            "object_addr": object_addr,
+        }
+
+    def _restore_controls_to_loaded_context(self) -> None:
+        if not self._loaded_context:
+            return
+
+        self._suppress_events = True
+        try:
+            year = int(self._loaded_context.get("year") or date.today().year)
+            month = int(self._loaded_context.get("month") or date.today().month)
+            object_id = normalize_spaces(self._loaded_context.get("object_id") or "")
+            object_addr = normalize_spaces(self._loaded_context.get("object_addr") or "")
+
+            self.var_year.set(year)
+            self.var_month.set(month)
+            self.cmb_month.current(max(0, month - 1))
+
+            self.cmb_address.set(object_addr)
+            self._sync_object_id_values_silent()
+
+            if object_id:
+                values = list(self.cmb_object_id.cget("values") or [])
+                if object_id not in values:
+                    values.append(object_id)
+                    self.cmb_object_id.config(values=values)
+                self.cmb_object_id.set(object_id)
+            else:
+                self.cmb_object_id.set("")
+        finally:
+            self._suppress_events = False
+
+    def _confirm_leave_with_unsaved(self) -> bool:
+        if not self._dirty:
+            return True
+
+        answer = messagebox.askyesnocancel(
+            "Несохранённые изменения",
+            "Есть несохранённые изменения.\n\nСохранить перед переключением?",
+            parent=self,
+        )
+        if answer is None:
+            return False
+
+        if answer is True:
+            return self._save_timesheet_internal(show_messages=True, is_auto=False)
+
+        return True
+
     # =========================================================
     # Справочники
     # =========================================================
@@ -664,10 +814,24 @@ class TripTimesheetPage(tk.Frame):
         self._on_period_changed()
 
     def _on_period_changed(self) -> None:
+        if self._suppress_events:
+            return
+
+        if not self._confirm_leave_with_unsaved():
+            self._restore_controls_to_loaded_context()
+            return
+
         self._refresh_grid()
         self._update_trip_info_from_selection()
 
     def _on_address_select(self) -> None:
+        if self._suppress_events:
+            return
+
+        if not self._confirm_leave_with_unsaved():
+            self._restore_controls_to_loaded_context()
+            return
+
         self._sync_object_id_values_silent()
 
         addr = normalize_spaces(self.cmb_address.get() or "")
@@ -689,7 +853,12 @@ class TripTimesheetPage(tk.Frame):
             self.cmb_object_id.set(selected_id)
 
     def _on_object_id_select(self) -> None:
-        pass
+        if self._suppress_events:
+            return
+
+        if not self._confirm_leave_with_unsaved():
+            self._restore_controls_to_loaded_context()
+            return
 
     # =========================================================
     # Работа со строками
@@ -797,6 +966,10 @@ class TripTimesheetPage(tk.Frame):
             messagebox.showwarning("Внимание", "Выберите объект.", parent=self)
             return
 
+        if not self._confirm_leave_with_unsaved():
+            self._restore_controls_to_loaded_context()
+            return
+
         try:
             rows = load_trip_timesheet_rows_from_db(
                 object_id=object_id or None,
@@ -817,29 +990,41 @@ class TripTimesheetPage(tk.Frame):
             return
 
         self._set_rows(rows)
+        self._loaded_context = self._capture_current_context()
+        self._dirty = False
         self.var_status.set(f"Открыт командировочный табель: {object_addr}, {month:02d}.{year}.")
         self._update_trip_info_from_selection()
 
     def _save_timesheet(self) -> None:
+        self._save_timesheet_internal(show_messages=True, is_auto=False)
+
+    def _save_timesheet_internal(self, show_messages: bool = True, is_auto: bool = False) -> bool:
         object_id, object_addr = self._parse_selected_object()
         year, month = self._get_year_month()
 
         if not object_addr:
-            messagebox.showwarning("Внимание", "Выберите объект.", parent=self)
-            return
+            if show_messages:
+                messagebox.showwarning("Внимание", "Выберите объект.", parent=self)
+            if is_auto:
+                self._mark_save_error("Ошибка авто‑сохранения: не выбран объект")
+            return False
 
         if not self.rows:
-            if not messagebox.askyesno(
-                "Сохранение",
-                "В табеле нет строк. Всё равно создать/сохранить пустой табель?",
-                parent=self,
-            ):
-                return
+            if show_messages and not is_auto:
+                if not messagebox.askyesno(
+                    "Сохранение",
+                    "В табеле нет строк. Всё равно создать/сохранить пустой табель?",
+                    parent=self,
+                ):
+                    return False
 
         errors = self._validate_before_save()
         if errors:
-            messagebox.showerror("Ошибка", "\n".join(errors), parent=self)
-            return
+            if show_messages:
+                messagebox.showerror("Ошибка", "\n".join(errors), parent=self)
+            if is_auto:
+                self._mark_save_error("Ошибка авто‑сохранения: есть ошибки в данных")
+            return False
 
         try:
             header_id = upsert_trip_timesheet_header(
@@ -859,12 +1044,17 @@ class TripTimesheetPage(tk.Frame):
             )
 
             self.current_header_id = header_id
+            self._loaded_context = self._capture_current_context()
         except Exception as exc:
-            messagebox.showerror("Ошибка", f"Не удалось сохранить табель:\n{exc}", parent=self)
-            return
+            if show_messages:
+                messagebox.showerror("Ошибка", f"Не удалось сохранить табель:\n{exc}", parent=self)
+            if is_auto:
+                self._mark_save_error("Ошибка авто‑сохранения")
+            return False
 
-        self.var_status.set(f"Командировочный табель сохранён. ID: {self.current_header_id}")
+        self._mark_saved(auto=is_auto)
         self._update_trip_info_from_selection()
+        return True
 
     def _validate_before_save(self) -> List[str]:
         errors: List[str] = []
@@ -874,6 +1064,7 @@ class TripTimesheetPage(tk.Frame):
             tbn = normalize_tbn(rec.get("tbn"))
             d_from = rec.get("trip_date_from")
             d_to = rec.get("trip_date_to")
+            hours = rec.get("hours") or []
 
             if not fio and not tbn:
                 errors.append(f"Строка {i}: не заполнены ФИО и табельный номер.")
@@ -883,6 +1074,10 @@ class TripTimesheetPage(tk.Frame):
 
             if d_from and d_to and d_from > d_to:
                 errors.append(f"Строка {i}: дата начала командировки позже даты окончания.")
+
+            has_hours = any(v is not None and str(v).strip() != "" for v in hours)
+            if has_hours and not (d_from and d_to):
+                errors.append(f"Строка {i}: есть часы, но не задан период командировки.")
 
         return errors
 
@@ -933,7 +1128,13 @@ class TripTimesheetPage(tk.Frame):
             added += 1
 
         self._refresh_grid()
-        self.var_status.set(f"Добавлено сотрудников: {added}")
+        if added > 0:
+            self._mark_dirty()
+            self._schedule_auto_save()
+            self.var_status.set(f"Добавлено сотрудников: {added}")
+        else:
+            self.var_status.set("Все выбранные сотрудники уже есть в табеле.")
+
         self._check_fired_employees_after_add()
         self._check_duplicates(silent_if_empty=True)
 
@@ -1064,6 +1265,8 @@ class TripTimesheetPage(tk.Frame):
 
         self._refresh_grid()
         self._update_trip_info_from_selection()
+        self._mark_dirty()
+        self._schedule_auto_save()
 
     def _on_delete_row(self, row_index: int) -> None:
         real_index = self._visible_to_real_index(row_index)
@@ -1084,6 +1287,8 @@ class TripTimesheetPage(tk.Frame):
         del self.rows[real_index]
         self._refresh_grid()
         self._update_trip_info_from_selection()
+        self._mark_dirty()
+        self._schedule_auto_save()
 
     def _on_selection_change(self, selected_rows) -> None:
         self._update_trip_info_from_selection()
@@ -1112,6 +1317,8 @@ class TripTimesheetPage(tk.Frame):
 
         self._refresh_grid()
         self._update_trip_info_from_selection()
+        self._mark_dirty()
+        self._schedule_auto_save()
 
     # =========================================================
     # Действия над выбранными строками
@@ -1146,6 +1353,10 @@ class TripTimesheetPage(tk.Frame):
         self._update_trip_info_from_selection()
         self.var_status.set(f"Удалено строк: {len(real_indexes)}")
 
+        if real_indexes:
+            self._mark_dirty()
+            self._schedule_auto_save()
+
     def _clear_hours_for_selected(self) -> None:
         indexes = self._get_selected_row_indexes()
         if not indexes:
@@ -1163,8 +1374,104 @@ class TripTimesheetPage(tk.Frame):
         self._refresh_grid()
         self.var_status.set(f"Очищены часы у строк: {len(real_indexes)}")
 
+        if real_indexes:
+            self._mark_dirty()
+            self._schedule_auto_save()
+
+    def _set_trip_period_for_selected(self) -> None:
+        indexes = self._get_selected_row_indexes()
+        if not indexes:
+            messagebox.showinfo("Период выбранным", "Не выбраны строки.", parent=self)
+            return
+
+        year, month = self._get_year_month()
+
+        result = TripPeriodDialog.show(
+            self,
+            initial_date_from=None,
+            initial_date_to=None,
+            year=year,
+            month=month,
+        )
+        if result is None:
+            return
+
+        trip_date_from, trip_date_to = result
+
+        real_indexes = [self._visible_to_real_index(i) for i in indexes]
+        real_indexes = [i for i in real_indexes if i is not None]
+
+        for idx in real_indexes:
+            self.rows[idx]["trip_date_from"] = trip_date_from
+            self.rows[idx]["trip_date_to"] = trip_date_to
+
+        self._refresh_grid()
+        self._update_trip_info_from_selection()
+        self.var_status.set(f"Период командировки применён к строкам: {len(real_indexes)}")
+
+        if real_indexes:
+            self._mark_dirty()
+            self._schedule_auto_save()
+
     # =========================================================
-    # Нижняя информационная строка
+    # Экспорт
+    # =========================================================
+    def _export_to_excel(self) -> None:
+        try:
+            year, month = self._get_year_month()
+            object_id, object_addr = self._parse_selected_object()
+
+            if not self.rows:
+                messagebox.showinfo("Выгрузка", "В табеле нет строк для выгрузки.", parent=self)
+                return
+
+            obj_part = object_id or object_addr or "без_объекта"
+
+            try:
+                prepared_by = normalize_spaces(
+                    (getattr(self.app, "current_user", {}) or {}).get("full_name")
+                    or (getattr(self.app, "current_user", {}) or {}).get("username")
+                    or ""
+                )
+            except Exception:
+                prepared_by = ""
+
+            path = filedialog.asksaveasfilename(
+                parent=self,
+                title="Сохранить командировочный табель в Excel",
+                defaultextension=".xlsx",
+                initialfile=f"Командировочный_табель_{safe_filename(obj_part)}_{year}_{month:02d}.xlsx",
+                filetypes=[("Excel", "*.xlsx"), ("Все", "*.*")],
+            )
+            if not path:
+                return
+
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Командировочный табель"
+
+            build_printable_trip_timesheet_sheet(
+                ws,
+                year=year,
+                month=month,
+                object_addr=object_addr,
+                object_id=object_id,
+                rows=self.rows,
+                prepared_by=prepared_by,
+            )
+
+            wb.save(path)
+
+            messagebox.showinfo(
+                "Выгрузка",
+                f"Готово.\nСтрок: {len(self.rows)}\nФайл: {path}",
+                parent=self,
+            )
+        except Exception as exc:
+            messagebox.showerror("Выгрузка", f"Ошибка выгрузки:\n{exc}", parent=self)
+
+    # =========================================================
+    # Нижняя инфо-строка
     # =========================================================
     def _update_trip_info_from_selection(self) -> None:
         indexes = self._get_selected_row_indexes()
@@ -1195,60 +1502,6 @@ class TripTimesheetPage(tk.Frame):
             suffix = f"{fio} ({tbn})"
 
         self.var_trip_info.set(f"{suffix}: {period}")
-
-    def _export_to_excel(self) -> None:
-        try:
-            year, month = self._get_year_month()
-            object_id, object_addr = self._parse_selected_object()
-    
-            if not self.rows:
-                messagebox.showinfo("Выгрузка", "В табеле нет строк для выгрузки.", parent=self)
-                return
-    
-            obj_part = object_id or object_addr or "без_объекта"
-    
-            try:
-                prepared_by = normalize_spaces(
-                    (getattr(self.app, "current_user", {}) or {}).get("full_name")
-                    or (getattr(self.app, "current_user", {}) or {}).get("username")
-                    or ""
-                )
-            except Exception:
-                prepared_by = ""
-    
-            path = filedialog.asksaveasfilename(
-                parent=self,
-                title="Сохранить командировочный табель в Excel",
-                defaultextension=".xlsx",
-                initialfile=f"Командировочный_табель_{safe_filename(obj_part)}_{year}_{month:02d}.xlsx",
-                filetypes=[("Excel", "*.xlsx"), ("Все", "*.*")],
-            )
-            if not path:
-                return
-    
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Командировочный табель"
-    
-            build_printable_trip_timesheet_sheet(
-                ws,
-                year=year,
-                month=month,
-                object_addr=object_addr,
-                object_id=object_id,
-                rows=self.rows,
-                prepared_by=prepared_by,
-            )
-    
-            wb.save(path)
-    
-            messagebox.showinfo(
-                "Выгрузка",
-                f"Готово.\nСтрок: {len(self.rows)}\nФайл: {path}",
-                parent=self,
-            )
-        except Exception as exc:
-            messagebox.showerror("Выгрузка", f"Ошибка выгрузки:\n{exc}", parent=self)
 
     # =========================================================
     # Внешние helpers
@@ -1286,3 +1539,5 @@ class TripTimesheetPage(tk.Frame):
         self.rows.append(self._empty_row())
         self._refresh_grid()
         self.var_status.set("Добавлена пустая строка.")
+        self._mark_dirty()
+        self._schedule_auto_save()
