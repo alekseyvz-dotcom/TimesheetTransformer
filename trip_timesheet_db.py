@@ -36,7 +36,6 @@ def _header_where_sql() -> str:
         AND h.month = %s
     """
 
-
 def _header_params(
     object_id: Optional[str],
     object_addr: str,
@@ -58,21 +57,40 @@ def _find_trip_header_id_by_key(
     year: int,
     month: int,
 ) -> Optional[int]:
-    cur.execute(
-        f"""
-        SELECT h.id
-        FROM trip_timesheet_headers h
-        WHERE {_header_where_sql()}
-        ORDER BY h.updated_at DESC NULLS LAST, h.id DESC
-        LIMIT 1
-        """,
-        _header_params(object_id, object_addr, year, month),
-    )
+    object_id_norm = _norm_header_object_id(object_id)
+    object_addr_norm = _norm_header_address(object_addr)
+
+    if object_id_norm:
+        cur.execute(
+            """
+            SELECT h.id
+            FROM trip_timesheet_headers h
+            WHERE COALESCE(h.object_id, '') = %s
+              AND h.year = %s
+              AND h.month = %s
+            ORDER BY h.updated_at DESC NULLS LAST, h.id DESC
+            LIMIT 1
+            """,
+            (object_id_norm, int(year), int(month)),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT h.id
+            FROM trip_timesheet_headers h
+            WHERE h.object_addr = %s
+              AND h.year = %s
+              AND h.month = %s
+            ORDER BY h.updated_at DESC NULLS LAST, h.id DESC
+            LIMIT 1
+            """,
+            (object_addr_norm, int(year), int(month)),
+        )
+
     row = cur.fetchone()
     if not row:
         return None
     return int(row[0])
-
 
 def _load_trip_header_meta_by_id(cur, header_id: int) -> Optional[Dict[str, Any]]:
     cur.execute(
@@ -462,7 +480,6 @@ def find_trip_timesheet_header_id(
             int(month),
         )
 
-
 def find_duplicate_employees_for_trip_timesheet(
     object_id: Optional[str],
     object_addr: str,
@@ -470,73 +487,37 @@ def find_duplicate_employees_for_trip_timesheet(
     month: int,
     employees: Sequence[Tuple[str, str]],
 ) -> List[Dict[str, Any]]:
-    with_tbn: set[tuple[str, str]] = set()
-    without_tbn: set[str] = set()
+    counts: Dict[tuple[str, str], Dict[str, Any]] = {}
 
     for fio, tbn in employees:
         fio_norm = normalize_spaces(fio or "")
         tbn_norm = normalize_tbn(tbn)
+
         if not fio_norm and not tbn_norm:
             continue
 
-        if tbn_norm:
-            with_tbn.add(make_row_key(fio_norm, tbn_norm))
-        else:
-            without_tbn.add(fio_norm.lower())
+        key = (fio_norm.lower(), tbn_norm)
+        if key not in counts:
+            counts[key] = {
+                "fio": fio_norm,
+                "tbn": tbn_norm,
+                "count": 0,
+            }
+        counts[key]["count"] += 1
 
-    if not with_tbn and not without_tbn:
-        return []
-
-    with db_cursor(dict_rows=True) as (_conn, cur):
-        cur.execute(
-            f"""
-            SELECT
-                h.id AS header_id,
-                r.fio,
-                r.tbn
-            FROM trip_timesheet_headers h
-            JOIN trip_timesheet_rows r ON r.header_id = h.id
-            WHERE {_header_where_sql()}
-            ORDER BY h.id, r.fio, r.tbn
-            """,
-            _header_params(object_id, object_addr, year, month),
-        )
-
-        result: List[Dict[str, Any]] = []
-        seen: set[tuple[Any, ...]] = set()
-
-        for row in cur.fetchall():
-            fio_db = normalize_spaces(row.get("fio") or "")
-            tbn_db = normalize_tbn(row.get("tbn"))
-
-            matched = False
-            if tbn_db:
-                matched = make_row_key(fio_db, tbn_db) in with_tbn
-            else:
-                matched = fio_db.lower() in without_tbn
-
-            if not matched:
-                continue
-
-            dedupe_key = (
-                row.get("header_id"),
-                fio_db.lower(),
-                tbn_db,
-            )
-            if dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
-
+    result: List[Dict[str, Any]] = []
+    for item in counts.values():
+        if item["count"] > 1:
             result.append(
                 {
-                    "header_id": row.get("header_id"),
-                    "fio": fio_db,
-                    "tbn": tbn_db,
+                    "header_id": None,
+                    "fio": item["fio"],
+                    "tbn": item["tbn"],
+                    "count": item["count"],
                 }
             )
 
-        return result
-
+    return result
 
 __all__ = [
     "upsert_trip_timesheet_header",
