@@ -36,10 +36,12 @@ class VirtualTimesheetGrid(tk.Frame):
         on_change: Optional[Callable[[int, int], None]] = None,
         on_delete_row: Optional[Callable[[int], None]] = None,
         on_selection_change: Optional[Callable[[Set[int]], None]] = None,
+        on_trip_period_click: Optional[Callable[[int], None]] = None,
         row_height: int = 22,
         colpx: Optional[Dict[str, int]] = None,
         read_only: bool = False,
         allow_row_select: bool = True,
+        show_trip_period: bool = False,
     ):
         super().__init__(master, bg="#ffffff")
 
@@ -47,14 +49,17 @@ class VirtualTimesheetGrid(tk.Frame):
         self.on_change = on_change
         self.on_delete_row = on_delete_row
         self.on_selection_change = on_selection_change
+        self.on_trip_period_click = on_trip_period_click
 
         self.read_only = bool(read_only)
         self.allow_row_select = bool(allow_row_select)
         self.row_height = int(row_height)
+        self.show_trip_period = bool(show_trip_period)
 
         self.COLPX = colpx or {
             "fio": 200,
             "tbn": 100,
+            "trip": 74,
             "day": 36,
             "days": 46,
             "hours": 56,
@@ -237,7 +242,10 @@ class VirtualTimesheetGrid(tk.Frame):
 
         add("fio", int(self.COLPX["fio"]))
         add("tbn", int(self.COLPX["tbn"]))
-
+        
+        if self.show_trip_period:
+            add("trip", int(self.COLPX.get("trip", 74)))
+        
         for di in range(31):
             add("day", int(self.COLPX["day"]), di)
 
@@ -261,6 +269,7 @@ class VirtualTimesheetGrid(tk.Frame):
         labels = {
             "fio": "ФИО",
             "tbn": "Таб.№",
+            "trip": "КМ",
             "days": "Дней",
             "hours": "Часы",
             "ot_day": "Пер.день",
@@ -413,33 +422,128 @@ class VirtualTimesheetGrid(tk.Frame):
 
     def _on_mouse_move(self, event):
         row_index, col_data = self._hit_test(event.x, event.y)
-
+    
         if row_index is None or not col_data:
             self._hide_tooltip()
             return
-
+    
         kind, _extra = col_data
-
-        if kind != "fio":
-            self._hide_tooltip()
-            return
-
+    
         if not (0 <= row_index < len(self.model_rows)):
             self._hide_tooltip()
             return
-
+    
         rec = self.model_rows[row_index]
-        schedule = str(rec.get("work_schedule") or "").strip()
-        if not schedule:
-            schedule = "не указан"
-
-        text = f"График: {schedule}"
-
-        self._tooltip_row = row_index
-        self._show_tooltip(text, event.x_root, event.y_root)
+    
+        if kind == "fio":
+            schedule = str(rec.get("work_schedule") or "").strip()
+            if not schedule:
+                schedule = "не указан"
+            text = f"График: {schedule}"
+            self._tooltip_row = row_index
+            self._show_tooltip(text, event.x_root, event.y_root)
+            return
+    
+        if kind == "trip" and self.show_trip_period:
+            text = self._format_trip_period_full(rec)
+            self._tooltip_row = row_index
+            self._show_tooltip(text, event.x_root, event.y_root)
+            return
+    
+        self._hide_tooltip()
 
     def _on_mouse_leave(self, _event):
         self._hide_tooltip()
+
+    def _format_trip_period_short(self, rec: Dict[str, Any]) -> str:
+        trip_date_from = rec.get("trip_date_from")
+        trip_date_to = rec.get("trip_date_to")
+    
+        if not trip_date_from and not trip_date_to:
+            return ""
+    
+        try:
+            year, month = self.get_year_month()
+        except Exception:
+            year, month = 0, 0
+    
+        if trip_date_from and trip_date_to:
+            same_month = (
+                trip_date_from.year == year
+                and trip_date_from.month == month
+                and trip_date_to.year == year
+                and trip_date_to.month == month
+            )
+            if same_month:
+                return f"{trip_date_from.day:02d}-{trip_date_to.day:02d}"
+            return f"{trip_date_from.strftime('%d.%m')}-{trip_date_to.strftime('%d.%m')}"
+    
+        if trip_date_from:
+            return f"с {trip_date_from.strftime('%d.%m')}"
+        return f"по {trip_date_to.strftime('%d.%m')}"
+    
+    
+    def _format_trip_period_full(self, rec: Dict[str, Any]) -> str:
+        trip_date_from = rec.get("trip_date_from")
+        trip_date_to = rec.get("trip_date_to")
+    
+        if not trip_date_from and not trip_date_to:
+            return "Период командировки не задан"
+    
+        left = trip_date_from.strftime("%d.%m.%Y") if trip_date_from else "—"
+        right = trip_date_to.strftime("%d.%m.%Y") if trip_date_to else "—"
+        return f"Командировка: с {left} по {right}"
+    
+    
+    def _is_trip_day(self, rec: Dict[str, Any], day_num: int) -> bool:
+        trip_date_from = rec.get("trip_date_from")
+        trip_date_to = rec.get("trip_date_to")
+        if not trip_date_from or not trip_date_to:
+            return False
+    
+        try:
+            year, month = self.get_year_month()
+            cur = date(year, month, day_num)
+        except Exception:
+            return False
+    
+        return trip_date_from <= cur <= trip_date_to
+    
+    
+    def _get_trip_cell_bg(
+        self,
+        rec: Dict[str, Any],
+        day_num: int,
+        day_index: int,
+        selected: bool,
+        base_bg: str,
+        cell_value: Any,
+    ) -> str:
+        if selected:
+            return self.SELECT_BG
+    
+        trip_bg = "#e7f1ff"
+        in_trip = self._is_trip_day(rec, day_num)
+    
+        if self.show_schedule_highlight:
+            base = self._get_schedule_cell_bg(
+                rec=rec,
+                day_num=day_num,
+                day_index=day_index,
+                selected=selected,
+                base_bg=base_bg,
+                cell_value=cell_value,
+            )
+            if in_trip:
+                if base in (self.SCHEDULE_MISSING_BG, self.SCHEDULE_EXTRA_BG):
+                    return base
+                return trip_bg
+            return base
+    
+        if in_trip:
+            return trip_bg
+    
+        return self._weekend_map.get(day_index, base_bg)
 
     # ------------------------------------------------------------------
     # Scrolling
@@ -523,6 +627,11 @@ class VirtualTimesheetGrid(tk.Frame):
         if kind == "del":
             if callable(self.on_delete_row) and not self.read_only:
                 self.on_delete_row(row_index)
+            return
+
+        if kind == "trip":
+            if not self.read_only and callable(self.on_trip_period_click):
+                self.on_trip_period_click(row_index)
             return
 
         if kind == "day" and not self.read_only:
@@ -838,7 +947,19 @@ class VirtualTimesheetGrid(tk.Frame):
                 text = self._clip_text(str(rec.get("tbn") or ""), max(10, x1 - x0 - 6), self.font_cell)
                 anchor = "center"
                 tx = (x0 + x1) / 2
-
+            
+            elif kind == "trip":
+                trip_short = self._format_trip_period_short(rec)
+                text = self._clip_text(trip_short, max(10, x1 - x0 - 6), self.font_small)
+                anchor = "center"
+                tx = (x0 + x1) / 2
+                font = self.font_small
+                if trip_short:
+                    bg = "#eef6ff" if not selected else self.SELECT_BG
+                else:
+                    bg = self.SELECT_BG if selected else base_bg
+                    fill = self.MUTED
+            
             elif kind == "day":
                 di = int(extra)
                 day_num = di + 1
@@ -851,6 +972,16 @@ class VirtualTimesheetGrid(tk.Frame):
                 else:
                     val = hours[di] if di < len(hours) else None
                     text = "" if val is None else str(val)
+                if self.show_trip_period:
+                    bg = self._get_trip_cell_bg(
+                        rec=rec,
+                        day_num=day_num,
+                        day_index=di,
+                        selected=selected,
+                        base_bg=base_bg,
+                        cell_value=val,
+                    )
+                else:
                     bg = self._get_schedule_cell_bg(
                         rec=rec,
                         day_num=day_num,
