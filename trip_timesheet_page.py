@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk, messagebox
-from datetime import date
+from tkinter import ttk, messagebox, filedialog
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.page import PageMargins
 
 from timesheet_common import (
     calc_row_totals,
@@ -13,6 +18,7 @@ from timesheet_common import (
     normalize_hours_list,
     normalize_spaces,
     normalize_tbn,
+    safe_filename,
 )
 from timesheet_db import (
     load_employees_from_db,
@@ -64,6 +70,259 @@ UI = {
     "btn_save_fg": "#ffffff",
 }
 
+PRINT_TITLE_FILL = PatternFill("solid", fgColor="DCE6F1")
+PRINT_META_FILL = PatternFill("solid", fgColor="EAF2F8")
+PRINT_HEADER_FILL = PatternFill("solid", fgColor="D9EAF7")
+PRINT_TOTAL_FILL = PatternFill("solid", fgColor="E2F0D9")
+
+THIN_BLACK = Side(style="thin", color="000000")
+MEDIUM_BLACK = Side(style="medium", color="000000")
+
+BORDER_THIN = Border(left=THIN_BLACK, right=THIN_BLACK, top=THIN_BLACK, bottom=THIN_BLACK)
+BORDER_EMPTY = Border()
+
+
+def _excel_safe_value(value: Any) -> Any:
+    return "" if value is None else value
+
+
+def _apply_print_style(
+    cell,
+    *,
+    bold: bool = False,
+    size: int = 9,
+    h: str = "center",
+    v: str = "center",
+    wrap: bool = True,
+    border: Border = BORDER_THIN,
+    fill=None,
+):
+    cell.font = Font(name="Segoe UI", size=size, bold=bold)
+    cell.alignment = Alignment(horizontal=h, vertical=v, wrap_text=wrap)
+    cell.border = border
+    if fill is not None:
+        cell.fill = fill
+
+
+def _set_outer_medium_border(ws, row1: int, col1: int, row2: int, col2: int):
+    for r in range(row1, row2 + 1):
+        for c in range(col1, col2 + 1):
+            cell = ws.cell(r, c)
+            cell.border = Border(
+                left=MEDIUM_BLACK if c == col1 else cell.border.left,
+                right=MEDIUM_BLACK if c == col2 else cell.border.right,
+                top=MEDIUM_BLACK if r == row1 else cell.border.top,
+                bottom=MEDIUM_BLACK if r == row2 else cell.border.bottom,
+            )
+
+
+def _setup_print_sheet_params(ws, *, last_col_letter: str, last_row: int, title_rows: str = "$1:$7"):
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+
+    ws.page_margins = PageMargins(
+        left=0.25,
+        right=0.25,
+        top=0.4,
+        bottom=0.45,
+        header=0.2,
+        footer=0.2,
+    )
+
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "E8"
+    ws.print_title_rows = title_rows
+    ws.print_area = f"A1:{last_col_letter}{last_row}"
+
+    ws.oddHeader.center.text = "&\"Segoe UI,Bold\"&12 Командировочный табель"
+    ws.oddFooter.left.text = "&\"Segoe UI\"&8 Сформировано автоматически"
+    ws.oddFooter.center.text = "&\"Segoe UI\"&8 Страница &[Page] из &N"
+    ws.oddFooter.right.text = f"&\"Segoe UI\"&8 {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+
+def build_printable_trip_timesheet_sheet(
+    ws,
+    *,
+    year: int,
+    month: int,
+    object_addr: str,
+    object_id: str,
+    rows: list[dict[str, Any]],
+    prepared_by: str = "",
+):
+    days_in_month = month_days(year, month)
+    month_ru = MONTH_NAMES.get(month, str(month))
+
+    fixed_headers = ["№", "ФИО", "Таб. №", "Командировка"]
+    day_headers = [str(i) for i in range(1, days_in_month + 1)]
+    total_headers = ["Дни", "Часы"]
+    headers = fixed_headers + day_headers + total_headers
+
+    total_cols = len(headers)
+    last_col_letter = get_column_letter(total_cols)
+
+    # Заголовок
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=total_cols)
+    c = ws["A1"]
+    c.value = "КОМАНДИРОВОЧНЫЙ ТАБЕЛЬ"
+    _apply_print_style(c, bold=True, size=14, h="center", border=BORDER_EMPTY, fill=PRINT_TITLE_FILL)
+
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=total_cols)
+    c = ws["A2"]
+    c.value = f"за {month_ru} {year} г."
+    _apply_print_style(c, bold=True, size=11, h="center", border=BORDER_EMPTY)
+
+    meta_split = min(12, total_cols)
+    right_meta_start = meta_split + 1
+
+    ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=meta_split)
+    c = ws["A3"]
+    c.value = f"Объект: {object_addr or '-'}"
+    _apply_print_style(c, bold=True, h="left", fill=PRINT_META_FILL)
+
+    if right_meta_start <= total_cols:
+        ws.merge_cells(start_row=3, start_column=right_meta_start, end_row=3, end_column=total_cols)
+        c = ws.cell(3, right_meta_start)
+        c.value = f"ID объекта: {object_id or '-'}"
+        _apply_print_style(c, bold=True, h="left", fill=PRINT_META_FILL)
+
+    ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=total_cols)
+    c = ws["A4"]
+    c.value = f"Дата формирования: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+    _apply_print_style(c, h="left", fill=PRINT_META_FILL)
+
+    ws.merge_cells(start_row=5, start_column=1, end_row=5, end_column=total_cols)
+    c = ws["A5"]
+    c.value = "В таблице указываются часы по дням и период командировки по сотруднику."
+    _apply_print_style(c, size=8, h="left", border=BORDER_EMPTY)
+
+    ws.row_dimensions[1].height = 24
+    ws.row_dimensions[2].height = 18
+    ws.row_dimensions[3].height = 20
+    ws.row_dimensions[4].height = 20
+    ws.row_dimensions[5].height = 16
+
+    # Заголовок таблицы
+    header_row = 7
+    for col_idx, title in enumerate(headers, start=1):
+        cell = ws.cell(header_row, col_idx, title)
+        _apply_print_style(cell, bold=True, fill=PRINT_HEADER_FILL)
+
+    ws.row_dimensions[header_row].height = 30
+
+    # Ширины колонок
+    ws.column_dimensions["A"].width = 5
+    ws.column_dimensions["B"].width = 30
+    ws.column_dimensions["C"].width = 11
+    ws.column_dimensions["D"].width = 26
+
+    first_day_col = 5
+    last_day_col = first_day_col + days_in_month - 1
+    for col_idx in range(first_day_col, last_day_col + 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = 4.2
+
+    totals_start_col = last_day_col + 1
+    ws.column_dimensions[get_column_letter(totals_start_col)].width = 8
+    ws.column_dimensions[get_column_letter(totals_start_col + 1)].width = 10
+
+    # Данные
+    current_row = header_row + 1
+    normalized_rows: list[dict[str, Any]] = []
+
+    for rec in rows:
+        fio = normalize_spaces(rec.get("fio") or "")
+        tbn = normalize_tbn(rec.get("tbn"))
+        hours = normalize_hours_list(rec.get("hours"), year, month)
+        totals = rec.get("_totals") or calc_row_totals(hours, year, month)
+        d_from = rec.get("trip_date_from")
+        d_to = rec.get("trip_date_to")
+
+        if d_from and d_to:
+            trip_period = f"{d_from.strftime('%d.%m.%Y')} – {d_to.strftime('%d.%m.%Y')}"
+        else:
+            trip_period = ""
+
+        normalized_rows.append(
+            {
+                "fio": fio,
+                "tbn": tbn,
+                "hours": hours,
+                "_totals": totals,
+                "trip_period": trip_period,
+            }
+        )
+
+    for idx, rec in enumerate(normalized_rows, start=1):
+        fio = rec["fio"]
+        tbn = rec["tbn"]
+        hours = rec["hours"]
+        totals = rec["_totals"]
+        trip_period = rec["trip_period"]
+
+        row_values = [
+            idx,
+            fio,
+            tbn,
+            trip_period,
+            *[_excel_safe_value(v) for v in hours[:days_in_month]],
+            _excel_safe_value(format_summary_value(totals.get("days"))),
+            _excel_safe_value(format_summary_value(totals.get("hours"))),
+        ]
+
+        for col_idx, value in enumerate(row_values, start=1):
+            cell = ws.cell(current_row, col_idx, value)
+            if col_idx in (2, 4):
+                _apply_print_style(cell, h="left")
+            else:
+                _apply_print_style(cell, h="center")
+
+        ws.row_dimensions[current_row].height = 21
+        current_row += 1
+
+    summary = calc_rows_summary(normalized_rows, year, month)
+
+    ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=4)
+    total_cell = ws.cell(current_row, 1)
+    total_cell.value = "ИТОГО"
+    _apply_print_style(total_cell, bold=True, fill=PRINT_TOTAL_FILL)
+
+    for col_idx in range(5, totals_start_col):
+        cell = ws.cell(current_row, col_idx, "")
+        _apply_print_style(cell, bold=True, fill=PRINT_TOTAL_FILL)
+
+    summary_values = [
+        format_summary_value(summary.get("days")),
+        format_summary_value(summary.get("hours")),
+    ]
+    for offset, value in enumerate(summary_values):
+        cell = ws.cell(current_row, totals_start_col + offset, value)
+        _apply_print_style(cell, bold=True, fill=PRINT_TOTAL_FILL)
+
+    table_last_row = current_row
+    _set_outer_medium_border(ws, header_row, 1, table_last_row, total_cols)
+
+    sign_row = table_last_row + 3
+    left_sign_end = min(12, total_cols)
+    right_sign_start = left_sign_end + 1
+
+    ws.merge_cells(start_row=sign_row, start_column=1, end_row=sign_row, end_column=left_sign_end)
+    c = ws.cell(sign_row, 1)
+    c.value = f"Составил: {prepared_by or '__________________'}    Подпись: __________________"
+    _apply_print_style(c, h='left', border=BORDER_EMPTY)
+
+    if right_sign_start <= total_cols:
+        ws.merge_cells(start_row=sign_row, start_column=right_sign_start, end_row=sign_row, end_column=total_cols)
+        c = ws.cell(sign_row, right_sign_start)
+        c.value = "Дата: __________________"
+        _apply_print_style(c, h='left', border=BORDER_EMPTY)
+
+    _setup_print_sheet_params(
+        ws,
+        last_col_letter=last_col_letter,
+        last_row=sign_row,
+        title_rows="$1:$7",
+    )
 
 class TripTimesheetPage(tk.Frame):
     def __init__(self, master, app, *args, **kwargs):
@@ -252,6 +511,14 @@ class TripTimesheetPage(tk.Frame):
         self._ts_btn(row1, "Удалить выбранных", self._delete_selected_rows, side="left", padx=3)
         self._ts_btn(row1, "Очистить часы", self._clear_hours_for_selected, side="left", padx=3)
         self._ts_btn(row1, "Проверить дубли", self._check_duplicates, side="left", padx=3)
+
+        self.btn_export = ttk.Button(
+            actions,
+            text="Выгрузить Excel",
+            command=self._export_to_excel,
+            width=16,
+        )
+        self.btn_export.pack(fill="x")
 
         btn_save = tk.Button(
             actions,
@@ -928,6 +1195,60 @@ class TripTimesheetPage(tk.Frame):
             suffix = f"{fio} ({tbn})"
 
         self.var_trip_info.set(f"{suffix}: {period}")
+
+    def _export_to_excel(self) -> None:
+        try:
+            year, month = self._get_year_month()
+            object_id, object_addr = self._parse_selected_object()
+    
+            if not self.rows:
+                messagebox.showinfo("Выгрузка", "В табеле нет строк для выгрузки.", parent=self)
+                return
+    
+            obj_part = object_id or object_addr or "без_объекта"
+    
+            try:
+                prepared_by = normalize_spaces(
+                    (getattr(self.app, "current_user", {}) or {}).get("full_name")
+                    or (getattr(self.app, "current_user", {}) or {}).get("username")
+                    or ""
+                )
+            except Exception:
+                prepared_by = ""
+    
+            path = filedialog.asksaveasfilename(
+                parent=self,
+                title="Сохранить командировочный табель в Excel",
+                defaultextension=".xlsx",
+                initialfile=f"Командировочный_табель_{safe_filename(obj_part)}_{year}_{month:02d}.xlsx",
+                filetypes=[("Excel", "*.xlsx"), ("Все", "*.*")],
+            )
+            if not path:
+                return
+    
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Командировочный табель"
+    
+            build_printable_trip_timesheet_sheet(
+                ws,
+                year=year,
+                month=month,
+                object_addr=object_addr,
+                object_id=object_id,
+                rows=self.rows,
+                prepared_by=prepared_by,
+            )
+    
+            wb.save(path)
+    
+            messagebox.showinfo(
+                "Выгрузка",
+                f"Готово.\nСтрок: {len(self.rows)}\nФайл: {path}",
+                parent=self,
+            )
+        except Exception as exc:
+            messagebox.showerror("Выгрузка", f"Ошибка выгрузки:\n{exc}", parent=self)
 
     # =========================================================
     # Внешние helpers
