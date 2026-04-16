@@ -127,6 +127,7 @@ gpr_module = None
 gpr_task_dialog = None
 gpr_dictionaries = None
 work_schedules_manager = None
+trip_timesheet_page_module = None
 EstimateResourceDecoder = None
 
 
@@ -136,7 +137,8 @@ def perform_heavy_imports():
            analytics_module, timesheet_plan_fact_module, timesheet_transformer, employees_module, \
            timesheet_compare, meals_employees_module, lodging_module, \
            meals_reports_module, employee_card_module, payroll_module, \
-           brigades_module, gpr_module, gpr_task_dialog, gpr_dictionaries, work_schedules_manager
+           brigades_module, gpr_module, gpr_task_dialog, gpr_dictionaries, work_schedules_manager, \
+           trip_timesheet_page_module
 
     import BudgetAnalyzer
     import estimate_resource_decoder as EstimateResourceDecoder
@@ -155,6 +157,7 @@ def perform_heavy_imports():
     import timesheet_plan_fact_page as timesheet_plan_fact_module
     import employees as employees_module
     import timesheet_compare
+    import trip_timesheet_page as trip_timesheet_page_module
     import meals_employees as meals_employees_module
     import lodging_module as lodging_module
     import work_schedules_manager as work_schedules_manager
@@ -553,6 +556,7 @@ class HomePage(tk.Frame):
     PAGE_BUILDERS = {
         "timesheet": lambda p, app: timesheet_module.create_timesheet_page(p, app),
         "my_timesheets": lambda p, app: timesheet_module.create_my_timesheets_page(p, app),
+        "trip_timesheet": lambda p, app: trip_timesheet_page_module.TripTimesheetPage(p, app),
         "transport": lambda p, app: SpecialOrders.create_page(p, app),
         "meals_order": lambda p, app: meals_module.create_meals_order_page(p, app),
         "analytics_dashboard": lambda p, app: analytics_module.AnalyticsPage(p, app),
@@ -639,6 +643,7 @@ class HomePage(tk.Frame):
 
         actions = [
             ("Создать табель", "timesheet"),
+            ("Командировочный табель", "trip_timesheet"),
             ("Мои табели", "my_timesheets"),
             ("Заявка на транспорт", "transport"),
             ("Заказ питания", "meals_order"),
@@ -1411,6 +1416,7 @@ class MainApp(tk.Tk):
         return {
             "home": ("Главная", "Рабочий стол"),
             "timesheet": ("Создать табель", ""),
+            "trip_timesheet": ("Командировочный табель", ""),
             "my_timesheets": ("Мои табели", ""),
             "brigades": ("Бригады", "Назначение бригадиров"),
             "timesheet_registry": ("Реестр табелей", ""),
@@ -1595,6 +1601,7 @@ class MainApp(tk.Tk):
         mapping = {
             "timesheet": lambda p: timesheet_module.create_timesheet_page(p, self),
             "my_timesheets": lambda p: timesheet_module.create_my_timesheets_page(p, self),
+            "trip_timesheet": lambda p: trip_timesheet_page_module.TripTimesheetPage(p, self),
             "brigades": lambda p: brigades_module.create_brigades_page(p, self),
             "timesheet_registry": lambda p: timesheet_module.create_timesheet_registry_page(p, self),
             "workers": lambda p: employees_module.create_workers_page(p, self),
