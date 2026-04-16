@@ -26,7 +26,8 @@ MENU_SPEC: List[MenuSection] = [
         label="Объектный табель",
         entries=[
             MenuEntry("page", "Создать", key="timesheet", perm="page.timesheet", group="timesheets", title="Объектный табель: Создать"),
-            MenuEntry("page", "Мои табели", key="my_timesheets", perm="page.my_timesheets", group="timesheets", title="Объектный табель: Мои табели"),
+            MenuEntry("page", "Мои табели", key="trip_timesheet", perm="page.my_timesheets", group="timesheets", title="Объектный табель: Мои табели"),
+            MenuEntry("page", "Командировочный табель", key="my_timesheets", perm="page.trip_timesheet", group="timesheets", title="Командировочный табель"),
             MenuEntry("page", "Бригады", key="brigades", perm="page.brigades", group="timesheets", title="Объектный табель: Бригады"),
             MenuEntry("page", "Реестр табелей", key="timesheet_registry", perm="page.timesheet_registry", group="timesheets", title="Объектный табель: Реестр табелей"),
             MenuEntry("page", "Работники", key="workers", perm="page.workers", group="timesheets", title="Объектный табель: Работники"),
