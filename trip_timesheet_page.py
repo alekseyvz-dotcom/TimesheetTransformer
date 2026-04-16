@@ -33,7 +33,7 @@ from virtual_timesheet_grid import VirtualTimesheetGrid
 
 # ВАЖНО:
 # подстрой импорт под твой реальный модуль диалога выбора сотрудников
-from select_employees_dialog import SelectEmployeesDialog
+from timesheet_dialogs import SelectEmployeesDialog
 
 
 MONTH_NAMES = {
