@@ -976,14 +976,12 @@ class TripTimesheetPage(tk.Frame):
                 object_addr=object_addr,
                 year=year,
                 month=month,
-                user_id=int(self.app.current_user["id"]),
             )
             self.current_header_id = find_trip_timesheet_header_id(
                 object_id=object_id or None,
                 object_addr=object_addr,
                 year=year,
                 month=month,
-                user_id=int(self.app.current_user["id"]),
             )
         except Exception as exc:
             messagebox.showerror("Ошибка", f"Не удалось открыть табель:\n{exc}", parent=self)
@@ -1032,7 +1030,6 @@ class TripTimesheetPage(tk.Frame):
                 object_addr=object_addr,
                 year=year,
                 month=month,
-                user_id=int(self.app.current_user["id"]),
             )
 
             self._recalc_all_totals()
