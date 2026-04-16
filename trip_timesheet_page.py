@@ -816,49 +816,77 @@ class TripTimesheetPage(tk.Frame):
     def _on_period_changed(self) -> None:
         if self._suppress_events:
             return
-
+    
         if not self._confirm_leave_with_unsaved():
             self._restore_controls_to_loaded_context()
             return
-
-        self._refresh_grid()
-        self._update_trip_info_from_selection()
+    
+        object_id, object_addr = self._parse_selected_object()
+        if not object_addr:
+            self._set_rows([])
+            self.current_header_id = None
+            self._loaded_context = self._capture_current_context()
+            self.var_status.set("Выберите объект.")
+            self._update_trip_info_from_selection()
+            return
+    
+        self._open_timesheet()
 
     def _on_address_select(self) -> None:
         if self._suppress_events:
             return
-
+    
         if not self._confirm_leave_with_unsaved():
             self._restore_controls_to_loaded_context()
             return
-
+    
         self._sync_object_id_values_silent()
-
+    
         addr = normalize_spaces(self.cmb_address.get() or "")
         objects_for_addr = [
             (normalize_spaces(code), normalize_spaces(a), normalize_spaces(short_name))
             for (code, a, short_name) in self.objects_full
             if normalize_spaces(a) == addr
         ]
-
+    
         ids = sorted({code for code, _, _ in objects_for_addr if code})
-        if len(ids) <= 1:
+        if len(ids) > 1:
+            dlg = SelectObjectIdDialog(self, objects_for_addr, addr)
+            self.wait_window(dlg)
+    
+            selected_id = normalize_spaces(dlg.result or "")
+            if selected_id and selected_id in ids:
+                self.cmb_object_id.set(selected_id)
+    
+        object_id, object_addr = self._parse_selected_object()
+        if not object_addr:
+            self._set_rows([])
+            self.current_header_id = None
+            self._loaded_context = self._capture_current_context()
+            self.var_status.set("Выберите объект.")
+            self._update_trip_info_from_selection()
             return
-
-        dlg = SelectObjectIdDialog(self, objects_for_addr, addr)
-        self.wait_window(dlg)
-
-        selected_id = normalize_spaces(dlg.result or "")
-        if selected_id and selected_id in ids:
-            self.cmb_object_id.set(selected_id)
+    
+        self._open_timesheet()
 
     def _on_object_id_select(self) -> None:
         if self._suppress_events:
             return
-
+    
         if not self._confirm_leave_with_unsaved():
             self._restore_controls_to_loaded_context()
             return
+    
+        object_id, object_addr = self._parse_selected_object()
+        if not object_addr:
+            self._set_rows([])
+            self.current_header_id = None
+            self._loaded_context = self._capture_current_context()
+            self.var_status.set("Выберите объект.")
+            self._update_trip_info_from_selection()
+            return
+    
+        self._open_timesheet()
 
     # =========================================================
     # Работа со строками
@@ -1190,47 +1218,50 @@ class TripTimesheetPage(tk.Frame):
     def _check_duplicates(self, silent_if_empty: bool = False) -> None:
         object_id, object_addr = self._parse_selected_object()
         year, month = self._get_year_month()
-
+    
         if not object_addr:
             if not silent_if_empty:
                 messagebox.showwarning("Внимание", "Сначала выберите объект.", parent=self)
             return
-
+    
         employees = self._collect_employee_pairs()
         if not employees:
             if not silent_if_empty:
                 messagebox.showinfo("Проверка дублей", "В табеле нет сотрудников для проверки.", parent=self)
             return
-
+    
         try:
             duplicates = find_duplicate_employees_for_trip_timesheet(
                 object_id=object_id or None,
                 object_addr=object_addr,
                 year=year,
                 month=month,
-                user_id=int(self.app.current_user["id"]),
                 employees=employees,
             )
         except Exception as exc:
             if not silent_if_empty:
                 messagebox.showerror("Ошибка", f"Не удалось проверить дубли:\n{exc}", parent=self)
             return
-
+    
         if not duplicates:
             if not silent_if_empty:
                 messagebox.showinfo("Проверка дублей", "Дубликаты не найдены.", parent=self)
             return
-
-        lines = ["Сотрудники уже присутствуют в командировочных табелях других пользователей:"]
+    
+        lines = ["В текущем табеле обнаружены дубли сотрудников:"]
         for item in duplicates[:30]:
             fio = item.get("fio") or ""
             tbn = item.get("tbn") or ""
-            user_name = item.get("full_name") or item.get("username") or f"ID={item.get('user_id')}"
-            lines.append(f"• {fio} ({tbn}) — пользователь: {user_name}, header_id={item.get('header_id')}")
-
+            count = item.get("count")
+    
+            if count and count > 1:
+                lines.append(f"• {fio} ({tbn}) — повторений: {count}")
+            else:
+                lines.append(f"• {fio} ({tbn})")
+    
         if len(duplicates) > 30:
             lines.append(f"... и ещё {len(duplicates) - 30}")
-
+    
         messagebox.showwarning("Найдены дубликаты", "\n".join(lines), parent=self)
 
     # =========================================================
