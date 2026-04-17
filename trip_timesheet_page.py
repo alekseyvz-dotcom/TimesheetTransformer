@@ -20,6 +20,7 @@ from timesheet_common import (
     normalize_hours_list,
     normalize_spaces,
     normalize_tbn,
+    parse_hours_value,
     safe_filename,
 )
 from timesheet_db import (
@@ -324,6 +325,137 @@ def build_printable_trip_timesheet_sheet(
         title_rows="$1:$7",
     )
 
+class TripTimeFillDialog(simpledialog.Dialog):
+    def __init__(self, parent, max_day: int, title: str = "Проставить время"):
+        self.max_day = int(max_day)
+        self.result: Optional[Dict[str, Any]] = None
+        super().__init__(parent, title=title)
+
+    def body(self, master):
+        tk.Label(master, text=f"В текущем месяце дней: {self.max_day}").grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(4, 6)
+        )
+
+        self.var_mode = tk.StringVar(value="single")
+        ttk.Radiobutton(master, text="Один день", value="single", variable=self.var_mode).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(2, 2)
+        )
+        ttk.Radiobutton(master, text="Диапазон дней", value="range", variable=self.var_mode).grid(
+            row=1, column=2, columnspan=2, sticky="w", pady=(2, 2)
+        )
+
+        tk.Label(master, text="День:").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=(4, 2))
+        self.spn_day = tk.Spinbox(master, from_=1, to=self.max_day, width=6)
+        self.spn_day.grid(row=2, column=1, sticky="w", pady=(4, 2))
+        self.spn_day.delete(0, "end")
+        self.spn_day.insert(0, "1")
+
+        tk.Label(master, text="С:").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=(2, 2))
+        self.spn_from = tk.Spinbox(master, from_=1, to=self.max_day, width=6)
+        self.spn_from.grid(row=3, column=1, sticky="w", pady=(2, 2))
+        self.spn_from.delete(0, "end")
+        self.spn_from.insert(0, "1")
+
+        tk.Label(master, text="По:").grid(row=3, column=2, sticky="e", padx=(10, 6), pady=(2, 2))
+        self.spn_to = tk.Spinbox(master, from_=1, to=self.max_day, width=6)
+        self.spn_to.grid(row=3, column=3, sticky="w", pady=(2, 2))
+        self.spn_to.delete(0, "end")
+        self.spn_to.insert(0, str(self.max_day))
+
+        self.var_clear = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            master,
+            text="Очистить выбранные дни",
+            variable=self.var_clear,
+            command=self._toggle_hours_state,
+        ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 2))
+
+        tk.Label(master, text="Часы:").grid(row=5, column=0, sticky="e", padx=(0, 6), pady=(6, 2))
+        self.ent_hours = ttk.Entry(master, width=18)
+        self.ent_hours.grid(row=5, column=1, sticky="w", pady=(6, 2))
+        self.ent_hours.insert(0, "8")
+
+        tk.Label(
+            master,
+            text="Форматы: 8 | 8,25 | 8.5 | 8:30 | 1/7",
+            fg="#555555",
+        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+        return self.ent_hours
+
+    def _toggle_hours_state(self):
+        state = "disabled" if self.var_clear.get() else "normal"
+        self.ent_hours.configure(state=state)
+
+    def validate(self):
+        mode = self.var_mode.get()
+
+        try:
+            day_single = int(self.spn_day.get())
+            day_from = int(self.spn_from.get())
+            day_to = int(self.spn_to.get())
+        except Exception:
+            messagebox.showwarning("Проставить время", "Дни должны быть целыми числами.", parent=self)
+            return False
+
+        if not (1 <= day_single <= self.max_day):
+            messagebox.showwarning(
+                "Проставить время",
+                f"День должен быть в диапазоне 1–{self.max_day}.",
+                parent=self,
+            )
+            return False
+
+        if not (1 <= day_from <= self.max_day and 1 <= day_to <= self.max_day):
+            messagebox.showwarning(
+                "Проставить время",
+                f"Диапазон должен быть в пределах 1–{self.max_day}.",
+                parent=self,
+            )
+            return False
+
+        if mode == "range" and day_from > day_to:
+            messagebox.showwarning(
+                "Проставить время",
+                "Начальный день диапазона не может быть больше конечного.",
+                parent=self,
+            )
+            return False
+
+        if mode == "single":
+            self._day_from = day_single
+            self._day_to = day_single
+        else:
+            self._day_from = day_from
+            self._day_to = day_to
+
+        if self.var_clear.get():
+            self._value = None
+            return True
+
+        text = normalize_spaces(self.ent_hours.get())
+        if not text:
+            messagebox.showwarning("Проставить время", "Введите количество часов.", parent=self)
+            return False
+
+        parsed = parse_hours_value(text)
+        if parsed is None or parsed < 0:
+            messagebox.showwarning(
+                "Проставить время",
+                "Введите корректное значение часов.\nПримеры: 8, 8,25, 8.5, 8:30, 1/7",
+                parent=self,
+            )
+            return False
+
+        self._value = float(parsed)
+        return True
+
+    def apply(self):
+        self.result = {
+            "from": self._day_from,
+            "to": self._day_to,
+            "value": self._value,
+        }
 
 class TripTimesheetPage(tk.Frame):
     def __init__(self, master, app, *args, **kwargs):
@@ -1372,39 +1504,25 @@ class TripTimesheetPage(tk.Frame):
             selected = []
         return sorted(i for i in selected if 0 <= i < len(self._get_visible_rows()))
 
-    def _ask_fill_hour_value(self) -> Optional[float]:
-        value = simpledialog.askstring(
-            "Проставить время",
-            "Введите количество часов.\n\n"
-            "Примеры: 8, 10.5, 11,5",
-            parent=self,
-        )
-        if value is None:
-            return None
+    def _ask_fill_hours_params(self) -> Optional[Dict[str, Any]]:
+        year, month = self._get_year_month()
+        max_day = month_days(year, month)
     
-        text = str(value).strip()
-        if not text:
-            return None
-    
-        text = text.replace(",", ".")
-        try:
-            hours = float(text)
-        except ValueError:
-            messagebox.showerror("Ошибка", "Введите корректное числовое значение часов.", parent=self)
-            return None
-    
-        if hours < 0:
-            messagebox.showerror("Ошибка", "Количество часов не может быть отрицательным.", parent=self)
-            return None
-    
-        return hours
-    
-    
+        dlg = TripTimeFillDialog(self, max_day=max_day, title="Проставить время")
+        return dlg.result
+
     def _row_has_trip_period(self, rec: Dict[str, Any]) -> bool:
         return bool(rec.get("trip_date_from") and rec.get("trip_date_to"))
     
-    
-    def _fill_hours_for_row(self, rec: Dict[str, Any], hour_value: float, year: int, month: int) -> None:
+    def _fill_hours_for_row(
+        self,
+        rec: Dict[str, Any],
+        value: Optional[float],
+        day_from: int,
+        day_to: int,
+        year: int,
+        month: int,
+    ) -> None:
         days_in_month = month_days(year, month)
         trip_date_from = rec.get("trip_date_from")
         trip_date_to = rec.get("trip_date_to")
@@ -1412,17 +1530,26 @@ class TripTimesheetPage(tk.Frame):
         if not (trip_date_from and trip_date_to):
             return
     
-        hours = [None] * 31
-        for day in range(1, days_in_month + 1):
+        hours = normalize_hours_list(rec.get("hours"), year, month)
+    
+        day_from = max(1, min(day_from, days_in_month))
+        day_to = max(1, min(day_to, days_in_month))
+    
+        for day in range(day_from, day_to + 1):
             current_day = date(year, month, day)
             if trip_date_from <= current_day <= trip_date_to:
-                hours[day - 1] = hour_value
+                hours[day - 1] = value
     
         rec["hours"] = hours
         rec["_totals"] = calc_row_totals(hours, year, month)
     
-    
-    def _apply_hour_value_to_indexes(self, real_indexes: List[int], hour_value: float) -> int:
+    def _apply_hour_value_to_indexes(
+        self,
+        real_indexes: List[int],
+        value: Optional[float],
+        day_from: int,
+        day_to: int,
+    ) -> int:
         if not real_indexes:
             return 0
     
@@ -1441,7 +1568,7 @@ class TripTimesheetPage(tk.Frame):
                 skipped_without_period.append(f"{fio} ({tbn})".strip())
                 continue
     
-            self._fill_hours_for_row(rec, hour_value, year, month)
+            self._fill_hours_for_row(rec, value, day_from, day_to, year, month)
             applied += 1
     
         self._refresh_grid()
@@ -1461,38 +1588,62 @@ class TripTimesheetPage(tk.Frame):
     
         return applied
     
-    
     def _fill_hours_for_selected(self) -> None:
         indexes = self._get_selected_row_indexes()
         if not indexes:
             messagebox.showinfo("Проставить время", "Не выбраны строки.", parent=self)
             return
     
-        hour_value = self._ask_fill_hour_value()
-        if hour_value is None:
+        params = self._ask_fill_hours_params()
+        if not params:
             return
+    
+        day_from = int(params["from"])
+        day_to = int(params["to"])
+        value = params["value"]
     
         real_indexes = [self._visible_to_real_index(i) for i in indexes]
         real_indexes = [i for i in real_indexes if i is not None]
     
-        applied = self._apply_hour_value_to_indexes(real_indexes, hour_value)
+        applied = self._apply_hour_value_to_indexes(real_indexes, value, day_from, day_to)
         if applied:
-            self.var_status.set(f"Проставлено {hour_value} ч. в выбранные строки: {applied}")
-    
+            if value is None:
+                if day_from == day_to:
+                    self.var_status.set(f"Очищен день {day_from} у выбранных строк: {applied}")
+                else:
+                    self.var_status.set(f"Очищены дни {day_from}-{day_to} у выбранных строк: {applied}")
+            else:
+                if day_from == day_to:
+                    self.var_status.set(f"Проставлено {value} ч. в день {day_from} у выбранных строк: {applied}")
+                else:
+                    self.var_status.set(f"Проставлено {value} ч. за дни {day_from}-{day_to} у выбранных строк: {applied}")
     
     def _fill_hours_for_all(self) -> None:
         if not self.rows:
             messagebox.showinfo("Проставить время", "В табеле нет строк.", parent=self)
             return
     
-        hour_value = self._ask_fill_hour_value()
-        if hour_value is None:
+        params = self._ask_fill_hours_params()
+        if not params:
             return
     
+        day_from = int(params["from"])
+        day_to = int(params["to"])
+        value = params["value"]
+    
         real_indexes = list(range(len(self.rows)))
-        applied = self._apply_hour_value_to_indexes(real_indexes, hour_value)
+        applied = self._apply_hour_value_to_indexes(real_indexes, value, day_from, day_to)
         if applied:
-            self.var_status.set(f"Проставлено {hour_value} ч. во все строки: {applied}")
+            if value is None:
+                if day_from == day_to:
+                    self.var_status.set(f"Очищен день {day_from} у всех строк: {applied}")
+                else:
+                    self.var_status.set(f"Очищены дни {day_from}-{day_to} у всех строк: {applied}")
+            else:
+                if day_from == day_to:
+                    self.var_status.set(f"Проставлено {value} ч. в день {day_from} у всех строк: {applied}")
+                else:
+                    self.var_status.set(f"Проставлено {value} ч. за дни {day_from}-{day_to} у всех строк: {applied}")
 
     def _delete_selected_rows(self) -> None:
         indexes = self._get_selected_row_indexes()
