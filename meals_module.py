@@ -574,6 +574,7 @@ def load_all_meal_orders(
     department: Optional[str] = None,
     team_name: Optional[str] = None,
     address_substr: Optional[str] = None,
+    user_name: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     conn = None
     try:
@@ -601,6 +602,10 @@ def load_all_meal_orders(
             if address_substr and address_substr.strip():
                 where_clauses.append("COALESCE(mo.fact_address, o.address) ILIKE %s")
                 params.append(f"%{address_substr.strip()}%")
+
+            if user_name and user_name.strip() and user_name.strip().lower() != "все":
+                where_clauses.append("COALESCE(au.full_name, au.username, '') = %s")
+                params.append(user_name.strip())
 
             where_sql = ""
             if where_clauses:
@@ -2958,8 +2963,12 @@ class AllMealsOrdersPage(tk.Frame):
         self.ent_address_filter = ttk.Entry(top, width=24)
         self.ent_address_filter.grid(row=1, column=9, sticky="w", padx=(4, 8), pady=(4, 0))
 
+        tk.Label(top, text="Пользователь:", bg="#f7f7f7").grid(row=2, column=0, sticky="w", pady=(4, 0))
+        self.cmb_user_filter = ttk.Combobox(top, state="readonly", width=28)
+        self.cmb_user_filter.grid(row=2, column=1, sticky="w", padx=(4, 8), pady=(4, 0))
+
         btn_frame = tk.Frame(top, bg="#f7f7f7")
-        btn_frame.grid(row=0, column=10, rowspan=2, sticky="e", padx=(12, 0))
+        btn_frame.grid(row=0, column=10, rowspan=3, sticky="e", padx=(12, 0))
 
         ttk.Button(
             btn_frame,
@@ -2987,6 +2996,7 @@ class AllMealsOrdersPage(tk.Frame):
 
         self._init_dep_filter()
         self._init_team_filter()
+        self._init_user_filter()
 
         frame = tk.Frame(self, bg="#f7f7f7")
         frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
@@ -3119,8 +3129,38 @@ class AllMealsOrdersPage(tk.Frame):
             self.cmb_team_filter["values"] = ["Все"]
             self.cmb_team_filter.set("Все")
 
+    def _init_user_filter(self):
+        conn = None
+        try:
+            conn = get_db_connection()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT DISTINCT COALESCE(full_name, username, '') AS user_name
+                    FROM app_users
+                    WHERE COALESCE(full_name, username, '') <> ''
+                    ORDER BY 1;
+                """)
+                rows = cur.fetchall()
+
+                users = ["Все"]
+                for row in rows:
+                    user_name = row[0] if isinstance(row, (tuple, list)) else row["user_name"]
+                    if user_name:
+                        users.append(user_name)
+
+                self.cmb_user_filter["values"] = users
+                self.cmb_user_filter.set("Все")
+        except Exception:
+            self.cmb_user_filter["values"] = ["Все"]
+            self.cmb_user_filter.set("Все")
+        finally:
+            if conn:
+                release_db_connection(conn)
+
     def _on_department_changed(self, event=None):
         department = (self.cmb_dep_filter.get() or "").strip()
+        if department.lower() == "все":
+            department = None
         self._init_team_filter(department=department)
 
     def _reset_filters(self):
@@ -3146,6 +3186,11 @@ class AllMealsOrdersPage(tk.Frame):
         except Exception:
             pass
 
+        try:
+            self.cmb_user_filter.set("Все")
+        except Exception:
+            pass
+
         self._load_data()
 
     def _load_data(self):
@@ -3165,11 +3210,14 @@ class AllMealsOrdersPage(tk.Frame):
         dep_filter = (self.cmb_dep_filter.get() or "").strip() if hasattr(self, "cmb_dep_filter") else ""
         team_filter = (self.cmb_team_filter.get() or "").strip() if hasattr(self, "cmb_team_filter") else ""
         addr_filter = (self.ent_address_filter.get() or "").strip() if hasattr(self, "ent_address_filter") else ""
+        user_filter = (self.cmb_user_filter.get() or "").strip() if hasattr(self, "cmb_user_filter") else ""
 
         if dep_filter.lower() == "все":
             dep_filter = None
         if team_filter.lower() == "все":
             team_filter = None
+        if user_filter.lower() == "все":
+            user_filter = None
         if not addr_filter:
             addr_filter = None
 
@@ -3180,6 +3228,7 @@ class AllMealsOrdersPage(tk.Frame):
                 department=dep_filter,
                 team_name=team_filter,
                 address_substr=addr_filter,
+                user_name=user_filter,
             )
         except Exception as e:
             messagebox.showerror(
@@ -3240,11 +3289,14 @@ class AllMealsOrdersPage(tk.Frame):
             dep_filter = (self.cmb_dep_filter.get() or "").strip() if hasattr(self, "cmb_dep_filter") else ""
             team_filter = (self.cmb_team_filter.get() or "").strip() if hasattr(self, "cmb_team_filter") else ""
             addr_filter = (self.ent_address_filter.get() or "").strip() if hasattr(self, "ent_address_filter") else ""
+            user_filter = (self.cmb_user_filter.get() or "").strip() if hasattr(self, "cmb_user_filter") else ""
 
             if dep_filter.lower() == "все":
                 dep_filter = None
             if team_filter.lower() == "все":
                 team_filter = None
+            if user_filter.lower() == "все":
+                user_filter = None
             if not addr_filter:
                 addr_filter = None
 
@@ -3259,6 +3311,14 @@ class AllMealsOrdersPage(tk.Frame):
                 filter_date_str = None
 
             try:
+                raw_orders = get_details_from_db(
+                    filter_date=filter_date_str,
+                    filter_address=addr_filter,
+                    filter_department=dep_filter,
+                    filter_team=team_filter,
+                    filter_user=user_filter,
+                )
+            except TypeError:
                 raw_orders = get_details_from_db(
                     filter_date=filter_date_str,
                     filter_address=addr_filter,
@@ -3369,6 +3429,7 @@ class AllMealsOrdersPage(tk.Frame):
             dep_str = dep_filter or "Все"
             team_str = team_filter or "Все"
             addr_str = addr_filter or "(любой адрес)"
+            user_str = user_filter or "Все"
 
             ws.append([f"Реестр питания ({period_str})"])
             ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=end_col)
@@ -3382,10 +3443,13 @@ class AllMealsOrdersPage(tk.Frame):
             ws.append([f"Адрес содержит: {addr_str}"])
             ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=end_col)
 
+            ws.append([f"Пользователь: {user_str}"])
+            ws.merge_cells(start_row=5, start_column=1, end_row=5, end_column=end_col)
+
             ws.append([])
 
             ws.append(["Свод по объектам, типам питания и стоимости"])
-            ws.merge_cells(start_row=6, start_column=1, end_row=6, end_column=end_col)
+            ws.merge_cells(start_row=7, start_column=1, end_row=7, end_column=end_col)
             ws.append(["Адрес", "Тип питания", "Кол-во человек", "Сумма, руб."])
 
             for addr, by_type in summary.items():
@@ -3427,7 +3491,7 @@ class AllMealsOrdersPage(tk.Frame):
             for col, width in enumerate(widths, start=1):
                 ws.column_dimensions[get_column_letter(col)].width = width
 
-            ws.freeze_panes = "A8"
+            ws.freeze_panes = "A9"
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
