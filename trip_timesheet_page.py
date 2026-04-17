@@ -762,7 +762,6 @@ class TripTimesheetPage(tk.Frame):
         self.bind_all("<Control-e>", self._hotkey_export, add="+")
         self.bind_all("<Control-E>", self._hotkey_export, add="+")
         self.bind_all("<F5>", self._hotkey_reload, add="+")
-        self.bind_all("<Delete>", self._hotkey_delete, add="+")
 
     def _hotkey_save(self, event=None):
         if not self.winfo_exists():
@@ -793,7 +792,8 @@ class TripTimesheetPage(tk.Frame):
             return
         if self.focus_displayof() is None:
             return
-        self._delete_selected_rows()
+    
+        # Delete обрабатывается самим гридом и очищает только текущую ячейку.
         return "break"
 
     # =========================================================
