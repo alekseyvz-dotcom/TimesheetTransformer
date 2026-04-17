@@ -1367,7 +1367,7 @@ class TripTimesheetPage(tk.Frame):
     # =========================================================
     def _get_selected_row_indexes(self) -> List[int]:
         try:
-            selected = list(self.grid_widget.get_selected_rows())
+            selected = list(self.grid_widget.get_selected_indices())
         except Exception:
             selected = []
         return sorted(i for i in selected if 0 <= i < len(self._get_visible_rows()))
