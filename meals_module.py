@@ -2922,14 +2922,14 @@ class AllMealsOrdersPage(tk.Frame):
     def _build_ui(self):
         top = tk.Frame(self, bg="#f7f7f7")
         top.pack(fill="x", padx=8, pady=(8, 4))
-
+    
         tk.Label(
             top,
             text="Реестр заявок (все пользователи)",
             font=("Segoe UI", 12, "bold"),
             bg="#f7f7f7",
         ).grid(row=0, column=0, columnspan=12, sticky="w")
-
+    
         tk.Label(top, text="Дата с:", bg="#f7f7f7").grid(row=1, column=0, sticky="w", pady=(4, 0))
         self.ent_date_from = DateEntry(
             top,
@@ -2939,7 +2939,7 @@ class AllMealsOrdersPage(tk.Frame):
         )
         self.ent_date_from.grid(row=1, column=1, sticky="w", padx=(4, 8), pady=(4, 0))
         self.ent_date_from.delete(0, tk.END)
-
+    
         tk.Label(top, text="по:", bg="#f7f7f7").grid(row=1, column=2, sticky="w", pady=(4, 0))
         self.ent_date_to = DateEntry(
             top,
@@ -2949,58 +2949,58 @@ class AllMealsOrdersPage(tk.Frame):
         )
         self.ent_date_to.grid(row=1, column=3, sticky="w", padx=(4, 8), pady=(4, 0))
         self.ent_date_to.delete(0, tk.END)
-
+    
         tk.Label(top, text="Подразделение:", bg="#f7f7f7").grid(row=1, column=4, sticky="w", pady=(4, 0))
         self.cmb_dep_filter = ttk.Combobox(top, state="readonly", width=28)
         self.cmb_dep_filter.grid(row=1, column=5, sticky="w", padx=(4, 8), pady=(4, 0))
         self.cmb_dep_filter.bind("<<ComboboxSelected>>", self._on_department_changed)
-
+    
         tk.Label(top, text="Бригада:", bg="#f7f7f7").grid(row=1, column=6, sticky="w", pady=(4, 0))
         self.cmb_team_filter = ttk.Combobox(top, state="readonly", width=28)
         self.cmb_team_filter.grid(row=1, column=7, sticky="w", padx=(4, 8), pady=(4, 0))
-
+    
         tk.Label(top, text="Адрес (часть):", bg="#f7f7f7").grid(row=1, column=8, sticky="w", pady=(4, 0))
         self.ent_address_filter = ttk.Entry(top, width=24)
         self.ent_address_filter.grid(row=1, column=9, sticky="w", padx=(4, 8), pady=(4, 0))
-
-        tk.Label(top, text="Пользователь:", bg="#f7f7f7").grid(row=2, column=0, sticky="w", pady=(4, 0))
+    
+        tk.Label(top, text="Пользователь:", bg="#f7f7f7").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.cmb_user_filter = ttk.Combobox(top, state="readonly", width=28)
-        self.cmb_user_filter.grid(row=2, column=1, sticky="w", padx=(4, 8), pady=(4, 0))
-
+        self.cmb_user_filter.grid(row=2, column=1, sticky="w", padx=(4, 8), pady=(8, 0))
+    
         btn_frame = tk.Frame(top, bg="#f7f7f7")
-        btn_frame.grid(row=0, column=10, rowspan=3, sticky="e", padx=(12, 0))
-
-        ttk.Button(
-            btn_frame,
-            text="Выгрузить в Excel",
-            command=self._export_to_excel,
-        ).pack(side="right", padx=4)
-
-        ttk.Button(
-            btn_frame,
-            text="Применить фильтр",
-            command=self._load_data,
-        ).pack(side="right", padx=4)
-
-        ttk.Button(
-            btn_frame,
-            text="Сбросить фильтры",
-            command=self._reset_filters,
-        ).pack(side="right", padx=4)
-
+        btn_frame.grid(row=2, column=4, columnspan=6, sticky="w", padx=(12, 0), pady=(8, 0))
+    
         ttk.Button(
             btn_frame,
             text="Обновить",
             command=self._load_data,
-        ).pack(side="right", padx=4)
-
+        ).pack(side="left", padx=(0, 4))
+    
+        ttk.Button(
+            btn_frame,
+            text="Сбросить фильтры",
+            command=self._reset_filters,
+        ).pack(side="left", padx=4)
+    
+        ttk.Button(
+            btn_frame,
+            text="Применить фильтр",
+            command=self._load_data,
+        ).pack(side="left", padx=4)
+    
+        ttk.Button(
+            btn_frame,
+            text="Выгрузить в Excel",
+            command=self._export_to_excel,
+        ).pack(side="left", padx=4)
+    
         self._init_dep_filter()
         self._init_team_filter()
         self._init_user_filter()
-
+    
         frame = tk.Frame(self, bg="#f7f7f7")
         frame.pack(fill="both", expand=True, padx=8, pady=(4, 8))
-
+    
         cols = ("date", "object", "department", "team", "count", "user", "created_at")
         self.tree = ttk.Treeview(
             frame,
@@ -3008,7 +3008,7 @@ class AllMealsOrdersPage(tk.Frame):
             show="headings",
             selectmode="browse",
         )
-
+    
         self.tree.heading("date", text="Дата")
         self.tree.heading("object", text="Объект")
         self.tree.heading("department", text="Подразделение")
@@ -3016,7 +3016,7 @@ class AllMealsOrdersPage(tk.Frame):
         self.tree.heading("count", text="Сотр., чел.")
         self.tree.heading("user", text="Пользователь")
         self.tree.heading("created_at", text="Создана")
-
+    
         self.tree.column("date", width=90, anchor="center")
         self.tree.column("object", width=300, anchor="w")
         self.tree.column("department", width=180, anchor="w")
@@ -3024,19 +3024,19 @@ class AllMealsOrdersPage(tk.Frame):
         self.tree.column("count", width=90, anchor="center")
         self.tree.column("user", width=180, anchor="w")
         self.tree.column("created_at", width=140, anchor="center")
-
+    
         vsb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
-
+    
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
-
+    
         self.tree.bind("<Double-1>", self._on_open)
         self.tree.bind("<Return>", self._on_open)
-
+    
         bottom = tk.Frame(self, bg="#f7f7f7")
         bottom.pack(fill="x", padx=8, pady=(0, 8))
-
+    
         tk.Label(
             bottom,
             text="Двойной щелчок или Enter по строке — открыть заявку для редактирования или дублирования.",
@@ -3044,7 +3044,7 @@ class AllMealsOrdersPage(tk.Frame):
             fg="#555",
             bg="#f7f7f7",
         ).pack(side="left")
-
+    
         self.btn_delete = ttk.Button(
             bottom,
             text="Удалить заявку",
@@ -3135,19 +3135,21 @@ class AllMealsOrdersPage(tk.Frame):
             conn = get_db_connection()
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT DISTINCT COALESCE(full_name, username, '') AS user_name
-                    FROM app_users
-                    WHERE COALESCE(full_name, username, '') <> ''
+                    SELECT DISTINCT
+                        COALESCE(au.full_name, au.username, '') AS user_name
+                    FROM meal_orders mo
+                    JOIN app_users au ON au.id = mo.user_id
+                    WHERE COALESCE(au.full_name, au.username, '') <> ''
                     ORDER BY 1;
                 """)
                 rows = cur.fetchall()
-
+    
                 users = ["Все"]
                 for row in rows:
                     user_name = row[0] if isinstance(row, (tuple, list)) else row["user_name"]
                     if user_name:
                         users.append(user_name)
-
+    
                 self.cmb_user_filter["values"] = users
                 self.cmb_user_filter.set("Все")
         except Exception:
