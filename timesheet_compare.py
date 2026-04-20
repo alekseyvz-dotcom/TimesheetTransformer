@@ -104,6 +104,9 @@ class TimesheetComparePage(tk.Frame):
         self._merged_groups: List[Dict[str, Any]] = []
         self._agg_headers:   List[Dict[str, Any]] = []
 
+        # Состояние текущего месяца
+        self._current_month_days = 31
+
         # Статистика последнего сравнения
         self._stat_total    = 0
         self._stat_diff     = 0
@@ -294,6 +297,25 @@ class TimesheetComparePage(tk.Frame):
         cmp_tool = tk.Frame(cmp_pnl, bg=CMP_COLORS["accent_light"], pady=4)
         cmp_tool.pack(fill="x")
 
+        # Выбор режима сравнения (Весь месяц / 1-15)
+        tk.Label(
+            cmp_tool, text="Период:",
+            font=("Segoe UI", 9, "bold"), bg=CMP_COLORS["accent_light"], fg=CMP_COLORS["accent"]
+        ).pack(side="left", padx=(8, 2))
+
+        self.var_compare_mode = tk.StringVar(value="Весь месяц")
+        cmb_mode = ttk.Combobox(
+            cmp_tool, state="readonly", width=22,
+            textvariable=self.var_compare_mode,
+            values=["Весь месяц", "Первая половина (1-15)"]
+        )
+        cmb_mode.pack(side="left", padx=(0, 6))
+        cmb_mode.bind("<<ComboboxSelected>>", lambda e: self._rebuild_comparison())
+
+        tk.Frame(cmp_tool, bg=CMP_COLORS["border"], width=1).pack(
+            side="left", fill="y", padx=6
+        )
+
         # Фильтр расхождений
         self.var_only_diff = tk.BooleanVar(value=False)
         ttk.Checkbutton(
@@ -301,7 +323,7 @@ class TimesheetComparePage(tk.Frame):
             text="Только расхождения",
             variable=self.var_only_diff,
             command=self._rebuild_comparison
-        ).pack(side="left", padx=(8, 4))
+        ).pack(side="left", padx=(6, 4))
 
         tk.Frame(cmp_tool, bg=CMP_COLORS["border"], width=1).pack(
             side="left", fill="y", padx=6
@@ -633,8 +655,8 @@ class TimesheetComparePage(tk.Frame):
             return
 
         self._obj_rows = obj_rows
-        dim = month_days(agg["year"], agg["month"])
-        self._configure_compare_columns(dim)
+        # Обновляем количество дней для выбранного месяца
+        self._current_month_days = month_days(agg["year"], agg["month"])
         self._rebuild_comparison()
 
     # ──────────────────────────────────────────────────────────
@@ -642,7 +664,7 @@ class TimesheetComparePage(tk.Frame):
     # ──────────────────────────────────────────────────────────
 
     def _sum_days(self, days: List, count: int) -> float:
-        """Суммирует только числовые дневные значения."""
+        """Суммирует только числовые дневные значения в пределах count."""
         total = 0.0
         for i in range(min(count, len(days))):
             try:
@@ -749,15 +771,21 @@ class TimesheetComparePage(tk.Frame):
     def _rebuild_comparison(self):
         self._merged_groups.clear()
 
+        # Настраиваем колонки в зависимости от режима "Весь месяц" / "1-15"
+        mode = self.var_compare_mode.get()
+        active_days = 15 if mode == "Первая половина (1-15)" else self._current_month_days
+        
+        # Конфигурируем таблицу (это очистит дерево)
+        self._configure_compare_columns(active_days)
+
         if not self._obj_rows and not self._hr_rows:
-            self.tree_compare.delete(*self.tree_compare.get_children())
             return
 
         only_diff  = self.var_only_diff.get()
 
-        # Колонок дней (без status/fio/tbn/object/kind/total_obj/total_1c)
+        # Колонок дней теперь строго 15 или 28-31
         all_cols   = list(self.tree_compare["columns"])
-        days_count = len(all_cols) - 7   # 5 фикс. + 2 итога
+        days_count = len(all_cols) - 7
 
         hr_map: Dict[str, Dict]       = {
             normalize_tbn(r["tbn"]): r for r in self._hr_rows
@@ -770,12 +798,34 @@ class TimesheetComparePage(tk.Frame):
 
         stat_total = stat_diff = stat_only_obj = stat_only_1c = 0
 
+        # Вспомогательная функция для проверки пустых строк
+        def check_has_data_in_period(days_list):
+            for i in range(days_count):
+                if i < len(days_list) and normalize_val(days_list[i]):
+                    return True
+            return False
+
         for tbn in all_tbns:
             hr_row       = hr_map.get(tbn)
             obj_rows_lst = sorted(
                 obj_map.get(tbn, []),
                 key=lambda x: x.get("object_display", "")
             )
+
+            # Проверяем, есть ли вообще данные у человека в выбранном диапазоне дней.
+            # Если мы смотрим дни 1-15, а человек работал только 20-30, пропускаем его.
+            has_data_in_period = False
+            if hr_row and check_has_data_in_period(hr_row["days"]):
+                has_data_in_period = True
+            
+            if not has_data_in_period:
+                for o_row in obj_rows_lst:
+                    if check_has_data_in_period(o_row["days"]):
+                        has_data_in_period = True
+                        break
+            
+            if not has_data_in_period:
+                continue # Полностью пуст в данном периоде - игнорируем
 
             has_obj = bool(obj_rows_lst)
             has_1c  = bool(hr_row)
@@ -795,7 +845,7 @@ class TimesheetComparePage(tk.Frame):
             else:
                 situation = "both"
 
-            # ── Анализ расхождений (только когда есть оба) ──
+            # ── Анализ расхождений (только в пределах days_count) ──
             group_has_diff = False
             if situation == "both":
                 hr_days = hr_row["days"]
@@ -815,7 +865,7 @@ class TimesheetComparePage(tk.Frame):
                     if group_has_diff:
                         break
 
-                # Есть в 1С, нет ни в одном объекте
+                # Есть в 1С, нет ни в одном объекте (в пределах дней)
                 if not group_has_diff:
                     for i in range(days_count):
                         norm_h = normalize_val(
@@ -868,6 +918,7 @@ class TimesheetComparePage(tk.Frame):
             )
         )
         self._render_compare_from_groups()        
+        
         # ── Итог ────────────────────────────────────────────
         self._stat_total    = stat_total
         self._stat_diff     = stat_diff
@@ -924,8 +975,8 @@ class TimesheetComparePage(tk.Frame):
 
             # ── Заголовок файла ──────────────────────────────
             ws.append([
-                f"Сравнение табелей. Экспорт: "
-                f"{datetime.now().strftime('%d.%m.%Y %H:%M')}"
+                f"Сравнение табелей. Период: {self.var_compare_mode.get()}. "
+                f"Экспорт: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
             ])
             ws.append([
                 f"Итого сотрудников: {self._stat_total} | "
