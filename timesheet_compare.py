@@ -884,7 +884,7 @@ class TimesheetComparePage(tk.Frame):
         )
 
     # ──────────────────────────────────────────────────────────
-    #  Экспорт в Excel (в потоке)
+    #  Экспорт в Excel (с сеткой, фильтрами и числовым форматом)
     # ──────────────────────────────────────────────────────────
 
     def _start_export_thread(self):
@@ -956,22 +956,34 @@ class TimesheetComparePage(tk.Frame):
             font_header = Font(bold=True, color="FFFFFF")
             fill_header = PatternFill("solid", fgColor="1565C0")
 
-            border_thick = Border(
-                top=Side(style="medium"),
-                bottom=Side(style="medium")
+            # Сетка для всех ячеек
+            border_all_thin = Border(
+                left=Side(style="thin", color="A0A0A0"),
+                right=Side(style="thin", color="A0A0A0"),
+                top=Side(style="thin", color="A0A0A0"),
+                bottom=Side(style="thin", color="A0A0A0")
             )
-            border_thin  = Border(
-                bottom=Side(style="thin", color="CCCCCC")
-            )
+            
+            align_center = Alignment(horizontal="center", vertical="center")
 
             for c in range(1, len(hdr_row) + 1):
                 cell = ws.cell(hdr_excel_row, c)
                 cell.font   = font_header
                 cell.fill   = fill_header
-                cell.alignment = Alignment(horizontal="center",
-                                           vertical="center")
+                cell.alignment = align_center
+                cell.border = border_all_thin
 
             total_grp = len(self._merged_groups)
+            
+            # Функция перевода строк в числа для корректной работы Excel формул
+            def _to_excel_val(val):
+                if val is None or str(val).strip() == "": return ""
+                try:
+                    f = float(str(val).replace(',', '.'))
+                    return int(f) if f.is_integer() else f
+                except ValueError:
+                    return str(val) # Текст ("В", "ОТ") остается текстом
+
             for idx, grp in enumerate(self._merged_groups):
                 pct = int(idx / total_grp * 100) if total_grp else 0
                 self.after(
@@ -1010,9 +1022,6 @@ class TimesheetComparePage(tk.Frame):
                     if hr_row else 0.0
                 )
 
-                def _fmt(v):
-                    return round(v, 2) if v else ""
-
                 start_row = ws.max_row + 1
 
                 # Строки объектов
@@ -1020,17 +1029,25 @@ class TimesheetComparePage(tk.Frame):
                 for o_row in obj_rows:
                     days_raw = (o_row["days"][:days_cnt]
                                 + [None] * days_cnt)[:days_cnt]
+                    
                     row_data = (
                         [icon if first else "",
                          main_fio if first else "",
                          main_tbn if first else "",
                          o_row["object_display"], "Объект"]
-                        + [(v if v is not None else "") for v in days_raw]
-                        + [_fmt(sum_obj) if first else "",
-                           _fmt(sum_1c)  if first else ""]
+                        + [_to_excel_val(v) for v in days_raw]
+                        + [_to_excel_val(sum_obj) if first else "",
+                           _to_excel_val(sum_1c)  if first else ""]
                     )
                     ws.append(row_data)
                     cur = ws.max_row
+
+                    # Сетка и выравнивание
+                    for c_idx in range(1, len(row_data) + 1):
+                        cell = ws.cell(cur, c_idx)
+                        cell.border = border_all_thin
+                        if c_idx >= 6: # Выравнивание дней по центру
+                            cell.alignment = align_center
 
                     # Подсветка расхождений в ячейках
                     if hr_row and situation == "both":
@@ -1054,19 +1071,17 @@ class TimesheetComparePage(tk.Frame):
                         for c_idx in range(1, 6):
                             ws.cell(cur, c_idx).fill = fill_diff
 
-                    for c_idx in range(1, len(row_data) + 1):
-                        ws.cell(cur, c_idx).border = border_thin
-
                     first = False
 
                 # Строка 1С
                 if hr_row:
                     hr_days = (hr_row["days"][:days_cnt]
                                + [None] * days_cnt)[:days_cnt]
+                    
                     row_data = (
                         ["", main_fio, main_tbn, "", "1С Кадры"]
-                        + [(v if v is not None else "") for v in hr_days]
-                        + ["", _fmt(sum_1c)]
+                        + [_to_excel_val(v) for v in hr_days]
+                        + ["", _to_excel_val(sum_1c)]
                     )
                     ws.append(row_data)
                     cur = ws.max_row
@@ -1074,8 +1089,11 @@ class TimesheetComparePage(tk.Frame):
                     fill_1c = (fill_only_1c
                                if situation == "only_1c" else fill_hr)
                     for c_idx in range(1, len(row_data) + 1):
-                        ws.cell(cur, c_idx).fill   = fill_1c
-                        ws.cell(cur, c_idx).border = border_thin
+                        cell = ws.cell(cur, c_idx)
+                        cell.fill   = fill_1c
+                        cell.border = border_all_thin
+                        if c_idx >= 6:
+                            cell.alignment = align_center
 
                     # Ячейки: в 1С есть, в объектах нет
                     if situation == "both":
@@ -1093,19 +1111,19 @@ class TimesheetComparePage(tk.Frame):
                             if not found:
                                 ws.cell(cur, 6 + i).fill = fill_cell_miss
 
-                # Рамка блока
+                # Рамка блока (жирная сверху и снизу для всей группы)
                 end_row = ws.max_row
                 if end_row >= start_row:
                     for c_idx in range(1, len(hdr_row) + 1):
                         t = ws.cell(start_row, c_idx)
                         b = ws.cell(end_row,   c_idx)
                         t.border = Border(
-                            top=Side(style="medium"),
-                            bottom=t.border.bottom
+                            left=t.border.left, right=t.border.right,
+                            top=Side(style="medium"), bottom=t.border.bottom
                         )
                         b.border = Border(
-                            top=b.border.top,
-                            bottom=Side(style="medium")
+                            left=b.border.left, right=b.border.right,
+                            top=b.border.top, bottom=Side(style="medium")
                         )
                     # Объединяем ФИО и Таб.№ по блоку
                     if end_row > start_row:
@@ -1116,19 +1134,23 @@ class TimesheetComparePage(tk.Frame):
                             )
                             ws.cell(start_row, col_n).alignment = Alignment(
                                 horizontal="left" if col_n == 2 else "center",
-                                vertical="top", wrap_text=True
+                                vertical="center", wrap_text=True
                             )
 
             # Ширины колонок
-            ws.column_dimensions["A"].width = 22
+            ws.column_dimensions["A"].width = 16
             ws.column_dimensions["B"].width = 34
             ws.column_dimensions["C"].width = 10
             ws.column_dimensions["D"].width = 44
             ws.column_dimensions["E"].width = 12
             for i in range(days_cnt):
-                ws.column_dimensions[get_column_letter(6 + i)].width = 5
-            ws.column_dimensions[get_column_letter(6 + days_cnt)].width = 8
-            ws.column_dimensions[get_column_letter(7 + days_cnt)].width = 8
+                ws.column_dimensions[get_column_letter(6 + i)].width = 4.5
+            ws.column_dimensions[get_column_letter(6 + days_cnt)].width = 9.5
+            ws.column_dimensions[get_column_letter(7 + days_cnt)].width = 9.5
+
+            # Включаем Excel Автофильтр на шапку
+            last_col_letter = get_column_letter(len(hdr_row))
+            ws.auto_filter.ref = f"A{hdr_excel_row}:{last_col_letter}{ws.max_row}"
 
             ws.freeze_panes = f"A{hdr_excel_row + 1}"
 
