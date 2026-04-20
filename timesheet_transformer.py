@@ -31,12 +31,12 @@ DAY_COLS_HALF1_LETTERS = ["I", "K", "M", "N", "P", "R", "T", "V", "X", "Z", "AB"
 DAY_COLS_HALF2_LETTERS = ["I", "K", "M", "N", "P", "R", "T", "V", "X", "Z", "AB", "AD", "AF", "AH", "AK", "AL"]
 AO_COL_LETTER = "AO"
 
-NON_WORKING_CODES = {"В", "НН", "ОТ", "ОД", "У", "УД", "Б", "ДО", "К", "ПР", "ОЖ", "ОЗ", "НС", "Н", "НВ"}
+# Убрали "К" из списка, чтобы часы командировок считались рабочими
+NON_WORKING_CODES = {"В", "НН", "ОТ", "ОД", "У", "УД", "Б", "ДО", "ПР", "ОЖ", "ОЗ", "НС", "Н", "НВ"}
 
 def exe_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
-    # для модуля — используем папку скрипта
     try:
         return Path(__file__).resolve().parent
     except Exception:
@@ -83,7 +83,7 @@ def msg_error(title: str, text: str):
 class WelcomeUI:
     def __init__(self, parent: Optional[tk.Misc] = None):
         self._standalone = parent is None
-        self.choice = None  # ("file", path) | ("latest", folder) | None
+        self.choice = None
 
         if self._standalone:
             self.root = tk.Tk()
@@ -123,7 +123,6 @@ class WelcomeUI:
         except Exception:
             pass
 
-        # центрирование
         try:
             if self._standalone:
                 self._center_on_screen(440, 240)
@@ -182,7 +181,6 @@ class ProgressUI:
         else:
             self.root = tk.Toplevel(parent)
             self.root.transient(parent)
-            # Не захватываем grab_set, чтобы не блокировать диалоги выбора файла
         self.root.title(f"{APP_NAME} — выполняется")
         self.root.geometry("500x170")
         self.root.resizable(False, False)
@@ -290,20 +288,16 @@ def working_hours_by_code(code_val: Any, hours_val: Any) -> Optional[float]:
     Возвращает только часы, относящиеся к рабочим кодам.
     Примеры:
     - code='Я', hours='11' -> 11
-    - code='Я/ДО', hours='10/1' -> 10
-    - code='ДО/Я', hours='1/10' -> 10
-    - code='ДО', hours='4' -> None
+    - code='Я/ДО', hours='4/4.25' -> 4
     """
     code_tokens = extract_code_tokens(code_val)
 
-    # Если кодов нет, оставляем старую логику
     if not code_tokens:
         n = to_number_value(hours_val)
         return n if n is not None else None
 
     hour_parts = split_slash_tokens(hours_val)
 
-    # Если код один и часы не составные — обычный сценарий
     if len(code_tokens) == 1 and len(hour_parts) <= 1:
         code = code_tokens[0]
         if is_non_working_code(code):
@@ -311,7 +305,6 @@ def working_hours_by_code(code_val: Any, hours_val: Any) -> Optional[float]:
         n = to_number_value(hours_val)
         return n if n is not None else None
 
-    # Пытаемся сопоставить кодовые и часовые части по позициям
     total = 0.0
     got = False
     max_len = min(len(code_tokens), len(hour_parts))
@@ -328,9 +321,6 @@ def working_hours_by_code(code_val: Any, hours_val: Any) -> Optional[float]:
     if got:
         return total
 
-    # Если не удалось сопоставить по частям, fallback:
-    # если есть хотя бы один рабочий код, но часы не разделены,
-    # берем общее число как раньше
     if any(not is_non_working_code(code) for code in code_tokens):
         n = to_number_value(hours_val)
         return n if n is not None else None
@@ -440,27 +430,25 @@ def to_number_value(v: Any) -> Optional[float]:
 
 def day_value_from_values(code_val: Any, hours_val: Any) -> Optional[Any]:
     """
-    Возвращает:
-    - число (float), если есть часы
-    - строку-код (например, 'О'), если часов нет, но есть буквенный код
-      (кроме 'В' — выходные, для них возвращаем None)
-    - None, если нет ни часов, ни кода
+    Умный парсинг ячейки дня.
+    Извлекает только часы для РАБОЧИХ кодов (отсекая ДО, ОТ и т.д.).
+    Если рабочих часов нет, возвращает буквенный код (кроме выходного 'В').
     """
-    # 1. Пытаемся взять часы
-    n = to_number_value(hours_val)
+    # 1. Извлекаем ТОЛЬКО рабочие часы (умный парсинг Я/ДО)
+    n = working_hours_by_code(code_val, hours_val)
     if n is not None:
         return n
 
-    # 2. Часов нет — смотрим буквенный код сверху
+    # 2. Если рабочих часов нет — берем буквенный код сверху
     code = extract_code_token(code_val)
     if not code:
         return None
 
-    # 3. Если выходной 'В' — ничего не подставляем
+    # 3. Если выходной 'В' — оставляем пустую ячейку
     if code.strip().upper() == "В":
         return None
 
-    # 4. Для всех остальных кодов (О, Б, НН, и т.п.) возвращаем сам код
+    # 4. Возвращаем буквенный статус (ДО, ОТ, Б и т.д.)
     return code
 
 # ---------------- Поиск конца данных ----------------
@@ -857,12 +845,6 @@ def transform_file(file_path: str, out_path: Optional[str] = None, parent: Optio
 
 # ---------------- Точка входа для main_app ----------------
 def open_converter(parent: Optional[tk.Misc] = None):
-    """
-    Встраиваемый запуск конвертера:
-    - Если parent передан (из main_app), все окна будут Toplevel, без EXE.
-    - Если parent не передан — показывается отдельное окно выбора.
-    """
-    # Выбор источника
     welcome = WelcomeUI(parent=parent)
     choice = welcome.run()
     if not choice:
@@ -912,4 +894,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
