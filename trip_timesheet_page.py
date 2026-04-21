@@ -236,11 +236,12 @@ def build_printable_trip_timesheet_sheet(
         tbn = normalize_tbn(rec.get("tbn"))
         hours = normalize_hours_list(rec.get("hours"), year, month)
         totals = rec.get("_totals") or calc_row_totals(hours, year, month)
-        d_from = rec.get("trip_date_from")
-        d_to = rec.get("trip_date_to")
-
-        if d_from and d_to:
-            trip_period = f"{d_from.strftime('%d.%m.%Y')} – {d_to.strftime('%d.%m.%Y')}"
+        
+        # НОВОЕ: Обработка массива периодов для Excel
+        periods = rec.get("trip_periods", [])
+        if periods:
+            p_strs = [f"{p['from'].strftime('%d.%m.%y')}-{p['to'].strftime('%d.%m.%y')}" for p in periods]
+            trip_period = ",\n".join(p_strs) # Перенос строки для Excel, если периодов много
         else:
             trip_period = ""
 
@@ -1046,8 +1047,7 @@ class TripTimesheetPage(tk.Frame):
             "fio": normalize_spaces(fio),
             "tbn": normalize_tbn(tbn),
             "hours": hours,
-            "trip_date_from": None,
-            "trip_date_to": None,
+            "trip_periods": [],  # НОВОЕ: Теперь это список периодов
             "_totals": totals,
             "work_schedule": "",
         }
@@ -1059,13 +1059,10 @@ class TripTimesheetPage(tk.Frame):
         tbn = normalize_tbn(rec.get("tbn"))
         hours = normalize_hours_list(rec.get("hours"), year, month)
 
-        trip_date_from = rec.get("trip_date_from")
-        trip_date_to = rec.get("trip_date_to")
-
-        if trip_date_from and not isinstance(trip_date_from, date):
-            trip_date_from = None
-        if trip_date_to and not isinstance(trip_date_to, date):
-            trip_date_to = None
+        # НОВОЕ: Поддержка старого формата и преобразование в список периодов
+        periods = rec.get("trip_periods", [])
+        if not periods and rec.get("trip_date_from") and rec.get("trip_date_to"):
+            periods = [{"from": rec["trip_date_from"], "to": rec["trip_date_to"]}]
 
         totals = rec.get("_totals")
         if not isinstance(totals, dict):
@@ -1075,8 +1072,7 @@ class TripTimesheetPage(tk.Frame):
             "fio": fio,
             "tbn": tbn,
             "hours": hours,
-            "trip_date_from": trip_date_from,
-            "trip_date_to": trip_date_to,
+            "trip_periods": periods,  # НОВОЕ: сохраняем массив
             "_totals": totals,
             "work_schedule": normalize_spaces(rec.get("work_schedule") or ""),
         }
@@ -1233,22 +1229,19 @@ class TripTimesheetPage(tk.Frame):
         for i, rec in enumerate(self.rows, start=1):
             fio = normalize_spaces(rec.get("fio") or "")
             tbn = normalize_tbn(rec.get("tbn"))
-            d_from = rec.get("trip_date_from")
-            d_to = rec.get("trip_date_to")
+            periods = rec.get("trip_periods") or []
             hours = rec.get("hours") or []
 
             if not fio and not tbn:
                 errors.append(f"Строка {i}: не заполнены ФИО и табельный номер.")
 
-            if (d_from is None) != (d_to is None):
-                errors.append(f"Строка {i}: период командировки должен быть заполнен полностью или очищен полностью.")
-
-            if d_from and d_to and d_from > d_to:
-                errors.append(f"Строка {i}: дата начала командировки позже даты окончания.")
+            for p in periods:
+                if p["from"] > p["to"]:
+                    errors.append(f"Строка {i}: дата начала командировки ({p['from']}) позже даты окончания ({p['to']}).")
 
             has_hours = any(v is not None and str(v).strip() != "" for v in hours)
-            if has_hours and not (d_from and d_to):
-                errors.append(f"Строка {i}: есть часы, но не задан период командировки.")
+            if has_hours and not periods:
+                errors.append(f"Строка {i}: есть часы, но не задан ни один период командировки.")
 
         return errors
 
@@ -1475,19 +1468,17 @@ class TripTimesheetPage(tk.Frame):
         rec = self.rows[real_index]
         year, month = self._get_year_month()
 
-        result = TripPeriodDialog.show(
+        # НОВОЕ: Вызываем новый менеджер периодов
+        result = EmployeeTripsDialog.show(
             self,
-            initial_date_from=rec.get("trip_date_from"),
-            initial_date_to=rec.get("trip_date_to"),
+            periods=rec.get("trip_periods", []),
             year=year,
             month=month,
         )
         if result is None:
             return
 
-        trip_date_from, trip_date_to = result
-        rec["trip_date_from"] = trip_date_from
-        rec["trip_date_to"] = trip_date_to
+        rec["trip_periods"] = result
 
         self._refresh_grid()
         self._update_trip_info_from_selection()
@@ -1512,7 +1503,7 @@ class TripTimesheetPage(tk.Frame):
         return dlg.result
 
     def _row_has_trip_period(self, rec: Dict[str, Any]) -> bool:
-        return bool(rec.get("trip_date_from") and rec.get("trip_date_to"))
+        return bool(rec.get("trip_periods"))
     
     def _fill_hours_for_row(
         self,
@@ -1524,20 +1515,19 @@ class TripTimesheetPage(tk.Frame):
         month: int,
     ) -> None:
         days_in_month = month_days(year, month)
-        trip_date_from = rec.get("trip_date_from")
-        trip_date_to = rec.get("trip_date_to")
+        periods = rec.get("trip_periods", [])
     
-        if not (trip_date_from and trip_date_to):
+        if not periods:
             return
     
         hours = normalize_hours_list(rec.get("hours"), year, month)
-    
         day_from = max(1, min(day_from, days_in_month))
         day_to = max(1, min(day_to, days_in_month))
     
         for day in range(day_from, day_to + 1):
             current_day = date(year, month, day)
-            if trip_date_from <= current_day <= trip_date_to:
+            # НОВОЕ: Проверяем, попадает ли день хотя бы в один период из списка
+            if any(p["from"] <= current_day <= p["to"] for p in periods):
                 hours[day - 1] = value
     
         rec["hours"] = hours
@@ -1694,6 +1684,8 @@ class TripTimesheetPage(tk.Frame):
             self._schedule_auto_save()
 
     def _set_trip_period_for_selected(self) -> None:
+        # Для массовой установки логично просто добавлять период к существующим
+        # или переопределять? Сделаем вызов стандартного диалога для добавления ОДНОГО общего периода всем выделенным
         indexes = self._get_selected_row_indexes()
         if not indexes:
             messagebox.showinfo("Период выбранным", "Не выбраны строки.", parent=self)
@@ -1708,21 +1700,25 @@ class TripTimesheetPage(tk.Frame):
             year=year,
             month=month,
         )
-        if result is None:
+        if result is None or result[0] is None:
             return
 
         trip_date_from, trip_date_to = result
+        new_period = {"from": trip_date_from, "to": trip_date_to}
 
         real_indexes = [self._visible_to_real_index(i) for i in indexes]
         real_indexes = [i for i in real_indexes if i is not None]
 
         for idx in real_indexes:
-            self.rows[idx]["trip_date_from"] = trip_date_from
-            self.rows[idx]["trip_date_to"] = trip_date_to
+            # Если нужно заменять все периоды: self.rows[idx]["trip_periods"] = [new_period]
+            # Если нужно добавлять (логичнее):
+            if "trip_periods" not in self.rows[idx] or not self.rows[idx]["trip_periods"]:
+                self.rows[idx]["trip_periods"] = []
+            self.rows[idx]["trip_periods"].append(new_period)
 
         self._refresh_grid()
         self._update_trip_info_from_selection()
-        self.var_status.set(f"Период командировки применён к строкам: {len(real_indexes)}")
+        self.var_status.set(f"Период добавлен строкам: {len(real_indexes)}")
 
         if real_indexes:
             self._mark_dirty()
@@ -1804,19 +1800,20 @@ class TripTimesheetPage(tk.Frame):
         rec = visible_rows[idx]
         fio = normalize_spaces(rec.get("fio") or "")
         tbn = normalize_tbn(rec.get("tbn"))
-        d_from = rec.get("trip_date_from")
-        d_to = rec.get("trip_date_to")
+        periods = rec.get("trip_periods", [])
 
-        if d_from and d_to:
-            period = f"Командировка: с {d_from.strftime('%d.%m.%Y')} по {d_to.strftime('%d.%m.%Y')}"
+        # НОВОЕ: Форматируем строку со списком периодов
+        if periods:
+            p_strs = [f"{p['from'].strftime('%d.%m')} - {p['to'].strftime('%d.%m')}" for p in periods]
+            period_str = "Командировки: " + ", ".join(p_strs)
         else:
-            period = "Период командировки не задан"
+            period_str = "Период командировки не задан"
 
         suffix = fio
         if tbn:
             suffix = f"{fio} ({tbn})"
 
-        self.var_trip_info.set(f"{suffix}: {period}")
+        self.var_trip_info.set(f"{suffix}: {period_str}")
 
     # =========================================================
     # Внешние helpers
