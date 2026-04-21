@@ -6,6 +6,129 @@ from tkinter import ttk, messagebox
 from datetime import date
 from typing import Optional
 
+class EmployeeTripsDialog(tk.Toplevel):
+    def __init__(self, master, periods: List[Dict[str, date]], year: int, month: int):
+        super().__init__(master)
+        self.title("Список командировок сотрудника")
+        self.resizable(False, False)
+        self.transient(master)
+
+        # Копируем список, чтобы не менять оригинал до нажатия ОК
+        self.periods = [dict(p) for p in (periods or [])]
+        self.year = year
+        self.month = month
+        self.result: Optional[List[Dict[str, date]]] = None
+
+        self._build_ui()
+        self._refresh_list()
+        self._center(master)
+
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        self.bind("<Escape>", lambda _e: self._on_cancel())
+
+        self.grab_set()
+        self.focus_set()
+
+    def _build_ui(self):
+        root = ttk.Frame(self, padding=12)
+        root.pack(fill="both", expand=True)
+
+        # Списки периодов
+        frm_list = ttk.LabelFrame(root, text="Периоды командировок в текущем месяце", padding=10)
+        frm_list.pack(fill="both", expand=True)
+
+        self.listbox = tk.Listbox(frm_list, width=40, height=8, font=("Segoe UI", 10))
+        self.listbox.pack(side="left", fill="both", expand=True)
+        
+        scroll = ttk.Scrollbar(frm_list, orient="vertical", command=self.listbox.yview)
+        scroll.pack(side="right", fill="y")
+        self.listbox.config(yscrollcommand=scroll.set)
+        
+        self.listbox.bind("<Double-Button-1>", lambda e: self._on_edit())
+
+        # Кнопки управления списком
+        frm_side_btns = ttk.Frame(frm_list)
+        frm_side_btns.pack(side="right", fill="y", padx=(10, 0))
+
+        ttk.Button(frm_side_btns, text="Добавить", command=self._on_add).pack(fill="x", pady=(0, 4))
+        ttk.Button(frm_side_btns, text="Изменить", command=self._on_edit).pack(fill="x", pady=(0, 4))
+        ttk.Button(frm_side_btns, text="Удалить", command=self._on_delete).pack(fill="x", pady=(0, 4))
+
+        # Нижние кнопки
+        btns = ttk.Frame(root)
+        btns.pack(fill="x", pady=(12, 0))
+
+        ttk.Button(btns, text="Отмена", command=self._on_cancel).pack(side="right")
+        ttk.Button(btns, text="ОК", command=self._on_ok).pack(side="right", padx=(0, 8))
+
+    def _refresh_list(self):
+        self.listbox.delete(0, tk.END)
+        # Сортируем периоды по дате начала
+        self.periods.sort(key=lambda p: p["from"] if p["from"] else date.max)
+        for p in self.periods:
+            df = p["from"].strftime('%d.%m.%Y')
+            dt = p["to"].strftime('%d.%m.%Y')
+            self.listbox.insert(tk.END, f"с {df} по {dt}")
+
+    def _on_add(self):
+        # Вызываем старый добрый TripPeriodDialog
+        res = TripPeriodDialog.show(self, year=self.year, month=self.month)
+        if res and res[0] and res[1]:
+            self.periods.append({"from": res[0], "to": res[1]})
+            self._refresh_list()
+
+    def _on_edit(self):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        p = self.periods[idx]
+        
+        res = TripPeriodDialog.show(
+            self, 
+            initial_date_from=p["from"], 
+            initial_date_to=p["to"], 
+            year=self.year, 
+            month=self.month
+        )
+        if res:
+            if res[0] is None and res[1] is None: # Нажали "Очистить"
+                del self.periods[idx]
+            else:
+                self.periods[idx] = {"from": res[0], "to": res[1]}
+            self._refresh_list()
+
+    def _on_delete(self):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        del self.periods[sel[0]]
+        self._refresh_list()
+
+    def _center(self, master):
+        self.update_idletasks()
+        mw, mh, mx, my = 900, 700, 100, 100
+        if master:
+            try:
+                mx, my = master.winfo_rootx(), master.winfo_rooty()
+                mw, mh = master.winfo_width(), master.winfo_height()
+            except Exception: pass
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        self.geometry(f"+{mx + max(0, (mw - w) // 2)}+{my + max(0, (mh - h) // 2)}")
+
+    def _on_ok(self):
+        self.result = self.periods
+        self.destroy()
+
+    def _on_cancel(self):
+        self.result = None
+        self.destroy()
+
+    @classmethod
+    def show(cls, master, periods: List[Dict[str, date]], year: int, month: int) -> Optional[List[Dict[str, date]]]:
+        dlg = cls(master, periods=periods, year=year, month=month)
+        dlg.wait_window()
+        return dlg.result
 
 class TripPeriodDialog(tk.Toplevel):
     def __init__(
