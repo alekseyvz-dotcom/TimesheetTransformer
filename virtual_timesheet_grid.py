@@ -456,58 +456,86 @@ class VirtualTimesheetGrid(tk.Frame):
         self._hide_tooltip()
 
     def _format_trip_period_short(self, rec: Dict[str, Any]) -> str:
-        trip_date_from = rec.get("trip_date_from")
-        trip_date_to = rec.get("trip_date_to")
-    
-        if not trip_date_from and not trip_date_to:
-            return ""
-    
+        periods = rec.get("trip_periods", [])
+        
+        # Если периодов нет (или остался старый формат без конвертации)
+        if not periods:
+            # На всякий случай fallback для старых данных, если они просочатся
+            if rec.get("trip_date_from") and rec.get("trip_date_to"):
+                periods = [{"from": rec["trip_date_from"], "to": rec["trip_date_to"]}]
+            else:
+                return ""
+
         try:
             year, month = self.get_year_month()
         except Exception:
             year, month = 0, 0
-    
-        if trip_date_from and trip_date_to:
-            same_month = (
-                trip_date_from.year == year
-                and trip_date_from.month == month
-                and trip_date_to.year == year
-                and trip_date_to.month == month
-            )
-            if same_month:
-                return f"{trip_date_from.day:02d}-{trip_date_to.day:02d}"
-            return f"{trip_date_from.strftime('%d.%m')}-{trip_date_to.strftime('%d.%m')}"
-    
-        if trip_date_from:
-            return f"с {trip_date_from.strftime('%d.%m')}"
-        return f"по {trip_date_to.strftime('%d.%m')}"
+
+        # Если командировка всего одна в месяце, выводим как раньше
+        if len(periods) == 1:
+            d_from = periods[0].get("from")
+            d_to = periods[0].get("to")
+            
+            if d_from and d_to:
+                same_month = (
+                    d_from.year == year and d_from.month == month and
+                    d_to.year == year and d_to.month == month
+                )
+                if same_month:
+                    return f"{d_from.day:02d}-{d_to.day:02d}"
+                return f"{d_from.strftime('%d.%m')}-{d_to.strftime('%d.%m')}"
+
+        # Если периодов несколько, пишем их количество
+        return f"{len(periods)} пер."
     
     
     def _format_trip_period_full(self, rec: Dict[str, Any]) -> str:
-        trip_date_from = rec.get("trip_date_from")
-        trip_date_to = rec.get("trip_date_to")
-    
-        if not trip_date_from and not trip_date_to:
-            return "Период командировки не задан"
-    
-        left = trip_date_from.strftime("%d.%m.%Y") if trip_date_from else "—"
-        right = trip_date_to.strftime("%d.%m.%Y") if trip_date_to else "—"
-        return f"Командировка: с {left} по {right}"
-    
+        periods = rec.get("trip_periods", [])
+        
+        if not periods:
+            # Fallback
+            if rec.get("trip_date_from") and rec.get("trip_date_to"):
+                periods = [{"from": rec["trip_date_from"], "to": rec["trip_date_to"]}]
+            else:
+                return "Период командировки не задан"
+
+        parts = []
+        for p in periods:
+            d_from = p.get("from")
+            d_to = p.get("to")
+            left = d_from.strftime("%d.%m.%Y") if d_from else "—"
+            right = d_to.strftime("%d.%m.%Y") if d_to else "—"
+            parts.append(f"с {left} по {right}")
+
+        if len(parts) == 1:
+            return f"Командировка: {parts[0]}"
+        
+        return "Командировки:\n" + "\n".join(parts)
     
     def _is_trip_day(self, rec: Dict[str, Any], day_num: int) -> bool:
-        trip_date_from = rec.get("trip_date_from")
-        trip_date_to = rec.get("trip_date_to")
-        if not trip_date_from or not trip_date_to:
+        periods = rec.get("trip_periods", [])
+        
+        # Fallback для старых данных
+        if not periods and rec.get("trip_date_from") and rec.get("trip_date_to"):
+            periods = [{"from": rec["trip_date_from"], "to": rec["trip_date_to"]}]
+            
+        if not periods:
             return False
-    
+
         try:
             year, month = self.get_year_month()
             cur = date(year, month, day_num)
         except Exception:
             return False
-    
-        return trip_date_from <= cur <= trip_date_to
+
+        # Проверяем вхождение даты во все существующие периоды
+        for p in periods:
+            d_from = p.get("from")
+            d_to = p.get("to")
+            if d_from and d_to and (d_from <= cur <= d_to):
+                return True
+
+        return False    
     
     
     def _get_trip_cell_bg(
