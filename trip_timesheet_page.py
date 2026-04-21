@@ -217,7 +217,7 @@ def build_printable_trip_timesheet_sheet(
     ws.column_dimensions["A"].width = 5
     ws.column_dimensions["B"].width = 30
     ws.column_dimensions["C"].width = 11
-    ws.column_dimensions["D"].width = 26
+    ws.column_dimensions["D"].width = 24 # Слегка сузили, чтобы перенос срабатывал красивее
 
     first_day_col = 5
     last_day_col = first_day_col + days_in_month - 1
@@ -237,13 +237,18 @@ def build_printable_trip_timesheet_sheet(
         hours = normalize_hours_list(rec.get("hours"), year, month)
         totals = rec.get("_totals") or calc_row_totals(hours, year, month)
         
-        # НОВОЕ: Обработка массива периодов для Excel
+        # --- ОБРАБОТКА МАССИВА ПЕРИОДОВ ---
         periods = rec.get("trip_periods", [])
         if periods:
-            p_strs = [f"{p['from'].strftime('%d.%m.%y')}-{p['to'].strftime('%d.%m.%y')}" for p in periods]
-            trip_period = ",\n".join(p_strs) # Перенос строки для Excel, если периодов много
+            # Сортируем периоды по дате начала
+            sorted_periods = sorted(periods, key=lambda x: x["from"])
+            # Форматируем: 01.01.2024 - 15.01.2024
+            p_strs = [f"{p['from'].strftime('%d.%m.%Y')} - {p['to'].strftime('%d.%m.%Y')}" for p in sorted_periods]
+            trip_period = "\n".join(p_strs) # Склеиваем через перенос строки
+            lines_count = len(sorted_periods)
         else:
             trip_period = ""
+            lines_count = 1
 
         normalized_rows.append(
             {
@@ -252,6 +257,7 @@ def build_printable_trip_timesheet_sheet(
                 "hours": hours,
                 "_totals": totals,
                 "trip_period": trip_period,
+                "lines_count": lines_count, # Сохраняем кол-во строк для расчета высоты ячейки
             }
         )
 
@@ -275,11 +281,16 @@ def build_printable_trip_timesheet_sheet(
         for col_idx, value in enumerate(row_values, start=1):
             cell = ws.cell(current_row, col_idx, value)
             if col_idx in (2, 4):
-                _apply_print_style(cell, h="left")
+                # wrap=True включен по умолчанию в _apply_print_style
+                _apply_print_style(cell, h="left") 
             else:
                 _apply_print_style(cell, h="center")
 
-        ws.row_dimensions[current_row].height = 21
+        # --- ДИНАМИЧЕСКАЯ ВЫСОТА СТРОКИ ---
+        # Если строк 1, высота 22. Если строк больше, добавляем по 14 пикселей на каждую строку
+        calc_height = max(22, 14 * rec["lines_count"])
+        ws.row_dimensions[current_row].height = calc_height
+        
         current_row += 1
 
     summary = calc_rows_summary(normalized_rows, year, month)
