@@ -92,6 +92,7 @@ def _find_trip_header_id_by_key(
         return None
     return int(row[0])
 
+
 def _load_trip_header_meta_by_id(cur, header_id: int) -> Optional[Dict[str, Any]]:
     cur.execute(
         """
@@ -214,6 +215,7 @@ def replace_trip_timesheet_rows(
     month: int,
 ) -> None:
     values: List[tuple[Any, ...]] = []
+    original_records = []
 
     for rec in rows:
         fio = normalize_spaces(str(rec.get("fio") or ""))
@@ -233,17 +235,12 @@ def replace_trip_timesheet_rows(
         total_ot_day = float(totals.get("ot_day") or 0.0) or None
         total_ot_night = float(totals.get("ot_night") or 0.0) or None
 
-        trip_date_from = rec.get("trip_date_from")
-        trip_date_to = rec.get("trip_date_to")
-
         values.append(
             (
                 int(header_id),
                 fio,
                 tbn or None,
                 hours_list,
-                trip_date_from,
-                trip_date_to,
                 total_days,
                 total_hours,
                 total_night,
@@ -251,8 +248,10 @@ def replace_trip_timesheet_rows(
                 total_ot_night,
             )
         )
+        original_records.append(rec)
 
     with db_cursor() as (_conn, cur):
+        # Удаляем старые строки (таблица периодов очистится автоматически из-за CASCADE)
         cur.execute("DELETE FROM trip_timesheet_rows WHERE header_id = %s", (int(header_id),))
 
         if not values:
@@ -265,8 +264,6 @@ def replace_trip_timesheet_rows(
                     fio,
                     tbn,
                     hours_raw,
-                    trip_date_from,
-                    trip_date_to,
                     total_days,
                     total_hours,
                     night_hours,
@@ -274,8 +271,26 @@ def replace_trip_timesheet_rows(
                     overtime_night
                 )
             VALUES %s
+            RETURNING id
         """
-        execute_values(cur, insert_query, values)
+        # Вставляем строки и получаем их сгенерированные ID
+        returned_ids = execute_values(cur, insert_query, values, fetch=True)
+
+        # Теперь формируем список всех периодов для вставки
+        period_values = []
+        for row_id_tuple, rec in zip(returned_ids, original_records):
+            row_id = row_id_tuple[0]
+            periods = rec.get("trip_periods", [])
+            for p in periods:
+                if p.get("from") and p.get("to"):
+                    period_values.append((row_id, p["from"], p["to"]))
+
+        if period_values:
+            period_insert_query = """
+                INSERT INTO trip_timesheet_periods (row_id, date_from, date_to)
+                VALUES %s
+            """
+            execute_values(cur, period_insert_query, period_values)
 
 
 def load_trip_timesheet_rows_from_db(
@@ -297,27 +312,31 @@ def load_trip_timesheet_rows_from_db(
 
         cur.execute(
             """
-            SELECT fio, tbn, hours_raw, trip_date_from, trip_date_to
-            FROM trip_timesheet_rows
-            WHERE header_id = %s
-            ORDER BY fio, tbn
+            SELECT 
+                r.id, r.fio, r.tbn, r.hours_raw, 
+                p.date_from, p.date_to
+            FROM trip_timesheet_rows r
+            LEFT JOIN trip_timesheet_periods p ON p.row_id = r.id
+            WHERE r.header_id = %s
+            ORDER BY r.fio, r.tbn, p.date_from
             """,
             (int(header_id),),
         )
 
-        result: List[Dict[str, Any]] = []
-        for fio, tbn, hours_raw, trip_date_from, trip_date_to in cur.fetchall():
-            hours = normalize_hours_list(hours_raw, year, month)
-            result.append(
-                {
+        rows_map = {}
+        for r_id, fio, tbn, hours_raw, d_from, d_to in cur.fetchall():
+            if r_id not in rows_map:
+                hours = normalize_hours_list(hours_raw, year, month)
+                rows_map[r_id] = {
                     "fio": fio or "",
                     "tbn": tbn or "",
                     "hours": hours,
-                    "trip_date_from": trip_date_from,
-                    "trip_date_to": trip_date_to,
+                    "trip_periods": [],
                 }
-            )
-        return result
+            if d_from and d_to:
+                rows_map[r_id]["trip_periods"].append({"from": d_from, "to": d_to})
+
+        return list(rows_map.values())
 
 
 def load_trip_timesheet_rows_by_header_id(header_id: int) -> List[Dict[str, Any]]:
@@ -339,53 +358,57 @@ def load_trip_timesheet_rows_by_header_id(header_id: int) -> List[Dict[str, Any]
         cur.execute(
             """
             SELECT
-                fio,
-                tbn,
-                hours_raw,
-                trip_date_from,
-                trip_date_to,
-                total_days,
-                total_hours,
-                night_hours,
-                overtime_day,
-                overtime_night
-            FROM trip_timesheet_rows
-            WHERE header_id = %s
-            ORDER BY fio, tbn
+                r.id,
+                r.fio,
+                r.tbn,
+                r.hours_raw,
+                p.date_from as trip_date_from,
+                p.date_to as trip_date_to,
+                r.total_days,
+                r.total_hours,
+                r.night_hours,
+                r.overtime_day,
+                r.overtime_night
+            FROM trip_timesheet_rows r
+            LEFT JOIN trip_timesheet_periods p ON p.row_id = r.id
+            WHERE r.header_id = %s
+            ORDER BY r.fio, r.tbn, p.date_from
             """,
             (int(header_id),),
         )
 
-        result: List[Dict[str, Any]] = []
+        rows_map = {}
         for (
+            r_id,
             fio,
             tbn,
             hours_raw,
-            trip_date_from,
-            trip_date_to,
+            d_from,
+            d_to,
             total_days,
             total_hours,
             night_hours,
             ot_day,
             ot_night,
         ) in cur.fetchall():
-            hours = normalize_hours_list(hours_raw, year, month)
-            result.append(
-                {
+            if r_id not in rows_map:
+                hours = normalize_hours_list(hours_raw, year, month)
+                rows_map[r_id] = {
                     "fio": fio or "",
                     "tbn": tbn or "",
                     "hours": hours,
                     "hours_raw": hours[:],
-                    "trip_date_from": trip_date_from,
-                    "trip_date_to": trip_date_to,
+                    "trip_periods": [],
                     "total_days": int(total_days) if total_days is not None else None,
                     "total_hours": float(total_hours) if total_hours is not None else None,
                     "night_hours": float(night_hours) if night_hours is not None else None,
                     "overtime_day": float(ot_day) if ot_day is not None else None,
                     "overtime_night": float(ot_night) if ot_night is not None else None,
                 }
-            )
-        return result
+            if d_from and d_to:
+                rows_map[r_id]["trip_periods"].append({"from": d_from, "to": d_to})
+
+        return list(rows_map.values())
 
 
 def load_trip_timesheet_full_by_header_id(header_id: int) -> Optional[Dict[str, Any]]:
@@ -400,26 +423,29 @@ def load_trip_timesheet_full_by_header_id(header_id: int) -> Optional[Dict[str, 
         cur.execute(
             """
             SELECT
-                fio,
-                tbn,
-                hours_raw,
-                trip_date_from,
-                trip_date_to,
-                total_days,
-                total_hours,
-                night_hours,
-                overtime_day,
-                overtime_night
-            FROM trip_timesheet_rows
-            WHERE header_id = %s
-            ORDER BY fio, tbn
+                r.id as row_id,
+                r.fio,
+                r.tbn,
+                r.hours_raw,
+                p.date_from as trip_date_from,
+                p.date_to as trip_date_to,
+                r.total_days,
+                r.total_hours,
+                r.night_hours,
+                r.overtime_day,
+                r.overtime_night
+            FROM trip_timesheet_rows r
+            LEFT JOIN trip_timesheet_periods p ON p.row_id = r.id
+            WHERE r.header_id = %s
+            ORDER BY r.fio, r.tbn, p.date_from
             """,
             (int(header_id),),
         )
 
-        rows: List[Dict[str, Any]] = []
+        rows_map = {}
         for r in cur.fetchall():
             if isinstance(r, dict):
+                r_id = r.get("row_id")
                 fio = r.get("fio") or ""
                 tbn = r.get("tbn") or ""
                 hours_raw = r.get("hours_raw")
@@ -432,6 +458,7 @@ def load_trip_timesheet_full_by_header_id(header_id: int) -> Optional[Dict[str, 
                 overtime_night = r.get("overtime_night")
             else:
                 (
+                    r_id,
                     fio,
                     tbn,
                     hours_raw,
@@ -444,24 +471,25 @@ def load_trip_timesheet_full_by_header_id(header_id: int) -> Optional[Dict[str, 
                     overtime_night,
                 ) = r
 
-            hours = normalize_hours_list(hours_raw, year, month)
-            rows.append(
-                {
+            if r_id not in rows_map:
+                hours = normalize_hours_list(hours_raw, year, month)
+                rows_map[r_id] = {
                     "fio": fio or "",
                     "tbn": tbn or "",
                     "hours": hours,
                     "hours_raw": hours[:],
-                    "trip_date_from": trip_date_from,
-                    "trip_date_to": trip_date_to,
+                    "trip_periods": [],
                     "total_days": int(total_days) if total_days is not None else None,
                     "total_hours": float(total_hours) if total_hours is not None else None,
                     "night_hours": float(night_hours) if night_hours is not None else None,
                     "overtime_day": float(overtime_day) if overtime_day is not None else None,
                     "overtime_night": float(overtime_night) if overtime_night is not None else None,
                 }
-            )
 
-        header["rows"] = rows
+            if trip_date_from and trip_date_to:
+                rows_map[r_id]["trip_periods"].append({"from": trip_date_from, "to": trip_date_to})
+
+        header["rows"] = list(rows_map.values())
         return header
 
 
