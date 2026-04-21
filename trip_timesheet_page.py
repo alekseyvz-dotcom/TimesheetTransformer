@@ -33,7 +33,7 @@ from timesheet_dialogs import (
     SelectEmployeesDialog,
     SelectObjectIdDialog,
 )
-from trip_period_dialog import TripPeriodDialog
+from trip_period_dialog import TripPeriodDialog, EmployeeTripsDialog
 from trip_timesheet_db import (
     find_duplicate_employees_for_trip_timesheet,
     find_trip_timesheet_header_id,
