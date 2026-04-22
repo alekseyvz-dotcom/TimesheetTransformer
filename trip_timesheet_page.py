@@ -1,926 +1,1866 @@
 from __future__ import annotations
 
-import calendar
-import difflib
 import logging
-import re
-import sys
-from dataclasses import dataclass
 from datetime import date, datetime
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from openpyxl import load_workbook
+import tkinter as tk
+from tkinter import filedialog, messagebox, simpledialog, ttk
+
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.page import PageMargins
+
+from timesheet_common import (
+    calc_row_totals,
+    calc_rows_summary,
+    format_summary_value,
+    month_days,
+    normalize_hours_list,
+    normalize_spaces,
+    normalize_tbn,
+    parse_hours_value,
+    safe_filename,
+)
+from timesheet_db import (
+    find_fired_employees_in_timesheet,
+    load_employees_from_db,
+    load_objects_short_for_timesheet,
+)
+from timesheet_dialogs import (
+    AutoCompleteCombobox,
+    SelectEmployeesDialog,
+    SelectObjectIdDialog,
+)
+from trip_period_dialog import TripPeriodDialog, EmployeeTripsDialog
+from trip_timesheet_db import (
+    find_duplicate_employees_for_trip_timesheet,
+    find_trip_timesheet_header_id,
+    load_trip_timesheet_rows_from_db,
+    replace_trip_timesheet_rows,
+    upsert_trip_timesheet_header,
+)
+from virtual_timesheet_grid import VirtualTimesheetGrid
 
 logger = logging.getLogger(__name__)
 
-MAX_HOURS_PER_DAY = 24
+MONTH_NAMES = {
+    1: "Январь",
+    2: "Февраль",
+    3: "Март",
+    4: "Апрель",
+    5: "Май",
+    6: "Июнь",
+    7: "Июль",
+    8: "Август",
+    9: "Сентябрь",
+    10: "Октябрь",
+    11: "Ноябрь",
+    12: "Декабрь",
+}
 
-TS_COLORS = {
-    "bg": "#f0f2f5",
-    "panel": "#ffffff",
-    "accent": "#1565c0",
-    "accent_light": "#e3f2fd",
-    "success": "#2e7d32",
-    "warning": "#b00020",
-    "border": "#dde1e7",
-    "btn_save_bg": "#1565c0",
+UI = {
+    "bg": "#edf1f5",
+    "panel": "#f7f9fb",
+    "panel2": "#eef3f8",
+    "line": "#c9d3df",
+    "accent": "#2f74c0",
+    "warning": "#c97a20",
+    "text": "#1f2937",
+    "muted": "#5b6776",
+    "white": "#ffffff",
+    "btn_save_bg": "#2f74c0",
     "btn_save_fg": "#ffffff",
-    "suspicious": "#FF6B6B",
-    "suspicious_fg": "#FFFFFF",
 }
 
-# Единый справочник поддерживаемых кодов.
-# Если позже потребуется поменять бизнес-логику по конкретному коду,
-# достаточно будет исправить этот словарь и/или parse_timesheet_cell().
-SPECIAL_CODES = {
-    "Б": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Больничный"},
-    "Т": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Больничный неоплачиваемый"},
-    "ВМ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Вахта"},
-    "ВЧ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Вечерние часы"},
-    "ПВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Время вынужденного прогула"},
-    "РП": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Время простоя по вине работодателя"},
-    "Г": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Выполнение государственных обязанностей"},
-    "В": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Выходной"},
-    "ДВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Дни в пути (вахта)"},
-    "ДБ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Доп. отпуск без сохранения заработной платы"},
-    "НВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Доп. выходной без оплаты"},
-    "ЕО": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Дополнительные выходные дни (неоплачиваемые)"},
-    "ОВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отгул донорский"},
-    "ОД": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Дополнительный отпуск"},
-    "ЗБ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Забастовка"},
-    "К": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Командировка"},
-    "МО": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Междувахтовый отдых"},
-    "НН": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Неявка"},
-    "Н": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Ночные часы"},
-    "ОТ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отпуск"},
-    "УД": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отпуск дополнительный (неоплачиваемый учебный)"},
-    "У": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отпуск дополнительный (оплачиваемый учебный)"},
-    "ОЗ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отпуск неоплачиваемый в соответствии с законом"},
-    "ДО": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отпуск без сохранения"},
-    "Р": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отпуск по беременности и родам"},
-    "ОЖ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отпуск по уходу за ребенком"},
-    "НБ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отстранение от работы без оплаты"},
-    "НО": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отстранение от работы с оплатой"},
-    "КР": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Перерывы для кормления ребенка"},
-    "ПК": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Повышение квалификации"},
-    "ПМ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Повышение квалификации в другой местности"},
-    "РВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Праздники"},
-    "РВВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Праздники (вечернее время)"},
-    "РВН": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Праздники (ночное время)"},
-    "ПН": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Праздники без повышенной оплаты"},
-    "ПНВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Праздники без повышенной оплаты (вечернее время)"},
-    "ПНН": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Праздники без повышенной оплаты (ночное время)"},
-    "НЗ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Приостановка работы в случае задержки выплаты з/п"},
-    "ПТД": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Приостановление трудового договора"},
-    "ПР": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Прогул"},
-    "ВП": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Простой по вине работника"},
-    "НП": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Простой, не зависящий от работодателя и работника"},
-    "НРВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Работа в выходные и праздники (ночное время)"},
-    "НС": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Работа в режиме неполного рабочего времени"},
-    "С": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Сверхурочно"},
-    "СВВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Сверхурочно (вечернее время)"},
-    "СВН": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Сверхурочно (ночное время)"},
-    "СН": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Сверхурочные без повышенной оплаты"},
-    "СНВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Сверхурочные без повышенной оплаты (вечер. время)"},
-    "СНН": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Сверхурочные без повышенной оплаты (ночное время)"},
-    "УВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Уволен"},
-    "ЛЧ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Сокращенное рабочее время в соответствии с законом"},
-    "Я": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Явка"},
+PRINT_TITLE_FILL = PatternFill("solid", fgColor="DCE6F1")
+PRINT_META_FILL = PatternFill("solid", fgColor="EAF2F8")
+PRINT_HEADER_FILL = PatternFill("solid", fgColor="D9EAF7")
+PRINT_TOTAL_FILL = PatternFill("solid", fgColor="E2F0D9")
 
-    # твои кастомные коды
-    "О": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отсутствие"},
-    "П": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Простой / прочее"},
-    "КВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Командировка выходного дня"},
-    "СНЕГ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Снег"},
-    
-    # Оставили эти ключи для совместимости (хотя универсальная логика ниже перехватит их)
-    "РВ 8": {"hours": 8.0, "night_hours": 0.0, "counts_day": True, "description": "Работа в выходной 8 ч"},
-    "РВ 11": {"hours": 11.0, "night_hours": 0.0, "counts_day": True, "description": "Работа в выходной 11 ч"},
-}
+THIN_BLACK = Side(style="thin", color="000000")
+MEDIUM_BLACK = Side(style="medium", color="000000")
+
+BORDER_THIN = Border(left=THIN_BLACK, right=THIN_BLACK, top=THIN_BLACK, bottom=THIN_BLACK)
+BORDER_EMPTY = Border()
 
 
-@dataclass(frozen=True)
-class ParsedTimesheetCell:
-    raw: str
-    normalized: str
-    is_empty: bool
-    is_code: bool
-    code: Optional[str]
-    total_hours: Optional[float]
-    night_hours: float
-    overtime_day: float
-    overtime_night: float
-    counts_day: bool
-    suspicious: bool
+def _excel_safe_value(value: Any) -> Any:
+    return "" if value is None else value
 
 
-def exe_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent
+def _apply_print_style(
+    cell,
+    *,
+    bold: bool = False,
+    size: int = 9,
+    h: str = "center",
+    v: str = "center",
+    wrap: bool = True,
+    border: Border = BORDER_THIN,
+    fill=None,
+):
+    cell.font = Font(name="Segoe UI", size=size, bold=bold)
+    cell.alignment = Alignment(horizontal=h, vertical=v, wrap_text=wrap)
+    cell.border = border
+    if fill is not None:
+        cell.fill = fill
 
 
-def month_days(year: int, month: int) -> int:
-    return calendar.monthrange(year, month)[1]
-
-
-def month_name_ru(month: int) -> str:
-    names = [
-        "Январь",
-        "Февраль",
-        "Март",
-        "Апрель",
-        "Май",
-        "Июнь",
-        "Июль",
-        "Август",
-        "Сентябрь",
-        "Октябрь",
-        "Ноябрь",
-        "Декабрь",
-    ]
-    if 1 <= month <= 12:
-        return names[month - 1]
-    return str(month)
-
-
-def safe_filename(value: str, maxlen: int = 60) -> str:
-    s = re.sub(r'[<>:"/\\|?*\n\r\t]+', "_", str(value or "")).strip()
-    s = re.sub(r"_+", "_", s)
-    return s[:maxlen] if maxlen > 0 else s
-
-
-def normalize_spaces(value: str) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip())
-
-
-def normalize_tbn(value: Any) -> str:
-    return normalize_spaces(str(value or ""))
-
-
-def normalize_code(value: str) -> str:
-    s = normalize_spaces(str(value or "").upper())
-    # УНИВЕРСАЛЬНАЯ ОБРАБОТКА РВ: 
-    # Превращаем любые "РВ14", "РВ 10.5", "РВ08" в стандартный вид "РВ <число>"
-    match = re.match(r"^РВ\s*0*(\d+(?:[.,]\d+)?)$", s)
-    if match:
-        return f"РВ {match.group(1)}"
-    return s
-
-
-def is_allowed_timesheet_code(value: str) -> bool:
-    s = normalize_code(value)
-    if s in SPECIAL_CODES:
-        return True
-
-    # Универсальная поддержка формата "РВ <число>"
-    if s.startswith("РВ "):
-        tail = s[3:].strip()
-        try:
-            number = float(tail.replace(",", "."))
-            return number > 0
-        except Exception:
-            return False
-
-    return False
-
-
-def format_hours_for_cell(value: float | int | None) -> Optional[str]:
-    if value is None:
-        return None
-    v = float(value)
-    if abs(v) < 1e-12:
-        return "0"
-    return f"{v:.2f}".rstrip("0").rstrip(".").replace(".", ",")
-
-
-def _to_float_number(value: str) -> Optional[float]:
-    try:
-        return float(value.replace(",", "."))
-    except Exception:
-        return None
-
-
-def _parse_time_token_to_hours(token: str) -> Optional[float]:
-    token = normalize_spaces(token)
-    if not token:
-        return None
-
-    if ":" in token:
-        parts = token.split(":")
-        if len(parts) > 2:
-            return None
-        hh = _to_float_number(parts[0].strip())
-        mm_raw = parts[1].strip() if len(parts) == 2 else "0"
-        mm = _to_float_number(mm_raw)
-        if hh is None or mm is None:
-            return None
-        if mm < 0 or mm >= 60:
-            return None
-        return hh + mm / 60.0
-
-    return _to_float_number(token)
-
-
-def parse_hours_value(value: Any) -> Optional[float]:
-    """
-    Парсит только числовой формат часов:
-      8
-      8,25
-      8:30
-      1/7
-      8/2
-      8/2/1
-
-    ВАЖНО:
-    - буквенные коды здесь не поддерживаются;
-    - часть в скобках (...) игнорируется.
-    """
-    s = normalize_spaces(str(value or ""))
-    if not s:
-        return None
-
-    if "(" in s:
-        s = s.split("(", 1)[0].strip()
-    if not s:
-        return None
-
-    if "/" in s:
-        total = 0.0
-        found_any = False
-        for part in s.split("/"):
-            hours = _parse_time_token_to_hours(part.strip())
-            if hours is None:
-                return None
-            total += float(hours)
-            found_any = True
-        return total if found_any else None
-
-    return _parse_time_token_to_hours(s)
-
-
-def parse_overtime(value: Any) -> Tuple[Optional[float], Optional[float]]:
-    """
-    Парсинг переработки из скобок:
-      8/2(1/1) -> (1.0, 1.0)
-      8(2)     -> (2.0, 0.0)
-    """
-    s = normalize_spaces(str(value or ""))
-    if "(" not in s or ")" not in s:
-        return None, None
-
-    try:
-        overtime_str = s[s.index("(") + 1 : s.index(")")].strip()
-    except ValueError:
-        return None, None
-
-    if not overtime_str:
-        return None, None
-
-    try:
-        if "/" in overtime_str:
-            parts = [p.strip() for p in overtime_str.split("/")]
-            day_ot = _to_float_number(parts[0]) if len(parts) >= 1 and parts[0] else 0.0
-            night_ot = _to_float_number(parts[1]) if len(parts) >= 2 and parts[1] else 0.0
-            if day_ot is None or night_ot is None:
-                return None, None
-            return float(day_ot), float(night_ot)
-
-        single = _to_float_number(overtime_str)
-        if single is None:
-            return None, None
-        return float(single), 0.0
-    except Exception:
-        return None, None
-
-
-def parse_hours_and_night(value: Any) -> Tuple[Optional[float], Optional[float]]:
-    """
-    Старый совместимый интерфейс:
-      "8/2" -> total=10, night=2
-      "8"   -> total=8, night=0
-      "РВ 8" -> total=8, night=0
-      "ОТ"   -> total=0, night=0
-    """
-    parsed = parse_timesheet_cell(value)
-    if parsed.is_empty:
-        return None, None
-    if parsed.total_hours is None:
-        return None, None
-    return parsed.total_hours, parsed.night_hours
-
-
-def parse_timesheet_cell(value: Any) -> ParsedTimesheetCell:
-    raw = str(value or "")
-    normalized = normalize_spaces(raw)
-
-    if not normalized:
-        return ParsedTimesheetCell(
-            raw=raw,
-            normalized="",
-            is_empty=True,
-            is_code=False,
-            code=None,
-            total_hours=None,
-            night_hours=0.0,
-            overtime_day=0.0,
-            overtime_night=0.0,
-            counts_day=False,
-            suspicious=False,
-        )
-
-    code = normalize_code(normalized)
-    if code in SPECIAL_CODES:
-        info = SPECIAL_CODES[code]
-        total_hours = float(info.get("hours", 0.0))
-        night_hours = float(info.get("night_hours", 0.0))
-        counts_day = bool(info.get("counts_day", total_hours > 1e-12))
-        return ParsedTimesheetCell(
-            raw=raw,
-            normalized=code,
-            is_empty=False,
-            is_code=True,
-            code=code,
-            total_hours=total_hours,
-            night_hours=night_hours,
-            overtime_day=0.0,
-            overtime_night=0.0,
-            counts_day=counts_day,
-            suspicious=False,
-        )
-
-    # Поддержка универсального формата "РВ <число>"
-    if code.startswith("РВ "):
-        tail = code[3:].strip()
-        generic_rv = _to_float_number(tail)
-        if generic_rv is not None and generic_rv > 0:
-            return ParsedTimesheetCell(
-                raw=raw,
-                normalized=code,
-                is_empty=False,
-                is_code=True,
-                code=code,
-                total_hours=float(generic_rv),
-                night_hours=0.0,
-                overtime_day=0.0,
-                overtime_night=0.0,
-                counts_day=True,
-                suspicious=float(generic_rv) > MAX_HOURS_PER_DAY,
+def _set_outer_medium_border(ws, row1: int, col1: int, row2: int, col2: int):
+    for r in range(row1, row2 + 1):
+        for c in range(col1, col2 + 1):
+            cell = ws.cell(r, c)
+            cell.border = Border(
+                left=MEDIUM_BLACK if c == col1 else cell.border.left,
+                right=MEDIUM_BLACK if c == col2 else cell.border.right,
+                top=MEDIUM_BLACK if r == row1 else cell.border.top,
+                bottom=MEDIUM_BLACK if r == row2 else cell.border.bottom,
             )
 
-    base_part = normalized
-    if "(" in base_part:
-        base_part = base_part.split("(", 1)[0].strip()
 
-    total_hours: Optional[float] = None
-    night_hours = 0.0
+def _setup_print_sheet_params(ws, *, last_col_letter: str, last_row: int, title_rows: str = "$1:$7"):
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
 
-    if "/" in base_part:
-        parts = [p.strip() for p in base_part.split("/") if p.strip()]
-        if parts:
-            base = _parse_time_token_to_hours(parts[0])
-            if base is not None:
-                total = float(base)
-                for night_part in parts[1:]:
-                    nv = _parse_time_token_to_hours(night_part)
-                    if nv is None:
-                        total = None
-                        night_hours = 0.0
-                        break
-                    total += float(nv)
-                    night_hours += float(nv)
-                total_hours = total
-    else:
-        total_hours = parse_hours_value(base_part)
-        night_hours = 0.0
-
-    ot_day, ot_night = parse_overtime(normalized)
-    overtime_day = float(ot_day) if isinstance(ot_day, (int, float)) else 0.0
-    overtime_night = float(ot_night) if isinstance(ot_night, (int, float)) else 0.0
-
-    suspicious = False
-    counts_day = False
-    if isinstance(total_hours, (int, float)):
-        suspicious = float(total_hours) > MAX_HOURS_PER_DAY
-        counts_day = float(total_hours) > 1e-12
-
-    return ParsedTimesheetCell(
-        raw=raw,
-        normalized=normalized,
-        is_empty=False,
-        is_code=False,
-        code=None,
-        total_hours=float(total_hours) if isinstance(total_hours, (int, float)) else None,
-        night_hours=float(night_hours),
-        overtime_day=overtime_day,
-        overtime_night=overtime_night,
-        counts_day=counts_day,
-        suspicious=suspicious,
+    ws.page_margins = PageMargins(
+        left=0.25,
+        right=0.25,
+        top=0.4,
+        bottom=0.45,
+        header=0.2,
+        footer=0.2,
     )
 
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "E8"
+    ws.print_title_rows = title_rows
+    ws.print_area = f"A1:{last_col_letter}{last_row}"
 
-def is_suspicious_hours(raw_value: Any) -> bool:
-    parsed = parse_timesheet_cell(raw_value)
-    return bool(parsed.suspicious)
+    ws.oddHeader.center.text = "&\"Segoe UI,Bold\"&12 Командировочный табель"
+    ws.oddFooter.left.text = "&\"Segoe UI\"&8 Сформировано автоматически"
+    ws.oddFooter.center.text = "&\"Segoe UI\"&8 Страница &[Page] из &N"
+    ws.oddFooter.right.text = f"&\"Segoe UI\"&8 {datetime.now().strftime('%d.%m.%Y %H:%M')}"
 
 
-def normalize_hours_list(
-    hours_list: Sequence[Any] | None,
+def build_printable_trip_timesheet_sheet(
+    ws,
+    *,
     year: int,
     month: int,
-) -> list[Optional[str]]:
-    """
-    Нормализует массив часов:
-    - всегда длина 31;
-    - все значения str|None;
-    - дни после конца месяца зануляются.
-    """
-    out: list[Optional[str]] = []
-    for item in list(hours_list or [])[:31]:
-        if item in (None, ""):
-            out.append(None)
-        else:
-            text = normalize_spaces(str(item))
-            out.append(text or None)
+    object_addr: str,
+    object_id: str,
+    rows: list[dict[str, Any]],
+    prepared_by: str = "",
+):
+    days_in_month = month_days(year, month)
+    month_ru = MONTH_NAMES.get(month, str(month))
 
-    if len(out) < 31:
-        out.extend([None] * (31 - len(out)))
+    fixed_headers = ["№", "ФИО", "Таб. №", "Командировка"]
+    day_headers = [str(i) for i in range(1, days_in_month + 1)]
+    total_headers = ["Дни", "Часы"]
+    headers = fixed_headers + day_headers + total_headers
 
-    days_in_m = month_days(year, month)
-    for idx in range(days_in_m, 31):
-        out[idx] = None
+    total_cols = len(headers)
+    last_col_letter = get_column_letter(total_cols)
 
-    return out
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=total_cols)
+    c = ws["A1"]
+    c.value = "КОМАНДИРОВОЧНЫЙ ТАБЕЛЬ"
+    _apply_print_style(c, bold=True, size=14, h="center", border=BORDER_EMPTY, fill=PRINT_TITLE_FILL)
 
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=total_cols)
+    c = ws["A2"]
+    c.value = f"за {month_ru} {year} г."
+    _apply_print_style(c, bold=True, size=11, h="center", border=BORDER_EMPTY)
 
-def calc_row_totals(hours_list: Sequence[Any] | None, year: int, month: int) -> Dict[str, Any]:
-    normalized = normalize_hours_list(hours_list, year, month)
-    days_in_m = month_days(year, month)
+    meta_split = min(12, total_cols)
+    right_meta_start = meta_split + 1
 
-    total_hours = 0.0
-    total_days = 0
-    total_night = 0.0
-    total_ot_day = 0.0
-    total_ot_night = 0.0
+    ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=meta_split)
+    c = ws["A3"]
+    c.value = f"Объект: {object_addr or '-'}"
+    _apply_print_style(c, bold=True, h="left", fill=PRINT_META_FILL)
 
-    for i in range(days_in_m):
-        raw = normalized[i]
-        if not raw:
-            continue
+    if right_meta_start <= total_cols:
+        ws.merge_cells(start_row=3, start_column=right_meta_start, end_row=3, end_column=total_cols)
+        c = ws.cell(3, right_meta_start)
+        c.value = f"ID объекта: {object_id or '-'}"
+        _apply_print_style(c, bold=True, h="left", fill=PRINT_META_FILL)
 
-        parsed = parse_timesheet_cell(raw)
+    ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=total_cols)
+    c = ws["A4"]
+    c.value = f"Дата формирования: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+    _apply_print_style(c, h="left", fill=PRINT_META_FILL)
 
-        if isinstance(parsed.total_hours, (int, float)):
-            total_hours += float(parsed.total_hours)
-        total_night += float(parsed.night_hours)
-        total_ot_day += float(parsed.overtime_day)
-        total_ot_night += float(parsed.overtime_night)
+    ws.merge_cells(start_row=5, start_column=1, end_row=5, end_column=total_cols)
+    c = ws["A5"]
+    c.value = "В таблице указываются часы по дням и период командировки по сотруднику."
+    _apply_print_style(c, size=8, h="left", border=BORDER_EMPTY)
 
-        if parsed.counts_day:
-            total_days += 1
+    ws.row_dimensions[1].height = 24
+    ws.row_dimensions[2].height = 18
+    ws.row_dimensions[3].height = 20
+    ws.row_dimensions[4].height = 20
+    ws.row_dimensions[5].height = 16
 
-    return {
-        "days": total_days,
-        "hours": float(f"{total_hours:.2f}"),
-        "night_hours": float(f"{total_night:.2f}"),
-        "ot_day": float(f"{total_ot_day:.2f}"),
-        "ot_night": float(f"{total_ot_night:.2f}"),
-    }
+    header_row = 7
+    for col_idx, title in enumerate(headers, start=1):
+        cell = ws.cell(header_row, col_idx, title)
+        _apply_print_style(cell, bold=True, fill=PRINT_HEADER_FILL)
 
+    ws.row_dimensions[header_row].height = 30
 
-def calc_rows_summary(rows: Sequence[Mapping[str, Any]], year: int, month: int) -> Dict[str, Any]:
-    total_hours = 0.0
-    total_days = 0
-    total_night = 0.0
-    total_ot_day = 0.0
-    total_ot_night = 0.0
+    ws.column_dimensions["A"].width = 5
+    ws.column_dimensions["B"].width = 30
+    ws.column_dimensions["C"].width = 11
+    ws.column_dimensions["D"].width = 24 # Слегка сузили, чтобы перенос срабатывал красивее
+
+    first_day_col = 5
+    last_day_col = first_day_col + days_in_month - 1
+    for col_idx in range(first_day_col, last_day_col + 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = 4.2
+
+    totals_start_col = last_day_col + 1
+    ws.column_dimensions[get_column_letter(totals_start_col)].width = 8
+    ws.column_dimensions[get_column_letter(totals_start_col + 1)].width = 10
+
+    current_row = header_row + 1
+    normalized_rows: list[dict[str, Any]] = []
 
     for rec in rows:
+        fio = normalize_spaces(rec.get("fio") or "")
+        tbn = normalize_tbn(rec.get("tbn"))
+        hours = normalize_hours_list(rec.get("hours"), year, month)
+        totals = rec.get("_totals") or calc_row_totals(hours, year, month)
+        
+        # --- ОБРАБОТКА МАССИВА ПЕРИОДОВ ---
+        periods = rec.get("trip_periods", [])
+        if periods:
+            # Сортируем периоды по дате начала
+            sorted_periods = sorted(periods, key=lambda x: x["from"])
+            # Форматируем: 01.01.2024 - 15.01.2024
+            p_strs = [f"{p['from'].strftime('%d.%m.%Y')} - {p['to'].strftime('%d.%m.%Y')}" for p in sorted_periods]
+            trip_period = "\n".join(p_strs) # Склеиваем через перенос строки
+            lines_count = len(sorted_periods)
+        else:
+            trip_period = ""
+            lines_count = 1
+
+        normalized_rows.append(
+            {
+                "fio": fio,
+                "tbn": tbn,
+                "hours": hours,
+                "_totals": totals,
+                "trip_period": trip_period,
+                "lines_count": lines_count, # Сохраняем кол-во строк для расчета высоты ячейки
+            }
+        )
+
+    for idx, rec in enumerate(normalized_rows, start=1):
+        fio = rec["fio"]
+        tbn = rec["tbn"]
+        hours = rec["hours"]
+        totals = rec["_totals"]
+        trip_period = rec["trip_period"]
+
+        row_values = [
+            idx,
+            fio,
+            tbn,
+            trip_period,
+            *[_excel_safe_value(v) for v in hours[:days_in_month]],
+            _excel_safe_value(format_summary_value(totals.get("days"))),
+            _excel_safe_value(format_summary_value(totals.get("hours"))),
+        ]
+
+        for col_idx, value in enumerate(row_values, start=1):
+            cell = ws.cell(current_row, col_idx, value)
+            if col_idx in (2, 4):
+                # wrap=True включен по умолчанию в _apply_print_style
+                _apply_print_style(cell, h="left") 
+            else:
+                _apply_print_style(cell, h="center")
+
+        # --- ДИНАМИЧЕСКАЯ ВЫСОТА СТРОКИ ---
+        # Если строк 1, высота 22. Если строк больше, добавляем по 14 пикселей на каждую строку
+        calc_height = max(22, 14 * rec["lines_count"])
+        ws.row_dimensions[current_row].height = calc_height
+        
+        current_row += 1
+
+    summary = calc_rows_summary(normalized_rows, year, month)
+
+    ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=4)
+    total_cell = ws.cell(current_row, 1)
+    total_cell.value = "ИТОГО"
+    _apply_print_style(total_cell, bold=True, fill=PRINT_TOTAL_FILL)
+
+    for col_idx in range(5, totals_start_col):
+        cell = ws.cell(current_row, col_idx, "")
+        _apply_print_style(cell, bold=True, fill=PRINT_TOTAL_FILL)
+
+    summary_values = [
+        format_summary_value(summary.get("days")),
+        format_summary_value(summary.get("hours")),
+    ]
+    for offset, value in enumerate(summary_values):
+        cell = ws.cell(current_row, totals_start_col + offset, value)
+        _apply_print_style(cell, bold=True, fill=PRINT_TOTAL_FILL)
+
+    table_last_row = current_row
+    _set_outer_medium_border(ws, header_row, 1, table_last_row, total_cols)
+
+    sign_row = table_last_row + 3
+    left_sign_end = min(12, total_cols)
+    right_sign_start = left_sign_end + 1
+
+    ws.merge_cells(start_row=sign_row, start_column=1, end_row=sign_row, end_column=left_sign_end)
+    c = ws.cell(sign_row, 1)
+    c.value = f"Составил: {prepared_by or '__________________'}    Подпись: __________________"
+    _apply_print_style(c, h="left", border=BORDER_EMPTY)
+
+    if right_sign_start <= total_cols:
+        ws.merge_cells(start_row=sign_row, start_column=right_sign_start, end_row=sign_row, end_column=total_cols)
+        c = ws.cell(sign_row, right_sign_start)
+        c.value = "Дата: __________________"
+        _apply_print_style(c, h="left", border=BORDER_EMPTY)
+
+    _setup_print_sheet_params(
+        ws,
+        last_col_letter=last_col_letter,
+        last_row=sign_row,
+        title_rows="$1:$7",
+    )
+
+class TripTimeFillDialog(simpledialog.Dialog):
+    def __init__(self, parent, max_day: int, title: str = "Проставить время"):
+        self.max_day = int(max_day)
+        self.result: Optional[Dict[str, Any]] = None
+        super().__init__(parent, title=title)
+
+    def body(self, master):
+        tk.Label(master, text=f"В текущем месяце дней: {self.max_day}").grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(4, 6)
+        )
+
+        self.var_mode = tk.StringVar(value="single")
+        ttk.Radiobutton(master, text="Один день", value="single", variable=self.var_mode).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(2, 2)
+        )
+        ttk.Radiobutton(master, text="Диапазон дней", value="range", variable=self.var_mode).grid(
+            row=1, column=2, columnspan=2, sticky="w", pady=(2, 2)
+        )
+
+        tk.Label(master, text="День:").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=(4, 2))
+        self.spn_day = tk.Spinbox(master, from_=1, to=self.max_day, width=6)
+        self.spn_day.grid(row=2, column=1, sticky="w", pady=(4, 2))
+        self.spn_day.delete(0, "end")
+        self.spn_day.insert(0, "1")
+
+        tk.Label(master, text="С:").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=(2, 2))
+        self.spn_from = tk.Spinbox(master, from_=1, to=self.max_day, width=6)
+        self.spn_from.grid(row=3, column=1, sticky="w", pady=(2, 2))
+        self.spn_from.delete(0, "end")
+        self.spn_from.insert(0, "1")
+
+        tk.Label(master, text="По:").grid(row=3, column=2, sticky="e", padx=(10, 6), pady=(2, 2))
+        self.spn_to = tk.Spinbox(master, from_=1, to=self.max_day, width=6)
+        self.spn_to.grid(row=3, column=3, sticky="w", pady=(2, 2))
+        self.spn_to.delete(0, "end")
+        self.spn_to.insert(0, str(self.max_day))
+
+        self.var_clear = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            master,
+            text="Очистить выбранные дни",
+            variable=self.var_clear,
+            command=self._toggle_hours_state,
+        ).grid(row=4, column=0, columnspan=4, sticky="w", pady=(8, 2))
+
+        tk.Label(master, text="Часы:").grid(row=5, column=0, sticky="e", padx=(0, 6), pady=(6, 2))
+        self.ent_hours = ttk.Entry(master, width=18)
+        self.ent_hours.grid(row=5, column=1, sticky="w", pady=(6, 2))
+        self.ent_hours.insert(0, "8")
+
+        tk.Label(
+            master,
+            text="Форматы: 8 | 8,25 | 8.5 | 8:30 | 1/7",
+            fg="#555555",
+        ).grid(row=6, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+        return self.ent_hours
+
+    def _toggle_hours_state(self):
+        state = "disabled" if self.var_clear.get() else "normal"
+        self.ent_hours.configure(state=state)
+
+    def validate(self):
+        mode = self.var_mode.get()
+
+        try:
+            day_single = int(self.spn_day.get())
+            day_from = int(self.spn_from.get())
+            day_to = int(self.spn_to.get())
+        except Exception:
+            messagebox.showwarning("Проставить время", "Дни должны быть целыми числами.", parent=self)
+            return False
+
+        if not (1 <= day_single <= self.max_day):
+            messagebox.showwarning(
+                "Проставить время",
+                f"День должен быть в диапазоне 1–{self.max_day}.",
+                parent=self,
+            )
+            return False
+
+        if not (1 <= day_from <= self.max_day and 1 <= day_to <= self.max_day):
+            messagebox.showwarning(
+                "Проставить время",
+                f"Диапазон должен быть в пределах 1–{self.max_day}.",
+                parent=self,
+            )
+            return False
+
+        if mode == "range" and day_from > day_to:
+            messagebox.showwarning(
+                "Проставить время",
+                "Начальный день диапазона не может быть больше конечного.",
+                parent=self,
+            )
+            return False
+
+        if mode == "single":
+            self._day_from = day_single
+            self._day_to = day_single
+        else:
+            self._day_from = day_from
+            self._day_to = day_to
+
+        if self.var_clear.get():
+            self._value = None
+            return True
+
+        text = normalize_spaces(self.ent_hours.get())
+        if not text:
+            messagebox.showwarning("Проставить время", "Введите количество часов.", parent=self)
+            return False
+
+        parsed = parse_hours_value(text)
+        if parsed is None or parsed < 0:
+            messagebox.showwarning(
+                "Проставить время",
+                "Введите корректное значение часов.\nПримеры: 8, 8,25, 8.5, 8:30, 1/7",
+                parent=self,
+            )
+            return False
+
+        self._value = float(parsed)
+        return True
+
+    def apply(self):
+        self.result = {
+            "from": self._day_from,
+            "to": self._day_to,
+            "value": self._value,
+        }
+
+class TripTimesheetPage(tk.Frame):
+    def __init__(self, master, app, *args, **kwargs):
+        super().__init__(master, bg=UI["bg"], *args, **kwargs)
+        self.app = app
+
+        self.current_header_id: Optional[int] = None
+        self.rows: List[Dict[str, Any]] = []
+
+        today = date.today()
+        self.var_year = tk.IntVar(value=today.year)
+        self.var_month = tk.IntVar(value=today.month)
+
+        self.var_status = tk.StringVar(value="Готово.")
+        self.var_trip_info = tk.StringVar(value="")
+        self.var_filter = tk.StringVar(value="")
+
+        self.objects_full: List[Tuple[str, str, str]] = []
+        self.address_options: List[str] = []
+
+        self._building_ui = False
+        self._dirty = False
+        self._auto_save_job = None
+        self._auto_save_delay_ms = 8000
+        self._loaded_context: Dict[str, Any] = {}
+        self._suppress_events = False
+
+        self._build_ui()
+        self._load_reference_data()
+        self._bind_hotkeys()
+        self._refresh_grid()
+
+    def destroy(self):
+        if self._auto_save_job is not None:
+            try:
+                self.after_cancel(self._auto_save_job)
+            except Exception:
+                pass
+            self._auto_save_job = None
+        super().destroy()
+
+    # =========================================================
+    # UI
+    # =========================================================
+    def _build_ui(self) -> None:
+        self._building_ui = True
+
+        self._build_header()
+        self._build_top_form()
+        self._build_toolbar()
+        self._build_filter_bar()
+        self._build_grid()
+        self._build_bottom()
+
+        self._building_ui = False
+
+    def _build_header(self) -> None:
+        hdr = tk.Frame(self, bg=UI["accent"], pady=4)
+        hdr.pack(fill="x")
+
+        tk.Label(
+            hdr,
+            text="📋 Командировочный табель",
+            font=("Segoe UI", 12, "bold"),
+            bg=UI["accent"],
+            fg="white",
+            padx=12,
+        ).pack(side="left")
+
+        tk.Label(
+            hdr,
+            textvariable=self.var_status,
+            font=("Segoe UI", 8),
+            bg=UI["accent"],
+            fg="#dbeafe",
+            padx=10,
+        ).pack(side="right")
+
+    def _ts_lbl(self, parent, text: str, row: int, col: int = 0, required: bool = False, **grid_kw):
+        display = f"{text}{'  *' if required else ''}:"
+        fg = UI["warning"] if required else "#333333"
+        tk.Label(
+            parent,
+            text=display,
+            font=("Segoe UI", 9),
+            bg=UI["panel"],
+            fg=fg,
+            anchor="e",
+        ).grid(row=row, column=col, sticky="e", padx=(0, 6), pady=3, **grid_kw)
+
+    def _build_top_form(self) -> None:
+        outer = tk.Frame(self, bg=UI["bg"])
+        outer.pack(fill="x", padx=10, pady=(6, 2))
+        outer.grid_columnconfigure(0, weight=1)
+        outer.grid_columnconfigure(1, weight=2)
+
+        self._build_period_panel(outer)
+        self._build_object_panel(outer)
+
+    def _build_period_panel(self, parent) -> None:
+        pnl = tk.LabelFrame(
+            parent,
+            text=" 📅 Период ",
+            font=("Segoe UI", 9, "bold"),
+            bg=UI["panel"],
+            fg=UI["accent"],
+            relief="groove",
+            bd=1,
+            padx=10,
+            pady=8,
+        )
+        pnl.grid(row=0, column=0, sticky="nsew", padx=(0, 4), pady=2)
+
+        self._ts_lbl(pnl, "Месяц", 0, required=True)
+        self.cmb_month = ttk.Combobox(
+            pnl,
+            width=16,
+            state="readonly",
+            values=[f"{m:02d} — {MONTH_NAMES[m]}" for m in range(1, 13)],
+        )
+        self.cmb_month.grid(row=0, column=1, sticky="w", pady=3)
+        self.cmb_month.bind("<<ComboboxSelected>>", lambda _e: self._on_month_combo_changed())
+        self.cmb_month.current(max(0, self.var_month.get() - 1))
+
+        tk.Label(
+            pnl,
+            text="Год  *:",
+            font=("Segoe UI", 9),
+            bg=UI["panel"],
+            fg=UI["warning"],
+            anchor="e",
+        ).grid(row=0, column=2, sticky="e", padx=(12, 6), pady=3)
+
+        self.cmb_year = ttk.Combobox(
+            pnl,
+            width=8,
+            state="readonly",
+            values=self._make_year_values(),
+            textvariable=self.var_year,
+        )
+        self.cmb_year.grid(row=0, column=3, sticky="w", pady=3)
+        self.cmb_year.bind("<<ComboboxSelected>>", lambda _e: self._on_period_changed())
+
+    def _build_object_panel(self, parent) -> None:
+        pnl = tk.LabelFrame(
+            parent,
+            text=" 📍 Объект ",
+            font=("Segoe UI", 9, "bold"),
+            bg=UI["panel"],
+            fg=UI["accent"],
+            relief="groove",
+            bd=1,
+            padx=10,
+            pady=8,
+        )
+        pnl.grid(row=0, column=1, sticky="nsew", padx=(4, 0), pady=2)
+        pnl.grid_columnconfigure(1, weight=1)
+
+        self._ts_lbl(pnl, "Адрес объекта", 0, required=True)
+        self.cmb_address = AutoCompleteCombobox(pnl, width=42, font=("Segoe UI", 9))
+        self.cmb_address.grid(row=0, column=1, columnspan=3, sticky="ew", pady=3)
+        self.cmb_address.bind("<<ComboboxSelected>>", lambda _e: self._on_address_select())
+        self.cmb_address.bind("<Return>", lambda _e: self._on_address_select())
+
+        self._ts_lbl(pnl, "ID объекта", 1)
+        id_frame = tk.Frame(pnl, bg=UI["panel"])
+        id_frame.grid(row=1, column=1, columnspan=3, sticky="ew", pady=3)
+
+        self.cmb_object_id = ttk.Combobox(id_frame, state="readonly", values=[], width=22)
+        self.cmb_object_id.pack(side="left")
+        self.cmb_object_id.bind("<<ComboboxSelected>>", lambda _e: self._on_object_id_select())
+
+        tk.Label(
+            id_frame,
+            text="← подставляется автоматически по адресу",
+            font=("Segoe UI", 7),
+            fg="#888888",
+            bg=UI["panel"],
+        ).pack(side="left", padx=8)
+
+    def _ts_btn(self, parent, text: str, cmd, side="left", padx=3, pady=0, width=None):
+        b = ttk.Button(parent, text=text, command=cmd, width=width)
+        b.pack(side=side, padx=padx, pady=pady)
+        return b
+
+    def _build_toolbar(self) -> None:
+        bar = tk.Frame(self, bg=UI["panel2"], relief="flat")
+        bar.pack(fill="x", padx=10, pady=(4, 0))
+
+        left = tk.Frame(bar, bg=UI["panel2"])
+        left.pack(side="left", fill="x", expand=True)
+
+        actions = tk.Frame(bar, bg=UI["panel2"])
+        actions.pack(side="right", anchor="n", padx=(10, 4), pady=4)
+
+        row1 = tk.Frame(left, bg=UI["panel2"])
+        row1.pack(fill="x", pady=(4, 4))
+
+        self._ts_btn(row1, "Открыть", self._open_timesheet, side="left", padx=(4, 3))
+        self._ts_btn(row1, "Добавить сотрудников", self._add_employees, side="left", padx=3)
+        self._ts_btn(row1, "Период выбранным", self._set_trip_period_for_selected, side="left", padx=3)
+        self._ts_btn(row1, "Время выбранным", self._fill_hours_for_selected, side="left", padx=3)
+        self._ts_btn(row1, "Время всем", self._fill_hours_for_all, side="left", padx=3)
+        self._ts_btn(row1, "Удалить выбранных", self._delete_selected_rows, side="left", padx=3)
+        self._ts_btn(row1, "Очистить часы", self._clear_hours_for_selected, side="left", padx=3)
+        self._ts_btn(row1, "Проверить дубли", self._check_duplicates, side="left", padx=3)
+
+        btn_save = tk.Button(
+            actions,
+            text="Сохранить",
+            font=("Segoe UI", 9, "bold"),
+            bg=UI["btn_save_bg"],
+            fg=UI["btn_save_fg"],
+            activebackground="#0d47a1",
+            activeforeground="white",
+            relief="flat",
+            cursor="hand2",
+            padx=14,
+            pady=4,
+            command=self._save_timesheet,
+            width=14,
+        )
+        btn_save.pack(fill="x", pady=(0, 4))
+        btn_save.bind("<Enter>", lambda _e: btn_save.config(bg="#0d47a1"))
+        btn_save.bind("<Leave>", lambda _e: btn_save.config(bg=UI["btn_save_bg"]))
+
+        self.btn_export = ttk.Button(
+            actions,
+            text="Выгрузить Excel",
+            command=self._export_to_excel,
+            width=16,
+        )
+        self.btn_export.pack(fill="x")
+
+    def _build_filter_bar(self) -> None:
+        bar = tk.Frame(self, bg=UI["bg"], pady=2)
+        bar.pack(fill="x", padx=10, pady=(4, 0))
+
+        tk.Label(
+            bar,
+            text="🔍 Поиск (ФИО / таб. №):",
+            font=("Segoe UI", 9),
+            bg=UI["bg"],
+        ).pack(side="left")
+
+        ent_filter = ttk.Entry(bar, textvariable=self.var_filter, width=36)
+        ent_filter.pack(side="left", padx=(4, 8))
+        ent_filter.bind("<KeyRelease>", lambda _e: self._apply_filter())
+
+        ttk.Button(bar, text="Очистить", command=self._clear_filter).pack(side="left")
+
+    def _build_grid(self) -> None:
+        grid_wrap = tk.Frame(
+            self,
+            bg=UI["panel"],
+            highlightbackground=UI["line"],
+            highlightthickness=1,
+            bd=0,
+        )
+        grid_wrap.pack(fill="both", expand=True, padx=10, pady=(4, 4))
+
+        self.grid_widget = VirtualTimesheetGrid(
+            grid_wrap,
+            get_year_month=self._get_year_month,
+            on_change=self._on_grid_change,
+            on_delete_row=self._on_delete_row,
+            on_selection_change=self._on_selection_change,
+            on_trip_period_click=self._on_trip_period_click,
+            show_trip_period=True,
+            allow_row_select=True,
+            read_only=False,
+        )
+        self.grid_widget.pack(fill="both", expand=True)
+
+    def _build_bottom(self) -> None:
+        bottom = tk.Frame(self, bg=UI["panel2"], pady=5)
+        bottom.pack(fill="x", padx=10, pady=(0, 8))
+
+        self.lbl_totals = tk.Label(
+            bottom,
+            text="Сотрудников: 0 | Дней: 0 | Часов: 0",
+            font=("Segoe UI", 9, "bold"),
+            fg=UI["accent"],
+            bg=UI["panel2"],
+        )
+        self.lbl_totals.pack(side="left", padx=10)
+
+        self.lbl_trip_info = tk.Label(
+            bottom,
+            textvariable=self.var_trip_info,
+            font=("Segoe UI", 9),
+            fg=UI["muted"],
+            bg=UI["panel2"],
+        )
+        self.lbl_trip_info.pack(side="right", padx=10)
+
+    def _make_year_values(self) -> List[int]:
+        current = date.today().year
+        return list(range(current - 3, current + 4))
+
+    def _bind_hotkeys(self) -> None:
+        self.bind_all("<Control-s>", self._hotkey_save, add="+")
+        self.bind_all("<Control-S>", self._hotkey_save, add="+")
+        self.bind_all("<Control-e>", self._hotkey_export, add="+")
+        self.bind_all("<Control-E>", self._hotkey_export, add="+")
+        self.bind_all("<F5>", self._hotkey_reload, add="+")
+
+    def _hotkey_save(self, event=None):
+        if not self.winfo_exists():
+            return
+        if self.focus_displayof() is None:
+            return
+        self._save_timesheet()
+        return "break"
+
+    def _hotkey_export(self, event=None):
+        if not self.winfo_exists():
+            return
+        if self.focus_displayof() is None:
+            return
+        self._export_to_excel()
+        return "break"
+
+    def _hotkey_reload(self, event=None):
+        if not self.winfo_exists():
+            return
+        if self.focus_displayof() is None:
+            return
+        self._open_timesheet()
+        return "break"
+
+    def _hotkey_delete(self, event=None):
+        if not self.winfo_exists():
+            return
+        if self.focus_displayof() is None:
+            return
+    
+        # Delete обрабатывается самим гридом и очищает только текущую ячейку.
+        return "break"
+
+    # =========================================================
+    # Статус / dirty / автосохранение
+    # =========================================================
+    def _set_status_text(self, text: str) -> None:
+        self.var_status.set(text)
+
+    def _mark_dirty(self) -> None:
+        self._dirty = True
+        self._set_status_text("Есть несохранённые изменения")
+
+    def _mark_saved(self, auto: bool = False) -> None:
+        self._dirty = False
+        now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        if auto:
+            self._set_status_text(f"Последнее авто‑сохранение: {now}")
+        else:
+            self._set_status_text(f"Сохранено: {now}")
+
+    def _mark_save_error(self, text: str) -> None:
+        self._set_status_text(text)
+
+    def _schedule_auto_save(self) -> None:
+        if self._auto_save_job is not None:
+            try:
+                self.after_cancel(self._auto_save_job)
+            except Exception:
+                pass
+            self._auto_save_job = None
+
+        self._auto_save_job = self.after(self._auto_save_delay_ms, self._auto_save_callback)
+
+    def _auto_save_callback(self) -> None:
+        self._auto_save_job = None
+        if not self._dirty:
+            return
+        self._save_timesheet_internal(show_messages=False, is_auto=True)
+
+    def _capture_current_context(self) -> Dict[str, Any]:
+        object_id, object_addr = self._parse_selected_object()
+        year, month = self._get_year_month()
+        return {
+            "year": year,
+            "month": month,
+            "object_id": object_id,
+            "object_addr": object_addr,
+        }
+
+    def _restore_controls_to_loaded_context(self) -> None:
+        if not self._loaded_context:
+            return
+
+        self._suppress_events = True
+        try:
+            year = int(self._loaded_context.get("year") or date.today().year)
+            month = int(self._loaded_context.get("month") or date.today().month)
+            object_id = normalize_spaces(self._loaded_context.get("object_id") or "")
+            object_addr = normalize_spaces(self._loaded_context.get("object_addr") or "")
+
+            self.var_year.set(year)
+            self.var_month.set(month)
+            self.cmb_month.current(max(0, month - 1))
+
+            self.cmb_address.set(object_addr)
+            self._sync_object_id_values_silent()
+
+            if object_id:
+                values = list(self.cmb_object_id.cget("values") or [])
+                if object_id not in values:
+                    values.append(object_id)
+                    self.cmb_object_id.config(values=values)
+                self.cmb_object_id.set(object_id)
+            else:
+                self.cmb_object_id.set("")
+        finally:
+            self._suppress_events = False
+
+    def _confirm_leave_with_unsaved(self) -> bool:
+        if not self._dirty:
+            return True
+
+        answer = messagebox.askyesnocancel(
+            "Несохранённые изменения",
+            "Есть несохранённые изменения.\n\nСохранить перед переключением?",
+            parent=self,
+        )
+        if answer is None:
+            return False
+
+        if answer is True:
+            return self._save_timesheet_internal(show_messages=True, is_auto=False)
+
+        return True
+
+    # =========================================================
+    # Справочники
+    # =========================================================
+    def _load_reference_data(self) -> None:
+        self.objects_full = load_objects_short_for_timesheet()
+        self.address_options = sorted(
+            {
+                normalize_spaces(addr)
+                for _object_id, addr, _short_name in self.objects_full
+                if normalize_spaces(addr)
+            }
+        )
+        self.cmb_address.set_completion_list(self.address_options)
+
+    def _parse_selected_object(self) -> Tuple[str, str]:
+        object_addr = normalize_spaces(self.cmb_address.get() or "")
+        object_id = normalize_spaces(self.cmb_object_id.get() or "")
+        return object_id, object_addr
+
+    def _sync_object_id_values_silent(self) -> None:
+        addr = normalize_spaces(self.cmb_address.get() or "")
+        objects_for_addr = [
+            (code, a, short_name)
+            for (code, a, short_name) in self.objects_full
+            if normalize_spaces(a) == addr
+        ]
+
+        if not objects_for_addr:
+            self.cmb_object_id.config(state="normal", values=[])
+            self.cmb_object_id.set("")
+            return
+
+        ids = sorted({normalize_spaces(code) for code, _, _ in objects_for_addr if normalize_spaces(code)})
+        cur = normalize_spaces(self.cmb_object_id.get() or "")
+
+        self.cmb_object_id.config(state="readonly", values=ids)
+
+        if cur and cur in ids:
+            return
+        if len(ids) == 1:
+            self.cmb_object_id.set(ids[0])
+        else:
+            if cur not in ids:
+                self.cmb_object_id.set("")
+
+    def _auto_open_current_context(self) -> None:
+        object_id, object_addr = self._parse_selected_object()
+        if not object_addr:
+            self._set_rows([])
+            self.current_header_id = None
+            self._loaded_context = self._capture_current_context()
+            self.var_status.set("Выберите объект.")
+            self._update_trip_info_from_selection()
+            return
+    
+        self._open_timesheet()
+    
+    # =========================================================
+    # Период / объект
+    # =========================================================
+    def _get_year_month(self) -> Tuple[int, int]:
+        return int(self.var_year.get()), int(self.var_month.get())
+
+    def _on_month_combo_changed(self) -> None:
+        idx = self.cmb_month.current()
+        if idx < 0:
+            return
+        self.var_month.set(idx + 1)
+        self._on_period_changed()
+
+    def _on_period_changed(self) -> None:
+        if self._suppress_events:
+            return
+    
+        if not self._confirm_leave_with_unsaved():
+            self._restore_controls_to_loaded_context()
+            return
+    
+        object_id, object_addr = self._parse_selected_object()
+        if not object_addr:
+            self._set_rows([])
+            self.current_header_id = None
+            self._loaded_context = self._capture_current_context()
+            self.var_status.set("Выберите объект.")
+            self._update_trip_info_from_selection()
+            return
+    
+        self._open_timesheet()
+
+    def _on_address_select(self) -> None:
+        if self._suppress_events:
+            return
+    
+        if not self._confirm_leave_with_unsaved():
+            self._restore_controls_to_loaded_context()
+            return
+    
+        self._sync_object_id_values_silent()
+    
+        addr = normalize_spaces(self.cmb_address.get() or "")
+        objects_for_addr = [
+            (normalize_spaces(code), normalize_spaces(a), normalize_spaces(short_name))
+            for (code, a, short_name) in self.objects_full
+            if normalize_spaces(a) == addr
+        ]
+    
+        ids = sorted({code for code, _, _ in objects_for_addr if code})
+        if len(ids) > 1:
+            dlg = SelectObjectIdDialog(self, objects_for_addr, addr)
+            self.wait_window(dlg)
+    
+            selected_id = normalize_spaces(dlg.result or "")
+            if selected_id and selected_id in ids:
+                self.cmb_object_id.set(selected_id)
+    
+        object_id, object_addr = self._parse_selected_object()
+        if not object_addr:
+            self._set_rows([])
+            self.current_header_id = None
+            self._loaded_context = self._capture_current_context()
+            self.var_status.set("Выберите объект.")
+            self._update_trip_info_from_selection()
+            return
+    
+        self._open_timesheet()
+
+    def _on_object_id_select(self) -> None:
+        if self._suppress_events:
+            return
+    
+        if not self._confirm_leave_with_unsaved():
+            self._restore_controls_to_loaded_context()
+            return
+    
+        object_id, object_addr = self._parse_selected_object()
+        if not object_addr:
+            self._set_rows([])
+            self.current_header_id = None
+            self._loaded_context = self._capture_current_context()
+            self.var_status.set("Выберите объект.")
+            self._update_trip_info_from_selection()
+            return
+    
+        self._open_timesheet()
+
+    # =========================================================
+    # Работа со строками
+    # =========================================================
+    def _empty_row(self, fio: str = "", tbn: str = "") -> Dict[str, Any]:
+        year, month = self._get_year_month()
+        hours = normalize_hours_list([], year, month)
+        totals = calc_row_totals(hours, year, month)
+
+        return {
+            "fio": normalize_spaces(fio),
+            "tbn": normalize_tbn(tbn),
+            "hours": hours,
+            "trip_periods": [],  # НОВОЕ: Теперь это список периодов
+            "_totals": totals,
+            "work_schedule": "",
+        }
+
+    def _normalize_trip_row(self, rec: Dict[str, Any]) -> Dict[str, Any]:
+        year, month = self._get_year_month()
+
+        fio = normalize_spaces(rec.get("fio") or "")
+        tbn = normalize_tbn(rec.get("tbn"))
+        hours = normalize_hours_list(rec.get("hours"), year, month)
+
+        # НОВОЕ: Поддержка старого формата и преобразование в список периодов
+        periods = rec.get("trip_periods", [])
+        if not periods and rec.get("trip_date_from") and rec.get("trip_date_to"):
+            periods = [{"from": rec["trip_date_from"], "to": rec["trip_date_to"]}]
+
         totals = rec.get("_totals")
         if not isinstance(totals, dict):
-            totals = calc_row_totals(rec.get("hours"), year, month)
+            totals = calc_row_totals(hours, year, month)
 
-        total_days += int(totals.get("days") or 0)
-        total_hours += float(totals.get("hours") or 0.0)
-        total_night += float(totals.get("night_hours") or 0.0)
-        total_ot_day += float(totals.get("ot_day") or 0.0)
-        total_ot_night += float(totals.get("ot_night") or 0.0)
+        out = {
+            "fio": fio,
+            "tbn": tbn,
+            "hours": hours,
+            "trip_periods": periods,  # НОВОЕ: сохраняем массив
+            "_totals": totals,
+            "work_schedule": normalize_spaces(rec.get("work_schedule") or ""),
+        }
+        return out
 
-    return {
-        "employees": len(rows),
-        "days": total_days,
-        "hours": float(f"{total_hours:.2f}"),
-        "night_hours": float(f"{total_night:.2f}"),
-        "ot_day": float(f"{total_ot_day:.2f}"),
-        "ot_night": float(f"{total_ot_night:.2f}"),
-    }
+    def _recalc_all_totals(self) -> None:
+        year, month = self._get_year_month()
+        for rec in self.rows:
+            rec["hours"] = normalize_hours_list(rec.get("hours"), year, month)
+            rec["_totals"] = calc_row_totals(rec["hours"], year, month)
 
+    def _refresh_grid(self) -> None:
+        self._recalc_all_totals()
+        visible_rows = self._get_filtered_rows()
+        self.grid_widget.set_rows(visible_rows)
+        self._recalc_bottom_totals()
 
-def format_summary_value(value: float | int) -> str:
-    return f"{float(value):.2f}".rstrip("0").rstrip(".")
+    def _set_rows(self, rows: Sequence[Dict[str, Any]]) -> None:
+        self.rows = [self._normalize_trip_row(dict(r)) for r in rows]
+        self._refresh_grid()
 
+    def _get_filtered_rows(self) -> List[Dict[str, Any]]:
+        q = normalize_spaces(self.var_filter.get() or "").lower()
+        if not q:
+            return self.rows
 
-def make_row_key(fio: str, tbn: str) -> tuple[str, str]:
-    return normalize_spaces(fio).lower(), normalize_tbn(tbn)
+        filtered = []
+        for rec in self.rows:
+            fio = normalize_spaces(rec.get("fio") or "").lower()
+            tbn = normalize_tbn(rec.get("tbn")).lower()
+            if q in fio or q in tbn:
+                filtered.append(rec)
+        return filtered
 
+    def _apply_filter(self) -> None:
+        self._refresh_grid()
+        self._update_trip_info_from_selection()
 
-def normalize_row_record(
-    record: Mapping[str, Any],
-    year: int,
-    month: int,
-) -> Dict[str, Any]:
-    fio = normalize_spaces(str(record.get("fio") or ""))
-    tbn = normalize_tbn(record.get("tbn"))
-    hours_source = record.get("hours")
-    if hours_source is None:
-        hours_source = record.get("hours_raw")
+    def _clear_filter(self) -> None:
+        self.var_filter.set("")
+        self._apply_filter()
 
-    hours = normalize_hours_list(hours_source, year, month)
-    totals = calc_row_totals(hours, year, month)
+    def _recalc_bottom_totals(self) -> None:
+        year, month = self._get_year_month()
+        summary = calc_rows_summary(self.rows, year, month)
+        txt = (
+            f"Сотрудников: {summary['employees']}  |  "
+            f"Дней: {summary['days']}  |  "
+            f"Часов: {format_summary_value(summary['hours'])}"
+        )
+        self.lbl_totals.config(text=txt)
 
-    return {
-        "fio": fio,
-        "tbn": tbn,
-        "hours": hours,
-        "_totals": totals,
-    }
+    # =========================================================
+    # Открытие / загрузка / сохранение
+    # =========================================================
+    def _open_timesheet(self) -> None:
+        object_id, object_addr = self._parse_selected_object()
+        year, month = self._get_year_month()
 
+        if not object_addr:
+            messagebox.showwarning("Внимание", "Выберите объект.", parent=self)
+            return
 
-def deduplicate_timesheet_rows(
-    rows: Sequence[Mapping[str, Any]],
-    year: int,
-    month: int,
-) -> List[Dict[str, Any]]:
-    """
-    Удаляет дубли по ключу (fio.lower(), tbn).
-    Последняя запись побеждает.
-    """
-    uniq: dict[tuple[str, str], Dict[str, Any]] = {}
-    for rec in rows:
-        normalized = normalize_row_record(rec, year, month)
-        key = make_row_key(normalized["fio"], normalized["tbn"])
-        if not key[0] and not key[1]:
-            continue
-        uniq[key] = normalized
-    return list(uniq.values())
+        if not self._confirm_leave_with_unsaved():
+            self._restore_controls_to_loaded_context()
+            return
 
+        try:
+            rows = load_trip_timesheet_rows_from_db(
+                object_id=object_id or None,
+                object_addr=object_addr,
+                year=year,
+                month=month,
+            )
+            self.current_header_id = find_trip_timesheet_header_id(
+                object_id=object_id or None,
+                object_addr=object_addr,
+                year=year,
+                month=month,
+            )
+        except Exception as exc:
+            messagebox.showerror("Ошибка", f"Не удалось открыть табель:\n{exc}", parent=self)
+            return
 
-def find_suspicious_cells(
-    rows: Sequence[Mapping[str, Any]],
-    year: int,
-    month: int,
-) -> List[Dict[str, Any]]:
-    days_in_m = month_days(year, month)
-    suspicious: List[Dict[str, Any]] = []
+        self._set_rows(rows)
+        self._loaded_context = self._capture_current_context()
+        self._dirty = False
+        self.var_status.set(f"Открыт командировочный табель: {object_addr}, {month:02d}.{year}.")
+        self._update_trip_info_from_selection()
 
-    for row_idx, rec in enumerate(rows):
-        fio = str(rec.get("fio") or "")
-        tbn = str(rec.get("tbn") or "")
-        hours_list = normalize_hours_list(rec.get("hours"), year, month)
+    def _save_timesheet(self) -> None:
+        self._save_timesheet_internal(show_messages=True, is_auto=False)
 
-        for day_idx in range(days_in_m):
-            raw = hours_list[day_idx]
-            if not raw:
+    def _save_timesheet_internal(self, show_messages: bool = True, is_auto: bool = False) -> bool:
+        object_id, object_addr = self._parse_selected_object()
+        year, month = self._get_year_month()
+
+        if not object_addr:
+            if show_messages:
+                messagebox.showwarning("Внимание", "Выберите объект.", parent=self)
+            if is_auto:
+                self._mark_save_error("Ошибка авто‑сохранения: не выбран объект")
+            return False
+
+        if not self.rows:
+            if show_messages and not is_auto:
+                if not messagebox.askyesno(
+                    "Сохранение",
+                    "В табеле нет строк. Всё равно создать/сохранить пустой табель?",
+                    parent=self,
+                ):
+                    return False
+
+        errors = self._validate_before_save()
+        if errors:
+            if show_messages:
+                messagebox.showerror("Ошибка", "\n".join(errors), parent=self)
+            if is_auto:
+                self._mark_save_error("Ошибка авто‑сохранения: есть ошибки в данных")
+            return False
+
+        try:
+            header_id = upsert_trip_timesheet_header(
+                object_id=object_id or None,
+                object_addr=object_addr,
+                year=year,
+                month=month,
+            )
+
+            self._recalc_all_totals()
+            replace_trip_timesheet_rows(
+                header_id=header_id,
+                rows=self.rows,
+                year=year,
+                month=month,
+            )
+
+            self.current_header_id = header_id
+            self._loaded_context = self._capture_current_context()
+        except Exception as exc:
+            if show_messages:
+                messagebox.showerror("Ошибка", f"Не удалось сохранить табель:\n{exc}", parent=self)
+            if is_auto:
+                self._mark_save_error("Ошибка авто‑сохранения")
+            return False
+
+        self._mark_saved(auto=is_auto)
+        self._update_trip_info_from_selection()
+        return True
+
+    def _validate_before_save(self) -> List[str]:
+        errors: List[str] = []
+
+        for i, rec in enumerate(self.rows, start=1):
+            fio = normalize_spaces(rec.get("fio") or "")
+            tbn = normalize_tbn(rec.get("tbn"))
+            periods = rec.get("trip_periods") or []
+            hours = rec.get("hours") or []
+
+            if not fio and not tbn:
+                errors.append(f"Строка {i}: не заполнены ФИО и табельный номер.")
+
+            for p in periods:
+                if p["from"] > p["to"]:
+                    errors.append(f"Строка {i}: дата начала командировки ({p['from']}) позже даты окончания ({p['to']}).")
+
+            has_hours = any(v is not None and str(v).strip() != "" for v in hours)
+            if has_hours and not periods:
+                errors.append(f"Строка {i}: есть часы, но не задан ни один период командировки.")
+
+        return errors
+
+    # =========================================================
+    # Выбор сотрудников
+    # =========================================================
+    def _add_employees(self) -> None:
+        try:
+            employees = load_employees_from_db()
+        except Exception as exc:
+            messagebox.showerror("Ошибка", f"Не удалось загрузить сотрудников:\n{exc}", parent=self)
+            return
+
+        existing_keys = {
+            (normalize_spaces(r.get("fio") or "").lower(), normalize_tbn(r.get("tbn")))
+            for r in self.rows
+        }
+
+        try:
+            dlg = SelectEmployeesDialog(self, employees=employees, current_dep="Все")
+            self.wait_window(dlg)
+            selected = getattr(dlg, "result", None)
+        except Exception as exc:
+            messagebox.showerror("Ошибка", f"Не удалось открыть выбор сотрудников:\n{exc}", parent=self)
+            return
+
+        if not selected:
+            return
+
+        added = 0
+        for item in selected:
+            if len(item) >= 2:
+                fio = normalize_spaces(item[0] or "")
+                tbn = normalize_tbn(item[1])
+            else:
                 continue
 
-            parsed = parse_timesheet_cell(raw)
-            if parsed.suspicious:
-                suspicious.append(
-                    {
-                        "row_idx": row_idx,
-                        "day": day_idx + 1,
-                        "fio": fio,
-                        "tbn": tbn,
-                        "raw": str(raw),
-                        "parsed": parsed.total_hours,
-                    }
-                )
+            key = (fio.lower(), tbn)
+            if key in existing_keys:
+                continue
 
-    return suspicious
+            row = self._empty_row(fio=fio, tbn=tbn)
+            if len(item) >= 5:
+                row["work_schedule"] = normalize_spaces(item[4] or "")
 
+            self.rows.append(row)
+            existing_keys.add(key)
+            added += 1
 
-def validate_row_record(
-    record: Mapping[str, Any],
-    year: int,
-    month: int,
-) -> List[str]:
-    errors: List[str] = []
-    fio = normalize_spaces(str(record.get("fio") or ""))
-    tbn = normalize_tbn(record.get("tbn"))
-    hours = normalize_hours_list(record.get("hours"), year, month)
-    days_in_m = month_days(year, month)
+        self._refresh_grid()
+        if added > 0:
+            self._mark_dirty()
+            self._schedule_auto_save()
+            self.var_status.set(f"Добавлено сотрудников: {added}")
+        else:
+            self.var_status.set("Все выбранные сотрудники уже есть в табеле.")
 
-    if not fio and not tbn:
-        errors.append("Строка сотрудника не содержит ни ФИО, ни табельного номера.")
+        self._check_fired_employees_after_add()
+        self._check_duplicates(silent_if_empty=True)
 
-    for idx in range(days_in_m):
-        raw = hours[idx]
-        if not raw:
-            continue
+    def _check_fired_employees_after_add(self) -> None:
+        employees = []
+        for rec in self.rows:
+            fio = normalize_spaces(rec.get("fio") or "")
+            tbn = normalize_tbn(rec.get("tbn"))
+            if fio or tbn:
+                employees.append((fio, tbn))
 
-        parsed = parse_timesheet_cell(raw)
-        if parsed.is_empty:
-            continue
+        if not employees:
+            return
 
-        if parsed.is_code:
-            continue
+        year, month = self._get_year_month()
 
-        numeric_ok = parsed.total_hours is not None
-        has_overtime = parsed.overtime_day > 0 or parsed.overtime_night > 0
-        if not numeric_ok and not has_overtime:
-            errors.append(
-                f"Некорректное значение в дне {idx + 1}: '{raw}'"
+        try:
+            fired = find_fired_employees_in_timesheet(
+                employees=employees,
+                year=year,
+                month=month,
             )
+        except Exception:
+            return
 
-    return errors
+        if not fired:
+            return
 
+        lines = ["В табеле обнаружены уволенные сотрудники:"]
+        for item in fired[:20]:
+            fio = item.get("fio") or ""
+            tbn = item.get("tbn") or ""
+            dismissal_date = item.get("dismissal_date")
+            if dismissal_date:
+                lines.append(f"• {fio} ({tbn}) — увольнение: {dismissal_date}")
+            else:
+                lines.append(f"• {fio} ({tbn}) — отмечен как уволенный")
 
-def validate_rows_before_save(
-    rows: Sequence[Mapping[str, Any]],
-    year: int,
-    month: int,
-) -> List[str]:
-    errors: List[str] = []
-    seen: set[tuple[str, str]] = set()
+        if len(fired) > 20:
+            lines.append(f"... и ещё {len(fired) - 20}")
 
-    for index, rec in enumerate(rows, start=1):
-        normalized = normalize_row_record(rec, year, month)
-        row_key = make_row_key(normalized["fio"], normalized["tbn"])
+        messagebox.showwarning("Проверка сотрудников", "\n".join(lines), parent=self)
 
-        if row_key in seen and (row_key[0] or row_key[1]):
-            errors.append(
-                f"Дублирующаяся строка в текущем табеле: "
-                f"{normalized['fio']} (таб.№ {normalized['tbn']})"
+    # =========================================================
+    # Дубли
+    # =========================================================
+    def _collect_employee_pairs(self) -> List[Tuple[str, str]]:
+        out: List[Tuple[str, str]] = []
+        for rec in self.rows:
+            fio = normalize_spaces(rec.get("fio") or "")
+            tbn = normalize_tbn(rec.get("tbn"))
+            if fio or tbn:
+                out.append((fio, tbn))
+        return out
+
+    def _check_duplicates(self, silent_if_empty: bool = False) -> None:
+        object_id, object_addr = self._parse_selected_object()
+        year, month = self._get_year_month()
+    
+        if not object_addr:
+            if not silent_if_empty:
+                messagebox.showwarning("Внимание", "Сначала выберите объект.", parent=self)
+            return
+    
+        employees = self._collect_employee_pairs()
+        if not employees:
+            if not silent_if_empty:
+                messagebox.showinfo("Проверка дублей", "В табеле нет сотрудников для проверки.", parent=self)
+            return
+    
+        try:
+            duplicates = find_duplicate_employees_for_trip_timesheet(
+                object_id=object_id or None,
+                object_addr=object_addr,
+                year=year,
+                month=month,
+                employees=employees,
             )
-        seen.add(row_key)
+        except Exception as exc:
+            if not silent_if_empty:
+                messagebox.showerror("Ошибка", f"Не удалось проверить дубли:\n{exc}", parent=self)
+            return
+    
+        if not duplicates:
+            if not silent_if_empty:
+                messagebox.showinfo("Проверка дублей", "Дубликаты не найдены.", parent=self)
+            return
+    
+        lines = ["В текущем табеле обнаружены дубли сотрудников:"]
+        for item in duplicates[:30]:
+            fio = item.get("fio") or ""
+            tbn = item.get("tbn") or ""
+            count = item.get("count")
+    
+            if count and count > 1:
+                lines.append(f"• {fio} ({tbn}) — повторений: {count}")
+            else:
+                lines.append(f"• {fio} ({tbn})")
+    
+        if len(duplicates) > 30:
+            lines.append(f"... и ещё {len(duplicates) - 30}")
+    
+        messagebox.showwarning("Найдены дубликаты", "\n".join(lines), parent=self)
 
-        row_errors = validate_row_record(normalized, year, month)
-        for msg in row_errors:
-            errors.append(f"Строка {index}: {msg}")
+    # =========================================================
+    # События грида
+    # =========================================================
+    def _get_visible_rows(self) -> List[Dict[str, Any]]:
+        return self._get_filtered_rows()
 
-    return errors
+    def _visible_to_real_index(self, visible_index: int) -> Optional[int]:
+        visible_rows = self._get_visible_rows()
+        if not (0 <= visible_index < len(visible_rows)):
+            return None
 
-
-def _norm_fio(value: str) -> str:
-    s = normalize_spaces(value).lower()
-    s = s.replace("ё", "е")
-    s = re.sub(r"[.\t\r\n]+", " ", s)
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
-
-
-def best_fio_match_with_score(skud_fio: str, candidates: Sequence[str]) -> Tuple[Optional[str], float]:
-    nf = _norm_fio(skud_fio)
-    if not nf:
-        return None, 0.0
-
-    best_name = None
-    best_score = 0.0
-    for candidate in candidates:
-        nc = _norm_fio(candidate)
-        if not nc:
-            continue
-        score = difflib.SequenceMatcher(None, nf, nc).ratio()
-        if score > best_score:
-            best_score = score
-            best_name = candidate
-
-    return best_name, float(best_score)
-
-
-def round_hours_nearest(duration_minutes: int) -> int:
-    if duration_minutes <= 0:
-        return 0
-    return int((duration_minutes + 30) // 60)
-
-
-def _parse_skud_datetime(value: Any) -> Optional[datetime]:
-    if isinstance(value, datetime):
-        return value
-
-    s = normalize_spaces(str(value or ""))
-    if not s:
+        rec = visible_rows[visible_index]
+        for i, row in enumerate(self.rows):
+            if row is rec:
+                return i
         return None
 
-    for fmt in ("%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M"):
+    def _on_grid_change(self, row_index: int, col_index: int) -> None:
+        real_index = self._visible_to_real_index(row_index)
+        if real_index is None:
+            return
+
+        year, month = self._get_year_month()
+        rec = self.rows[real_index]
+        rec["hours"] = normalize_hours_list(rec.get("hours"), year, month)
+        rec["_totals"] = calc_row_totals(rec["hours"], year, month)
+
+        self._refresh_grid()
+        self._update_trip_info_from_selection()
+        self._mark_dirty()
+        self._schedule_auto_save()
+
+    def _on_delete_row(self, row_index: int) -> None:
+        real_index = self._visible_to_real_index(row_index)
+        if real_index is None:
+            return
+
+        rec = self.rows[real_index]
+        fio = normalize_spaces(rec.get("fio") or "")
+        tbn = normalize_tbn(rec.get("tbn"))
+
+        if not messagebox.askyesno(
+            "Удаление строки",
+            f"Удалить строку сотрудника:\n{fio} ({tbn})?",
+            parent=self,
+        ):
+            return
+
+        del self.rows[real_index]
+        self._refresh_grid()
+        self._update_trip_info_from_selection()
+        self._mark_dirty()
+        self._schedule_auto_save()
+
+    def _on_selection_change(self, selected_rows) -> None:
+        self._update_trip_info_from_selection()
+
+    def _on_trip_period_click(self, row_index: int) -> None:
+        real_index = self._visible_to_real_index(row_index)
+        if real_index is None:
+            return
+
+        rec = self.rows[real_index]
+        year, month = self._get_year_month()
+
+        # НОВОЕ: Вызываем новый менеджер периодов
+        result = EmployeeTripsDialog.show(
+            self,
+            periods=rec.get("trip_periods", []),
+            year=year,
+            month=month,
+        )
+        if result is None:
+            return
+
+        rec["trip_periods"] = result
+
+        self._refresh_grid()
+        self._update_trip_info_from_selection()
+        self._mark_dirty()
+        self._schedule_auto_save()
+
+    # =========================================================
+    # Действия над выбранными строками
+    # =========================================================
+    def _get_selected_row_indexes(self) -> List[int]:
         try:
-            return datetime.strptime(s, fmt)
+            selected = list(self.grid_widget.get_selected_indices())
         except Exception:
-            continue
+            selected = []
+        return sorted(i for i in selected if 0 <= i < len(self._get_visible_rows()))
 
-    return None
+    def _ask_fill_hours_params(self) -> Optional[Dict[str, Any]]:
+        year, month = self._get_year_month()
+        max_day = month_days(year, month)
+    
+        dlg = TripTimeFillDialog(self, max_day=max_day, title="Проставить время")
+        return dlg.result
 
-
-def read_skud_events_from_xlsx(path: str) -> List[Dict[str, Any]]:
-    wb = load_workbook(path, data_only=True)
-    ws = wb.active
-
-    header_row: Optional[int] = None
-    header_map: Dict[str, int] = {}
-    max_scan = min(ws.max_row or 0, 60)
-    max_cols = ws.max_column or 0
-
-    for r in range(1, max_scan + 1):
-        row_vals = [normalize_spaces(str(ws.cell(r, c).value or "")) for c in range(1, max_cols + 1)]
-        if "Время" in row_vals and "Событие" in row_vals and "ФИО сотрудника" in row_vals:
-            header_row = r
-            for c, name in enumerate(row_vals, start=1):
-                if name:
-                    header_map[name] = c
-            break
-
-    if not header_row:
-        raise RuntimeError("Не найден заголовок отчёта СКУД (колонки 'Время', 'Событие', 'ФИО сотрудника').")
-
-    c_time = header_map.get("Время")
-    c_fio = header_map.get("ФИО сотрудника")
-    c_event = header_map.get("Событие")
-
-    if not (c_time and c_fio and c_event):
-        raise RuntimeError("В отчёте СКУД не найдены обязательные колонки.")
-
-    events: List[Dict[str, Any]] = []
-    for r in range(header_row + 1, (ws.max_row or header_row) + 1):
-        fio = normalize_spaces(str(ws.cell(r, c_fio).value or ""))
-        event_raw = normalize_spaces(str(ws.cell(r, c_event).value or ""))
-        dt = _parse_skud_datetime(ws.cell(r, c_time).value)
-
-        if not fio or not dt:
-            continue
-
-        if event_raw == "Вход":
-            event_type = "in"
-        elif event_raw == "Выход":
-            event_type = "out"
-        else:
-            continue
-
-        events.append({"dt": dt, "fio": fio, "event": event_type})
-
-    return events
-
-
-def _apply_default_skud_break(duration_minutes: int) -> int:
-    """
-    Сохраняем старую бизнес-логику:
-    если суммарное присутствие > 4 часов, вычитаем 1 час на обед.
-    """
-    if duration_minutes > 4 * 60:
-        return max(0, duration_minutes - 60)
-    return max(0, duration_minutes)
-
-
-def compute_day_summary_from_events(
-    events: Sequence[Mapping[str, Any]],
-    target_date: date,
-) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Более корректный расчёт по СКУД:
-    - суммируем пары Вход -> Выход,
-    - фиксируем проблемы, если есть висячие входы/выходы.
-
-    Возвращает:
-      summary_by_fio, problems
-    где problems совместимы с текущим UI.
-    """
-    by_fio: Dict[str, List[Dict[str, Any]]] = {}
-    for e in events:
-        dt = e.get("dt")
-        if not isinstance(dt, datetime):
-            continue
-        if dt.date() != target_date:
-            continue
-
-        fio = normalize_spaces(str(e.get("fio") or ""))
-        ev = str(e.get("event") or "").strip()
-        if not fio or ev not in ("in", "out"):
-            continue
-
-        by_fio.setdefault(fio, []).append({"dt": dt, "fio": fio, "event": ev})
-
-    summary: Dict[str, Dict[str, Any]] = {}
-    problems: List[Dict[str, Any]] = []
-
-    for fio, items in by_fio.items():
-        items.sort(key=lambda x: x["dt"])
-
-        count_in = sum(1 for x in items if x["event"] == "in")
-        count_out = sum(1 for x in items if x["event"] == "out")
-        first_in = next((x["dt"] for x in items if x["event"] == "in"), None)
-        last_out = next((x["dt"] for x in reversed(items) if x["event"] == "out"), None)
-
-        total_minutes = 0
-        open_in: Optional[datetime] = None
-        anomaly = False
-
-        for item in items:
-            dt = item["dt"]
-            ev = item["event"]
-
-            if ev == "in":
-                if open_in is None:
-                    open_in = dt
+    def _row_has_trip_period(self, rec: Dict[str, Any]) -> bool:
+        return bool(rec.get("trip_periods"))
+    
+    def _fill_hours_for_row(
+        self,
+        rec: Dict[str, Any],
+        value: Optional[float],
+        day_from: int,
+        day_to: int,
+        year: int,
+        month: int,
+    ) -> None:
+        days_in_month = month_days(year, month)
+        periods = rec.get("trip_periods", [])
+    
+        if not periods:
+            return
+    
+        hours = normalize_hours_list(rec.get("hours"), year, month)
+        day_from = max(1, min(day_from, days_in_month))
+        day_to = max(1, min(day_to, days_in_month))
+    
+        for day in range(day_from, day_to + 1):
+            current_day = date(year, month, day)
+            # НОВОЕ: Проверяем, попадает ли день хотя бы в один период из списка
+            if any(p["from"] <= current_day <= p["to"] for p in periods):
+                hours[day - 1] = value
+    
+        rec["hours"] = hours
+        rec["_totals"] = calc_row_totals(hours, year, month)
+    
+    def _apply_hour_value_to_indexes(
+        self,
+        real_indexes: List[int],
+        value: Optional[float],
+        day_from: int,
+        day_to: int,
+    ) -> int:
+        if not real_indexes:
+            return 0
+    
+        year, month = self._get_year_month()
+        skipped_without_period = []
+    
+        applied = 0
+        for idx in real_indexes:
+            if not (0 <= idx < len(self.rows)):
+                continue
+    
+            rec = self.rows[idx]
+            if not self._row_has_trip_period(rec):
+                fio = normalize_spaces(rec.get("fio") or "")
+                tbn = normalize_tbn(rec.get("tbn"))
+                skipped_without_period.append(f"{fio} ({tbn})".strip())
+                continue
+    
+            self._fill_hours_for_row(rec, value, day_from, day_to, year, month)
+            applied += 1
+    
+        self._refresh_grid()
+        self._update_trip_info_from_selection()
+    
+        if applied:
+            self._mark_dirty()
+            self._schedule_auto_save()
+    
+        if skipped_without_period:
+            messagebox.showwarning(
+                "Проставить время",
+                "Часть строк пропущена, потому что у них не задан период командировки.\n\n"
+                f"Пропущено строк: {len(skipped_without_period)}",
+                parent=self,
+            )
+    
+        return applied
+    
+    def _fill_hours_for_selected(self) -> None:
+        indexes = self._get_selected_row_indexes()
+        if not indexes:
+            messagebox.showinfo("Проставить время", "Не выбраны строки.", parent=self)
+            return
+    
+        params = self._ask_fill_hours_params()
+        if not params:
+            return
+    
+        day_from = int(params["from"])
+        day_to = int(params["to"])
+        value = params["value"]
+    
+        real_indexes = [self._visible_to_real_index(i) for i in indexes]
+        real_indexes = [i for i in real_indexes if i is not None]
+    
+        applied = self._apply_hour_value_to_indexes(real_indexes, value, day_from, day_to)
+        if applied:
+            if value is None:
+                if day_from == day_to:
+                    self.var_status.set(f"Очищен день {day_from} у выбранных строк: {applied}")
                 else:
-                    # Повторный вход без выхода.
-                    anomaly = True
-                    # Сохраняем самый ранний открытый вход, новый игнорируем.
-            else:  # out
-                if open_in is None:
-                    # Выход без входа.
-                    anomaly = True
-                    continue
+                    self.var_status.set(f"Очищены дни {day_from}-{day_to} у выбранных строк: {applied}")
+            else:
+                if day_from == day_to:
+                    self.var_status.set(f"Проставлено {value} ч. в день {day_from} у выбранных строк: {applied}")
+                else:
+                    self.var_status.set(f"Проставлено {value} ч. за дни {day_from}-{day_to} у выбранных строк: {applied}")
+    
+    def _fill_hours_for_all(self) -> None:
+        if not self.rows:
+            messagebox.showinfo("Проставить время", "В табеле нет строк.", parent=self)
+            return
+    
+        params = self._ask_fill_hours_params()
+        if not params:
+            return
+    
+        day_from = int(params["from"])
+        day_to = int(params["to"])
+        value = params["value"]
+    
+        real_indexes = list(range(len(self.rows)))
+        applied = self._apply_hour_value_to_indexes(real_indexes, value, day_from, day_to)
+        if applied:
+            if value is None:
+                if day_from == day_to:
+                    self.var_status.set(f"Очищен день {day_from} у всех строк: {applied}")
+                else:
+                    self.var_status.set(f"Очищены дни {day_from}-{day_to} у всех строк: {applied}")
+            else:
+                if day_from == day_to:
+                    self.var_status.set(f"Проставлено {value} ч. в день {day_from} у всех строк: {applied}")
+                else:
+                    self.var_status.set(f"Проставлено {value} ч. за дни {day_from}-{day_to} у всех строк: {applied}")
 
-                delta_minutes = int((dt - open_in).total_seconds() // 60)
-                if delta_minutes < 0:
-                    anomaly = True
-                    open_in = None
-                    continue
+    def _delete_selected_rows(self) -> None:
+        indexes = self._get_selected_row_indexes()
+        if not indexes:
+            messagebox.showinfo("Удаление", "Не выбраны строки.", parent=self)
+            return
 
-                total_minutes += delta_minutes
-                open_in = None
+        if not messagebox.askyesno(
+            "Удаление",
+            f"Удалить выбранные строки: {len(indexes)} шт.?",
+            parent=self,
+        ):
+            return
 
-        if open_in is not None:
-            anomaly = True
+        real_indexes = [self._visible_to_real_index(i) for i in indexes]
+        real_indexes = sorted([i for i in real_indexes if i is not None], reverse=True)
 
-        total_minutes = _apply_default_skud_break(total_minutes)
-        hours_rounded = round_hours_nearest(total_minutes)
+        for idx in real_indexes:
+            del self.rows[idx]
 
-        if total_minutes > 0:
-            summary[fio] = {
-                "first_in": first_in,
-                "last_out": last_out,
-                "minutes": total_minutes,
-                "hours_rounded": hours_rounded,
-                "count_in": count_in,
-                "count_out": count_out,
-            }
+        self._refresh_grid()
+        self._update_trip_info_from_selection()
+        self.var_status.set(f"Удалено строк: {len(real_indexes)}")
 
-        if anomaly or count_in == 0 or count_out == 0:
-            problems.append(
-                {
-                    "skud_fio": fio,
-                    "has_in": bool(count_in),
-                    "has_out": bool(count_out),
-                    "first_in": first_in,
-                    "last_out": last_out,
-                    "count_in": count_in,
-                    "count_out": count_out,
-                }
+        if real_indexes:
+            self._mark_dirty()
+            self._schedule_auto_save()
+
+    def _clear_hours_for_selected(self) -> None:
+        indexes = self._get_selected_row_indexes()
+        if not indexes:
+            messagebox.showinfo("Очистка часов", "Не выбраны строки.", parent=self)
+            return
+
+        year, month = self._get_year_month()
+        real_indexes = [self._visible_to_real_index(i) for i in indexes]
+        real_indexes = [i for i in real_indexes if i is not None]
+
+        for idx in real_indexes:
+            self.rows[idx]["hours"] = [None] * 31
+            self.rows[idx]["_totals"] = calc_row_totals(self.rows[idx]["hours"], year, month)
+
+        self._refresh_grid()
+        self.var_status.set(f"Очищены часы у строк: {len(real_indexes)}")
+
+        if real_indexes:
+            self._mark_dirty()
+            self._schedule_auto_save()
+
+    def _set_trip_period_for_selected(self) -> None:
+        # Для массовой установки логично просто добавлять период к существующим
+        # или переопределять? Сделаем вызов стандартного диалога для добавления ОДНОГО общего периода всем выделенным
+        indexes = self._get_selected_row_indexes()
+        if not indexes:
+            messagebox.showinfo("Период выбранным", "Не выбраны строки.", parent=self)
+            return
+
+        year, month = self._get_year_month()
+
+        result = TripPeriodDialog.show(
+            self,
+            initial_date_from=None,
+            initial_date_to=None,
+            year=year,
+            month=month,
+        )
+        if result is None or result[0] is None:
+            return
+
+        trip_date_from, trip_date_to = result
+        new_period = {"from": trip_date_from, "to": trip_date_to}
+
+        real_indexes = [self._visible_to_real_index(i) for i in indexes]
+        real_indexes = [i for i in real_indexes if i is not None]
+
+        for idx in real_indexes:
+            # Если нужно заменять все периоды: self.rows[idx]["trip_periods"] = [new_period]
+            # Если нужно добавлять (логичнее):
+            if "trip_periods" not in self.rows[idx] or not self.rows[idx]["trip_periods"]:
+                self.rows[idx]["trip_periods"] = []
+            self.rows[idx]["trip_periods"].append(new_period)
+
+        self._refresh_grid()
+        self._update_trip_info_from_selection()
+        self.var_status.set(f"Период добавлен строкам: {len(real_indexes)}")
+
+        if real_indexes:
+            self._mark_dirty()
+            self._schedule_auto_save()
+
+    # =========================================================
+    # Экспорт
+    # =========================================================
+    def _export_to_excel(self) -> None:
+        try:
+            year, month = self._get_year_month()
+            object_id, object_addr = self._parse_selected_object()
+
+            if not self.rows:
+                messagebox.showinfo("Выгрузка", "В табеле нет строк для выгрузки.", parent=self)
+                return
+
+            obj_part = object_id or object_addr or "без_объекта"
+
+            try:
+                prepared_by = normalize_spaces(
+                    (getattr(self.app, "current_user", {}) or {}).get("full_name")
+                    or (getattr(self.app, "current_user", {}) or {}).get("username")
+                    or ""
+                )
+            except Exception:
+                prepared_by = ""
+
+            path = filedialog.asksaveasfilename(
+                parent=self,
+                title="Сохранить командировочный табель в Excel",
+                defaultextension=".xlsx",
+                initialfile=f"Командировочный_табель_{safe_filename(obj_part)}_{year}_{month:02d}.xlsx",
+                filetypes=[("Excel", "*.xlsx"), ("Все", "*.*")],
+            )
+            if not path:
+                return
+
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Командировочный табель"
+
+            build_printable_trip_timesheet_sheet(
+                ws,
+                year=year,
+                month=month,
+                object_addr=object_addr,
+                object_id=object_id,
+                rows=self.rows,
+                prepared_by=prepared_by,
             )
 
-    return summary, problems
+            wb.save(path)
 
+            messagebox.showinfo(
+                "Выгрузка",
+                f"Готово.\nСтрок: {len(self.rows)}\nФайл: {path}",
+                parent=self,
+            )
+        except Exception as exc:
+            messagebox.showerror("Выгрузка", f"Ошибка выгрузки:\n{exc}", parent=self)
 
-def ensure_current_month_date(selected_date: date, year: int, month: int) -> bool:
-    return selected_date.year == year and selected_date.month == month
+    # =========================================================
+    # Нижняя инфо-строка
+    # =========================================================
+    def _update_trip_info_from_selection(self) -> None:
+        indexes = self._get_selected_row_indexes()
+        visible_rows = self._get_visible_rows()
 
+        if len(indexes) != 1:
+            self.var_trip_info.set("")
+            return
 
-def rows_have_unsaved_content(rows: Sequence[Mapping[str, Any]]) -> bool:
-    for rec in rows:
-        if normalize_spaces(str(rec.get("fio") or "")):
-            return True
-        if normalize_tbn(rec.get("tbn")):
-            return True
-        for item in rec.get("hours") or []:
-            if normalize_spaces(str(item or "")):
-                return True
-    return False
+        idx = indexes[0]
+        if not (0 <= idx < len(visible_rows)):
+            self.var_trip_info.set("")
+            return
 
+        rec = visible_rows[idx]
+        fio = normalize_spaces(rec.get("fio") or "")
+        tbn = normalize_tbn(rec.get("tbn"))
+        periods = rec.get("trip_periods", [])
 
-__all__ = [
-    "MAX_HOURS_PER_DAY",
-    "TS_COLORS",
-    "SPECIAL_CODES",
-    "ParsedTimesheetCell",
-    "exe_dir",
-    "month_days",
-    "month_name_ru",
-    "safe_filename",
-    "normalize_spaces",
-    "normalize_tbn",
-    "normalize_code",
-    "is_allowed_timesheet_code",
-    "format_hours_for_cell",
-    "parse_hours_value",
-    "parse_overtime",
-    "parse_hours_and_night",
-    "parse_timesheet_cell",
-    "normalize_hours_list",
-    "calc_row_totals",
-    "calc_rows_summary",
-    "format_summary_value",
-    "make_row_key",
-    "normalize_row_record",
-    "deduplicate_timesheet_rows",
-    "find_suspicious_cells",
-    "is_suspicious_hours",
-    "validate_row_record",
-    "validate_rows_before_save",
-    "best_fio_match_with_score",
-    "round_hours_nearest",
-    "read_skud_events_from_xlsx",
-    "compute_day_summary_from_events",
-    "ensure_current_month_date",
-    "rows_have_unsaved_content",
-]
+        # НОВОЕ: Форматируем строку со списком периодов
+        if periods:
+            p_strs = [f"{p['from'].strftime('%d.%m')} - {p['to'].strftime('%d.%m')}" for p in periods]
+            period_str = "Командировки: " + ", ".join(p_strs)
+        else:
+            period_str = "Период командировки не задан"
+
+        suffix = fio
+        if tbn:
+            suffix = f"{fio} ({tbn})"
+
+        self.var_trip_info.set(f"{suffix}: {period_str}")
+
+    # =========================================================
+    # Внешние helpers
+    # =========================================================
+    def open_by_context(
+        self,
+        *,
+        object_id: Optional[str],
+        object_addr: str,
+        year: int,
+        month: int,
+    ) -> None:
+        self.var_year.set(int(year))
+        self.var_month.set(int(month))
+        self.cmb_month.current(max(0, int(month) - 1))
+
+        object_id_norm = normalize_spaces(object_id or "")
+        object_addr_norm = normalize_spaces(object_addr or "")
+
+        self.cmb_address.set(object_addr_norm)
+        self._sync_object_id_values_silent()
+
+        if object_id_norm:
+            values = list(self.cmb_object_id.cget("values") or [])
+            if object_id_norm not in values:
+                values.append(object_id_norm)
+                self.cmb_object_id.config(values=values)
+            self.cmb_object_id.set(object_id_norm)
+        else:
+            self.cmb_object_id.set("")
+
+        self._open_timesheet()
+
+    def add_empty_row(self) -> None:
+        self.rows.append(self._empty_row())
+        self._refresh_grid()
+        self.var_status.set("Добавлена пустая строка.")
+        self._mark_dirty()
+        self._schedule_auto_save()
