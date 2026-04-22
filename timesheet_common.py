@@ -94,8 +94,7 @@ SPECIAL_CODES = {
     "КВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Командировка выходного дня"},
     "СНЕГ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Снег"},
     
-    # Для РВ логичнее учитывать часы как фактические часы работы.
-    # При необходимости можно перенастроить.
+    # Оставили эти ключи для совместимости (хотя универсальная логика ниже перехватит их)
     "РВ 8": {"hours": 8.0, "night_hours": 0.0, "counts_day": True, "description": "Работа в выходной 8 ч"},
     "РВ 11": {"hours": 11.0, "night_hours": 0.0, "counts_day": True, "description": "Работа в выходной 11 ч"},
 }
@@ -162,9 +161,11 @@ def normalize_tbn(value: Any) -> str:
 
 def normalize_code(value: str) -> str:
     s = normalize_spaces(str(value or "").upper())
-    s = s.replace("РВ8", "РВ 8").replace("РВ11", "РВ 11")
-    s = re.sub(r"^РВ\s+0*8$", "РВ 8", s)
-    s = re.sub(r"^РВ\s+0*11$", "РВ 11", s)
+    # УНИВЕРСАЛЬНАЯ ОБРАБОТКА РВ: 
+    # Превращаем любые "РВ14", "РВ 10.5", "РВ08" в стандартный вид "РВ <число>"
+    match = re.match(r"^РВ\s*0*(\d+(?:[.,]\d+)?)$", s)
+    if match:
+        return f"РВ {match.group(1)}"
     return s
 
 
@@ -173,8 +174,7 @@ def is_allowed_timesheet_code(value: str) -> bool:
     if s in SPECIAL_CODES:
         return True
 
-    # Разрешаем общий формат "РВ <число>", если потребуется в будущем.
-    # Если хочешь оставить строго только РВ 8 / РВ 11, этот блок можно удалить.
+    # Универсальная поддержка формата "РВ <число>"
     if s.startswith("РВ "):
         tail = s[3:].strip()
         try:
@@ -350,7 +350,7 @@ def parse_timesheet_cell(value: Any) -> ParsedTimesheetCell:
             suspicious=False,
         )
 
-    # Поддержка общего формата "РВ <число>"
+    # Поддержка универсального формата "РВ <число>"
     if code.startswith("РВ "):
         tail = code[3:].strip()
         generic_rv = _to_float_number(tail)
@@ -366,7 +366,7 @@ def parse_timesheet_cell(value: Any) -> ParsedTimesheetCell:
                 overtime_day=0.0,
                 overtime_night=0.0,
                 counts_day=True,
-                suspicious=False,
+                suspicious=float(generic_rv) > MAX_HOURS_PER_DAY,
             )
 
     base_part = normalized
