@@ -61,6 +61,7 @@ from timesheet_db import (
     replace_timesheet_rows,
     set_db_pool,
     upsert_timesheet_header,
+    update_timesheet_header_by_id,
 )
 from timesheet_dialogs import (
     AutoCompleteCombobox,
@@ -3077,14 +3078,26 @@ class TimesheetPage(tk.Frame):
             return fail(msg)
 
         try:
-            header_id = upsert_timesheet_header(
-                object_id=object_id or None,
-                object_addr=object_addr,
-                department=department,
-                year=year,
-                month=month,
-                user_id=user_id,
-            )
+            if self._active_header_id:
+                header_id = update_timesheet_header_by_id(
+                    header_id=int(self._active_header_id),
+                    object_id=object_id or None,
+                    object_addr=object_addr,
+                    department=department,
+                    year=year,
+                    month=month,
+                    user_id=user_id,
+                )
+            else:
+                header_id = upsert_timesheet_header(
+                    object_id=object_id or None,
+                    object_addr=object_addr,
+                    department=department,
+                    year=year,
+                    month=month,
+                    user_id=user_id,
+                )
+            
             replace_timesheet_rows(header_id, self.model_rows_all, year, month)
             self._active_header_id = header_id
         except Exception as e:
