@@ -150,6 +150,25 @@ def safe_filename(value: str, maxlen: int = 60) -> str:
     s = re.sub(r"_+", "_", s)
     return s[:maxlen] if maxlen > 0 else s
 
+def normalize_object_addr(value: Any) -> str:
+    s = normalize_spaces(str(value or ""))
+
+    # Нормализуем разные типы дефисов в обычный дефис.
+    s = s.replace("–", "-").replace("—", "-").replace("−", "-")
+
+    # Убираем пробелы вокруг дефиса:
+    # M3SM- 0269 / M3SM - 0269 / M3SM -0269 -> M3SM-0269
+    s = re.sub(r"\s*-\s*", "-", s)
+
+    # Нормализуем слэш:
+    # a/b, a /b, a/ b -> a / b
+    s = re.sub(r"\s*/\s*", " / ", s)
+
+    # Нормализуем запятые:
+    # Москва,Удалцова, 85 -> Москва, Удалцова, 85
+    s = re.sub(r"\s*,\s*", ", ", s)
+
+    return normalize_spaces(s)
 
 def normalize_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip())
@@ -897,6 +916,7 @@ __all__ = [
     "month_days",
     "month_name_ru",
     "safe_filename",
+    "normalize_object_addr",
     "normalize_spaces",
     "normalize_tbn",
     "normalize_code",
