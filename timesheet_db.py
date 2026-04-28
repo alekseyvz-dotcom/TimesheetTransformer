@@ -12,6 +12,7 @@ from timesheet_common import (
     calc_row_totals,
     make_row_key,
     normalize_hours_list,
+    normalize_object_addr,
     normalize_spaces,
     normalize_tbn,
 )
@@ -107,7 +108,7 @@ def _norm_header_department(value: Optional[str]) -> str:
 
 
 def _norm_header_address(value: str) -> str:
-    return normalize_spaces(value or "")
+    return normalize_object_addr(value or "")
 
 
 def _header_where_sql() -> str:
@@ -145,22 +146,58 @@ def _find_header_id_by_key(
     month: int,
     user_id: int,
 ) -> Optional[int]:
-    cur.execute(
-        f"""
-        SELECT h.id
-        FROM timesheet_headers h
-        WHERE {_header_where_sql()}
-          AND h.user_id = %s
-        ORDER BY h.updated_at DESC NULLS LAST, h.id DESC
-        LIMIT 1
-        """,
-        _header_params(object_id, object_addr, department, year, month) + [int(user_id)],
-    )
+    object_id_norm = _norm_header_object_id(object_id)
+    object_addr_norm = _norm_header_address(object_addr)
+    department_norm = _norm_header_department(department)
+
+    if object_id_norm:
+        cur.execute(
+            """
+            SELECT h.id
+            FROM timesheet_headers h
+            WHERE COALESCE(h.object_id, '') = %s
+              AND COALESCE(h.department, '') = %s
+              AND h.year = %s
+              AND h.month = %s
+              AND h.user_id = %s
+            ORDER BY h.updated_at DESC NULLS LAST, h.id DESC
+            LIMIT 1
+            """,
+            (
+                object_id_norm,
+                department_norm,
+                int(year),
+                int(month),
+                int(user_id),
+            ),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT h.id
+            FROM timesheet_headers h
+            WHERE h.object_addr = %s
+              AND COALESCE(h.department, '') = %s
+              AND h.year = %s
+              AND h.month = %s
+              AND h.user_id = %s
+            ORDER BY h.updated_at DESC NULLS LAST, h.id DESC
+            LIMIT 1
+            """,
+            (
+                object_addr_norm,
+                department_norm,
+                int(year),
+                int(month),
+                int(user_id),
+            ),
+        )
+
     row = cur.fetchone()
     if not row:
         return None
-    return int(row[0])
 
+    return int(row[0])
 
 def _load_header_meta_by_id(cur, header_id: int) -> Optional[Dict[str, Any]]:
     cur.execute(
@@ -208,7 +245,7 @@ def _load_header_meta_by_id(cur, header_id: int) -> Optional[Dict[str, Any]]:
 
 def find_object_db_id_by_excel_or_address(cur, excel_id: Optional[str], address: str) -> Optional[int]:
     excel_id_norm = normalize_spaces(excel_id or "")
-    addr_norm = normalize_spaces(address or "")
+    addr_norm = normalize_object_addr(address or "")
 
     if excel_id_norm:
         cur.execute(
@@ -1230,6 +1267,68 @@ def find_fired_employees_in_timesheet(
 
         return result
 
+def update_timesheet_header_by_id(
+    header_id: int,
+    object_id: Optional[str],
+    object_addr: str,
+    department: str,
+    year: int,
+    month: int,
+    user_id: int,
+) -> int:
+    object_id_norm = _norm_header_object_id(object_id)
+    object_addr_norm = _norm_header_address(object_addr)
+    department_norm = _norm_header_department(department)
+
+    if not object_addr_norm:
+        raise RuntimeError("Не задан адрес объекта для сохранения табеля.")
+
+    with db_cursor() as (_conn, cur):
+        object_db_id = find_object_db_id_by_excel_or_address(
+            cur,
+            object_id_norm or None,
+            object_addr_norm,
+        )
+
+        if object_db_id is None:
+            raise RuntimeError(
+                f"В БД не найден объект (excel_id={object_id_norm!r}, address={object_addr_norm!r}).\n"
+                f"Сначала создайте объект в разделе «Объекты»."
+            )
+
+        cur.execute(
+            """
+            UPDATE timesheet_headers
+            SET
+                object_id = %s,
+                object_addr = %s,
+                department = %s,
+                year = %s,
+                month = %s,
+                user_id = %s,
+                object_db_id = %s,
+                updated_at = now()
+            WHERE id = %s
+            RETURNING id
+            """,
+            (
+                object_id_norm,
+                object_addr_norm,
+                department_norm,
+                int(year),
+                int(month),
+                int(user_id),
+                int(object_db_id),
+                int(header_id),
+            ),
+        )
+
+        row = cur.fetchone()
+        if not row:
+            raise RuntimeError(f"Табель с id={header_id} не найден.")
+
+        return int(row[0])
+
 # ============================================================
 # Экспортируемые имена
 # ============================================================
@@ -1261,4 +1360,5 @@ __all__ = [
     "find_timesheet_header_id",
     "find_fired_employees_in_timesheet",
     "find_employee_day_conflicts",
+    "update_timesheet_header_by_id",
 ]
