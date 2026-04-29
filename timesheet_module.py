@@ -3605,7 +3605,7 @@ class TimesheetRegistryPage(tk.Frame):
         cmb_month.bind("<<ComboboxSelected>>", lambda _e: self._load_data())
 
         tk.Label(row0, text="Подразделение:", font=("Segoe UI", 9), bg=TS_COLORS["panel"]).pack(side="left", padx=(16, 4))
-        self._cmb_dep = ttk.Combobox(row0, state="readonly", width=28, textvariable=self.var_dep, values=["Все"])
+        self._cmb_dep = ttk.Combobox(row0, state="readonly", width=60, textvariable=self.var_dep, values=["Все"])
         self._cmb_dep.pack(side="left")
         self._cmb_dep.bind("<<ComboboxSelected>>", lambda _e: self._load_data())
 
