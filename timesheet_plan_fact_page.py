@@ -12,7 +12,9 @@ import pandas as pd
 
 from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
-
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
 
 db_connection_pool: Optional[pool.SimpleConnectionPool] = None
 
@@ -723,17 +725,48 @@ class TimesheetPlanFactPage(ttk.Frame):
         self._show_loading_placeholder("Не удалось загрузить данные.")
         messagebox.showerror("План / факт", f"Не удалось загрузить данные:\n{error}")
 
-    def _create_card(self, parent, title: str, value: str, unit: str, color: str):
-        card = tk.Frame(parent, bg="white", highlightbackground="#E0E0E0", highlightthickness=1)
+    def _create_card(self, parent, title: str, value: str, unit: str, color: str, note: str = ""):
+        card = tk.Frame(
+            parent,
+            bg="white",
+            highlightbackground="#DDE3EA",
+            highlightthickness=1,
+        )
+    
         tk.Frame(card, bg=color, height=4).pack(fill="x", side="top")
-
-        inner = tk.Frame(card, bg="white", padx=10, pady=10)
+    
+        inner = tk.Frame(card, bg="white", padx=12, pady=10)
         inner.pack(fill="both", expand=True)
-
-        tk.Label(inner, text=title, font=("Segoe UI", 9), fg=PALETTE["text_muted"], bg="white").pack()
-        tk.Label(inner, text=value, font=("Segoe UI", 20, "bold"), fg=color, bg="white").pack(pady=(4, 0))
-        tk.Label(inner, text=unit, font=("Segoe UI", 8), fg=PALETTE["text_muted"], bg="white").pack()
-
+    
+        tk.Label(
+            inner,
+            text=title,
+            font=("Segoe UI", 9, "bold"),
+            fg="#455A64",
+            bg="white",
+            anchor="w",
+        ).pack(fill="x")
+    
+        tk.Label(
+            inner,
+            text=value,
+            font=("Segoe UI", 22, "bold"),
+            fg=color,
+            bg="white",
+            anchor="w",
+        ).pack(fill="x", pady=(5, 0))
+    
+        bottom_text = unit if not note else f"{unit} · {note}"
+    
+        tk.Label(
+            inner,
+            text=bottom_text,
+            font=("Segoe UI", 8),
+            fg=PALETTE["text_muted"],
+            bg="white",
+            anchor="w",
+        ).pack(fill="x", pady=(2, 0))
+    
         return card
 
     def _create_treeview(self, parent, columns: List[Tuple[str, str]], height: int = 10) -> ttk.Treeview:
@@ -763,160 +796,238 @@ class TimesheetPlanFactPage(ttk.Frame):
 
     def _render(self):
         self._clear_inner()
+    
         dp = self.data_provider
         if not dp:
             return
-
+    
         kpi = dp.get_kpi()
-
-        kpi_frame = tk.Frame(self.inner, bg="#F0F2F5")
-        kpi_frame.pack(fill="x", padx=10, pady=10)
-
+    
+        selected_date_text = dp.selected_date.strftime("%d.%m.%Y")
+        object_filter_text = dp.object_type_filter if dp.object_type_filter else "Все типы объектов"
+    
+        # Верхний информационный блок
+        hero = tk.Frame(
+            self.inner,
+            bg="white",
+            highlightbackground="#DDE3EA",
+            highlightthickness=1,
+        )
+        hero.pack(fill="x", padx=10, pady=10)
+    
+        hero_inner = tk.Frame(hero, bg="white", padx=14, pady=12)
+        hero_inner.pack(fill="x")
+    
+        tk.Label(
+            hero_inner,
+            text="Аналитика выходов сотрудников",
+            font=("Segoe UI", 15, "bold"),
+            fg="#263238",
+            bg="white",
+            anchor="w",
+        ).pack(fill="x")
+    
+        tk.Label(
+            hero_inner,
+            text=(
+                f"Дата: {selected_date_text}  ·  "
+                f"Фильтр: {object_filter_text}  ·  "
+                f"Сотрудников в выборке: {kpi.get('employees_count', 0)}  ·  "
+                f"Объектов: {kpi.get('objects_count', 0)}"
+            ),
+            font=("Segoe UI", 9),
+            fg=PALETTE["text_muted"],
+            bg="white",
+            anchor="w",
+        ).pack(fill="x", pady=(4, 0))
+    
+        # KPI без "Не вышли" и без процента
+        kpi_frame = tk.Frame(self.inner, bg="#F5F7FA")
+        kpi_frame.pack(fill="x", padx=10, pady=(0, 10))
+    
         cards = [
-            ("План", str(kpi.get("plan_total", 0)), "чел.", PALETTE["primary"]),
-            ("Выходной", str(kpi.get("off_total", 0)), "чел.", PALETTE["offday"]),
-            ("Факт", str(kpi.get("fact_total", 0)), "чел.", PALETTE["success"]),
-            ("Не вышли", str(kpi.get("absent_total", 0)), "чел.", PALETTE["negative"]),
-            ("Вышли в выходной", str(kpi.get("worked_on_off_total", 0)), "чел.", PALETTE["warning"]),
-            ("Без графика", str(kpi.get("no_schedule_total", 0)), "чел.", PALETTE["noschedule"]),
-            ("Явка", f"{kpi.get('attendance_pct', 0):.1f}", "%", PALETTE["accent"]),
+            (
+                "План",
+                str(kpi.get("plan_total", 0)),
+                "чел.",
+                PALETTE["primary"],
+                "по графику",
+            ),
+            (
+                "Факт",
+                str(kpi.get("fact_total", 0)),
+                "чел.",
+                PALETTE["success"],
+                "есть часы в табеле",
+            ),
+            (
+                "Выходной",
+                str(kpi.get("off_total", 0)),
+                "чел.",
+                PALETTE["offday"],
+                "по графику",
+            ),
+            (
+                "Вышли в выходной",
+                str(kpi.get("worked_on_off_total", 0)),
+                "чел.",
+                PALETTE["warning"],
+                "есть часы",
+            ),
+            (
+                "Без графика",
+                str(kpi.get("no_schedule_total", 0)),
+                "чел.",
+                PALETTE["noschedule"],
+                "не найден график",
+            ),
         ]
-
-        for i, (title, value, unit, color) in enumerate(cards):
-            c = self._create_card(kpi_frame, title, value, unit, color)
+    
+        for i, (title, value, unit, color, note) in enumerate(cards):
+            c = self._create_card(kpi_frame, title, value, unit, color, note)
             c.grid(row=0, column=i, padx=5, pady=4, sticky="nsew")
             kpi_frame.grid_columnconfigure(i, weight=1)
-
-        top = ttk.Frame(self.inner)
-        top.pack(fill="both", expand=True, padx=10, pady=(0, 8))
-
-        left = ttk.LabelFrame(top, text="По объектам на выбранную дату")
-        left.pack(side="left", fill="both", expand=True, padx=(0, 5))
-
-        right = ttk.LabelFrame(top, text="По подразделениям / должностям на выбранную дату")
-        right.pack(side="left", fill="both", expand=True, padx=(5, 0))
-
+    
+        # По объектам
         df_obj = dp.get_by_object()
-        obj_wrap = ttk.Frame(left)
-        obj_wrap.pack(fill="both", expand=True, padx=4, pady=4)
-
+    
+        obj_wrap = self._create_section(
+            self.inner,
+            "Сводка по объектам",
+            "План, факт и отклонения по каждому объекту на выбранную дату.",
+        )
+    
         tree_obj = self._create_treeview(
             obj_wrap,
             [
                 ("object", "Объект"),
                 ("plan", "План"),
-                ("off", "Выходной"),
                 ("fact", "Факт"),
                 ("absent", "Не вышли"),
+                ("off", "Выходной"),
                 ("workoff", "Вышли в вых."),
                 ("noschedule", "Без графика"),
-                ("pct", "% явки"),
+                ("pct", "Явка, %"),
             ],
-            height=12,
+            height=10,
         )
-        tree_obj.column("object", width=280)
-        for col in ["plan", "off", "fact", "absent", "workoff", "noschedule", "pct"]:
-            tree_obj.column(col, width=90, anchor="e")
-
+    
+        tree_obj.column("object", width=360)
+        for col in ["plan", "fact", "absent", "off", "workoff", "noschedule", "pct"]:
+            tree_obj.column(col, width=105, anchor="e")
+    
         self._insert_rows(tree_obj, [
             (
                 r["object_name"],
                 int(r["plan_count"]),
-                int(r["off_count"]),
                 int(r["fact_count"]),
                 int(r["absent_count"]),
+                int(r["off_count"]),
                 int(r["worked_on_off_count"]),
                 int(r["no_schedule_count"]),
                 f"{float(r['attendance_pct']):.1f}",
             )
             for _, r in df_obj.iterrows()
         ])
-
+    
+        # По подразделениям и должностям
         df_pos = dp.get_by_position()
-        pos_wrap = ttk.Frame(right)
-        pos_wrap.pack(fill="both", expand=True, padx=4, pady=4)
-
+    
+        pos_wrap = self._create_section(
+            self.inner,
+            "Сводка по подразделениям и должностям",
+            "Помогает понять, по каким подразделениям и должностям есть недовыходы или выходы вне графика.",
+        )
+    
         tree_pos = self._create_treeview(
             pos_wrap,
             [
                 ("department", "Подразделение"),
                 ("position", "Должность"),
                 ("plan", "План"),
-                ("off", "Выходной"),
                 ("fact", "Факт"),
                 ("absent", "Не вышли"),
+                ("off", "Выходной"),
                 ("workoff", "Вышли в вых."),
                 ("noschedule", "Без графика"),
-                ("pct", "% явки"),
+                ("pct", "Явка, %"),
             ],
-            height=12,
+            height=10,
         )
-        tree_pos.column("department", width=180)
-        tree_pos.column("position", width=180)
-        for col in ["plan", "off", "fact", "absent", "workoff", "noschedule", "pct"]:
-            tree_pos.column(col, width=85, anchor="e")
-
+    
+        tree_pos.column("department", width=220)
+        tree_pos.column("position", width=220)
+        for col in ["plan", "fact", "absent", "off", "workoff", "noschedule", "pct"]:
+            tree_pos.column(col, width=100, anchor="e")
+    
         self._insert_rows(tree_pos, [
             (
                 r["department_name"],
                 r["position_name"],
                 int(r["plan_count"]),
-                int(r["off_count"]),
                 int(r["fact_count"]),
                 int(r["absent_count"]),
+                int(r["off_count"]),
                 int(r["worked_on_off_count"]),
                 int(r["no_schedule_count"]),
                 f"{float(r['attendance_pct']):.1f}",
             )
             for _, r in df_pos.iterrows()
         ])
-
-        trend_box = ttk.LabelFrame(self.inner, text="Динамика за последние 7 дней")
-        trend_box.pack(fill="both", expand=True, padx=10, pady=(0, 8))
-
-        trend_wrap = ttk.Frame(trend_box)
-        trend_wrap.pack(fill="both", expand=True, padx=4, pady=4)
-
+    
+        # Динамика
+        df_trend = dp.get_trend(7)
+    
+        trend_wrap = self._create_section(
+            self.inner,
+            "Динамика за последние 7 дней",
+            "Краткая история план-факт показателей за неделю.",
+        )
+    
         tree_trend = self._create_treeview(
             trend_wrap,
             [
                 ("date", "Дата"),
                 ("plan", "План"),
-                ("off", "Выходной"),
                 ("fact", "Факт"),
                 ("absent", "Не вышли"),
+                ("off", "Выходной"),
                 ("workoff", "Вышли в вых."),
                 ("noschedule", "Без графика"),
-                ("pct", "% явки"),
+                ("pct", "Явка, %"),
             ],
             height=7,
         )
-        for col in ["plan", "off", "fact", "absent", "workoff", "noschedule", "pct"]:
-            tree_trend.column(col, width=90, anchor="e")
-
-        df_trend = dp.get_trend(7)
+    
+        tree_trend.column("date", width=120)
+        for col in ["plan", "fact", "absent", "off", "workoff", "noschedule", "pct"]:
+            tree_trend.column(col, width=105, anchor="e")
+    
         self._insert_rows(tree_trend, [
             (
                 pd.to_datetime(r["work_date"]).strftime("%d.%m.%Y"),
                 int(r["plan_count"]),
-                int(r["off_count"]),
                 int(r["fact_count"]),
                 int(r["absent_count"]),
+                int(r["off_count"]),
                 int(r["worked_on_off_count"]),
                 int(r["no_schedule_count"]),
                 f"{float(r['attendance_pct']):.1f}",
             )
             for _, r in df_trend.iterrows()
         ])
-
-        bottom = ttk.LabelFrame(self.inner, text="Люди на выбранную дату")
-        bottom.pack(fill="both", expand=True, padx=10, pady=(0, 8))
-
-        det_wrap = ttk.Frame(bottom)
-        det_wrap.pack(fill="both", expand=True, padx=4, pady=4)
-
+    
+        # Детализация по людям
+        detail_df = dp.get_day_detail().copy()
+    
+        people_wrap = self._create_section(
+            self.inner,
+            "Сотрудники на выбранную дату",
+            "Детальная расшифровка по людям: объект, должность, график, часы и итоговый статус.",
+        )
+    
         tree_det = self._create_treeview(
-            det_wrap,
+            people_wrap,
             [
                 ("fio", "ФИО"),
                 ("tbn", "Таб. №"),
@@ -927,34 +1038,21 @@ class TimesheetPlanFactPage(ttk.Frame):
                 ("hours", "Часы"),
                 ("status", "Статус"),
             ],
-            height=16,
+            height=15,
         )
-        tree_det.column("fio", width=220)
+    
+        tree_det.column("fio", width=240)
         tree_det.column("tbn", width=90)
-        tree_det.column("object", width=220)
-        tree_det.column("dept", width=160)
-        tree_det.column("pos", width=160)
-        tree_det.column("schedule", width=100)
-        tree_det.column("hours", width=70, anchor="e")
-        tree_det.column("status", width=140)
-
-        detail_df = dp.get_day_detail().copy()
-
-        def _status(r):
-            if int(r["fact_flag"]) == 1:
-                return "Вышел по графику"
-            if int(r["absent_flag"]) == 1:
-                return "Не вышел"
-            if int(r["worked_on_off_flag"]) == 1:
-                return "Вышел в выходной"
-            if int(r["off_flag"]) == 1:
-                return "Выходной"
-            if int(r["no_schedule_flag"]) == 1:
-                return "Нет графика"
-            return "Не определено"
-
-        detail_df["status_text"] = detail_df.apply(_status, axis=1)
-
+        tree_det.column("object", width=260)
+        tree_det.column("dept", width=180)
+        tree_det.column("pos", width=180)
+        tree_det.column("schedule", width=120)
+        tree_det.column("hours", width=80, anchor="e")
+        tree_det.column("status", width=160)
+    
+        if not detail_df.empty:
+            detail_df["status_text"] = detail_df.apply(self._get_status_text, axis=1)
+    
         self._insert_rows(tree_det, [
             (
                 r["fio"],
@@ -966,7 +1064,9 @@ class TimesheetPlanFactPage(ttk.Frame):
                 f"{float(r['hours']):.2f}",
                 r["status_text"],
             )
-            for _, r in detail_df.sort_values(["object_name", "department_name", "position_name", "fio"]).iterrows()
+            for _, r in detail_df.sort_values(
+                ["object_name", "department_name", "position_name", "fio"]
+            ).iterrows()
         ])
 
     @staticmethod
@@ -987,27 +1087,370 @@ class TimesheetPlanFactPage(ttk.Frame):
         if not self.data_provider:
             messagebox.showwarning("Экспорт", "Сначала загрузите данные.")
             return
-
+    
+        dp = self.data_provider
+    
         path = filedialog.asksaveasfilename(
             defaultextension=".xlsx",
             filetypes=[("Excel файл", "*.xlsx")],
             title="Сохранить отчёт",
-            initialfile=f"timesheet_plan_fact_day_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            initialfile=f"план_факт_выходов_{dp.selected_date.strftime('%Y%m%d')}_{datetime.now().strftime('%H%M')}.xlsx",
         )
+    
         if not path:
             return
-
-        dp = self.data_provider
+    
         try:
+            frames = self._build_excel_frames(dp)
+    
+            table_names = {
+                "KPI": "tbl_kpi",
+                "По объектам": "tbl_by_object",
+                "По должностям": "tbl_by_position",
+                "Динамика 7 дней": "tbl_trend_7_days",
+                "Сотрудники": "tbl_people",
+                "Свод объект-подразделение": "tbl_summary",
+            }
+    
             with pd.ExcelWriter(path, engine="openpyxl") as writer:
-                pd.DataFrame([dp.get_kpi()]).to_excel(writer, sheet_name="KPI_день", index=False)
-                dp.get_by_object().to_excel(writer, sheet_name="По_объектам", index=False)
-                dp.get_by_position().to_excel(writer, sheet_name="По_должностям", index=False)
-                dp.get_trend(7).to_excel(writer, sheet_name="Динамика_7_дней", index=False)
-                dp.get_day_detail().to_excel(writer, sheet_name="Люди_за_день", index=False)
-                dp.get_export_summary().to_excel(writer, sheet_name="Свод_объект_подр_должн", index=False)
-
+                for sheet_name, df in frames.items():
+                    df = self._strip_tz(df)
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+    
+                    ws = writer.sheets[sheet_name]
+                    self._format_excel_sheet(
+                        ws,
+                        table_names.get(sheet_name, f"tbl_{len(writer.sheets)}"),
+                    )
+    
+                wb = writer.book
+                wb.properties.title = "План-факт выходов сотрудников"
+                wb.properties.subject = f"Дата отчёта: {dp.selected_date.strftime('%d.%m.%Y')}"
+                wb.properties.creator = "Модуль аналитики табелей"
+    
             messagebox.showinfo("Экспорт завершён", f"Файл успешно сохранён:\n{path}")
+    
         except Exception as e:
             logging.exception("Ошибка экспорта")
             messagebox.showerror("Ошибка экспорта", f"Не удалось сохранить файл:\n{e}")
+
+    def _get_status_text(self, r) -> str:
+        if int(r.get("worked_on_off_flag", 0)) == 1:
+            return "Вышел в выходной"
+    
+        if int(r.get("fact_flag", 0)) == 1 and int(r.get("plan_flag", 0)) == 1:
+            return "Вышел по графику"
+    
+        if int(r.get("fact_flag", 0)) == 1 and int(r.get("no_schedule_flag", 0)) == 1:
+            return "Вышел без графика"
+    
+        if int(r.get("absent_flag", 0)) == 1:
+            return "Не вышел"
+    
+        if int(r.get("off_flag", 0)) == 1:
+            return "Выходной"
+    
+        if int(r.get("no_schedule_flag", 0)) == 1:
+            return "Нет графика"
+    
+        return "Не определено"
+
+    def _create_section(self, parent, title: str, subtitle: str = ""):
+        section = tk.Frame(
+            parent,
+            bg="white",
+            highlightbackground="#DDE3EA",
+            highlightthickness=1,
+        )
+        section.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+    
+        header = tk.Frame(section, bg="white", padx=10, pady=8)
+        header.pack(fill="x")
+    
+        tk.Label(
+            header,
+            text=title,
+            font=("Segoe UI", 11, "bold"),
+            fg="#263238",
+            bg="white",
+            anchor="w",
+        ).pack(fill="x")
+    
+        if subtitle:
+            tk.Label(
+                header,
+                text=subtitle,
+                font=("Segoe UI", 8),
+                fg=PALETTE["text_muted"],
+                bg="white",
+                anchor="w",
+            ).pack(fill="x", pady=(2, 0))
+    
+        body = ttk.Frame(section)
+        body.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+    
+        return body
+
+    def _build_excel_frames(self, dp: TimesheetPlanFactData) -> Dict[str, pd.DataFrame]:
+        kpi = dp.get_kpi()
+    
+        kpi_df = pd.DataFrame([
+            {
+                "Показатель": "План по графику",
+                "Значение": kpi.get("plan_total", 0),
+                "Ед. изм.": "чел.",
+            },
+            {
+                "Показатель": "Факт выходов",
+                "Значение": kpi.get("fact_total", 0),
+                "Ед. изм.": "чел.",
+            },
+            {
+                "Показатель": "Выходной по графику",
+                "Значение": kpi.get("off_total", 0),
+                "Ед. изм.": "чел.",
+            },
+            {
+                "Показатель": "Вышли в выходной",
+                "Значение": kpi.get("worked_on_off_total", 0),
+                "Ед. изм.": "чел.",
+            },
+            {
+                "Показатель": "Без графика",
+                "Значение": kpi.get("no_schedule_total", 0),
+                "Ед. изм.": "чел.",
+            },
+            {
+                "Показатель": "Сотрудников в выборке",
+                "Значение": kpi.get("employees_count", 0),
+                "Ед. изм.": "чел.",
+            },
+            {
+                "Показатель": "Объектов в выборке",
+                "Значение": kpi.get("objects_count", 0),
+                "Ед. изм.": "объектов",
+            },
+        ])
+    
+        by_object_df = dp.get_by_object().rename(columns={
+            "object_name": "Объект",
+            "plan_count": "План",
+            "fact_count": "Факт",
+            "absent_count": "Не вышли",
+            "off_count": "Выходной",
+            "worked_on_off_count": "Вышли в выходной",
+            "no_schedule_count": "Без графика",
+            "attendance_pct": "Явка, %",
+        })
+    
+        by_object_df = by_object_df[
+            [
+                "Объект",
+                "План",
+                "Факт",
+                "Не вышли",
+                "Выходной",
+                "Вышли в выходной",
+                "Без графика",
+                "Явка, %",
+            ]
+        ]
+    
+        by_position_df = dp.get_by_position().rename(columns={
+            "department_name": "Подразделение",
+            "position_name": "Должность",
+            "plan_count": "План",
+            "fact_count": "Факт",
+            "absent_count": "Не вышли",
+            "off_count": "Выходной",
+            "worked_on_off_count": "Вышли в выходной",
+            "no_schedule_count": "Без графика",
+            "attendance_pct": "Явка, %",
+        })
+    
+        by_position_df = by_position_df[
+            [
+                "Подразделение",
+                "Должность",
+                "План",
+                "Факт",
+                "Не вышли",
+                "Выходной",
+                "Вышли в выходной",
+                "Без графика",
+                "Явка, %",
+            ]
+        ]
+    
+        trend_df = dp.get_trend(7).copy()
+    
+        if not trend_df.empty:
+            trend_df["work_date"] = pd.to_datetime(trend_df["work_date"]).dt.date
+    
+        trend_df = trend_df.rename(columns={
+            "work_date": "Дата",
+            "plan_count": "План",
+            "fact_count": "Факт",
+            "absent_count": "Не вышли",
+            "off_count": "Выходной",
+            "worked_on_off_count": "Вышли в выходной",
+            "no_schedule_count": "Без графика",
+            "attendance_pct": "Явка, %",
+        })
+    
+        trend_df = trend_df[
+            [
+                "Дата",
+                "План",
+                "Факт",
+                "Не вышли",
+                "Выходной",
+                "Вышли в выходной",
+                "Без графика",
+                "Явка, %",
+            ]
+        ]
+    
+        detail_df = dp.get_day_detail().copy()
+    
+        if not detail_df.empty:
+            detail_df["Статус"] = detail_df.apply(self._get_status_text, axis=1)
+            detail_df["work_date"] = pd.to_datetime(detail_df["work_date"]).dt.date
+    
+            detail_df["Рабочий день по графику"] = detail_df["is_workday"].map({
+                True: "Да",
+                False: "Нет",
+            }).fillna("—")
+    
+            detail_df = detail_df.rename(columns={
+                "work_date": "Дата",
+                "object_name": "Объект",
+                "object_type": "Тип объекта",
+                "department_name": "Подразделение",
+                "position_name": "Должность",
+                "fio": "ФИО",
+                "tbn": "Табельный номер",
+                "work_schedule_name": "График",
+                "day_raw": "Значение в табеле",
+                "hours": "Часы",
+                "planned_hours": "Плановые часы",
+            })
+    
+            detail_df = detail_df[
+                [
+                    "Дата",
+                    "Объект",
+                    "Тип объекта",
+                    "Подразделение",
+                    "Должность",
+                    "ФИО",
+                    "Табельный номер",
+                    "График",
+                    "Рабочий день по графику",
+                    "Плановые часы",
+                    "Значение в табеле",
+                    "Часы",
+                    "Статус",
+                ]
+            ]
+        else:
+            detail_df = pd.DataFrame(columns=[
+                "Дата",
+                "Объект",
+                "Тип объекта",
+                "Подразделение",
+                "Должность",
+                "ФИО",
+                "Табельный номер",
+                "График",
+                "Рабочий день по графику",
+                "Плановые часы",
+                "Значение в табеле",
+                "Часы",
+                "Статус",
+            ])
+    
+        summary_df = dp.get_export_summary().copy()
+    
+        return {
+            "KPI": kpi_df,
+            "По объектам": by_object_df,
+            "По должностям": by_position_df,
+            "Динамика 7 дней": trend_df,
+            "Сотрудники": detail_df,
+            "Свод объект-подразделение": summary_df,
+        }
+
+    def _format_excel_sheet(self, ws, table_name: str):
+        ws.sheet_view.showGridLines = False
+        ws.freeze_panes = "A2"
+    
+        header_fill = PatternFill("solid", fgColor="1565C0")
+        header_font = Font(color="FFFFFF", bold=True)
+        header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    
+        thin_side = Side(style="thin", color="D9E2EC")
+        border = Border(
+            left=thin_side,
+            right=thin_side,
+            top=thin_side,
+            bottom=thin_side,
+        )
+    
+        even_fill = PatternFill("solid", fgColor="F5F7FA")
+    
+        max_row = ws.max_row
+        max_col = ws.max_column
+    
+        if max_row < 1 or max_col < 1:
+            return
+    
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_alignment
+            cell.border = border
+    
+        for row_idx in range(2, max_row + 1):
+            for cell in ws[row_idx]:
+                cell.border = border
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+    
+                if row_idx % 2 == 0:
+                    cell.fill = even_fill
+    
+        for col_idx in range(1, max_col + 1):
+            col_letter = get_column_letter(col_idx)
+            max_len = 0
+    
+            for row_idx in range(1, max_row + 1):
+                value = ws.cell(row=row_idx, column=col_idx).value
+                if value is None:
+                    continue
+    
+                value_len = len(str(value))
+                if value_len > max_len:
+                    max_len = value_len
+    
+            width = min(max(max_len + 2, 12), 55)
+            ws.column_dimensions[col_letter].width = width
+    
+        ws.row_dimensions[1].height = 28
+    
+        for row_idx in range(2, max_row + 1):
+            ws.row_dimensions[row_idx].height = 22
+    
+        # Excel-таблицу создаём только если есть хотя бы одна строка данных
+        if max_row >= 2:
+            ref = f"A1:{get_column_letter(max_col)}{max_row}"
+    
+            tab = Table(displayName=table_name, ref=ref)
+            style = TableStyleInfo(
+                name="TableStyleMedium2",
+                showFirstColumn=False,
+                showLastColumn=False,
+                showRowStripes=True,
+                showColumnStripes=False,
+            )
+            tab.tableStyleInfo = style
+            ws.add_table(tab)
