@@ -1454,3 +1454,69 @@ class TimesheetPlanFactPage(ttk.Frame):
             )
             tab.tableStyleInfo = style
             ws.add_table(tab)
+
+    def _clean_excel_value(self, value):
+        """
+        Убирает значения и символы, которые могут ломать xlsx.
+        Особенно важно для строк из БД: адреса, ФИО, табельные значения и т.д.
+        """
+        if value is None:
+            return ""
+    
+        try:
+            if pd.isna(value):
+                return ""
+        except Exception:
+            pass
+    
+        if isinstance(value, float):
+            if value == float("inf") or value == float("-inf"):
+                return ""
+    
+        if isinstance(value, str):
+            value = ILLEGAL_CHARACTERS_RE.sub("", value)
+            return value
+    
+        return value
+    
+    
+    def _sanitize_excel_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Подготавливает DataFrame для безопасной записи в Excel:
+        - убирает запрещённые XML-символы;
+        - приводит заголовки к строкам;
+        - делает названия колонок уникальными;
+        - заменяет NaN/inf.
+        """
+        if df is None:
+            return pd.DataFrame()
+    
+        df = df.copy()
+    
+        # Чистим и уникализируем названия колонок
+        new_columns = []
+        seen = {}
+    
+        for col in df.columns:
+            col_name = str(self._clean_excel_value(col)).strip()
+            if not col_name:
+                col_name = "Колонка"
+    
+            if col_name in seen:
+                seen[col_name] += 1
+                col_name = f"{col_name}_{seen[col_name]}"
+            else:
+                seen[col_name] = 1
+    
+            new_columns.append(col_name)
+    
+        df.columns = new_columns
+    
+        # Заменяем бесконечности
+        df = df.replace([float("inf"), float("-inf")], "")
+    
+        # Чистим значения
+        for col in df.columns:
+            df[col] = df[col].map(self._clean_excel_value)
+    
+        return df
