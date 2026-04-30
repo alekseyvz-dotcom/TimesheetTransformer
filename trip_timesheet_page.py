@@ -469,6 +469,122 @@ class TripTimeFillDialog(simpledialog.Dialog):
             "value": self._value,
         }
 
+class CopyTripEmployeesFromMonthDialog(simpledialog.Dialog):
+    def __init__(
+        self,
+        parent,
+        *,
+        current_year: int,
+        current_month: int,
+        title: str = "Копировать сотрудников из другого месяца",
+    ):
+        self.current_year = int(current_year)
+        self.current_month = int(current_month)
+        self.result: Optional[Dict[str, Any]] = None
+
+        prev_year = self.current_year
+        prev_month = self.current_month - 1
+        if prev_month < 1:
+            prev_month = 12
+            prev_year -= 1
+
+        self.default_year = prev_year
+        self.default_month = prev_month
+
+        super().__init__(parent, title=title)
+
+    def body(self, master):
+        tk.Label(
+            master,
+            text="Выберите месяц, из которого нужно взять список сотрудников:",
+            anchor="w",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(4, 10))
+
+        tk.Label(master, text="Месяц:").grid(row=1, column=0, sticky="e", padx=(0, 6), pady=4)
+
+        self.cmb_month = ttk.Combobox(
+            master,
+            width=20,
+            state="readonly",
+            values=[f"{m:02d} — {MONTH_NAMES[m]}" for m in range(1, 13)],
+        )
+        self.cmb_month.grid(row=1, column=1, sticky="w", pady=4)
+        self.cmb_month.current(max(0, self.default_month - 1))
+
+        tk.Label(master, text="Год:").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=4)
+
+        current = date.today().year
+        self.var_year = tk.IntVar(value=self.default_year)
+
+        self.cmb_year = ttk.Combobox(
+            master,
+            width=10,
+            state="readonly",
+            textvariable=self.var_year,
+            values=list(range(current - 5, current + 6)),
+        )
+        self.cmb_year.grid(row=2, column=1, sticky="w", pady=4)
+
+        self.var_replace = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            master,
+            text="Заменить текущий список сотрудников",
+            variable=self.var_replace,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 2))
+
+        tk.Label(
+            master,
+            text=(
+                "Будут скопированы только ФИО, табельный номер и график.\n"
+                "Часы и периоды командировок не копируются."
+            ),
+            fg="#666666",
+            justify="left",
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+        return self.cmb_month
+
+    def validate(self):
+        month_index = self.cmb_month.current()
+        if month_index < 0:
+            messagebox.showwarning(
+                "Копирование",
+                "Выберите месяц.",
+                parent=self,
+            )
+            return False
+
+        try:
+            year = int(self.var_year.get())
+        except Exception:
+            messagebox.showwarning(
+                "Копирование",
+                "Выберите корректный год.",
+                parent=self,
+            )
+            return False
+
+        month = month_index + 1
+
+        if year == self.current_year and month == self.current_month:
+            messagebox.showwarning(
+                "Копирование",
+                "Нельзя копировать сотрудников из текущего же месяца.",
+                parent=self,
+            )
+            return False
+
+        self._source_year = year
+        self._source_month = month
+        return True
+
+    def apply(self):
+        self.result = {
+            "year": self._source_year,
+            "month": self._source_month,
+            "replace": bool(self.var_replace.get()),
+        }
+
 class TripTimesheetPage(tk.Frame):
     def __init__(self, master, app, *args, **kwargs):
         super().__init__(master, bg=UI["bg"], *args, **kwargs)
@@ -668,6 +784,7 @@ class TripTimesheetPage(tk.Frame):
 
         self._ts_btn(row1, "Открыть", self._open_timesheet, side="left", padx=(4, 3))
         self._ts_btn(row1, "Добавить сотрудников", self._add_employees, side="left", padx=3)
+        self._ts_btn(row1, "Копировать из месяца", self._copy_employees_from_month, side="left", padx=3)
         self._ts_btn(row1, "Период выбранным", self._set_trip_period_for_selected, side="left", padx=3)
         self._ts_btn(row1, "Время выбранным", self._fill_hours_for_selected, side="left", padx=3)
         self._ts_btn(row1, "Время всем", self._fill_hours_for_all, side="left", padx=3)
@@ -1259,6 +1376,173 @@ class TripTimesheetPage(tk.Frame):
     # =========================================================
     # Выбор сотрудников
     # =========================================================
+    def _employee_key(self, fio: str, tbn: str) -> Tuple[str, str]:
+        fio_norm = normalize_spaces(fio or "").lower()
+        tbn_norm = normalize_tbn(tbn)
+
+        if tbn_norm:
+            return ("tbn", tbn_norm)
+
+        return ("fio", fio_norm)
+
+    def _copy_employees_from_month(self) -> None:
+        object_id, object_addr = self._parse_selected_object()
+        year, month = self._get_year_month()
+
+        if not object_addr:
+            messagebox.showwarning(
+                "Копирование",
+                "Сначала выберите объект.",
+                parent=self,
+            )
+            return
+
+        if self._dirty:
+            if not messagebox.askyesno(
+                "Копирование",
+                (
+                    "В текущем табеле есть несохранённые изменения.\n\n"
+                    "Копирование изменит текущий табель.\n"
+                    "Продолжить?"
+                ),
+                parent=self,
+            ):
+                return
+
+        dlg = CopyTripEmployeesFromMonthDialog(
+            self,
+            current_year=year,
+            current_month=month,
+        )
+        self.wait_window(dlg)
+
+        params = getattr(dlg, "result", None)
+        if not params:
+            return
+
+        source_year = int(params["year"])
+        source_month = int(params["month"])
+        replace_current = bool(params["replace"])
+
+        try:
+            source_rows = load_trip_timesheet_rows_from_db(
+                object_id=object_id or None,
+                object_addr=object_addr,
+                year=source_year,
+                month=source_month,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Копирование",
+                f"Не удалось загрузить табель-источник:\n{exc}",
+                parent=self,
+            )
+            return
+
+        if not source_rows:
+            messagebox.showinfo(
+                "Копирование",
+                (
+                    f"В табеле за {source_month:02d}.{source_year} "
+                    "нет сотрудников для копирования."
+                ),
+                parent=self,
+            )
+            return
+
+        source_label = f"{source_month:02d}.{source_year}"
+        target_label = f"{month:02d}.{year}"
+
+        if replace_current:
+            if self.rows:
+                if not messagebox.askyesno(
+                    "Копирование",
+                    (
+                        f"Текущий список сотрудников за {target_label} будет очищен "
+                        f"и заменён списком из {source_label}.\n\n"
+                        "Продолжить?"
+                    ),
+                    parent=self,
+                ):
+                    return
+
+            self.rows = []
+            existing_keys = set()
+        else:
+            existing_keys = {
+                self._employee_key(
+                    normalize_spaces(r.get("fio") or ""),
+                    normalize_tbn(r.get("tbn")),
+                )
+                for r in self.rows
+            }
+
+        added = 0
+        skipped_duplicates = 0
+        skipped_empty = 0
+
+        for src in source_rows:
+            fio = normalize_spaces(src.get("fio") or "")
+            tbn = normalize_tbn(src.get("tbn"))
+
+            if not fio and not tbn:
+                skipped_empty += 1
+                continue
+
+            key = self._employee_key(fio, tbn)
+
+            if key in existing_keys:
+                skipped_duplicates += 1
+                continue
+
+            new_row = self._empty_row(fio=fio, tbn=tbn)
+
+            new_row["work_schedule"] = normalize_spaces(src.get("work_schedule") or "")
+
+            # ВАЖНО:
+            # Часы и периоды командировок специально не копируем,
+            # потому что они относятся к датам другого месяца.
+            new_row["hours"] = normalize_hours_list([], year, month)
+            new_row["trip_periods"] = []
+            new_row["_totals"] = calc_row_totals(new_row["hours"], year, month)
+
+            self.rows.append(new_row)
+            existing_keys.add(key)
+            added += 1
+
+        self._refresh_grid()
+        self._update_trip_info_from_selection()
+
+        if added > 0 or replace_current:
+            self._mark_dirty()
+            self._schedule_auto_save()
+
+        msg = (
+            f"Копирование из {source_label} в {target_label} завершено.\n\n"
+            f"Добавлено сотрудников: {added}\n"
+            f"Пропущено дублей: {skipped_duplicates}"
+        )
+
+        if skipped_empty:
+            msg += f"\nПропущено пустых строк: {skipped_empty}"
+
+        messagebox.showinfo(
+            "Копирование",
+            msg,
+            parent=self,
+        )
+
+        if added > 0:
+            self.var_status.set(
+                f"Скопировано сотрудников из {source_label}: {added}"
+            )
+            self._check_fired_employees_after_add()
+            self._check_duplicates(silent_if_empty=True)
+        else:
+            self.var_status.set(
+                f"Из {source_label} нечего добавить: все сотрудники уже есть."
+            )
+
     def _add_employees(self) -> None:
         try:
             employees = load_employees_from_db()
