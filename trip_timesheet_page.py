@@ -16,6 +16,7 @@ from timesheet_common import (
     calc_row_totals,
     calc_rows_summary,
     format_summary_value,
+    make_row_key,
     month_days,
     normalize_hours_list,
     normalize_spaces,
@@ -30,6 +31,7 @@ from timesheet_db import (
 )
 from timesheet_dialogs import (
     AutoCompleteCombobox,
+    CopyFromDialog,
     SelectEmployeesDialog,
     SelectObjectIdDialog,
 )
@@ -1469,172 +1471,159 @@ class TripTimesheetPage(tk.Frame):
         object_id, object_addr = self._parse_selected_object()
         year, month = self._get_year_month()
 
-        if not object_addr:
+        if not object_addr and not object_id:
             messagebox.showwarning(
                 "Копирование",
-                "Сначала выберите объект.",
+                "Укажите адрес/ID объекта.",
                 parent=self,
             )
             return
 
-        if self._dirty:
-            if not messagebox.askyesno(
-                "Копирование",
-                (
-                    "В текущем табеле есть несохранённые изменения.\n\n"
-                    "Копирование изменит текущий табель.\n"
-                    "Продолжить?"
-                ),
-                parent=self,
-            ):
-                return
+        src_year_default = year if month > 1 else year - 1
+        src_month_default = month - 1 if month > 1 else 12
 
-        dlg = CopyTripEmployeesFromMonthDialog(
+        dlg = CopyFromDialog(
             self,
-            current_year=year,
-            current_month=month,
+            init_year=src_year_default,
+            init_month=src_month_default,
         )
-        self.wait_window(dlg)
 
-        params = getattr(dlg, "result", None)
-        if not params:
+        # ВАЖНО:
+        # wait_window здесь НЕ нужен.
+        # CopyFromDialog / simpledialog.Dialog сам ждёт закрытия окна.
+        if not getattr(dlg, "result", None):
             return
 
-        source_year = int(params["year"])
-        source_month = int(params["month"])
-        replace_current = bool(params["replace"])
+        src_year = int(dlg.result["year"])
+        src_month = int(dlg.result["month"])
+        mode = dlg.result.get("mode", "append")
+
+        if src_year == year and src_month == month:
+            messagebox.showwarning(
+                "Копирование",
+                "Нельзя копировать сотрудников из текущего же месяца.",
+                parent=self,
+            )
+            return
 
         try:
-            source_rows, source_debug_info = load_trip_timesheet_rows_for_copy(
+            found_rows = load_trip_timesheet_rows_from_db(
                 object_id=object_id or None,
                 object_addr=object_addr,
-                year=source_year,
-                month=source_month,
+                year=src_year,
+                month=src_month,
             )
         except Exception as exc:
+            logger.exception("Ошибка загрузки табеля-источника для копирования")
             messagebox.showerror(
                 "Копирование",
-                f"Не удалось загрузить табель-источник:\n{exc}",
+                f"Ошибка при загрузке табеля-источника:\n{exc}",
                 parent=self,
             )
             return
 
-        if not source_rows:
+        if not found_rows:
             messagebox.showinfo(
                 "Копирование",
                 (
-                    f"Не найдены сотрудники для копирования.\n\n"
-                    f"Источник: {source_month:02d}.{source_year}\n"
-                    f"Объект: {object_addr}\n\n"
-                    f"Диагностика:\n{source_debug_info}"
+                    f"В БД не найден командировочный табель-источник.\n\n"
+                    f"Источник: {src_month:02d}.{src_year}\n"
+                    f"Объект: {object_addr}\n"
+                    f"ID объекта: {object_id or '-'}\n\n"
+                    "Проверьте, что табель за выбранный месяц был сохранён."
                 ),
                 parent=self,
             )
             return
 
-        source_label = f"{source_month:02d}.{source_year}"
-        target_label = f"{month:02d}.{year}"
-
-        if replace_current:
+        if mode == "replace":
             if self.rows:
                 if not messagebox.askyesno(
                     "Копирование",
                     (
-                        f"Текущий список сотрудников за {target_label} будет очищен "
-                        f"и заменён списком из {source_label}.\n\n"
+                        "Текущий список сотрудников будет очищен "
+                        "и заменён списком из выбранного месяца.\n\n"
                         "Продолжить?"
                     ),
                     parent=self,
                 ):
                     return
 
-            self.rows = []
-            existing_keys = set()
-        else:
-            existing_keys = {
-                self._employee_key(
-                    normalize_spaces(r.get("fio") or ""),
-                    normalize_tbn(r.get("tbn")),
-                )
-                for r in self.rows
-            }
+            self.rows.clear()
+
+        existing = {
+            make_row_key(
+                r.get("fio", ""),
+                r.get("tbn", ""),
+            )
+            for r in self.rows
+        }
 
         added = 0
         skipped_duplicates = 0
         skipped_empty = 0
 
-        for src in source_rows:
-            fio = normalize_spaces(
-                src.get("fio")
-                or src.get("full_name")
-                or src.get("employee_name")
-                or ""
-            )
-
-            tbn = normalize_tbn(
-                src.get("tbn")
-                or src.get("tab_no")
-                or src.get("tab_number")
-                or src.get("personnel_number")
-                or ""
-            )
+        for rec in found_rows:
+            fio = normalize_spaces(rec.get("fio") or "")
+            tbn = normalize_tbn(rec.get("tbn"))
 
             if not fio and not tbn:
                 skipped_empty += 1
                 continue
 
-            key = self._employee_key(fio, tbn)
+            key = make_row_key(fio, tbn)
 
-            if key in existing_keys:
+            if key in existing:
                 skipped_duplicates += 1
                 continue
 
-            new_row = self._empty_row(fio=fio, tbn=tbn)
+            new_rec = self._empty_row(fio=fio, tbn=tbn)
 
-            new_row["work_schedule"] = normalize_spaces(src.get("work_schedule") or "")
+            # Часы не копируем.
+            new_rec["hours"] = normalize_hours_list([], year, month)
 
-            # ВАЖНО:
-            # Часы и периоды командировок специально не копируем,
-            # потому что они относятся к датам другого месяца.
-            new_row["hours"] = normalize_hours_list([], year, month)
-            new_row["trip_periods"] = []
-            new_row["_totals"] = calc_row_totals(new_row["hours"], year, month)
+            # Периоды командировок не копируем,
+            # потому что они относятся к датам прошлого месяца.
+            new_rec["trip_periods"] = []
 
-            self.rows.append(new_row)
-            existing_keys.add(key)
+            # Если в будущем в source_rows появится график — подтянем.
+            new_rec["work_schedule"] = normalize_spaces(rec.get("work_schedule") or "")
+
+            new_rec["_totals"] = calc_row_totals(new_rec["hours"], year, month)
+
+            self.rows.append(new_rec)
+            existing.add(key)
             added += 1
 
         self._refresh_grid()
         self._update_trip_info_from_selection()
 
-        if added > 0 or replace_current:
+        if added > 0 or mode == "replace":
             self._mark_dirty()
             self._schedule_auto_save()
 
-        msg = (
-            f"Копирование из {source_label} в {target_label} завершено.\n\n"
-            f"Добавлено сотрудников: {added}\n"
-            f"Пропущено дублей: {skipped_duplicates}"
-        )
-
-        if skipped_empty:
-            msg += f"\nПропущено пустых строк: {skipped_empty}"
-
         messagebox.showinfo(
             "Копирование",
-            msg,
+            (
+                f"Копирование завершено.\n\n"
+                f"Источник: {src_month:02d}.{src_year}\n"
+                f"Найдено строк в источнике: {len(found_rows)}\n"
+                f"Добавлено сотрудников: {added}\n"
+                f"Пропущено дублей: {skipped_duplicates}\n"
+                f"Пропущено пустых строк: {skipped_empty}"
+            ),
             parent=self,
         )
 
         if added > 0:
             self.var_status.set(
-                f"Скопировано сотрудников из {source_label}: {added}"
+                f"Скопировано сотрудников из {src_month:02d}.{src_year}: {added}"
             )
             self._check_fired_employees_after_add()
             self._check_duplicates(silent_if_empty=True)
         else:
             self.var_status.set(
-                f"Из {source_label} нечего добавить: все сотрудники уже есть."
+                f"Из {src_month:02d}.{src_year} сотрудники не добавлены."
             )
 
     def _add_employees(self) -> None:
