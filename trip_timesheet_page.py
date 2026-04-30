@@ -1385,6 +1385,85 @@ class TripTimesheetPage(tk.Frame):
 
         return ("fio", fio_norm)
 
+    def _load_source_rows_for_copy(
+        self,
+        *,
+        object_id: str,
+        object_addr: str,
+        year: int,
+        month: int,
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        """
+        Загружает строки табеля-источника для копирования сотрудников.
+
+        Пробует несколько вариантов поиска, потому что старые табели могли быть
+        сохранены без object_id или с другим object_id, но с тем же адресом.
+        """
+        object_id = normalize_spaces(object_id or "")
+        object_addr = normalize_spaces(object_addr or "")
+
+        attempts: List[Tuple[Optional[str], str, str]] = []
+        seen = set()
+
+        def add_attempt(oid: Optional[str], addr: str, label: str) -> None:
+            key = (normalize_spaces(oid or ""), normalize_spaces(addr or ""))
+            if key in seen:
+                return
+            seen.add(key)
+            attempts.append((oid or None, addr, label))
+
+        # 1. Основной вариант — текущий ID + адрес
+        if object_id:
+            add_attempt(
+                object_id,
+                object_addr,
+                f"по ID объекта {object_id} и адресу",
+            )
+
+        # 2. Старые табели могли быть сохранены без ID объекта
+        add_attempt(
+            None,
+            object_addr,
+            "только по адресу объекта",
+        )
+
+        # 3. Если у этого адреса несколько ID, пробуем все
+        for code, addr, _short_name in self.objects_full:
+            code_norm = normalize_spaces(code or "")
+            addr_norm = normalize_spaces(addr or "")
+
+            if addr_norm == object_addr and code_norm:
+                add_attempt(
+                    code_norm,
+                    object_addr,
+                    f"по альтернативному ID объекта {code_norm}",
+                )
+
+        errors: List[str] = []
+
+        for oid, addr, label in attempts:
+            try:
+                rows = load_trip_timesheet_rows_from_db(
+                    object_id=oid,
+                    object_addr=addr,
+                    year=year,
+                    month=month,
+                )
+
+                if rows:
+                    return rows, label
+
+            except Exception as exc:
+                errors.append(f"{label}: {exc}")
+
+        if errors:
+            logger.warning(
+                "Ошибки при поиске табеля-источника для копирования: %s",
+                "; ".join(errors),
+            )
+
+        return [], ", ".join(label for _oid, _addr, label in attempts)
+
     def _copy_employees_from_month(self) -> None:
         object_id, object_addr = self._parse_selected_object()
         year, month = self._get_year_month()
@@ -1425,8 +1504,8 @@ class TripTimesheetPage(tk.Frame):
         replace_current = bool(params["replace"])
 
         try:
-            source_rows = load_trip_timesheet_rows_from_db(
-                object_id=object_id or None,
+            source_rows, source_search_info = self._load_source_rows_for_copy(
+                object_id=object_id,
                 object_addr=object_addr,
                 year=source_year,
                 month=source_month,
@@ -1443,8 +1522,14 @@ class TripTimesheetPage(tk.Frame):
             messagebox.showinfo(
                 "Копирование",
                 (
-                    f"В табеле за {source_month:02d}.{source_year} "
-                    "нет сотрудников для копирования."
+                    f"Не найдены сотрудники в табеле за {source_month:02d}.{source_year}.\n\n"
+                    f"Объект:\n{object_addr}\n\n"
+                    f"Проверялись варианты:\n{source_search_info}\n\n"
+                    "Возможные причины:\n"
+                    "1. Табель за этот месяц не был сохранён.\n"
+                    "2. Табель за апрель создан в другом модуле табеля.\n"
+                    "3. У апрельского табеля другой адрес объекта.\n"
+                    "4. В базе старый табель сохранён с другим ID объекта."
                 ),
                 parent=self,
             )
@@ -1482,8 +1567,20 @@ class TripTimesheetPage(tk.Frame):
         skipped_empty = 0
 
         for src in source_rows:
-            fio = normalize_spaces(src.get("fio") or "")
-            tbn = normalize_tbn(src.get("tbn"))
+            fio = normalize_spaces(
+                src.get("fio")
+                or src.get("full_name")
+                or src.get("employee_name")
+                or ""
+            )
+
+            tbn = normalize_tbn(
+                src.get("tbn")
+                or src.get("tab_no")
+                or src.get("tab_number")
+                or src.get("personnel_number")
+                or ""
+            )
 
             if not fio and not tbn:
                 skipped_empty += 1
