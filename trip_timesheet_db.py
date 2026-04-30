@@ -338,6 +338,276 @@ def load_trip_timesheet_rows_from_db(
 
         return list(rows_map.values())
 
+def _load_trip_rows_by_header_id_cur(
+    cur,
+    header_id: int,
+    year: int,
+    month: int,
+) -> List[Dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT 
+            r.id,
+            r.fio,
+            r.tbn,
+            r.hours_raw,
+            p.date_from,
+            p.date_to
+        FROM trip_timesheet_rows r
+        LEFT JOIN trip_timesheet_periods p ON p.row_id = r.id
+        WHERE r.header_id = %s
+        ORDER BY r.fio, r.tbn, p.date_from
+        """,
+        (int(header_id),),
+    )
+
+    rows_map: Dict[int, Dict[str, Any]] = {}
+
+    for r_id, fio, tbn, hours_raw, d_from, d_to in cur.fetchall():
+        if r_id not in rows_map:
+            hours = normalize_hours_list(hours_raw, year, month)
+            rows_map[r_id] = {
+                "fio": fio or "",
+                "tbn": tbn or "",
+                "hours": hours,
+                "trip_periods": [],
+            }
+
+        if d_from and d_to:
+            rows_map[r_id]["trip_periods"].append(
+                {
+                    "from": d_from,
+                    "to": d_to,
+                }
+            )
+
+    return list(rows_map.values())
+
+
+def _load_trip_rows_by_header_id_cur(
+    cur,
+    header_id: int,
+    year: int,
+    month: int,
+) -> List[Dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT 
+            r.id,
+            r.fio,
+            r.tbn,
+            r.hours_raw,
+            p.date_from,
+            p.date_to
+        FROM trip_timesheet_rows r
+        LEFT JOIN trip_timesheet_periods p ON p.row_id = r.id
+        WHERE r.header_id = %s
+        ORDER BY r.fio, r.tbn, p.date_from
+        """,
+        (int(header_id),),
+    )
+
+    rows_map: Dict[int, Dict[str, Any]] = {}
+
+    for r_id, fio, tbn, hours_raw, d_from, d_to in cur.fetchall():
+        if r_id not in rows_map:
+            hours = normalize_hours_list(hours_raw, year, month)
+            rows_map[r_id] = {
+                "fio": fio or "",
+                "tbn": tbn or "",
+                "hours": hours,
+                "trip_periods": [],
+            }
+
+        if d_from and d_to:
+            rows_map[r_id]["trip_periods"].append(
+                {
+                    "from": d_from,
+                    "to": d_to,
+                }
+            )
+
+    return list(rows_map.values())
+
+
+def load_trip_timesheet_rows_for_copy(
+    object_id: Optional[str],
+    object_addr: str,
+    year: int,
+    month: int,
+) -> Tuple[List[Dict[str, Any]], str]:
+    """
+    Более надёжная загрузка строк табеля для копирования сотрудников.
+
+    Ищет табель-источник несколькими способами:
+    1. по object_db_id;
+    2. по object_id;
+    3. по точному адресу;
+    4. по нормализованному адресу.
+
+    Возвращает:
+        rows, debug_info
+    """
+    object_id_norm = _norm_header_object_id(object_id)
+    object_addr_norm = _norm_header_address(object_addr)
+
+    with db_cursor() as (_conn, cur):
+        object_db_id = None
+
+        try:
+            object_db_id = find_object_db_id_by_excel_or_address(
+                cur,
+                object_id_norm or None,
+                object_addr_norm,
+            )
+        except Exception as exc:
+            logger.warning("Не удалось определить object_db_id для копирования: %s", exc)
+
+        attempts: List[Tuple[str, tuple[Any, ...], str]] = []
+
+        if object_db_id is not None:
+            attempts.append(
+                (
+                    """
+                    SELECT h.id
+                    FROM trip_timesheet_headers h
+                    WHERE h.object_db_id = %s
+                      AND h.year = %s
+                      AND h.month = %s
+                    ORDER BY h.updated_at DESC NULLS LAST, h.id DESC
+                    LIMIT 1
+                    """,
+                    (int(object_db_id), int(year), int(month)),
+                    f"по object_db_id={object_db_id}",
+                )
+            )
+
+        if object_id_norm:
+            attempts.append(
+                (
+                    """
+                    SELECT h.id
+                    FROM trip_timesheet_headers h
+                    WHERE COALESCE(h.object_id, '') = %s
+                      AND h.year = %s
+                      AND h.month = %s
+                    ORDER BY h.updated_at DESC NULLS LAST, h.id DESC
+                    LIMIT 1
+                    """,
+                    (object_id_norm, int(year), int(month)),
+                    f"по object_id={object_id_norm}",
+                )
+            )
+
+        if object_addr_norm:
+            attempts.append(
+                (
+                    """
+                    SELECT h.id
+                    FROM trip_timesheet_headers h
+                    WHERE h.object_addr = %s
+                      AND h.year = %s
+                      AND h.month = %s
+                    ORDER BY h.updated_at DESC NULLS LAST, h.id DESC
+                    LIMIT 1
+                    """,
+                    (object_addr_norm, int(year), int(month)),
+                    "по точному адресу",
+                )
+            )
+
+            attempts.append(
+                (
+                    """
+                    SELECT h.id
+                    FROM trip_timesheet_headers h
+                    WHERE LOWER(TRIM(REGEXP_REPLACE(COALESCE(h.object_addr, ''), '\\s+', ' ', 'g')))
+                          = LOWER(%s)
+                      AND h.year = %s
+                      AND h.month = %s
+                    ORDER BY h.updated_at DESC NULLS LAST, h.id DESC
+                    LIMIT 1
+                    """,
+                    (object_addr_norm, int(year), int(month)),
+                    "по нормализованному адресу",
+                )
+            )
+
+        checked_labels: List[str] = []
+
+        for sql, params, label in attempts:
+            checked_labels.append(label)
+
+            try:
+                cur.execute(sql, params)
+                row = cur.fetchone()
+            except Exception as exc:
+                logger.warning("Ошибка поиска табеля для копирования %s: %s", label, exc)
+                continue
+
+            if not row:
+                continue
+
+            header_id = int(row[0])
+            rows = _load_trip_rows_by_header_id_cur(
+                cur,
+                header_id=header_id,
+                year=year,
+                month=month,
+            )
+
+            return rows, f"Найдено {label}, header_id={header_id}, строк={len(rows)}"
+
+        # Диагностика: покажем, какие табели вообще есть за этот месяц
+        cur.execute(
+            """
+            SELECT
+                h.id,
+                COALESCE(h.object_id, '') AS object_id,
+                COALESCE(h.object_addr, '') AS object_addr,
+                h.object_db_id
+            FROM trip_timesheet_headers h
+            WHERE h.year = %s
+              AND h.month = %s
+            ORDER BY h.updated_at DESC NULLS LAST, h.id DESC
+            LIMIT 20
+            """,
+            (int(year), int(month)),
+        )
+
+        candidates = cur.fetchall()
+
+        debug_lines = [
+            f"Табель не найден за {int(month):02d}.{int(year)}.",
+            "",
+            "Проверялись варианты:",
+        ]
+
+        if checked_labels:
+            for label in checked_labels:
+                debug_lines.append(f"• {label}")
+        else:
+            debug_lines.append("• нет вариантов поиска")
+
+        debug_lines.append("")
+        debug_lines.append(f"Текущий object_id: {object_id_norm or '-'}")
+        debug_lines.append(f"Текущий object_addr: {object_addr_norm or '-'}")
+        debug_lines.append(f"Текущий object_db_id: {object_db_id or '-'}")
+        debug_lines.append("")
+
+        if candidates:
+            debug_lines.append(f"Другие табели за {int(month):02d}.{int(year)} в trip_timesheet_headers:")
+            for h_id, h_object_id, h_object_addr, h_object_db_id in candidates:
+                debug_lines.append(
+                    f"• header_id={h_id}, object_id={h_object_id or '-'}, "
+                    f"object_db_id={h_object_db_id or '-'}, адрес={h_object_addr or '-'}"
+                )
+        else:
+            debug_lines.append(
+                f"В таблице trip_timesheet_headers вообще нет табелей за {int(month):02d}.{int(year)}."
+            )
+
+        return [], "\n".join(debug_lines)
 
 def load_trip_timesheet_rows_by_header_id(header_id: int) -> List[Dict[str, Any]]:
     with db_cursor() as (_conn, cur):
@@ -551,6 +821,7 @@ __all__ = [
     "upsert_trip_timesheet_header",
     "replace_trip_timesheet_rows",
     "load_trip_timesheet_rows_from_db",
+    "load_trip_timesheet_rows_for_copy",
     "load_trip_timesheet_rows_by_header_id",
     "load_trip_timesheet_full_by_header_id",
     "find_trip_timesheet_header_id",
