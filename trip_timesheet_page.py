@@ -37,6 +37,7 @@ from trip_period_dialog import TripPeriodDialog, EmployeeTripsDialog
 from trip_timesheet_db import (
     find_duplicate_employees_for_trip_timesheet,
     find_trip_timesheet_header_id,
+    load_trip_timesheet_rows_for_copy,
     load_trip_timesheet_rows_from_db,
     replace_trip_timesheet_rows,
     upsert_trip_timesheet_header,
@@ -1504,8 +1505,8 @@ class TripTimesheetPage(tk.Frame):
         replace_current = bool(params["replace"])
 
         try:
-            source_rows, source_search_info = self._load_source_rows_for_copy(
-                object_id=object_id,
+            source_rows, source_debug_info = load_trip_timesheet_rows_for_copy(
+                object_id=object_id or None,
                 object_addr=object_addr,
                 year=source_year,
                 month=source_month,
@@ -1522,14 +1523,10 @@ class TripTimesheetPage(tk.Frame):
             messagebox.showinfo(
                 "Копирование",
                 (
-                    f"Не найдены сотрудники в табеле за {source_month:02d}.{source_year}.\n\n"
-                    f"Объект:\n{object_addr}\n\n"
-                    f"Проверялись варианты:\n{source_search_info}\n\n"
-                    "Возможные причины:\n"
-                    "1. Табель за этот месяц не был сохранён.\n"
-                    "2. Табель за апрель создан в другом модуле табеля.\n"
-                    "3. У апрельского табеля другой адрес объекта.\n"
-                    "4. В базе старый табель сохранён с другим ID объекта."
+                    f"Не найдены сотрудники для копирования.\n\n"
+                    f"Источник: {source_month:02d}.{source_year}\n"
+                    f"Объект: {object_addr}\n\n"
+                    f"Диагностика:\n{source_debug_info}"
                 ),
                 parent=self,
             )
