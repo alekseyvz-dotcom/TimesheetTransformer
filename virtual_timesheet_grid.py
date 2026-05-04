@@ -993,31 +993,35 @@ class VirtualTimesheetGrid(tk.Frame):
                 day_num = di + 1
                 anchor = "center"
                 tx = (x0 + x1) / 2
-
+            
+                val = None
+            
                 if day_num > dim:
-                    bg = self.DISABLED_BG
+                    bg = self.DISABLED_BG if not selected else self.SELECT_BG
                     fill = self.MUTED
+                    text = ""
                 else:
                     val = hours[di] if di < len(hours) else None
                     text = "" if val is None else str(val)
-                if self.show_trip_period:
-                    bg = self._get_trip_cell_bg(
-                        rec=rec,
-                        day_num=day_num,
-                        day_index=di,
-                        selected=selected,
-                        base_bg=base_bg,
-                        cell_value=val,
-                    )
-                else:
-                    bg = self._get_schedule_cell_bg(
-                        rec=rec,
-                        day_num=day_num,
-                        day_index=di,
-                        selected=selected,
-                        base_bg=base_bg,
-                        cell_value=val,
-                    )
+            
+                    if self.show_trip_period:
+                        bg = self._get_trip_cell_bg(
+                            rec=rec,
+                            day_num=day_num,
+                            day_index=di,
+                            selected=selected,
+                            base_bg=base_bg,
+                            cell_value=val,
+                        )
+                    else:
+                        bg = self._get_schedule_cell_bg(
+                            rec=rec,
+                            day_num=day_num,
+                            day_index=di,
+                            selected=selected,
+                            base_bg=base_bg,
+                            cell_value=val,
+                        )
 
             elif kind == "del":
                 anchor = "center"
