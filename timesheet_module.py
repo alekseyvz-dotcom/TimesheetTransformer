@@ -114,8 +114,10 @@ def _set_timesheet_tab_title(app_ref, key: str, header: Dict[str, Any]):
         year = int(header.get("year") or 0)
         month = int(header.get("month") or 0)
         month_ru = month_name_ru(month) if 1 <= month <= 12 else str(month or "")
-        oid = normalize_spaces(header.get("object_id") or "")
-        addr = normalize_spaces(header.get("object_addr") or "")
+        
+        # Убрали normalize_spaces, чтобы не искажать пробелы
+        oid = str(header.get("object_id") or "").strip()
+        addr = str(header.get("object_addr") or "").strip()
         dep = normalize_spaces(header.get("department") or "")
 
         if oid and addr:
@@ -606,8 +608,8 @@ class TimesheetPage(tk.Frame):
             "department": normalize_spaces(self.cmb_department.get() or ""),
             "year": year,
             "month": month,
-            "object_addr": normalize_spaces(self.cmb_address.get() or ""),
-            "object_id": normalize_spaces(self.cmb_object_id.get() or ""),
+            "object_addr": self.cmb_address.get().strip(),
+            "object_id": self.cmb_object_id.get().strip(),
             "header_id": self._active_header_id,
         }
 
@@ -1071,11 +1073,12 @@ class TimesheetPage(tk.Frame):
         )
         self.departments = ["Все"] + deps
 
+        # ВАЖНО: Используем адрес "как есть" из базы объектов, только strip()
         self.address_options = sorted(
             {
-                normalize_spaces(addr)
+                (addr.strip() if addr else "")
                 for _, addr, _ in self.objects_full
-                if normalize_spaces(addr)
+                if addr and addr.strip()
             }
         )
 
@@ -1504,8 +1507,18 @@ class TimesheetPage(tk.Frame):
                         self.owner_user_id = int(header["user_id"])
 
                     hist_dep = normalize_spaces(header.get("department") or "")
-                    hist_addr = normalize_spaces(header.get("object_addr") or "")
-                    hist_oid = normalize_spaces(header.get("object_id") or "")
+                    
+                    hist_oid = str(header.get("object_id") or "").strip()
+                    hist_addr = str(header.get("object_addr") or "").strip()
+                    
+                    # ПРИОРИТЕТ: берем точный адрес из базы objects по ID объекта!
+                    # Это исцеляет любые рассинхроны при открытии табеля
+                    if hist_oid:
+                        for code, a, _ in self.objects_full:
+                            if code and code.strip() == hist_oid:
+                                hist_addr = a.strip()
+                                break
+
                     hist_year = int(header.get("year") or self._safe_get_year())
                     hist_month = int(header.get("month") or (self.cmb_month.current() + 1))
 
@@ -1530,17 +1543,28 @@ class TimesheetPage(tk.Frame):
                         self.cmb_object_id.set(hist_oid)
 
             else:
-                if self._init_object_addr:
-                    self._ensure_address_option(self._init_object_addr)
-                    self.cmb_address.set(self._init_object_addr)
+                # Открывается новый табель по переданным параметрам
+                init_oid = str(self._init_object_id or "").strip()
+                init_addr = str(self._init_object_addr or "").strip()
+                
+                # Подтягиваем актуальный адрес по ID
+                if init_oid:
+                    for code, a, _ in self.objects_full:
+                        if code and code.strip() == init_oid:
+                            init_addr = a.strip()
+                            break
 
-                if self._init_object_id:
+                if init_addr:
+                    self._ensure_address_option(init_addr)
+                    self.cmb_address.set(init_addr)
+
+                if init_oid:
                     self._sync_object_id_values_silent()
                     values = list(self.cmb_object_id.cget("values") or [])
-                    if self._init_object_id not in values:
-                        values.append(self._init_object_id)
+                    if init_oid not in values:
+                        values.append(init_oid)
                         self.cmb_object_id.config(values=values)
-                    self.cmb_object_id.set(self._init_object_id)
+                    self.cmb_object_id.set(init_oid)
 
             self._refresh_employee_selector_for_department(normalize_spaces(self.cmb_department.get() or "Все"))
         finally:
@@ -1555,19 +1579,26 @@ class TimesheetPage(tk.Frame):
     # --------------------------------------------------------
 
     def _sync_object_id_values_silent(self):
-        addr = normalize_spaces(self.cmb_address.get() or "")
+        # Берем чистый текст из комбобокса, не меняя внутренние пробелы
+        addr = self.cmb_address.get().strip()
+        
         objects_for_addr = [
-            (code, a, short_name)
+            (code.strip(), a.strip(), short_name)
             for (code, a, short_name) in self.objects_full
-            if normalize_spaces(a) == addr
+            if a and a.strip() == addr
         ]
+        
         if not objects_for_addr:
+            loaded_addr = self._loaded_context.get("object_addr") if hasattr(self, "_loaded_context") else None
+            if loaded_addr and addr == loaded_addr:
+                return
+
             self.cmb_object_id.config(state="normal", values=[])
             self.cmb_object_id.set("")
             return
 
-        ids = sorted({normalize_spaces(code) for code, _, _ in objects_for_addr if normalize_spaces(code)})
-        cur = normalize_spaces(self.cmb_object_id.get() or "")
+        ids = sorted({code for code, _, _ in objects_for_addr if code})
+        cur = self.cmb_object_id.get().strip()
 
         self.cmb_object_id.config(state="readonly", values=ids)
         if cur and cur in ids:
@@ -1616,11 +1647,11 @@ class TimesheetPage(tk.Frame):
         self._load_existing_rows()
 
     def _on_address_change(self, ask_user: bool = True):
-        addr = normalize_spaces(self.cmb_address.get() or "")
+        addr = self.cmb_address.get().strip()
         objects_for_addr = [
-            (normalize_spaces(code), normalize_spaces(a), normalize_spaces(short_name))
+            (code.strip(), a.strip(), short_name)
             for (code, a, short_name) in self.objects_full
-            if normalize_spaces(a) == addr
+            if a and a.strip() == addr
         ]
 
         if not objects_for_addr:
@@ -1629,7 +1660,7 @@ class TimesheetPage(tk.Frame):
             return
 
         ids = sorted({code for code, _, _ in objects_for_addr if code})
-        current_oid = normalize_spaces(self.cmb_object_id.get() or "")
+        current_oid = self.cmb_object_id.get().strip()
         self.cmb_object_id.config(state="readonly", values=ids)
 
         if current_oid and current_oid in ids:
@@ -1646,7 +1677,7 @@ class TimesheetPage(tk.Frame):
         dlg = SelectObjectIdDialog(self, objects_for_addr, addr)
         self.wait_window(dlg)
 
-        selected_id = normalize_spaces(dlg.result or "")
+        selected_id = (dlg.result or "").strip()
         if selected_id and selected_id in ids:
             self.cmb_object_id.set(selected_id)
         else:
@@ -2979,8 +3010,9 @@ class TimesheetPage(tk.Frame):
                 self._mark_save_error(msg if len(msg) < 80 else "Ошибка авто‑сохранения")
             return False
 
-        object_addr = normalize_spaces(self.cmb_address.get() or "")
-        object_id = normalize_spaces(self.cmb_object_id.get() or "")
+        # Изменения здесь: используем точные строки из полей ввода
+        object_addr = self.cmb_address.get().strip()
+        object_id = self.cmb_object_id.get().strip()
         year, month = self.get_year_month()
         department = normalize_spaces(self.cmb_department.get() or "")
 
@@ -2992,8 +3024,10 @@ class TimesheetPage(tk.Frame):
             return fail("Не удалось определить пользователя.", level="error")
 
         self._sync_object_id_values_silent()
-        object_addr = normalize_spaces(self.cmb_address.get() or "")
-        object_id = normalize_spaces(self.cmb_object_id.get() or "")
+        
+        # Забираем адрес заново после синхронизации (строго strip без normalize_spaces)
+        object_addr = self.cmb_address.get().strip()
+        object_id = self.cmb_object_id.get().strip()
 
         if not object_addr:
             return fail("Не задан адрес объекта. Выберите адрес из списка.")
@@ -3003,9 +3037,9 @@ class TimesheetPage(tk.Frame):
             return fail("Адрес объекта введён вручную и не найден в справочнике.\nВыберите адрес из списка.")
 
         objects_for_addr = [
-            (normalize_spaces(code), normalize_spaces(a), normalize_spaces(short_name))
+            (code.strip(), a.strip(), short_name)
             for (code, a, short_name) in self.objects_full
-            if normalize_spaces(a) == object_addr
+            if a and a.strip() == object_addr
         ]
         ids_for_addr = sorted({code for code, _, _ in objects_for_addr if code})
         if len(ids_for_addr) > 1 and not object_id:
