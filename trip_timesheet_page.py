@@ -975,6 +975,23 @@ class TripTimesheetPage(tk.Frame):
             "object_addr": object_addr,
         }
 
+    def _get_current_user_id(self) -> Optional[int]:
+        try:
+            current_user = getattr(self.app, "current_user", {}) or {}
+    
+            user_id = (
+                current_user.get("user_id")
+                or current_user.get("id")
+                or current_user.get("pk")
+            )
+    
+            if user_id is None:
+                return None
+    
+            return int(user_id)
+        except Exception:
+            return None
+
     def _restore_controls_to_loaded_context(self) -> None:
         if not self._loaded_context:
             return
@@ -1325,14 +1342,29 @@ class TripTimesheetPage(tk.Frame):
                 self._mark_save_error("Ошибка авто‑сохранения: есть ошибки в данных")
             return False
 
+        user_id = self._get_current_user_id()
+        
+        if user_id is None:
+            if show_messages:
+                messagebox.showerror(
+                    "Ошибка",
+                    "Не удалось определить пользователя для сохранения табеля.\n"
+                    "Перезайдите в программу.",
+                    parent=self,
+                )
+            if is_auto:
+                self._mark_save_error("Ошибка авто‑сохранения: не определён пользователь")
+            return False
+        
         try:
             header_id = upsert_trip_timesheet_header(
                 object_id=object_id or None,
                 object_addr=object_addr,
                 year=year,
                 month=month,
+                user_id=user_id,
             )
-
+        
             self._recalc_all_totals()
             replace_trip_timesheet_rows(
                 header_id=header_id,
@@ -1340,7 +1372,7 @@ class TripTimesheetPage(tk.Frame):
                 year=year,
                 month=month,
             )
-
+        
             self.current_header_id = header_id
             self._loaded_context = self._capture_current_context()
         except Exception as exc:
