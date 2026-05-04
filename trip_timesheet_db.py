@@ -136,6 +136,7 @@ def upsert_trip_timesheet_header(
     object_addr: str,
     year: int,
     month: int,
+    user_id: int,
 ) -> int:
     object_id_norm = _norm_header_object_id(object_id)
     object_addr_norm = _norm_header_address(object_addr)
@@ -143,12 +144,25 @@ def upsert_trip_timesheet_header(
     if not object_addr_norm:
         raise RuntimeError("Не задан адрес объекта для сохранения командировочного табеля.")
 
+    if user_id is None:
+        raise RuntimeError(
+            "Не удалось сохранить командировочный табель: не передан user_id."
+        )
+
+    try:
+        user_id_int = int(user_id)
+    except Exception:
+        raise RuntimeError(
+            f"Не удалось сохранить командировочный табель: некорректный user_id={user_id!r}."
+        )
+
     with db_cursor() as (_conn, cur):
         object_db_id = find_object_db_id_by_excel_or_address(
             cur,
             object_id_norm or None,
             object_addr_norm,
         )
+
         if object_db_id is None:
             raise RuntimeError(
                 f"В БД не найден объект (excel_id={object_id_norm!r}, address={object_addr_norm!r}).\n"
@@ -173,6 +187,7 @@ def upsert_trip_timesheet_header(
                     year = %s,
                     month = %s,
                     object_db_id = %s,
+                    user_id = COALESCE(user_id, %s),
                     updated_at = now()
                 WHERE id = %s
                 """,
@@ -182,6 +197,7 @@ def upsert_trip_timesheet_header(
                     int(year),
                     int(month),
                     int(object_db_id),
+                    user_id_int,
                     int(existing_id),
                 ),
             )
@@ -190,8 +206,15 @@ def upsert_trip_timesheet_header(
         cur.execute(
             """
             INSERT INTO trip_timesheet_headers
-                (object_id, object_addr, year, month, object_db_id)
-            VALUES (%s, %s, %s, %s, %s)
+                (
+                    object_id,
+                    object_addr,
+                    year,
+                    month,
+                    user_id,
+                    object_db_id
+                )
+            VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -199,14 +222,16 @@ def upsert_trip_timesheet_header(
                 object_addr_norm,
                 int(year),
                 int(month),
+                user_id_int,
                 int(object_db_id),
             ),
         )
+
         row = cur.fetchone()
         if not row:
             raise RuntimeError("Не удалось создать заголовок командировочного табеля.")
-        return int(row[0])
 
+        return int(row[0])
 
 def replace_trip_timesheet_rows(
     header_id: int,
@@ -382,53 +407,6 @@ def _load_trip_rows_by_header_id_cur(
             )
 
     return list(rows_map.values())
-
-
-def _load_trip_rows_by_header_id_cur(
-    cur,
-    header_id: int,
-    year: int,
-    month: int,
-) -> List[Dict[str, Any]]:
-    cur.execute(
-        """
-        SELECT 
-            r.id,
-            r.fio,
-            r.tbn,
-            r.hours_raw,
-            p.date_from,
-            p.date_to
-        FROM trip_timesheet_rows r
-        LEFT JOIN trip_timesheet_periods p ON p.row_id = r.id
-        WHERE r.header_id = %s
-        ORDER BY r.fio, r.tbn, p.date_from
-        """,
-        (int(header_id),),
-    )
-
-    rows_map: Dict[int, Dict[str, Any]] = {}
-
-    for r_id, fio, tbn, hours_raw, d_from, d_to in cur.fetchall():
-        if r_id not in rows_map:
-            hours = normalize_hours_list(hours_raw, year, month)
-            rows_map[r_id] = {
-                "fio": fio or "",
-                "tbn": tbn or "",
-                "hours": hours,
-                "trip_periods": [],
-            }
-
-        if d_from and d_to:
-            rows_map[r_id]["trip_periods"].append(
-                {
-                    "from": d_from,
-                    "to": d_to,
-                }
-            )
-
-    return list(rows_map.values())
-
 
 def load_trip_timesheet_rows_for_copy(
     object_id: Optional[str],
