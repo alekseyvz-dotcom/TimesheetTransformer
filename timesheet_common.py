@@ -93,6 +93,10 @@ SPECIAL_CODES = {
     "П": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Простой / прочее"},
     "КВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Командировка выходного дня"},
     "СНЕГ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Снег"},
+    "Я/Н": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Явка/ночь"},
+    "Я/КР": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Явка/перерыв на кормление ребенка"},
+    "Я/ДО": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Явка/отпуск без оплаты"},
+    "Я/НН": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Явка/неявка по невыясненным причинам"},
     
     # Оставили эти ключи для совместимости (хотя универсальная логика ниже перехватит их)
     "РВ 8": {"hours": 8.0, "night_hours": 0.0, "counts_day": True, "description": "Работа в выходной 8 ч"},
