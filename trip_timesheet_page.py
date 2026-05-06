@@ -604,6 +604,12 @@ class TripTimesheetPage(tk.Frame):
         self.var_trip_info = tk.StringVar(value="")
         self.var_filter = tk.StringVar(value="")
 
+        self.var_filter_department = tk.StringVar(value="Все")
+        self.var_filter_position = tk.StringVar(value="Все")
+        
+        self.employee_meta_by_tbn: Dict[str, Dict[str, str]] = {}
+        self.employee_meta_by_fio: Dict[str, Dict[str, str]] = {}
+
         self.objects_full: List[Tuple[str, str, str]] = []
         self.address_options: List[str] = []
 
@@ -825,18 +831,52 @@ class TripTimesheetPage(tk.Frame):
     def _build_filter_bar(self) -> None:
         bar = tk.Frame(self, bg=UI["bg"], pady=2)
         bar.pack(fill="x", padx=10, pady=(4, 0))
-
+    
         tk.Label(
             bar,
-            text="🔍 Поиск (ФИО / таб. №):",
+            text="🔍 Поиск:",
             font=("Segoe UI", 9),
             bg=UI["bg"],
         ).pack(side="left")
-
-        ent_filter = ttk.Entry(bar, textvariable=self.var_filter, width=36)
-        ent_filter.pack(side="left", padx=(4, 8))
+    
+        ent_filter = ttk.Entry(bar, textvariable=self.var_filter, width=28)
+        ent_filter.pack(side="left", padx=(4, 10))
         ent_filter.bind("<KeyRelease>", lambda _e: self._apply_filter())
-
+    
+        tk.Label(
+            bar,
+            text="Подразделение:",
+            font=("Segoe UI", 9),
+            bg=UI["bg"],
+        ).pack(side="left")
+    
+        self.cmb_filter_department = ttk.Combobox(
+            bar,
+            textvariable=self.var_filter_department,
+            values=["Все"],
+            state="readonly",
+            width=24,
+        )
+        self.cmb_filter_department.pack(side="left", padx=(4, 10))
+        self.cmb_filter_department.bind("<<ComboboxSelected>>", lambda _e: self._apply_filter())
+    
+        tk.Label(
+            bar,
+            text="Должность:",
+            font=("Segoe UI", 9),
+            bg=UI["bg"],
+        ).pack(side="left")
+    
+        self.cmb_filter_position = ttk.Combobox(
+            bar,
+            textvariable=self.var_filter_position,
+            values=["Все"],
+            state="readonly",
+            width=24,
+        )
+        self.cmb_filter_position.pack(side="left", padx=(4, 10))
+        self.cmb_filter_position.bind("<<ComboboxSelected>>", lambda _e: self._apply_filter())
+    
         ttk.Button(bar, text="Очистить", command=self._clear_filter).pack(side="left")
 
     def _build_grid(self) -> None:
@@ -1041,6 +1081,7 @@ class TripTimesheetPage(tk.Frame):
     # =========================================================
     # Справочники
     # =========================================================
+
     def _load_reference_data(self) -> None:
         self.objects_full = load_objects_short_for_timesheet()
         self.address_options = sorted(
@@ -1051,7 +1092,9 @@ class TripTimesheetPage(tk.Frame):
             }
         )
         self.cmb_address.set_completion_list(self.address_options)
-
+    
+        self._load_employee_filter_meta()
+    
     def _parse_selected_object(self) -> Tuple[str, str]:
         object_addr = normalize_spaces(self.cmb_address.get() or "")
         object_id = normalize_spaces(self.cmb_object_id.get() or "")
@@ -1094,6 +1137,125 @@ class TripTimesheetPage(tk.Frame):
             return
     
         self._open_timesheet()
+
+    def _employee_meta_from_item(self, item: Any) -> Dict[str, str]:
+        """
+        Приводит запись сотрудника из load_employees_from_db() к единому виду.
+    
+        ВАЖНО:
+        Здесь предполагается, что tuple/list сотрудника имеет порядок:
+            0 - ФИО
+            1 - табельный номер
+            2 - должность
+            3 - подразделение
+            4 - график работы
+    
+        Если у тебя в load_employees_from_db() другой порядок полей,
+        поменяй индексы position/department местами.
+        """
+        if isinstance(item, dict):
+            fio = (
+                item.get("fio")
+                or item.get("full_name")
+                or item.get("name")
+                or ""
+            )
+            tbn = (
+                item.get("tbn")
+                or item.get("tab_number")
+                or item.get("personnel_number")
+                or ""
+            )
+            position = (
+                item.get("position")
+                or item.get("job_title")
+                or item.get("post")
+                or ""
+            )
+            department = (
+                item.get("department")
+                or item.get("department_name")
+                or item.get("dep")
+                or ""
+            )
+            work_schedule = (
+                item.get("work_schedule")
+                or item.get("schedule")
+                or ""
+            )
+        else:
+            def val(idx: int) -> str:
+                try:
+                    if len(item) > idx and item[idx] is not None:
+                        return str(item[idx])
+                except Exception:
+                    pass
+                return ""
+    
+            fio = val(0)
+            tbn = val(1)
+    
+            # Если порядок в твоей БД другой — поменяй эти две строки местами.
+            position = val(2)
+            department = val(3)
+    
+            work_schedule = val(4)
+    
+        return {
+            "fio": normalize_spaces(fio),
+            "tbn": normalize_tbn(tbn),
+            "position": normalize_spaces(position),
+            "department": normalize_spaces(department),
+            "work_schedule": normalize_spaces(work_schedule),
+        }
+    
+    
+    def _rebuild_employee_meta(self, employees: Sequence[Any]) -> None:
+        self.employee_meta_by_tbn = {}
+        self.employee_meta_by_fio = {}
+    
+        for item in employees:
+            meta = self._employee_meta_from_item(item)
+    
+            fio = normalize_spaces(meta.get("fio") or "")
+            tbn = normalize_tbn(meta.get("tbn"))
+    
+            if tbn:
+                self.employee_meta_by_tbn[tbn] = meta
+    
+            if fio:
+                self.employee_meta_by_fio[fio.lower()] = meta
+    
+    
+    def _load_employee_filter_meta(self) -> None:
+        try:
+            employees = load_employees_from_db()
+        except Exception as exc:
+            logger.warning("Не удалось загрузить данные сотрудников для фильтров: %s", exc)
+            self.employee_meta_by_tbn = {}
+            self.employee_meta_by_fio = {}
+            return
+    
+        self._rebuild_employee_meta(employees)
+    
+    
+    def _find_employee_meta(self, fio: str, tbn: str) -> Dict[str, str]:
+        fio_norm = normalize_spaces(fio or "")
+        tbn_norm = normalize_tbn(tbn)
+    
+        if tbn_norm and tbn_norm in self.employee_meta_by_tbn:
+            return self.employee_meta_by_tbn[tbn_norm]
+    
+        if fio_norm and fio_norm.lower() in self.employee_meta_by_fio:
+            return self.employee_meta_by_fio[fio_norm.lower()]
+    
+        return {
+            "fio": fio_norm,
+            "tbn": tbn_norm,
+            "position": "",
+            "department": "",
+            "work_schedule": "",
+        }
     
     # =========================================================
     # Период / объект
@@ -1190,14 +1352,21 @@ class TripTimesheetPage(tk.Frame):
         year, month = self._get_year_month()
         hours = normalize_hours_list([], year, month)
         totals = calc_row_totals(hours, year, month)
-
+    
+        fio_norm = normalize_spaces(fio)
+        tbn_norm = normalize_tbn(tbn)
+    
+        meta = self._find_employee_meta(fio_norm, tbn_norm)
+    
         return {
-            "fio": normalize_spaces(fio),
-            "tbn": normalize_tbn(tbn),
+            "fio": fio_norm,
+            "tbn": tbn_norm,
             "hours": hours,
-            "trip_periods": [],  # НОВОЕ: Теперь это список периодов
+            "trip_periods": [],
             "_totals": totals,
-            "work_schedule": "",
+            "work_schedule": normalize_spaces(meta.get("work_schedule") or ""),
+            "department": normalize_spaces(meta.get("department") or ""),
+            "position": normalize_spaces(meta.get("position") or ""),
         }
 
     def _normalize_trip_row(self, rec: Dict[str, Any]) -> Dict[str, Any]:
@@ -1216,13 +1385,29 @@ class TripTimesheetPage(tk.Frame):
         if not isinstance(totals, dict):
             totals = calc_row_totals(hours, year, month)
 
+        meta = self._find_employee_meta(fio, tbn)
+        
         out = {
             "fio": fio,
             "tbn": tbn,
             "hours": hours,
-            "trip_periods": periods,  # НОВОЕ: сохраняем массив
+            "trip_periods": periods,
             "_totals": totals,
-            "work_schedule": normalize_spaces(rec.get("work_schedule") or ""),
+            "work_schedule": normalize_spaces(
+                rec.get("work_schedule")
+                or meta.get("work_schedule")
+                or ""
+            ),
+            "department": normalize_spaces(
+                rec.get("department")
+                or meta.get("department")
+                or ""
+            ),
+            "position": normalize_spaces(
+                rec.get("position")
+                or meta.get("position")
+                or ""
+            ),
         }
         return out
 
@@ -1234,8 +1419,11 @@ class TripTimesheetPage(tk.Frame):
 
     def _refresh_grid(self) -> None:
         self._recalc_all_totals()
+        self._refresh_filter_options()
+    
         visible_rows = self._get_filtered_rows()
         self.grid_widget.set_rows(visible_rows)
+    
         self._recalc_bottom_totals()
 
     def _set_rows(self, rows: Sequence[Dict[str, Any]]) -> None:
@@ -1244,15 +1432,29 @@ class TripTimesheetPage(tk.Frame):
 
     def _get_filtered_rows(self) -> List[Dict[str, Any]]:
         q = normalize_spaces(self.var_filter.get() or "").lower()
-        if not q:
-            return self.rows
-
+    
+        filter_department = normalize_spaces(self.var_filter_department.get() or "Все")
+        filter_position = normalize_spaces(self.var_filter_position.get() or "Все")
+    
         filtered = []
+    
         for rec in self.rows:
             fio = normalize_spaces(rec.get("fio") or "").lower()
             tbn = normalize_tbn(rec.get("tbn")).lower()
-            if q in fio or q in tbn:
-                filtered.append(rec)
+            department = normalize_spaces(rec.get("department") or "")
+            position = normalize_spaces(rec.get("position") or "")
+    
+            if q and q not in fio and q not in tbn:
+                continue
+    
+            if filter_department != "Все" and department != filter_department:
+                continue
+    
+            if filter_position != "Все" and position != filter_position:
+                continue
+    
+            filtered.append(rec)
+    
         return filtered
 
     def _apply_filter(self) -> None:
@@ -1261,6 +1463,8 @@ class TripTimesheetPage(tk.Frame):
 
     def _clear_filter(self) -> None:
         self.var_filter.set("")
+        self.var_filter_department.set("Все")
+        self.var_filter_position.set("Все")
         self._apply_filter()
 
     def _recalc_bottom_totals(self) -> None:
@@ -1681,21 +1885,27 @@ class TripTimesheetPage(tk.Frame):
 
         added = 0
         for item in selected:
-            if len(item) >= 2:
-                fio = normalize_spaces(item[0] or "")
-                tbn = normalize_tbn(item[1])
-            else:
+            meta = self._employee_meta_from_item(item)
+        
+            fio = normalize_spaces(meta.get("fio") or "")
+            tbn = normalize_tbn(meta.get("tbn"))
+        
+            if not fio and not tbn:
                 continue
-
+        
             key = (fio.lower(), tbn)
             if key in existing_keys:
                 continue
-
+        
             row = self._empty_row(fio=fio, tbn=tbn)
-            if len(item) >= 5:
-                row["work_schedule"] = normalize_spaces(item[4] or "")
-
+        
+            row["department"] = normalize_spaces(meta.get("department") or row.get("department") or "")
+            row["position"] = normalize_spaces(meta.get("position") or row.get("position") or "")
+            row["work_schedule"] = normalize_spaces(meta.get("work_schedule") or row.get("work_schedule") or "")
+        
             self.rows.append(row)
+            existing_keys.add(key)
+            added += 1
             existing_keys.add(key)
             added += 1
 
@@ -2261,3 +2471,38 @@ class TripTimesheetPage(tk.Frame):
         self.var_status.set("Добавлена пустая строка.")
         self._mark_dirty()
         self._schedule_auto_save()
+
+    def _refresh_filter_options(self) -> None:
+        if not hasattr(self, "cmb_filter_department"):
+            return
+    
+        departments = sorted(
+            {
+                normalize_spaces(r.get("department") or "")
+                for r in self.rows
+                if normalize_spaces(r.get("department") or "")
+            }
+        )
+    
+        positions = sorted(
+            {
+                normalize_spaces(r.get("position") or "")
+                for r in self.rows
+                if normalize_spaces(r.get("position") or "")
+            }
+        )
+    
+        department_values = ["Все"] + departments
+        position_values = ["Все"] + positions
+    
+        current_department = normalize_spaces(self.var_filter_department.get() or "Все")
+        current_position = normalize_spaces(self.var_filter_position.get() or "Все")
+    
+        self.cmb_filter_department.config(values=department_values)
+        self.cmb_filter_position.config(values=position_values)
+    
+        if current_department not in department_values:
+            self.var_filter_department.set("Все")
+    
+        if current_position not in position_values:
+            self.var_filter_position.set("Все")
