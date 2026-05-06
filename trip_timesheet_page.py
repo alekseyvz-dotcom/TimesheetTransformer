@@ -855,7 +855,7 @@ class TripTimesheetPage(tk.Frame):
             textvariable=self.var_filter_department,
             values=["Все"],
             state="readonly",
-            width=35,
+            width=42,
         )
         self.cmb_filter_department.pack(side="left", padx=(4, 10))
         self.cmb_filter_department.bind("<<ComboboxSelected>>", lambda _e: self._apply_filter())
