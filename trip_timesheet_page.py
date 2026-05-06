@@ -1388,24 +1388,22 @@ class TripTimesheetPage(tk.Frame):
 
     def _validate_before_save(self) -> List[str]:
         errors: List[str] = []
-
+    
         for i, rec in enumerate(self.rows, start=1):
             fio = normalize_spaces(rec.get("fio") or "")
             tbn = normalize_tbn(rec.get("tbn"))
             periods = rec.get("trip_periods") or []
-            hours = rec.get("hours") or []
-
+    
             if not fio and not tbn:
                 errors.append(f"Строка {i}: не заполнены ФИО и табельный номер.")
-
+    
             for p in periods:
                 if p["from"] > p["to"]:
-                    errors.append(f"Строка {i}: дата начала командировки ({p['from']}) позже даты окончания ({p['to']}).")
-
-            has_hours = any(v is not None and str(v).strip() != "" for v in hours)
-            if has_hours and not periods:
-                errors.append(f"Строка {i}: есть часы, но не задан ни один период командировки.")
-
+                    errors.append(
+                        f"Строка {i}: дата начала командировки ({p['from']}) "
+                        f"позже даты окончания ({p['to']})."
+                    )
+    
         return errors
 
     # =========================================================
