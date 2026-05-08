@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from datetime import date
+import calendar
 import logging
+import socket
 from contextlib import contextmanager
+from datetime import date
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import psycopg2
-from psycopg2.extras import RealDictCursor, execute_values
+from psycopg2.extras import Json, RealDictCursor, execute_values
 
 from timesheet_common import (
     calc_row_totals,
@@ -238,7 +240,220 @@ def _load_header_meta_by_id(cur, header_id: int) -> Optional[Dict[str, Any]]:
         "updated_at": row[9],
     }
 
+def _audit_norm_cell(value: Any) -> Optional[str]:
+    """
+    Нормализация значения ячейки для сравнения в аудите.
+    Пустые строки и None считаются одинаковыми.
+    """
+    if value is None:
+        return None
 
+    text = normalize_spaces(str(value))
+    return text or None
+
+
+def _audit_row_key(row: Mapping[str, Any]) -> tuple[str, str]:
+    """
+    Ключ строки табеля для сравнения старого и нового состояния.
+    Используем тот же принцип, что и в табеле: ФИО + табельный номер.
+    """
+    return make_row_key(
+        normalize_spaces(row.get("fio") or ""),
+        normalize_tbn(row.get("tbn")),
+    )
+
+
+def _audit_hours(row: Mapping[str, Any], year: int, month: int) -> List[Optional[str]]:
+    """
+    Возвращает нормализованные 31 ячейку часов для строки табеля.
+    """
+    if not row:
+        return [None] * 31
+
+    hours = row.get("hours")
+    if hours is None:
+        hours = row.get("hours_raw")
+
+    normalized = normalize_hours_list(hours, int(year), int(month))
+    return [_audit_norm_cell(v) for v in normalized]
+
+
+def _load_timesheet_rows_for_audit(cur, header_id: int) -> List[Dict[str, Any]]:
+    """
+    Загружает текущее состояние строк табеля перед заменой.
+    """
+    cur.execute(
+        """
+        SELECT
+            fio,
+            tbn,
+            hours_raw
+        FROM public.timesheet_rows
+        WHERE header_id = %s
+        ORDER BY fio, tbn
+        """,
+        (int(header_id),),
+    )
+
+    result: List[Dict[str, Any]] = []
+
+    for row in cur.fetchall():
+        if isinstance(row, dict):
+            result.append(
+                {
+                    "fio": row.get("fio") or "",
+                    "tbn": row.get("tbn") or "",
+                    "hours_raw": row.get("hours_raw"),
+                }
+            )
+        else:
+            result.append(
+                {
+                    "fio": row[0] or "",
+                    "tbn": row[1] or "",
+                    "hours_raw": row[2],
+                }
+            )
+
+    return result
+
+
+def _insert_timesheet_cell_audit_records(
+    cur,
+    *,
+    header_id: int,
+    old_rows: Sequence[Mapping[str, Any]],
+    new_rows: Sequence[Mapping[str, Any]],
+    year: int,
+    month: int,
+    audit_user_id: Optional[int] = None,
+    audit_source: str = "save",
+    audit_detail: Optional[str] = None,
+) -> int:
+    """
+    Сравнивает старое и новое состояние табеля и пишет изменения ячеек в журнал.
+
+    Фиксируются:
+    - добавление значения: NULL -> "8"
+    - изменение значения: "8" -> "ОТ"
+    - очистка значения: "8" -> NULL
+    - удаление строки сотрудника: заполненные дни старой строки -> NULL
+    """
+    year = int(year)
+    month = int(month)
+    header_id = int(header_id)
+
+    header_meta = _load_header_meta_by_id(cur, header_id) or {}
+
+    object_db_id = header_meta.get("object_db_id")
+    object_id = normalize_spaces(header_meta.get("object_id") or "")
+    object_addr = normalize_spaces(header_meta.get("object_addr") or "")
+    department = normalize_spaces(header_meta.get("department") or "")
+
+    audit_source_norm = normalize_spaces(audit_source or "save") or "save"
+    audit_detail_norm = normalize_spaces(audit_detail or "") or None
+
+    old_by_key: Dict[tuple[str, str], Mapping[str, Any]] = {}
+    new_by_key: Dict[tuple[str, str], Mapping[str, Any]] = {}
+
+    for row in old_rows or []:
+        key = _audit_row_key(row)
+        if key[0] or key[1]:
+            old_by_key[key] = row
+
+    for row in new_rows or []:
+        key = _audit_row_key(row)
+        if key[0] or key[1]:
+            new_by_key[key] = row
+
+    all_keys = set(old_by_key.keys()) | set(new_by_key.keys())
+    if not all_keys:
+        return 0
+
+    days_in_month = calendar.monthrange(year, month)[1]
+
+    client_info = {
+        "host": socket.gethostname(),
+    }
+
+    values: List[tuple[Any, ...]] = []
+
+    for key in sorted(all_keys):
+        old_row = old_by_key.get(key)
+        new_row = new_by_key.get(key)
+
+        source_row = new_row or old_row or {}
+
+        fio = normalize_spaces(source_row.get("fio") or "")
+        tbn = normalize_tbn(source_row.get("tbn"))
+
+        if not fio and not tbn:
+            continue
+
+        old_hours = _audit_hours(old_row or {}, year, month)
+        new_hours = _audit_hours(new_row or {}, year, month)
+
+        for day_idx in range(days_in_month):
+            old_value = old_hours[day_idx]
+            new_value = new_hours[day_idx]
+
+            if old_value == new_value:
+                continue
+
+            day_no = day_idx + 1
+            work_date = date(year, month, day_no)
+
+            values.append(
+                (
+                    header_id,
+                    object_db_id,
+                    object_id or None,
+                    object_addr or None,
+                    department or None,
+                    year,
+                    month,
+                    day_no,
+                    work_date,
+                    fio,
+                    tbn or None,
+                    old_value,
+                    new_value,
+                    int(audit_user_id) if audit_user_id else None,
+                    audit_source_norm,
+                    audit_detail_norm,
+                    Json(client_info),
+                )
+            )
+
+    if not values:
+        return 0
+
+    insert_query = """
+        INSERT INTO public.timesheet_cell_audit (
+            header_id,
+            object_db_id,
+            object_id,
+            object_addr,
+            department,
+            year,
+            month,
+            day_no,
+            work_date,
+            fio,
+            tbn,
+            old_value,
+            new_value,
+            changed_by,
+            action_source,
+            action_detail,
+            client_info
+        )
+        VALUES %s
+    """
+
+    execute_values(cur, insert_query, values)
+    return len(values)
+    
 # ============================================================
 # Объекты / заголовки табелей
 # ============================================================
@@ -438,13 +653,27 @@ def replace_timesheet_rows(
     rows: Sequence[Mapping[str, Any]],
     year: int,
     month: int,
-) -> None:
+    *,
+    audit_user_id: Optional[int] = None,
+    audit_source: str = "save",
+    audit_detail: Optional[str] = None,
+) -> int:
     """
-    Полная замена строк табеля.
+    Полная замена строк табеля + журнал изменений ячеек.
+
     ВАЖНО:
-    - нормализует массив часов по реальному месяцу;
-    - totals считает только по валидным дням месяца.
+    - сначала загружается старое состояние строк;
+    - затем старое состояние сравнивается с новым;
+    - в timesheet_cell_audit пишутся только реально изменённые ячейки;
+    - затем строки табеля полностью заменяются;
+    - аудит и замена строк выполняются в одной транзакции.
+
+    Возвращает количество записей, добавленных в журнал аудита.
     """
+    header_id = int(header_id)
+    year = int(year)
+    month = int(month)
+
     values: List[tuple[Any, ...]] = []
 
     for rec in rows:
@@ -455,6 +684,7 @@ def replace_timesheet_rows(
             continue
 
         hours_list = normalize_hours_list(rec.get("hours"), year, month)
+
         totals = rec.get("_totals")
         if not isinstance(totals, dict):
             totals = calc_row_totals(hours_list, year, month)
@@ -467,7 +697,7 @@ def replace_timesheet_rows(
 
         values.append(
             (
-                int(header_id),
+                header_id,
                 fio,
                 tbn or None,
                 hours_list,
@@ -480,17 +710,46 @@ def replace_timesheet_rows(
         )
 
     with db_cursor() as (_conn, cur):
-        cur.execute("DELETE FROM timesheet_rows WHERE header_id = %s", (int(header_id),))
+        old_rows = _load_timesheet_rows_for_audit(cur, header_id)
 
-        if not values:
-            return
+        audit_count = _insert_timesheet_cell_audit_records(
+            cur,
+            header_id=header_id,
+            old_rows=old_rows,
+            new_rows=rows,
+            year=year,
+            month=month,
+            audit_user_id=audit_user_id,
+            audit_source=audit_source,
+            audit_detail=audit_detail,
+        )
 
-        insert_query = """
-            INSERT INTO timesheet_rows
-                (header_id, fio, tbn, hours_raw, total_days, total_hours, night_hours, overtime_day, overtime_night)
-            VALUES %s
-        """
-        execute_values(cur, insert_query, values)
+        cur.execute(
+            """
+            DELETE FROM public.timesheet_rows
+            WHERE header_id = %s
+            """,
+            (header_id,),
+        )
+
+        if values:
+            insert_query = """
+                INSERT INTO public.timesheet_rows (
+                    header_id,
+                    fio,
+                    tbn,
+                    hours_raw,
+                    total_days,
+                    total_hours,
+                    night_hours,
+                    overtime_day,
+                    overtime_night
+                )
+                VALUES %s
+            """
+            execute_values(cur, insert_query, values)
+
+        return int(audit_count)
 
 
 def load_timesheet_rows_from_db(
@@ -1329,6 +1588,114 @@ def update_timesheet_header_by_id(
 
         return int(row[0])
 
+def load_timesheet_cell_audit(
+    *,
+    header_id: Optional[int] = None,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+    object_id_substr: Optional[str] = None,
+    object_addr_substr: Optional[str] = None,
+    department: Optional[str] = None,
+    tbn: Optional[str] = None,
+    fio_substr: Optional[str] = None,
+    changed_by: Optional[int] = None,
+    limit: int = 1000,
+) -> List[Dict[str, Any]]:
+    """
+    Загружает журнал изменений ячеек табеля.
+
+    Можно фильтровать по:
+    - header_id;
+    - году/месяцу;
+    - объекту;
+    - подразделению;
+    - сотруднику;
+    - пользователю.
+    """
+    where: List[str] = ["1=1"]
+    params: List[Any] = []
+
+    if header_id is not None:
+        where.append("a.header_id = %s")
+        params.append(int(header_id))
+
+    if year is not None:
+        where.append("a.year = %s")
+        params.append(int(year))
+
+    if month is not None:
+        where.append("a.month = %s")
+        params.append(int(month))
+
+    object_id_norm = normalize_spaces(object_id_substr or "")
+    if object_id_norm:
+        where.append("COALESCE(a.object_id, '') ILIKE %s")
+        params.append(f"%{object_id_norm}%")
+
+    object_addr_norm = normalize_spaces(object_addr_substr or "")
+    if object_addr_norm:
+        where.append("COALESCE(a.object_addr, '') ILIKE %s")
+        params.append(f"%{object_addr_norm}%")
+
+    dep_norm = normalize_spaces(department or "")
+    if dep_norm:
+        where.append("COALESCE(a.department, '') = %s")
+        params.append(dep_norm)
+
+    tbn_norm = normalize_tbn(tbn)
+    if tbn_norm:
+        where.append("COALESCE(a.tbn, '') = %s")
+        params.append(tbn_norm)
+
+    fio_norm = normalize_spaces(fio_substr or "")
+    if fio_norm:
+        where.append("COALESCE(a.fio, '') ILIKE %s")
+        params.append(f"%{fio_norm}%")
+
+    if changed_by is not None:
+        where.append("a.changed_by = %s")
+        params.append(int(changed_by))
+
+    limit_safe = max(1, min(int(limit or 1000), 10000))
+
+    where_sql = " AND ".join(where)
+
+    with db_cursor(dict_rows=True) as (_conn, cur):
+        cur.execute(
+            f"""
+            SELECT
+                a.id,
+                a.changed_at,
+                a.header_id,
+                a.object_db_id,
+                a.object_id,
+                a.object_addr,
+                a.department,
+                a.year,
+                a.month,
+                a.day_no,
+                a.work_date,
+                a.fio,
+                a.tbn,
+                a.old_value,
+                a.new_value,
+                a.action_source,
+                a.action_detail,
+                a.client_info,
+                a.changed_by,
+                u.username,
+                u.full_name AS changed_by_name
+            FROM public.timesheet_cell_audit a
+            LEFT JOIN public.app_users u ON u.id = a.changed_by
+            WHERE {where_sql}
+            ORDER BY a.changed_at DESC, a.id DESC
+            LIMIT %s
+            """,
+            params + [limit_safe],
+        )
+
+        return [dict(row) for row in cur.fetchall()]
+
 # ============================================================
 # Экспортируемые имена
 # ============================================================
@@ -1361,4 +1728,5 @@ __all__ = [
     "find_fired_employees_in_timesheet",
     "find_employee_day_conflicts",
     "update_timesheet_header_by_id",
+    "load_timesheet_cell_audit",
 ]
