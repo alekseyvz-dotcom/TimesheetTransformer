@@ -3618,7 +3618,15 @@ class TimesheetPage(tk.Frame):
                     user_id=user_id,
                 )
             
-            replace_timesheet_rows(header_id, self.model_rows_all, year, month)
+            replace_timesheet_rows(
+                header_id,
+                self.model_rows_all,
+                year,
+                month,
+                audit_user_id=user_id,
+                audit_source="save",
+                audit_detail=None,
+            )
             self._active_header_id = header_id
         except Exception as e:
             logger.exception("Ошибка сохранения табеля в БД")
