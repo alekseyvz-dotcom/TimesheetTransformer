@@ -532,6 +532,7 @@ class TimesheetPage(tk.Frame):
         self._brig_names: dict[str, str] = {}
 
         self._schedule_map_cache: dict[tuple[str, int, int], dict[int, dict[str, Any]]] = {}
+        self._employment_period_cache: dict[str, dict[str, Any]] = {}
 
         self._load_spr_data_from_db()
         self._build_ui()
@@ -1285,6 +1286,7 @@ class TimesheetPage(tk.Frame):
     
         tk.Frame(row1, bg=border_color, width=1, height=24).pack(side="left", padx=8, fill="y")
     
+        self._ts_btn(row1, "Заполнить табель", self.fill_timesheet_by_schedules, side="left", padx=3)
         self._ts_btn(row1, "Время выбранным", self.fill_time_selected, side="left", padx=3)
         self._ts_btn(row1, "Часы всем", self.fill_hours_all, side="left", padx=3)
         self._ts_btn(row1, "Очистить часы", self.clear_all_rows, side="left", padx=3)
@@ -1857,6 +1859,7 @@ class TimesheetPage(tk.Frame):
         self.model_rows_all.clear()
         self.model_rows = self.model_rows_all
         self._clear_schedule_cache()
+        self._employment_period_cache.clear()
         self._selected_row_keys.clear()
         self._update_selected_count()
         try:
@@ -2189,6 +2192,489 @@ class TimesheetPage(tk.Frame):
     # Операции с сотрудниками / часами
     # --------------------------------------------------------
 
+    def _is_blank_timesheet_cell(self, value: Any) -> bool:
+        return value is None or str(value).strip() == ""
+
+    def _get_schedule_entry_for_day(
+        self,
+        schedule_map: Dict[Any, Any],
+        year: int,
+        month: int,
+        day: int,
+    ) -> Any:
+        """
+        Пытается достать запись графика на конкретный день.
+
+        Поддерживаем разные возможные форматы ключей:
+        - 1, 2, 3 ...
+        - "1", "01"
+        - date(year, month, day)
+        - "YYYY-MM-DD"
+        """
+        work_date = date(year, month, day)
+
+        keys = (
+            day,
+            str(day),
+            f"{day:02d}",
+            work_date,
+            work_date.isoformat(),
+        )
+
+        for key in keys:
+            if key in schedule_map:
+                return schedule_map[key]
+
+        return None
+
+    def _parse_schedule_hours_value(self, value: Any) -> Optional[float]:
+        """
+        Преобразует значение часов из графика в float.
+
+        planned_hours в БД numeric, но из разных слоёв приложения может прийти:
+        - int
+        - float
+        - Decimal
+        - str: "8", "8.00", "8,00"
+        """
+        if value is None:
+            return None
+
+        if isinstance(value, bool):
+            return None
+
+        if isinstance(value, (int, float)):
+            hours = float(value)
+            return hours if hours > 0 else None
+
+        raw = normalize_spaces(str(value))
+        if not raw:
+            return None
+
+        try:
+            hours = float(raw.replace(",", "."))
+            return hours if hours > 0 else None
+        except Exception:
+            return None
+
+    def _schedule_entry_to_cell_value(self, entry: Any) -> Optional[str]:
+        """
+        Преобразует запись дня графика в значение ячейки табеля.
+
+        Возвращает:
+        - строку часов, например "8";
+        - None, если день не рабочий или часов нет.
+        """
+        if entry is None:
+            return None
+
+        # Основной ожидаемый формат:
+        # {
+        #     "is_workday": True/False,
+        #     "planned_hours": 8,
+        #     "raw_value": "8"
+        # }
+        if isinstance(entry, dict):
+            is_workday = entry.get("is_workday")
+
+            if is_workday is False:
+                return None
+
+            planned_hours = entry.get("planned_hours")
+
+            if planned_hours is None:
+                planned_hours = entry.get("hours")
+
+            if planned_hours is None:
+                planned_hours = entry.get("value")
+
+            if planned_hours is None:
+                planned_hours = entry.get("raw_value")
+
+            hours = self._parse_schedule_hours_value(planned_hours)
+
+            if hours is None:
+                return None
+
+            if is_workday is False:
+                return None
+
+            return format_hours_for_cell(hours)
+
+        # Если вдруг get_schedule_days_map вернул просто число часов
+        hours = self._parse_schedule_hours_value(entry)
+        if hours is None:
+            return None
+
+        return format_hours_for_cell(hours)
+
+    def fill_timesheet_by_schedules(self):
+        """
+        Автоматически заполняет текущий табель по рабочим графикам сотрудников
+        с учётом hire_date и dismissal_date из employees.
+        """
+        if self.read_only:
+            return
+
+        if not callable(get_schedule_days_map):
+            messagebox.showerror(
+                "Заполнить табель",
+                "Модуль графиков недоступен: не удалось импортировать get_schedule_days_map.",
+                parent=self,
+            )
+            return
+
+        if not self.model_rows_all:
+            messagebox.showinfo(
+                "Заполнить табель",
+                "В табеле нет сотрудников.\n\nСначала добавьте сотрудников в табель.",
+                parent=self,
+            )
+            return
+
+        year, month = self.get_year_month()
+        days_in_month = month_days(year, month)
+
+        answer = messagebox.askyesnocancel(
+            "Заполнить табель",
+            "Заполнить табель по рабочим графикам сотрудников?\n\n"
+            "Да — перезаписать все дни по графику.\n"
+            "Нет — заполнить только пустые ячейки.\n"
+            "Отмена — ничего не делать.\n\n"
+            "Даты приёма и увольнения будут учтены:\n"
+            "• до даты приёма часы не ставятся;\n"
+            "• после даты увольнения часы не ставятся.\n\n"
+            "Важно: при перезаписи выходные дни и дни вне периода работы будут очищены.",
+            parent=self,
+        )
+
+        if answer is None:
+            return
+
+        overwrite = bool(answer)
+
+        changed_cells = 0
+        changed_rows = 0
+        skipped_busy_cells = 0
+        skipped_outside_employment_cells = 0
+
+        missing_schedule_rows: List[str] = []
+        missing_calendar_rows: List[str] = []
+        employment_limited_rows: set[str] = set()
+
+        self._show_schedule_progress(
+            text="Заполняется табель по графикам...",
+            maximum=len(self.model_rows_all),
+        )
+        self.update_idletasks()
+
+        try:
+            for idx, rec in enumerate(self.model_rows_all, start=1):
+                fio = normalize_spaces(rec.get("fio") or "")
+                tbn = normalize_tbn(rec.get("tbn"))
+                employee_label = self._format_employee_label(fio, tbn)
+
+                employment = self._get_employee_employment_period(fio, tbn)
+
+                schedule_name = normalize_spaces(rec.get("work_schedule") or "")
+
+                if not schedule_name:
+                    schedule_name = self._get_employee_work_schedule(fio, tbn)
+                    rec["work_schedule"] = schedule_name
+
+                if not schedule_name:
+                    missing_schedule_rows.append(employee_label)
+                    self._update_schedule_progress(
+                        idx,
+                        len(self.model_rows_all),
+                        text="Заполняется табель",
+                    )
+                    continue
+
+                schedule_map = self._build_schedule_days_map_for_row(rec, year, month)
+
+                if not schedule_map:
+                    missing_calendar_rows.append(f"{employee_label} — {schedule_name}")
+                    self._update_schedule_progress(
+                        idx,
+                        len(self.model_rows_all),
+                        text="Заполняется табель",
+                    )
+                    continue
+
+                hours = normalize_hours_list(rec.get("hours"), year, month)
+                row_changed = False
+
+                for day in range(1, days_in_month + 1):
+                    day_idx = day - 1
+                    work_date = date(year, month, day)
+
+                    old_value = hours[day_idx] if day_idx < len(hours) else None
+
+                    # Главное новое условие:
+                    # если сотрудник ещё не принят или уже уволен — часы не ставим.
+                    if not self._is_employee_active_on_date(employment, work_date):
+                        skipped_outside_employment_cells += 1
+                        employment_limited_rows.add(employee_label)
+
+                        # В режиме перезаписи очищаем старое значение,
+                        # чтобы после увольнения/до приёма не остались часы.
+                        if overwrite and not self._is_blank_timesheet_cell(old_value):
+                            hours[day_idx] = None
+                            changed_cells += 1
+                            row_changed = True
+
+                        continue
+
+                    entry = self._get_schedule_entry_for_day(schedule_map, year, month, day)
+                    new_value = self._schedule_entry_to_cell_value(entry)
+
+                    if overwrite:
+                        if old_value != new_value:
+                            hours[day_idx] = new_value
+                            changed_cells += 1
+                            row_changed = True
+                    else:
+                        # В режиме "только пустые" не очищаем выходные
+                        # и не трогаем вручную заполненные ячейки.
+                        if new_value is None:
+                            continue
+
+                        if self._is_blank_timesheet_cell(old_value):
+                            hours[day_idx] = new_value
+                            changed_cells += 1
+                            row_changed = True
+                        else:
+                            skipped_busy_cells += 1
+
+                rec["hours"] = normalize_hours_list(hours, year, month)
+                rec["_totals"] = calc_row_totals(rec["hours"], year, month)
+
+                if bool(self.var_show_schedule.get()):
+                    rec["schedule_days_map"] = schedule_map
+
+                if row_changed:
+                    changed_rows += 1
+
+                self._update_schedule_progress(
+                    idx,
+                    len(self.model_rows_all),
+                    text="Заполняется табель",
+                )
+
+        finally:
+            self._close_schedule_progress()
+
+        self._recalc_all_row_totals()
+        self._apply_filter()
+
+        if changed_cells > 0:
+            self._mark_dirty()
+            self._schedule_auto_save()
+
+        msg_parts = [
+            "Заполнение завершено.",
+            "",
+            f"Изменено строк: {changed_rows}",
+            f"Изменено ячеек: {changed_cells}",
+        ]
+
+        if not overwrite:
+            msg_parts.append(f"Пропущено заполненных ячеек: {skipped_busy_cells}")
+
+        if skipped_outside_employment_cells:
+            msg_parts.append(
+                f"Не заполнено ячеек вне периода работы сотрудника: {skipped_outside_employment_cells}"
+            )
+
+        if employment_limited_rows:
+            msg_parts.append("")
+            msg_parts.append(f"Сотрудники с ограничением по дате приёма/увольнения: {len(employment_limited_rows)}")
+            for item in sorted(employment_limited_rows)[:10]:
+                msg_parts.append(f"• {item}")
+            if len(employment_limited_rows) > 10:
+                msg_parts.append(f"... и ещё {len(employment_limited_rows) - 10}")
+
+        if missing_schedule_rows:
+            msg_parts.append("")
+            msg_parts.append(f"Сотрудников без указанного графика: {len(missing_schedule_rows)}")
+            for item in missing_schedule_rows[:10]:
+                msg_parts.append(f"• {item}")
+            if len(missing_schedule_rows) > 10:
+                msg_parts.append(f"... и ещё {len(missing_schedule_rows) - 10}")
+
+        if missing_calendar_rows:
+            msg_parts.append("")
+            msg_parts.append(f"Не найдены данные графика за {month:02d}.{year}: {len(missing_calendar_rows)}")
+            for item in missing_calendar_rows[:10]:
+                msg_parts.append(f"• {item}")
+            if len(missing_calendar_rows) > 10:
+                msg_parts.append(f"... и ещё {len(missing_calendar_rows) - 10}")
+
+        messagebox.showinfo(
+            "Заполнить табель",
+            "\n".join(msg_parts),
+            parent=self,
+        )
+
+    def _employee_employment_cache_key(self, fio: str, tbn: str) -> str:
+        fio_norm = normalize_spaces(fio or "").lower()
+        tbn_norm = normalize_tbn(tbn)
+        return f"{tbn_norm}|{fio_norm}"
+
+    def _normalize_db_date(self, value: Any) -> Optional[date]:
+        if value is None:
+            return None
+
+        if isinstance(value, date) and not isinstance(value, datetime):
+            return value
+
+        if isinstance(value, datetime):
+            return value.date()
+
+        try:
+            return datetime.strptime(str(value), "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+    def _get_employee_employment_period(self, fio: str, tbn: str) -> dict[str, Any]:
+        """
+        Возвращает даты приёма/увольнения сотрудника из employees.
+
+        Формат результата:
+        {
+            "hire_date": date | None,
+            "dismissal_date": date | None,
+            "is_fired": bool,
+            "found": bool,
+        }
+        """
+        key = self._employee_employment_cache_key(fio, tbn)
+
+        if key in self._employment_period_cache:
+            return self._employment_period_cache[key]
+
+        fio_norm = normalize_spaces(fio or "")
+        tbn_norm = normalize_tbn(tbn)
+        dep_norm = normalize_spaces(self.cmb_department.get() or "")
+
+        default_result = {
+            "hire_date": None,
+            "dismissal_date": None,
+            "is_fired": False,
+            "found": False,
+        }
+
+        if not fio_norm and not tbn_norm:
+            self._employment_period_cache[key] = default_result
+            return default_result
+
+        try:
+            with db_cursor(dict_rows=True) as (_conn, cur):
+                if tbn_norm:
+                    cur.execute(
+                        """
+                        SELECT
+                            e.hire_date,
+                            e.dismissal_date,
+                            e.is_fired
+                        FROM employees e
+                        WHERE btrim(COALESCE(e.tbn, '')) = %s
+                        ORDER BY e.id
+                        LIMIT 1
+                        """,
+                        (tbn_norm,),
+                    )
+                else:
+                    if dep_norm and dep_norm != "Все":
+                        cur.execute(
+                            """
+                            SELECT
+                                e.hire_date,
+                                e.dismissal_date,
+                                e.is_fired
+                            FROM employees e
+                            LEFT JOIN departments d ON d.id = e.department_id
+                            WHERE regexp_replace(btrim(e.fio), '\\s+', ' ', 'g') = %s
+                              AND regexp_replace(btrim(COALESCE(d.name, '')), '\\s+', ' ', 'g') = %s
+                            ORDER BY e.id
+                            LIMIT 1
+                            """,
+                            (fio_norm, dep_norm),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            SELECT
+                                e.hire_date,
+                                e.dismissal_date,
+                                e.is_fired
+                            FROM employees e
+                            WHERE regexp_replace(btrim(e.fio), '\\s+', ' ', 'g') = %s
+                            ORDER BY e.id
+                            LIMIT 1
+                            """,
+                            (fio_norm,),
+                        )
+
+                row = cur.fetchone()
+
+            if not row:
+                self._employment_period_cache[key] = default_result
+                return default_result
+
+            result = {
+                "hire_date": self._normalize_db_date(row.get("hire_date")),
+                "dismissal_date": self._normalize_db_date(row.get("dismissal_date")),
+                "is_fired": bool(row.get("is_fired")),
+                "found": True,
+            }
+
+            self._employment_period_cache[key] = result
+            return result
+
+        except Exception:
+            logger.exception(
+                "Не удалось получить даты приёма/увольнения сотрудника: %s, таб.№ %s",
+                fio_norm,
+                tbn_norm,
+            )
+            self._employment_period_cache[key] = default_result
+            return default_result
+
+    def _is_employee_active_on_date(
+        self,
+        employment: dict[str, Any],
+        work_date: date,
+    ) -> bool:
+        """
+        Проверяет, можно ли заполнять сотруднику день work_date.
+
+        Правило:
+        - до hire_date не заполняем;
+        - после dismissal_date не заполняем;
+        - сам день dismissal_date считаем допустимым.
+        """
+        hire_date = employment.get("hire_date")
+        dismissal_date = employment.get("dismissal_date")
+
+        if hire_date and work_date < hire_date:
+            return False
+
+        if dismissal_date and work_date > dismissal_date:
+            return False
+
+        return True
+
+    def _format_employee_label(self, fio: str, tbn: str) -> str:
+        fio_norm = normalize_spaces(fio or "")
+        tbn_norm = normalize_tbn(tbn)
+
+        if fio_norm and tbn_norm:
+            return f"{fio_norm} таб.№ {tbn_norm}"
+
+        return fio_norm or tbn_norm or "Без ФИО"
+    
     def add_row(self):
         if self.read_only:
             return
