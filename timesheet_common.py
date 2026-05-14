@@ -101,6 +101,14 @@ SPECIAL_CODES = {
     # Оставили эти ключи для совместимости (хотя универсальная логика ниже перехватит их)
     "РВ 8": {"hours": 8.0, "night_hours": 0.0, "counts_day": True, "description": "Работа в выходной 8 ч"},
     "РВ 11": {"hours": 11.0, "night_hours": 0.0, "counts_day": True, "description": "Работа в выходной 11 ч"},
+    "Н8": {"hours": 0.0, "night_hours": 8.0, "counts_day": True, "description": "Работа в в ночь 8 ч"},
+    "Н11": {"hours": 0.0, "night_hours": 11.0, "counts_day": True, "description": "Работа в ночь 11 ч"},
+    "Н12": {"hours": 0.0, "night_hours": 12.0, "counts_day": True, "description": "Работа в ночь  12 ч"},
+    "Н13": {"hours": 0.0, "night_hours": 13.0, "counts_day": True, "description": "Работа в ночь  13 ч"},
+    "НРВ8": {"hours": 0.0, "night_hours": 8.0, "counts_day": True, "description": "Работа в выходной ночь 8 ч"},
+    "НРВ11": {"hours": 0.0, "night_hours": 11.0, "counts_day": True, "description": "Работа в выходной ночь 11 ч"},
+    "НРВ12": {"hours": 0.0, "night_hours": 12.0, "counts_day": True, "description": "Работа в выходной ночь 12 ч"},
+    "НРВ13": {"hours": 0.0, "night_hours": 13.0, "counts_day": True, "description": "Работа в выходной ночь 13 ч"},
 }
 
 
