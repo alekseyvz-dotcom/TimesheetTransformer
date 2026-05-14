@@ -271,12 +271,12 @@ def build_printable_timesheet_sheet(
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=total_cols)
     c = ws["A1"]
     c.value = "ТАБЕЛЬ УЧЕТА РАБОЧЕГО ВРЕМЕНИ"
-    _apply_print_style(c, bold=True, size=14, h="center", border=BORDER_EMPTY, fill=PRINT_TITLE_FILL)
-
+    _apply_print_style(c, bold=True, size=16, h="center", border=BORDER_EMPTY, fill=PRINT_TITLE_FILL)
+    
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=total_cols)
     c = ws["A2"]
     c.value = f"за {month_ru} {year} г."
-    _apply_print_style(c, bold=True, size=11, h="center", border=BORDER_EMPTY)
+    _apply_print_style(c, bold=True, size=13, h="center", border=BORDER_EMPTY)
 
     meta_split = min(12, total_cols)
     right_meta_start = meta_split + 1
@@ -284,42 +284,42 @@ def build_printable_timesheet_sheet(
     ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=meta_split)
     c = ws["A3"]
     c.value = f"Объект: {object_addr or '-'}"
-    _apply_print_style(c, bold=True, size=11, h="left", fill=PRINT_META_FILL)
-
+    _apply_print_style(c, bold=True, size=12, h="left", fill=PRINT_META_FILL)
+    
     if right_meta_start <= total_cols:
         ws.merge_cells(start_row=3, start_column=right_meta_start, end_row=3, end_column=total_cols)
         c = ws.cell(3, right_meta_start)
         c.value = f"ID объекта: {object_id or '-'}"
-        _apply_print_style(c, bold=True, size=11, h="left", fill=PRINT_META_FILL)
-
+        _apply_print_style(c, bold=True, size=12, h="left", fill=PRINT_META_FILL)
+    
     ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=meta_split)
     c = ws["A4"]
     c.value = f"Подразделение: {department or '-'}"
-    _apply_print_style(c, bold=True, size=11, h="left", fill=PRINT_META_FILL)
-
+    _apply_print_style(c, bold=True, size=12, h="left", fill=PRINT_META_FILL)
+    
     if right_meta_start <= total_cols:
         ws.merge_cells(start_row=4, start_column=right_meta_start, end_row=4, end_column=total_cols)
         c = ws.cell(4, right_meta_start)
         c.value = f"Дата формирования: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        _apply_print_style(c, h="left", size=11, fill=PRINT_META_FILL)
-
+        _apply_print_style(c, h="left", size=12, fill=PRINT_META_FILL)
+    
     ws.merge_cells(start_row=5, start_column=1, end_row=5, end_column=total_cols)
     c = ws["A5"]
     c.value = "Условные обозначения в ячейках дней: часы или буквенные коды отсутствий/режимов работы."
-    _apply_print_style(c, size=8, h="left", border=BORDER_EMPTY)
-
+    _apply_print_style(c, size=10, h="left", border=BORDER_EMPTY)
+    
     # --- Размеры строк ---
-    ws.row_dimensions[1].height = 24
-    ws.row_dimensions[2].height = 18
-    ws.row_dimensions[3].height = 20
-    ws.row_dimensions[4].height = 20
-    ws.row_dimensions[5].height = 16
+    ws.row_dimensions[1].height = 28
+    ws.row_dimensions[2].height = 22
+    ws.row_dimensions[3].height = 24
+    ws.row_dimensions[4].height = 24
+    ws.row_dimensions[5].height = 20
 
     # --- Заголовок таблицы ---
     header_row = 7
     for col_idx, title in enumerate(headers, start=1):
         cell = ws.cell(header_row, col_idx, title)
-        _apply_print_style(cell, bold=True, fill=PRINT_HEADER_FILL)
+        _apply_print_style(cell, bold=True, size=11, fill=PRINT_HEADER_FILL)
 
     ws.row_dimensions[header_row].height = 30
 
@@ -374,11 +374,11 @@ def build_printable_timesheet_sheet(
         for col_idx, value in enumerate(row_values, start=1):
             cell = ws.cell(current_row, col_idx, value)
             if col_idx in (2, 4):
-                _apply_print_style(cell, h="left")
+                _apply_print_style(cell, h="left", size=11)
             else:
-                _apply_print_style(cell, h="center")
-
-        ws.row_dimensions[current_row].height = 21
+                _apply_print_style(cell, h="center", size=11)
+                
+        ws.row_dimensions[current_row].height = 24
         current_row += 1
 
     # --- Итого ---
@@ -387,11 +387,11 @@ def build_printable_timesheet_sheet(
     ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=4)
     total_cell = ws.cell(current_row, 1)
     total_cell.value = "ИТОГО"
-    _apply_print_style(total_cell, bold=True, fill=PRINT_TOTAL_FILL)
+    _apply_print_style(total_cell, bold=True, size=11, fill=PRINT_TOTAL_FILL)
 
     for col_idx in range(5, totals_start_col):
         cell = ws.cell(current_row, col_idx, "")
-        _apply_print_style(cell, bold=True, fill=PRINT_TOTAL_FILL)
+        _apply_print_style(cell, bold=True, size=11, fill=PRINT_TOTAL_FILL)
 
     summary_values = [
         format_summary_value(summary.get("days")),
@@ -402,7 +402,7 @@ def build_printable_timesheet_sheet(
     ]
     for offset, value in enumerate(summary_values):
         cell = ws.cell(current_row, totals_start_col + offset, value)
-        _apply_print_style(cell, bold=True, fill=PRINT_TOTAL_FILL)
+        _apply_print_style(cell, bold=True, size=11, fill=PRINT_TOTAL_FILL)
 
     table_last_row = current_row
 
@@ -411,43 +411,29 @@ def build_printable_timesheet_sheet(
 
     # --- Подписи ---
     sign_row = table_last_row + 3
-
-    left_sign_end = min(12, total_cols)
-    right_sign_start = left_sign_end + 1
-
-    ws.merge_cells(start_row=sign_row, start_column=1, end_row=sign_row, end_column=left_sign_end)
-    c = ws.cell(sign_row, 1)
-    c.value = f"Составил: {prepared_by or '__________________'}    Подпись: __________________"
-    _apply_print_style(c, h="left", border=BORDER_EMPTY)
-
-    if right_sign_start <= total_cols:
-        ws.merge_cells(start_row=sign_row, start_column=right_sign_start, end_row=sign_row, end_column=total_cols)
-        c = ws.cell(sign_row, right_sign_start)
-        c.value = "Дата: __________________"
-        _apply_print_style(c, h="left", border=BORDER_EMPTY)
-
-    ws.merge_cells(start_row=sign_row + 1, start_column=1, end_row=sign_row + 1, end_column=left_sign_end)
-    c = ws.cell(sign_row + 1, 1)
-    c.value = "Проверил: _________________________________    Подпись: __________________"
-    _apply_print_style(c, h="left", border=BORDER_EMPTY)
-
-    if right_sign_start <= total_cols:
-        ws.merge_cells(start_row=sign_row + 1, start_column=right_sign_start, end_row=sign_row + 1, end_column=total_cols)
-        c = ws.cell(sign_row + 1, right_sign_start)
-        c.value = "Дата: __________________"
-        _apply_print_style(c, h="left", border=BORDER_EMPTY)
-
-    ws.merge_cells(start_row=sign_row + 2, start_column=1, end_row=sign_row + 2, end_column=left_sign_end)
-    c = ws.cell(sign_row + 2, 1)
-    c.value = "Утвердил: ________________________________    Подпись: __________________"
-    _apply_print_style(c, h="left", border=BORDER_EMPTY)
-
-    if right_sign_start <= total_cols:
-        ws.merge_cells(start_row=sign_row + 2, start_column=right_sign_start, end_row=sign_row + 2, end_column=total_cols)
-        c = ws.cell(sign_row + 2, right_sign_start)
-        c.value = "Дата: __________________"
-        _apply_print_style(c, h="left", border=BORDER_EMPTY)
-
+    
+    signature_lines = [
+        "Составил: _________________________________    Должность __________________ Подпись: __________________",
+        "Руководитель структурного подразделения: _________________________________    Должность __________________ Подпись: __________________",
+        "Проверил: _________________________________    Должность _____________________________ Подпись: __________________",
+    ]
+    
+    for offset, text in enumerate(signature_lines):
+        row_idx = sign_row + offset
+    
+        ws.merge_cells(
+            start_row=row_idx,
+            start_column=1,
+            end_row=row_idx,
+            end_column=total_cols,
+        )
+    
+        c = ws.cell(row_idx, 1)
+        c.value = text
+        _apply_print_style(c, h="left", size=11, border=BORDER_EMPTY)
+    
+        ws.row_dimensions[row_idx].height = 22
+    
     # --- Параметры печати ---
     _setup_print_sheet_params(
         ws,
