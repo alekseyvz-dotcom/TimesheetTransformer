@@ -325,8 +325,8 @@ def build_printable_timesheet_sheet(
 
     # --- Ширины колонок ---
     ws.column_dimensions["A"].width = 5
-    ws.column_dimensions["B"].width = 30
-    ws.column_dimensions["C"].width = 11
+    ws.column_dimensions["B"].width = 32
+    ws.column_dimensions["C"].width = 12
     ws.column_dimensions["D"].width = 24
 
     first_day_col = 5
@@ -373,12 +373,35 @@ def build_printable_timesheet_sheet(
 
         for col_idx, value in enumerate(row_values, start=1):
             cell = ws.cell(current_row, col_idx, value)
-            if col_idx in (2, 4):
+        
+            if col_idx == 2:
                 _apply_print_style(cell, h="left", size=11)
+                cell.alignment = Alignment(
+                    horizontal="left",
+                    vertical="center",
+                    wrap_text=True,
+                )
+        
+            elif col_idx == 3:
+                _apply_print_style(cell, h="center", size=11)
+                cell.alignment = Alignment(
+                    horizontal="center",
+                    vertical="center",
+                    wrap_text=True,
+                )
+        
+            elif col_idx == 4:
+                _apply_print_style(cell, h="left", size=11)
+                cell.alignment = Alignment(
+                    horizontal="left",
+                    vertical="center",
+                    wrap_text=True,
+                )
+        
             else:
                 _apply_print_style(cell, h="center", size=11)
-                
-        ws.row_dimensions[current_row].height = 24
+        
+        ws.row_dimensions[current_row].height = 40
         current_row += 1
 
     # --- Итого ---
