@@ -284,24 +284,24 @@ def build_printable_timesheet_sheet(
     ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=meta_split)
     c = ws["A3"]
     c.value = f"Объект: {object_addr or '-'}"
-    _apply_print_style(c, bold=True, h="left", fill=PRINT_META_FILL)
+    _apply_print_style(c, bold=True, size=11, h="left", fill=PRINT_META_FILL)
 
     if right_meta_start <= total_cols:
         ws.merge_cells(start_row=3, start_column=right_meta_start, end_row=3, end_column=total_cols)
         c = ws.cell(3, right_meta_start)
         c.value = f"ID объекта: {object_id or '-'}"
-        _apply_print_style(c, bold=True, h="left", fill=PRINT_META_FILL)
+        _apply_print_style(c, bold=True, size=11, h="left", fill=PRINT_META_FILL)
 
     ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=meta_split)
     c = ws["A4"]
     c.value = f"Подразделение: {department or '-'}"
-    _apply_print_style(c, bold=True, h="left", fill=PRINT_META_FILL)
+    _apply_print_style(c, bold=True, size=11, h="left", fill=PRINT_META_FILL)
 
     if right_meta_start <= total_cols:
         ws.merge_cells(start_row=4, start_column=right_meta_start, end_row=4, end_column=total_cols)
         c = ws.cell(4, right_meta_start)
         c.value = f"Дата формирования: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        _apply_print_style(c, h="left", fill=PRINT_META_FILL)
+        _apply_print_style(c, h="left", size=11, fill=PRINT_META_FILL)
 
     ws.merge_cells(start_row=5, start_column=1, end_row=5, end_column=total_cols)
     c = ws["A5"]
