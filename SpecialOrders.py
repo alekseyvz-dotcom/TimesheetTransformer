@@ -1188,32 +1188,23 @@ class SpecialOrdersPage(tk.Frame):
             self.add_position()
 
     def _load_spr(self):
-        self.emps = load_employees_for_transport()
-        self.objects = load_objects_for_transport()
-        self.techs = load_vehicles_for_transport()
-
-        tech_types = set()
-        for v in self.techs:
-            tp = safe_str(v.get("type"))
-            if tp:
-                tech_types.add(tp)
-        self.tech_values = sorted(tech_types)
-
-        self.deps = ["Все"] + sorted({safe_str(r["dep"]) for r in self.emps if safe_str(r["dep"])})
-
-        self.addr_to_ids: Dict[str, List[str]] = {}
-        for oid, addr in self.objects:
-            addr = safe_str(addr)
-            oid = safe_str(oid)
-            if not addr:
-                continue
-            self.addr_to_ids.setdefault(addr, [])
-            if oid and oid not in self.addr_to_ids[addr]:
-                self.addr_to_ids[addr].append(oid)
-
-        addresses_set = set(self.addr_to_ids.keys())
-        addresses_set.update(addr for _, addr in self.objects if safe_str(addr))
-        self.addresses = sorted(addresses_set)
+        self.vehicles = load_vehicles_for_transport()
+        self.vehicle_types = sorted(
+            {safe_str(v.get("type")) for v in self.vehicles if safe_str(v.get("type"))}
+        )
+    
+        employees_raw = load_employees_for_transport()
+    
+        # Выбираем водителей по должности
+        self.drivers = [
+            e for e in employees_raw
+            if "водител" in safe_str(e.get("pos")).lower()
+        ]
+        self.drivers.sort(key=lambda x: x["fio"])
+    
+        self.departments = ["Все"] + sorted(
+            {safe_str(e.get("dep")) for e in employees_raw if safe_str(e.get("dep"))}
+        )
 
     def _build_ui(self):
         top = tk.Frame(self, bg="#f7f7f7")
@@ -1972,8 +1963,18 @@ class TransportPlanningPage(tk.Frame):
         driver_display_list = []
         for d in self.drivers:
             display = safe_str(d["fio"])
-            if safe_str(d.get("dep")):
-                display += f" ({safe_str(d.get('dep'))})"
+            pos = safe_str(d.get("pos"))
+            dep = safe_str(d.get("dep"))
+        
+            parts = []
+            if pos:
+                parts.append(pos)
+            if dep:
+                parts.append(dep)
+        
+            if parts:
+                display += f" — {' / '.join(parts)}"
+        
             driver_display_list.append(display)
 
         ttk.Separator(assign_frame, orient="horizontal").grid(row=7, column=0, sticky="ew", pady=15)
@@ -2035,8 +2036,8 @@ class TransportPlanningPage(tk.Frame):
                 return
 
             driver_name = safe_str(driver_var.get())
-            if " (" in driver_name:
-                driver_name = driver_name.split(" (")[0].strip()
+            if " — " in driver_name:
+                driver_name = driver_name.split(" — ")[0].strip()
 
             new_values = list(values)
             new_values[10] = get_full_vehicle_string()
