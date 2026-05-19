@@ -182,6 +182,56 @@ def _fmt_qty(v) -> str:
         return ""
     return f"{f:.3f}".rstrip("0").rstrip(".")
 
+def _overlap_days(a0: date, a1: date, b0: date, b1: date) -> int:
+    """
+    Количество календарных дней пересечения двух периодов включительно.
+    """
+    if not a0 or not a1 or not b0 or not b1:
+        return 0
+
+    s = max(a0, b0)
+    f = min(a1, b1)
+
+    if f < s:
+        return 0
+
+    return (f - s).days + 1
+
+
+def _calc_plan_qty_for_period(
+    plan_qty: Any,
+    plan_start: Any,
+    plan_finish: Any,
+    period_from: date,
+    period_to: date,
+) -> Optional[float]:
+    """
+    Расчёт планового объёма на период.
+
+    Логика:
+    - если у работы есть общий плановый объём;
+    - и работа пересекается с выбранным периодом;
+    - то объём распределяется равномерно по календарным дням работы.
+    """
+    qty = _safe_float(plan_qty)
+    if qty is None:
+        return None
+
+    ds = _to_date(plan_start)
+    df = _to_date(plan_finish)
+
+    if not ds or not df or df < ds:
+        return None
+
+    total_days = (df - ds).days + 1
+    if total_days <= 0:
+        return None
+
+    days_in_period = _overlap_days(ds, df, period_from, period_to)
+    if days_in_period <= 0:
+        return 0.0
+
+    return qty * days_in_period / total_days
 
 def _mouse_delta(event) -> int:
     """Кроссплатформенный расчёт направления колёсика мыши."""
@@ -685,6 +735,112 @@ class GprService:
                         "workers_max": int(d["workers_max"]) if d.get("workers_max") is not None else None,
                         "workers_sum": int(d["workers_sum"]) if d.get("workers_sum") is not None else 0,
                     }
+                return out
+
+    @staticmethod
+    def load_task_fact_period_info(
+        task_ids: List[int],
+        period_from: date,
+        period_to: date,
+    ) -> Dict[int, Dict[str, Any]]:
+        """
+        Загружает факт только за выбранный период.
+
+        Возвращает:
+        {
+            task_id: {
+                "fact_qty_period": float,
+                "workers_last_period": int | None,
+                "workers_max_period": int | None,
+                "workers_sum_period": int,
+            }
+        }
+        """
+        if not task_ids:
+            return {}
+
+        with _DBConn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    WITH qty AS (
+                        SELECT
+                            task_id,
+                            COALESCE(SUM(fact_qty), 0) AS fact_qty_period
+                        FROM public.gpr_task_facts
+                        WHERE task_id = ANY(%s)
+                          AND fact_date BETWEEN %s AND %s
+                        GROUP BY task_id
+                    ),
+                    last_fact AS (
+                        SELECT DISTINCT ON (task_id)
+                            task_id,
+                            workers_count,
+                            fact_date,
+                            id
+                        FROM public.gpr_task_facts
+                        WHERE task_id = ANY(%s)
+                          AND fact_date BETWEEN %s AND %s
+                        ORDER BY task_id, fact_date DESC, id DESC
+                    ),
+                    agg AS (
+                        SELECT
+                            task_id,
+                            MAX(workers_count) AS workers_max_period,
+                            COALESCE(SUM(workers_count), 0) AS workers_sum_period
+                        FROM public.gpr_task_facts
+                        WHERE task_id = ANY(%s)
+                          AND fact_date BETWEEN %s AND %s
+                        GROUP BY task_id
+                    )
+                    SELECT
+                        q.task_id,
+                        q.fact_qty_period,
+                        lf.workers_count AS workers_last_period,
+                        a.workers_max_period,
+                        a.workers_sum_period
+                    FROM qty q
+                    LEFT JOIN last_fact lf ON lf.task_id = q.task_id
+                    LEFT JOIN agg a ON a.task_id = q.task_id
+                    """,
+                    (
+                        task_ids,
+                        period_from,
+                        period_to,
+                        task_ids,
+                        period_from,
+                        period_to,
+                        task_ids,
+                        period_from,
+                        period_to,
+                    ),
+                )
+
+                out: Dict[int, Dict[str, Any]] = {}
+
+                for r in cur.fetchall():
+                    d = dict(r)
+                    tid = int(d["task_id"])
+
+                    out[tid] = {
+                        "fact_qty_period": float(d.get("fact_qty_period") or 0),
+                        "workers_last_period": (
+                            int(d["workers_last_period"])
+                            if d.get("workers_last_period") is not None
+                            else None
+                        ),
+                        "workers_max_period": (
+                            int(d["workers_max_period"])
+                            if d.get("workers_max_period") is not None
+                            else None
+                        ),
+                        "workers_sum_period": (
+                            int(d["workers_sum_period"])
+                            if d.get("workers_sum_period") is not None
+                            else 0
+                        ),
+                    }
+
                 return out
 
     # ── plans ──
@@ -2129,6 +2285,7 @@ class GprPage(tk.Frame):
     
         self.btn_template = self._tb_btn(bar, "📋 Из шаблона…", self._apply_template)
         self.btn_fact_batch = self._tb_btn(bar, "📈 Заполнить факт", self._open_fact_batch)
+        self.btn_period_slice = self._tb_btn(bar, "📊 Срез периода", self._export_period_slice)
         self.btn_import = self._tb_btn(bar, "📤 Импорт Excel", self._import_excel)
         self.btn_export = self._tb_btn(bar, "📥 Экспорт Excel", self._export_excel)
     
@@ -3257,6 +3414,486 @@ class GprPage(tk.Frame):
             "Для записи в базу нажмите 'СОХРАНИТЬ'.",
             parent=self,
         )
+
+    def _build_period_slice_rows(
+        self,
+        period_from: date,
+        period_to: date,
+    ) -> List[Dict[str, Any]]:
+        """
+        Формирует строки среза:
+        план на период / факт на период.
+        """
+        task_ids = [
+            int(t["id"])
+            for t in self.tasks
+            if t.get("id") and (t.get("row_kind") or "task") == "task"
+        ]
+
+        period_fact_info = GprService.load_task_fact_period_info(
+            task_ids,
+            period_from,
+            period_to,
+        )
+
+        rows: List[Dict[str, Any]] = []
+
+        for t in self.tasks:
+            row_kind = (t.get("row_kind") or "task").strip()
+
+            if row_kind in ("group", "title"):
+                rows.append(
+                    {
+                        "row_kind": row_kind,
+                        "name": t.get("name", ""),
+                    }
+                )
+                continue
+
+            ds = _to_date(t.get("plan_start"))
+            df = _to_date(t.get("plan_finish"))
+
+            # Работа попадает в срез, если:
+            # 1. она пересекается плановыми датами с периодом;
+            # 2. или по ней есть факт в периоде.
+            tid = t.get("id")
+            tid_int = int(tid) if tid else None
+
+            fact_period_info = (
+                period_fact_info.get(tid_int, {})
+                if tid_int
+                else {}
+            )
+
+            fact_qty_period = float(
+                fact_period_info.get("fact_qty_period") or 0
+            )
+
+            has_plan_overlap = False
+            if ds and df:
+                has_plan_overlap = _overlap_days(
+                    ds,
+                    df,
+                    period_from,
+                    period_to,
+                ) > 0
+
+            if not has_plan_overlap and fact_qty_period <= 0:
+                continue
+
+            plan_qty_total = _safe_float(t.get("plan_qty"))
+            plan_qty_period = _calc_plan_qty_for_period(
+                plan_qty_total,
+                ds,
+                df,
+                period_from,
+                period_to,
+            )
+
+            fact_qty_total = 0.0
+            if tid_int:
+                fact_qty_total = float(self.facts.get(tid_int, 0) or 0)
+
+            deviation = None
+            period_pct = None
+
+            if plan_qty_period is not None:
+                deviation = fact_qty_period - plan_qty_period
+
+                if plan_qty_period > 0:
+                    period_pct = fact_qty_period / plan_qty_period * 100
+
+            total_pct = None
+            if plan_qty_total and plan_qty_total > 0:
+                total_pct = fact_qty_total / plan_qty_total * 100
+
+            rows.append(
+                {
+                    "row_kind": "task",
+                    "task_id": tid_int,
+                    "work_type_name": t.get("work_type_name", ""),
+                    "name": t.get("name", ""),
+                    "uom_code": t.get("uom_code") or "",
+                    "plan_start": ds,
+                    "plan_finish": df,
+                    "status": t.get("status", "planned"),
+                    "plan_qty_total": plan_qty_total,
+                    "plan_qty_period": plan_qty_period,
+                    "fact_qty_period": fact_qty_period,
+                    "deviation": deviation,
+                    "period_pct": period_pct,
+                    "fact_qty_total": fact_qty_total,
+                    "total_pct": total_pct,
+                    "workers_last_period": fact_period_info.get("workers_last_period"),
+                    "workers_max_period": fact_period_info.get("workers_max_period"),
+                    "workers_sum_period": fact_period_info.get("workers_sum_period", 0),
+                }
+            )
+
+        return rows
+
+    def _export_period_slice(self):
+        """
+        Экспортирует срез за выбранный период:
+        план на период / факт на период.
+        """
+        if not self.plan_id:
+            messagebox.showinfo(
+                "ГПР",
+                "Сначала откройте объект.",
+                parent=self,
+            )
+            return
+
+        if not self.tasks:
+            messagebox.showinfo(
+                "ГПР",
+                "Нет работ для формирования среза.",
+                parent=self,
+            )
+            return
+
+        if not HAS_OPENPYXL:
+            messagebox.showwarning(
+                "ГПР",
+                "Для экспорта необходима библиотека openpyxl.\n"
+                "Установите: pip install openpyxl",
+                parent=self,
+            )
+            return
+
+        dlg = DateRangeDialog(self, self.range_from, self.range_to)
+        if not dlg.result:
+            return
+
+        period_from, period_to = dlg.result
+
+        try:
+            rows = self._build_period_slice_rows(period_from, period_to)
+        except Exception as e:
+            logger.exception("GPR period slice build error")
+            messagebox.showerror(
+                "ГПР",
+                f"Не удалось сформировать срез:\n{e}",
+                parent=self,
+            )
+            return
+
+        task_rows_count = sum(
+            1 for r in rows if r.get("row_kind") == "task"
+        )
+
+        if task_rows_count <= 0:
+            messagebox.showinfo(
+                "ГПР",
+                "В выбранном периоде нет плановых работ и факта.",
+                parent=self,
+            )
+            return
+
+        obj = next(
+            (o for o in self.objects if int(o["id"]) == self.object_db_id),
+            None,
+        )
+
+        if obj:
+            obj_name = obj.get("short_name") or obj.get("address") or "объект"
+            addr = obj.get("address") or ""
+        else:
+            obj_name = "объект"
+            addr = ""
+
+        default_name = (
+            f"ГПР_срез_{obj_name}_"
+            f"{period_from.strftime('%Y%m%d')}_"
+            f"{period_to.strftime('%Y%m%d')}.xlsx"
+        )
+        default_name = "".join(
+            c if c.isalnum() or c in "._- ()" else "_"
+            for c in default_name
+        )
+
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Сохранить срез ГПР в Excel",
+            defaultextension=".xlsx",
+            initialfile=default_name,
+            filetypes=[("Excel", "*.xlsx"), ("Все файлы", "*.*")],
+        )
+
+        if not path:
+            return
+
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Срез периода"
+
+            thin_side = Side(style="thin", color="D0D0D0")
+            thin_border = Border(
+                left=thin_side,
+                right=thin_side,
+                top=thin_side,
+                bottom=thin_side,
+            )
+
+            header_fill = PatternFill("solid", fgColor="D6DCE4")
+            group_fill = PatternFill("solid", fgColor="EEF5FF")
+            title_fill = PatternFill("solid", fgColor="DFF1FF")
+            negative_fill = PatternFill("solid", fgColor="F8D7DA")
+            positive_fill = PatternFill("solid", fgColor="D4EDDA")
+            neutral_fill = PatternFill("solid", fgColor="FFF3CD")
+
+            status_fill = {
+                "planned": PatternFill("solid", fgColor="D6EAFF"),
+                "in_progress": PatternFill("solid", fgColor="FFF3CD"),
+                "done": PatternFill("solid", fgColor="D4EDDA"),
+                "paused": PatternFill("solid", fgColor="FFF9C4"),
+                "canceled": PatternFill("solid", fgColor="F8D7DA"),
+            }
+
+            ws.merge_cells("A1:P1")
+            title = (
+                f"Срез ГПР за период "
+                f"{_fmt_date(period_from)} — {_fmt_date(period_to)}"
+            )
+            ws.cell(1, 1, title).font = Font(bold=True, size=13)
+            ws.cell(1, 1).alignment = Alignment(horizontal="left")
+
+            ws.merge_cells("A2:P2")
+            obj_title = f"Объект: {obj_name}"
+            if addr:
+                obj_title += f" — {addr}"
+            ws.cell(2, 1, obj_title).font = Font(size=10, italic=True)
+
+            headers = [
+                "№",
+                "Тип работ",
+                "Вид работ",
+                "Ед.",
+                "Начало",
+                "Окончание",
+                "Статус",
+                "План всего",
+                "План на период",
+                "Факт на период",
+                "Отклонение",
+                "% периода",
+                "Факт накоп.",
+                "% общий",
+                "Людей посл.",
+                "Людей сумма",
+            ]
+
+            widths = [
+                6,
+                22,
+                40,
+                8,
+                12,
+                12,
+                16,
+                14,
+                16,
+                16,
+                14,
+                12,
+                14,
+                12,
+                12,
+                12,
+            ]
+
+            header_row = 4
+            data_row = header_row + 1
+
+            for col_idx, header in enumerate(headers, start=1):
+                cell = ws.cell(header_row, col_idx, header)
+                cell.font = Font(bold=True)
+                cell.fill = header_fill
+                cell.alignment = Alignment(
+                    horizontal="center",
+                    vertical="center",
+                    wrap_text=True,
+                )
+                cell.border = thin_border
+
+            for col_idx, width in enumerate(widths, start=1):
+                ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+            excel_no = 0
+            row_num = data_row
+
+            total_plan_period = 0.0
+            total_fact_period = 0.0
+            total_plan_all = 0.0
+            total_fact_all = 0.0
+
+            for r in rows:
+                row_kind = (r.get("row_kind") or "task").strip()
+
+                if row_kind == "group":
+                    ws.cell(row_num, 2, "ГРУППА").font = Font(bold=True)
+                    ws.cell(row_num, 3, r.get("name", "")).font = Font(bold=True)
+
+                    for col in range(1, len(headers) + 1):
+                        ws.cell(row_num, col).fill = group_fill
+                        ws.cell(row_num, col).border = thin_border
+
+                    row_num += 1
+                    continue
+
+                if row_kind == "title":
+                    ws.cell(row_num, 2, "ТИТУЛ").font = Font(bold=True)
+                    ws.cell(row_num, 3, r.get("name", "")).font = Font(bold=True)
+
+                    for col in range(1, len(headers) + 1):
+                        ws.cell(row_num, col).fill = title_fill
+                        ws.cell(row_num, col).border = thin_border
+
+                    row_num += 1
+                    continue
+
+                excel_no += 1
+
+                st_code = r.get("status", "planned")
+                st_label = STATUS_LABELS.get(st_code, st_code)
+
+                plan_total = r.get("plan_qty_total")
+                plan_period = r.get("plan_qty_period")
+                fact_period = float(r.get("fact_qty_period") or 0)
+                deviation = r.get("deviation")
+                period_pct = r.get("period_pct")
+                fact_total = float(r.get("fact_qty_total") or 0)
+                total_pct = r.get("total_pct")
+
+                if plan_period is not None:
+                    total_plan_period += float(plan_period or 0)
+
+                total_fact_period += fact_period
+
+                if plan_total is not None:
+                    total_plan_all += float(plan_total or 0)
+
+                total_fact_all += fact_total
+
+                values = [
+                    excel_no,
+                    r.get("work_type_name", ""),
+                    r.get("name", ""),
+                    r.get("uom_code", ""),
+                    _fmt_date(r.get("plan_start")),
+                    _fmt_date(r.get("plan_finish")),
+                    st_label,
+                    _fmt_qty(plan_total),
+                    _fmt_qty(plan_period),
+                    _fmt_qty(fact_period),
+                    _fmt_qty(deviation),
+                    f"{period_pct:.1f}%" if period_pct is not None else "",
+                    _fmt_qty(fact_total),
+                    f"{total_pct:.1f}%" if total_pct is not None else "",
+                    r.get("workers_last_period") or "",
+                    r.get("workers_sum_period") or "",
+                ]
+
+                for col_idx, value in enumerate(values, start=1):
+                    cell = ws.cell(row_num, col_idx, value)
+                    cell.border = thin_border
+                    cell.alignment = Alignment(
+                        horizontal="center",
+                        vertical="center",
+                        wrap_text=True,
+                    )
+
+                    if col_idx in (2, 3):
+                        cell.alignment = Alignment(
+                            horizontal="left",
+                            vertical="center",
+                            wrap_text=True,
+                        )
+
+                status_cell = ws.cell(row_num, 7)
+                if st_code in status_fill:
+                    status_cell.fill = status_fill[st_code]
+
+                deviation_cell = ws.cell(row_num, 11)
+                if deviation is not None:
+                    if deviation < 0:
+                        deviation_cell.fill = negative_fill
+                    elif deviation > 0:
+                        deviation_cell.fill = positive_fill
+                    else:
+                        deviation_cell.fill = neutral_fill
+
+                row_num += 1
+
+            total_row = row_num + 1
+
+            ws.cell(total_row, 2, "ИТОГО").font = Font(bold=True)
+            ws.cell(total_row, 8, _fmt_qty(total_plan_all)).font = Font(bold=True)
+            ws.cell(total_row, 9, _fmt_qty(total_plan_period)).font = Font(bold=True)
+            ws.cell(total_row, 10, _fmt_qty(total_fact_period)).font = Font(bold=True)
+
+            total_dev = total_fact_period - total_plan_period
+            ws.cell(total_row, 11, _fmt_qty(total_dev)).font = Font(bold=True)
+
+            if total_plan_period > 0:
+                ws.cell(
+                    total_row,
+                    12,
+                    f"{total_fact_period / total_plan_period * 100:.1f}%"
+                ).font = Font(bold=True)
+
+            ws.cell(total_row, 13, _fmt_qty(total_fact_all)).font = Font(bold=True)
+
+            if total_plan_all > 0:
+                ws.cell(
+                    total_row,
+                    14,
+                    f"{total_fact_all / total_plan_all * 100:.1f}%"
+                ).font = Font(bold=True)
+
+            for col in range(1, len(headers) + 1):
+                ws.cell(total_row, col).border = thin_border
+                ws.cell(total_row, col).fill = PatternFill(
+                    "solid",
+                    fgColor="E2F0D9",
+                )
+
+            ws.cell(
+                total_row + 2,
+                2,
+                f"Сформировано: {_today().strftime('%d.%m.%Y')}",
+            ).font = Font(italic=True, size=8, color="888888")
+
+            ws.freeze_panes = ws.cell(data_row, 1)
+            ws.auto_filter.ref = (
+                f"A{header_row}:"
+                f"{get_column_letter(len(headers))}{max(row_num - 1, header_row)}"
+            )
+
+            wb.save(path)
+
+            messagebox.showinfo(
+                "ГПР",
+                f"Срез периода сохранён:\n{path}",
+                parent=self,
+            )
+
+        except PermissionError:
+            messagebox.showerror(
+                "ГПР",
+                f"Нет доступа к файлу:\n{path}\n\n"
+                "Возможно файл открыт в другой программе.",
+                parent=self,
+            )
+        except Exception as e:
+            logger.exception("GPR period slice export error")
+            messagebox.showerror(
+                "ГПР",
+                f"Ошибка экспорта среза:\n{e}",
+                parent=self,
+            )
     
     def _export_excel_gantt_sheet(self, wb, obj, obj_name: str) -> None:
         """
