@@ -2372,6 +2372,9 @@ class GprPage(tk.Frame):
             compact=True,
         )
         self.btn_save.pack(side="right", fill="y", ipady=5)
+
+        fbar = tk.Frame(parent, bg=C["bg"], pady=4)
+        fbar.pack(fill="x", padx=10)
     
         tk.Label(
             fbar, text="Фильтр тип:", bg=C["bg"], font=("Segoe UI", 8)
