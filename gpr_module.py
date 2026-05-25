@@ -2268,40 +2268,110 @@ class GprPage(tk.Frame):
             range_f, text="По работам", command=self._fit_range
         ).pack(side="left", padx=(6, 0))
     
-        bar = tk.Frame(parent, bg=C["accent_light"], pady=5)
+        style = ttk.Style(self)
+        style.configure(
+            "GPR.Toolbar.TButton",
+            font=("Segoe UI", 8),
+            padding=(5, 2),
+        )
+
+        bar = tk.Frame(parent, bg=C["accent_light"], pady=2)
         bar.pack(fill="x", padx=10)
-    
-        self.btn_add = self._tb_btn(bar, "➕ Добавить", self._add_task)
-        self.btn_group = self._tb_btn(bar, "📁 Группа", self._add_group)
-        self.btn_title = self._tb_btn(bar, "🟦 Титул", self._add_title)
-        self.btn_edit = self._tb_btn(bar, "✏️ Редактировать", self._edit_selected)
-        self.btn_delete = self._tb_btn(bar, "🗑 Удалить", self._delete_selected)
-        self.btn_up = self._tb_btn(bar, "⬆ Вверх", self._move_selected_up)
-        self.btn_down = self._tb_btn(bar, "⬇ Вниз", self._move_selected_down)
-    
-        tk.Frame(bar, bg=C["border"], width=1).pack(
-            side="left", fill="y", padx=8
+
+        tools_left = tk.Frame(bar, bg=C["accent_light"])
+        tools_left.pack(side="left", fill="x", expand=True)
+
+        tools_save = tk.Frame(bar, bg=C["accent_light"])
+        tools_save.pack(side="right", fill="y", padx=(8, 4))
+
+        row1 = tk.Frame(tools_left, bg=C["accent_light"])
+        row1.pack(anchor="w", fill="x", pady=(0, 1))
+
+        row2 = tk.Frame(tools_left, bg=C["accent_light"])
+        row2.pack(anchor="w", fill="x", pady=(1, 0))
+
+        def _grid_btn(row_frame, col, text, cmd):
+            btn = self._tb_btn(
+                row_frame,
+                text,
+                cmd,
+                pack=False,
+                style="GPR.Toolbar.TButton",
+            )
+            btn.grid(row=0, column=col, sticky="w", padx=(0, 4), pady=0)
+            return btn
+
+        def _grid_sep(row_frame, col):
+            sep = tk.Frame(row_frame, bg=C["border"], width=1, height=22)
+            sep.grid(row=0, column=col, sticky="ns", padx=(3, 7), pady=1)
+            return sep
+
+        # 1-я строка: основные операции редактирования.
+        c = 0
+        self.btn_add = _grid_btn(row1, c, "➕ Работа", self._add_task)
+        c += 1
+
+        self.btn_group = _grid_btn(row1, c, "📁 Группа", self._add_group)
+        c += 1
+
+        self.btn_title = _grid_btn(row1, c, "🟦 Титул", self._add_title)
+        c += 1
+
+        _grid_sep(row1, c)
+        c += 1
+
+        self.btn_edit = _grid_btn(row1, c, "✏️ Правка", self._edit_selected)
+        c += 1
+
+        self.btn_delete = _grid_btn(row1, c, "🗑 Удалить", self._delete_selected)
+        c += 1
+
+        _grid_sep(row1, c)
+        c += 1
+
+        self.btn_up = _grid_btn(row1, c, "⬆ Вверх", self._move_selected_up)
+        c += 1
+
+        self.btn_down = _grid_btn(row1, c, "⬇ Вниз", self._move_selected_down)
+        c += 1
+
+        _grid_sep(row1, c)
+        c += 1
+
+        _grid_btn(row1, c, "🔍−", lambda: self._zoom(-2))
+        c += 1
+
+        _grid_btn(row1, c, "🔍+", lambda: self._zoom(2))
+        c += 1
+
+        # 2-я строка: шаблоны, факт, отчёты и Excel.
+        c = 0
+        self.btn_template = _grid_btn(row2, c, "📋 Шаблон", self._apply_template)
+        c += 1
+
+        self.btn_fact_batch = _grid_btn(row2, c, "📈 Факт", self._open_fact_batch)
+        c += 1
+
+        self.btn_period_slice = _grid_btn(row2, c, "📊 Срез", self._export_period_slice)
+        c += 1
+
+        _grid_sep(row2, c)
+        c += 1
+
+        self.btn_import = _grid_btn(row2, c, "📤 Импорт", self._import_excel)
+        c += 1
+
+        self.btn_export = _grid_btn(row2, c, "📥 Экспорт", self._export_excel)
+        c += 1
+
+        self.btn_save = self._accent_btn(
+            tools_save,
+            "💾  СОХРАНИТЬ",
+            self._save,
+            pack=False,
+            compact=True,
         )
-    
-        self.btn_template = self._tb_btn(bar, "📋 Из шаблона…", self._apply_template)
-        self.btn_fact_batch = self._tb_btn(bar, "📈 Заполнить факт", self._open_fact_batch)
-        self.btn_period_slice = self._tb_btn(bar, "📊 Срез периода", self._export_period_slice)
-        self.btn_import = self._tb_btn(bar, "📤 Импорт Excel", self._import_excel)
-        self.btn_export = self._tb_btn(bar, "📥 Экспорт Excel", self._export_excel)
-    
-        tk.Frame(bar, bg=C["border"], width=1).pack(
-            side="left", fill="y", padx=8
-        )
-    
-        self._tb_btn(bar, "🔍−", lambda: self._zoom(-2))
-        self._tb_btn(bar, "🔍+", lambda: self._zoom(2))
-    
-        self.btn_save = self._accent_btn(bar, "💾  СОХРАНИТЬ", self._save)
-        self.btn_save.pack_forget()
-        self.btn_save.pack(side="right", padx=(4, 8))
-    
-        fbar = tk.Frame(parent, bg=C["bg"], pady=4)
-        fbar.pack(fill="x", padx=10)
+        self.btn_save.pack(side="right", fill="y", ipady=5)
     
         tk.Label(
             fbar, text="Фильтр тип:", bg=C["bg"], font=("Segoe UI", 8)
@@ -2494,29 +2564,44 @@ class GprPage(tk.Frame):
             logger.exception("Error syncing tree/gantt header heights")
             self.tree_top_spacer.config(height=GanttCanvas.MONTH_H)
 
-    def _accent_btn(self, parent, text, cmd):
+    def _accent_btn(self, parent, text, cmd, *, pack=True, compact=False):
         b = tk.Button(
             parent,
             text=text,
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 8 if compact else 9, "bold"),
             bg=C["btn_bg"],
             fg=C["btn_fg"],
             activebackground="#0d47a1",
             activeforeground="white",
             relief="flat",
             cursor="hand2",
-            padx=10,
-            pady=3,
+            padx=8 if compact else 10,
+            pady=2 if compact else 3,
             command=cmd,
         )
-        b.pack(side="left", padx=2)
+
+        if pack:
+            b.pack(side="left", padx=2)
+
         b.bind("<Enter>", lambda _e: b.config(bg="#0d47a1"))
         b.bind("<Leave>", lambda _e: b.config(bg=C["btn_bg"]))
+
         return b
 
-    def _tb_btn(self, parent, text, cmd):
-        b = ttk.Button(parent, text=text, command=cmd)
-        b.pack(side="left", padx=2)
+    def _tb_btn(self, parent, text, cmd, *, pack=True, style=None):
+        kw = {
+            "text": text,
+            "command": cmd,
+        }
+
+        if style:
+            kw["style"] = style
+
+        b = ttk.Button(parent, **kw)
+
+        if pack:
+            b.pack(side="left", padx=2)
+
         return b
 
     def _on_tree_scroll(self, *args):
