@@ -238,7 +238,7 @@ def build_printable_trip_timesheet_sheet(
         fio = normalize_spaces(rec.get("fio") or "")
         tbn = normalize_tbn(rec.get("tbn"))
         hours = normalize_hours_list(rec.get("hours"), year, month)
-        totals = rec.get("_totals") or calc_row_totals(hours, year, month)
+        totals = calc_row_totals(hours, year, month)
         
         # --- ОБРАБОТКА МАССИВА ПЕРИОДОВ ---
         periods = rec.get("trip_periods", [])
@@ -2374,6 +2374,8 @@ class TripTimesheetPage(tk.Frame):
             )
             if not path:
                 return
+
+            self._recalc_all_totals()
 
             wb = Workbook()
             ws = wb.active
