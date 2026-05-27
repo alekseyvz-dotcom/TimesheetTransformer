@@ -377,14 +377,7 @@ class TimesheetPlanFactData:
     
         # Оставляем лучшую строку по каждому человеку.
         # Ключ человека: сначала TBN, если нет — по ФИО.
-        df = (
-            df.sort_values(
-                ["person_key", "_priority", "hours", "object_name"],
-                ascending=[True, False, False, True]
-            )
-            .drop_duplicates(subset=["person_key"], keep="first")
-            .drop(columns=["_priority"])
-        )
+        df = df.drop(columns=["_priority"])
     
         return df
     
