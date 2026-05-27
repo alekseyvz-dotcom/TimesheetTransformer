@@ -184,19 +184,32 @@ def normalize_spaces(value: str) -> str:
 def normalize_tbn(value: Any) -> str:
     return normalize_spaces(str(value or ""))
 
-
 def normalize_code(value: str) -> str:
     s = normalize_spaces(str(value or "").upper())
-    # УНИВЕРСАЛЬНАЯ ОБРАБОТКА РВ: 
-    # Превращаем любые "РВ14", "РВ 10.5", "РВ08" в стандартный вид "РВ <число>"
+
+    # Универсальная обработка РВ:
+    # РВ14, РВ 14, РВ08 -> РВ 14 / РВ 8
     match = re.match(r"^РВ\s*0*(\d+(?:[.,]\d+)?)$", s)
     if match:
         return f"РВ {match.group(1)}"
-    return s
 
+    # Универсальная обработка ночных часов:
+    # Н11, Н 11, Н08 -> Н11 / Н8
+    match = re.match(r"^Н\s*0*(\d+(?:[.,]\d+)?)$", s)
+    if match:
+        return f"Н{match.group(1)}"
+
+    # Универсальная обработка работы в выходной ночью:
+    # НРВ11, НРВ 11, НРВ08 -> НРВ11 / НРВ8
+    match = re.match(r"^НРВ\s*0*(\d+(?:[.,]\d+)?)$", s)
+    if match:
+        return f"НРВ{match.group(1)}"
+
+    return s
 
 def is_allowed_timesheet_code(value: str) -> bool:
     s = normalize_code(value)
+
     if s in SPECIAL_CODES:
         return True
 
@@ -209,8 +222,25 @@ def is_allowed_timesheet_code(value: str) -> bool:
         except Exception:
             return False
 
-    return False
+    # Универсальная поддержка Н11, Н8, Н12.5
+    match = re.match(r"^Н(\d+(?:[.,]\d+)?)$", s)
+    if match:
+        try:
+            number = float(match.group(1).replace(",", "."))
+            return number > 0
+        except Exception:
+            return False
 
+    # Универсальная поддержка НРВ11, НРВ8, НРВ12.5
+    match = re.match(r"^НРВ(\d+(?:[.,]\d+)?)$", s)
+    if match:
+        try:
+            number = float(match.group(1).replace(",", "."))
+            return number > 0
+        except Exception:
+            return False
+
+    return False
 
 def format_hours_for_cell(value: float | int | None) -> Optional[str]:
     if value is None:
@@ -357,11 +387,20 @@ def parse_timesheet_cell(value: Any) -> ParsedTimesheetCell:
         )
 
     code = normalize_code(normalized)
+    
     if code in SPECIAL_CODES:
         info = SPECIAL_CODES[code]
+    
         total_hours = float(info.get("hours", 0.0))
         night_hours = float(info.get("night_hours", 0.0))
-        counts_day = bool(info.get("counts_day", total_hours > 1e-12))
+        counts_day = bool(info.get("counts_day", total_hours > 1e-12 or night_hours > 1e-12))
+    
+        # ВАЖНО:
+        # Если код является рабочим ночным кодом, например Н11 или НРВ11,
+        # то ночные часы должны входить и в общие часы.
+        if total_hours <= 1e-12 and night_hours > 1e-12 and counts_day:
+            total_hours = night_hours
+    
         return ParsedTimesheetCell(
             raw=raw,
             normalized=code,
@@ -373,7 +412,7 @@ def parse_timesheet_cell(value: Any) -> ParsedTimesheetCell:
             overtime_day=0.0,
             overtime_night=0.0,
             counts_day=counts_day,
-            suspicious=False,
+            suspicious=total_hours > MAX_HOURS_PER_DAY,
         )
 
     # Поддержка универсального формата "РВ <число>"
@@ -393,6 +432,46 @@ def parse_timesheet_cell(value: Any) -> ParsedTimesheetCell:
                 overtime_night=0.0,
                 counts_day=True,
                 suspicious=float(generic_rv) > MAX_HOURS_PER_DAY,
+            )
+
+    # Поддержка универсального формата ночных часов:
+    # Н11, Н 11, Н8, Н12.5
+    match = re.match(r"^Н(\d+(?:[.,]\d+)?)$", code)
+    if match:
+        night_value = _to_float_number(match.group(1))
+        if night_value is not None and night_value > 0:
+            return ParsedTimesheetCell(
+                raw=raw,
+                normalized=code,
+                is_empty=False,
+                is_code=True,
+                code=code,
+                total_hours=float(night_value),
+                night_hours=float(night_value),
+                overtime_day=0.0,
+                overtime_night=0.0,
+                counts_day=True,
+                suspicious=float(night_value) > MAX_HOURS_PER_DAY,
+            )
+    
+    # Поддержка универсального формата работы в выходной ночью:
+    # НРВ11, НРВ 11, НРВ8, НРВ12.5
+    match = re.match(r"^НРВ(\d+(?:[.,]\d+)?)$", code)
+    if match:
+        night_value = _to_float_number(match.group(1))
+        if night_value is not None and night_value > 0:
+            return ParsedTimesheetCell(
+                raw=raw,
+                normalized=code,
+                is_empty=False,
+                is_code=True,
+                code=code,
+                total_hours=float(night_value),
+                night_hours=float(night_value),
+                overtime_day=0.0,
+                overtime_night=0.0,
+                counts_day=True,
+                suspicious=float(night_value) > MAX_HOURS_PER_DAY,
             )
 
     base_part = normalized
