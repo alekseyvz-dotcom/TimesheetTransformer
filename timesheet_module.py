@@ -62,6 +62,11 @@ from timesheet_db import (
     set_db_pool,
     upsert_timesheet_header,
     update_timesheet_header_by_id,
+    load_user_all_timesheet_headers,
+    load_all_combined_timesheet_headers,
+    load_trip_timesheet_rows_by_header_id,
+    load_trip_timesheet_rows_with_schedule_by_header_id,
+    load_timesheet_users_for_registry_combined,
 )
 from timesheet_dialogs import (
     AutoCompleteCombobox,
@@ -93,6 +98,11 @@ try:
     from work_schedules_manager import get_schedule_days_map
 except Exception:
     get_schedule_days_map = None
+
+try:
+    from trip_timesheet_page import TripTimesheetPage
+except Exception:
+    TripTimesheetPage = None
 
 # Приводим цвета модуля к новой светлой оболочке
 TS_COLORS = dict(TS_COLORS)
@@ -151,29 +161,34 @@ MEDIUM_BLACK = Side(style="medium", color="000000")
 BORDER_THIN = Border(left=THIN_BLACK, right=THIN_BLACK, top=THIN_BLACK, bottom=THIN_BLACK)
 BORDER_EMPTY = Border()
 
-def _load_timesheet_users_for_registry() -> List[Tuple[int, str]]:
+def _set_trip_timesheet_tab_title(app_ref, key: str, header: Dict[str, Any]):
     try:
-        with db_cursor(dict_rows=True) as (_conn, cur):
-            cur.execute(
-                """
-                SELECT DISTINCT
-                    u.id,
-                    COALESCE(NULLIF(u.full_name, ''), u.username) AS display_name
-                FROM timesheet_headers h
-                JOIN app_users u ON u.id = h.user_id
-                ORDER BY COALESCE(NULLIF(u.full_name, ''), u.username)
-                """
-            )
-            result: List[Tuple[int, str]] = []
-            for row in cur.fetchall():
-                uid = int(row.get("id"))
-                display = normalize_spaces(row.get("display_name") or "")
-                if display:
-                    result.append((uid, display))
-            return result
+        year = int(header.get("year") or 0)
+        month = int(header.get("month") or 0)
+        month_ru = month_name_ru(month) if 1 <= month <= 12 else str(month or "")
+
+        oid = str(header.get("object_id") or "").strip()
+        addr = str(header.get("object_addr") or "").strip()
+
+        if oid:
+            title = f"Командировочный [{oid}] {month_ru} {year}"
+        elif addr:
+            title = f"Командировочный {month_ru} {year}"
+        else:
+            title = f"Командировочный табель {month_ru} {year}"
+
+        if hasattr(app_ref, "_tab_titles"):
+            app_ref._tab_titles[key] = title
+
+        frame = getattr(app_ref, "_tab_frames", {}).get(key)
+        notebook = getattr(app_ref, "notebook", None)
+        if frame is not None and notebook is not None:
+            notebook.tab(frame, text=title)
     except Exception:
-        logger.exception("Не удалось загрузить список пользователей для реестра табелей")
-        return []
+        logger.exception("Не удалось обновить заголовок вкладки командировочного табеля")
+
+def _load_timesheet_users_for_registry() -> List[Tuple[int, str]]:
+    return load_timesheet_users_for_registry_combined()
 
 def _excel_safe_value(value: Any) -> Any:
     return "" if value is None else value
@@ -3848,13 +3863,14 @@ class MyTimesheetsPage(tk.Frame):
         )
         tbl_frame.pack(fill="both", expand=True, padx=10, pady=(4, 4))
 
-        cols = ("year", "month", "object", "department", "updated_at")
+        cols = ("type", "year", "month", "object", "department", "updated_at")
         self.tree = ttk.Treeview(tbl_frame, columns=cols, show="headings", selectmode="browse")
 
         heads = {
+            "type": ("Тип", 130, "center"),
             "year": ("Год", 70, "center"),
             "month": ("Месяц", 110, "center"),
-            "object": ("Объект", 380, "w"),
+            "object": ("Объект", 360, "w"),
             "department": ("Подразделение", 210, "w"),
             "updated_at": ("Обновлён", 150, "center"),
         }
@@ -3924,7 +3940,7 @@ class MyTimesheetsPage(tk.Frame):
         addr_substr = normalize_spaces(self.var_obj_addr.get() or "") or None
 
         try:
-            headers = load_user_timesheet_headers(user_id, year, month, dep, addr_substr)
+            headers = load_user_all_timesheet_headers(user_id, year, month, dep, addr_substr)
         except Exception as e:
             messagebox.showerror("Мои табели", f"Ошибка загрузки из БД:\n{e}", parent=self)
             return
@@ -3940,11 +3956,22 @@ class MyTimesheetsPage(tk.Frame):
             upd = h.get("updated_at")
             upd_str = upd.strftime("%d.%m.%Y %H:%M") if isinstance(upd, datetime) else ""
 
+            source = h.get("source", "object")
+            iid = f"{source}:{int(h['id'])}"
+            type_label = h.get("source_label") or ("Командировочный" if source == "trip" else "Объектный")
+            
             self.tree.insert(
                 "",
                 "end",
-                iid=str(h["id"]),
-                values=(h["year"], month_ru, obj_display, h.get("department") or "", upd_str),
+                iid=iid,
+                values=(
+                    type_label,
+                    h["year"],
+                    month_ru,
+                    obj_display,
+                    h.get("department") or "",
+                    upd_str,
+                ),
             )
 
         self.lbl_count.config(text=f"Табелей: {len(headers)}")
@@ -3971,6 +3998,7 @@ class MyTimesheetsPage(tk.Frame):
 
             header = (
                 [
+                    "Тип табеля",
                     "Год",
                     "Месяц",
                     "Адрес",
@@ -3992,8 +4020,12 @@ class MyTimesheetsPage(tk.Frame):
 
             total_rows = 0
             for h in self._headers:
-                rows_data = load_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
-                brig_map = load_brigadiers_map_for_header(int(h["id"]))
+                if h.get("source") == "trip":
+                    rows_data = load_trip_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
+                    brig_map = {}
+                else:
+                    rows_data = load_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
+                    brig_map = load_brigadiers_map_for_header(int(h["id"]))
 
                 for r in rows_data:
                     tbn = normalize_tbn(r.get("tbn"))
@@ -4001,6 +4033,7 @@ class MyTimesheetsPage(tk.Frame):
 
                     ws.append(
                         [
+                            h.get("source_label") or ("Командировочный" if h.get("source") == "trip" else "Объектный"),
                             h["year"],
                             h["month"],
                             h.get("object_addr", ""),
@@ -4032,9 +4065,24 @@ class MyTimesheetsPage(tk.Frame):
         sel = self.tree.selection()
         if not sel:
             return None
+    
         try:
-            hid = int(sel[0])
-            return next((h for h in self._headers if int(h["id"]) == hid), None)
+            raw = str(sel[0])
+            if ":" in raw:
+                source, id_part = raw.split(":", 1)
+                hid = int(id_part)
+            else:
+                source = "object"
+                hid = int(raw)
+    
+            return next(
+                (
+                    h for h in self._headers
+                    if int(h["id"]) == hid
+                    and str(h.get("source", "object")) == source
+                ),
+                None,
+            )
         except Exception:
             return None
 
@@ -4043,11 +4091,45 @@ class MyTimesheetsPage(tk.Frame):
         if not h:
             return
     
-        key = f"timesheet_{int(h['id'])}"
+        source = h.get("source", "object")
+        hid = int(h["id"])
+    
+        if source == "trip":
+            if TripTimesheetPage is None:
+                messagebox.showerror(
+                    "Командировочный табель",
+                    "Модуль командировочных табелей недоступен.",
+                    parent=self,
+                )
+                return
+    
+            key = f"trip_timesheet_{hid}"
+    
+            def builder(parent):
+                page = TripTimesheetPage(parent, self.app_ref)
+                page.after_idle(
+                    lambda: page.open_by_context(
+                        object_id=h.get("object_id"),
+                        object_addr=h.get("object_addr") or "",
+                        year=int(h.get("year") or datetime.now().year),
+                        month=int(h.get("month") or datetime.now().month),
+                    )
+                )
+                return page
+    
+            if hasattr(self.app_ref, "open_page_in_tab"):
+                self.app_ref.open_page_in_tab(key, builder)
+            else:
+                self.app_ref._show_page(key, builder)
+    
+            _set_trip_timesheet_tab_title(self.app_ref, key, h)
+            return
+    
+        key = f"timesheet_{hid}"
         builder = lambda parent: TimesheetPage(
             parent,
             app_ref=self.app_ref,
-            init_header_id=int(h["id"]),
+            init_header_id=hid,
             init_object_id=h.get("object_id"),
             init_object_addr=h.get("object_addr"),
             init_department=h.get("department"),
@@ -4198,15 +4280,16 @@ class TimesheetRegistryPage(tk.Frame):
         )
         tbl_frame.pack(fill="both", expand=True, padx=10, pady=(4, 4))
 
-        cols = ("year", "month", "object", "department", "user", "updated_at")
+        cols = ("type", "year", "month", "object", "department", "user", "updated_at")
         self.tree = ttk.Treeview(tbl_frame, columns=cols, show="headings", selectmode="browse")
 
         heads = {
+            "type": ("Тип", 130, "center"),
             "year": ("Год", 65, "center"),
             "month": ("Месяц", 95, "center"),
-            "object": ("Объект", 310, "w"),
-            "department": ("Подразделение", 190, "w"),
-            "user": ("Пользователь", 190, "w"),
+            "object": ("Объект", 290, "w"),
+            "department": ("Подразделение", 180, "w"),
+            "user": ("Пользователь", 180, "w"),
             "updated_at": ("Обновлён", 140, "center"),
         }
         for col, (text, width, anchor) in heads.items():
@@ -4247,17 +4330,29 @@ class TimesheetRegistryPage(tk.Frame):
             with db_cursor() as (_conn, cur):
                 cur.execute(
                     """
-                    SELECT DISTINCT department
-                    FROM timesheet_headers
-                    WHERE department IS NOT NULL
-                      AND TRIM(department) <> ''
-                    ORDER BY department
+                    SELECT DISTINCT dep
+                    FROM (
+                        SELECT NULLIF(btrim(department), '') AS dep
+                        FROM public.timesheet_headers
+    
+                        UNION
+    
+                        SELECT NULLIF(btrim(d.name), '') AS dep
+                        FROM public.trip_timesheet_headers h
+                        JOIN public.trip_timesheet_rows r ON r.header_id = h.id
+                        LEFT JOIN public.employees e
+                            ON btrim(COALESCE(e.tbn, '')) = btrim(COALESCE(r.tbn, ''))
+                        LEFT JOIN public.departments d
+                            ON d.id = e.department_id
+                    ) x
+                    WHERE dep IS NOT NULL
+                    ORDER BY dep
                     """
                 )
                 self._all_departments = [normalize_spaces(r[0]) for r in cur.fetchall() if normalize_spaces(r[0])]
         except Exception:
             logger.exception("Ошибка загрузки списка подразделений реестра")
-
+    
         values = ["Все"] + self._all_departments
         self._cmb_dep.configure(values=values)
         if not self.var_dep.get() or self.var_dep.get() == "Все":
@@ -4338,7 +4433,7 @@ class TimesheetRegistryPage(tk.Frame):
                     break
 
         try:
-            headers = load_all_timesheet_headers(
+            headers = load_all_combined_timesheet_headers(
                 year=year,
                 month=month,
                 department=dep,
@@ -4365,11 +4460,23 @@ class TimesheetRegistryPage(tk.Frame):
             obj_display = f"[{oid}] {addr}" if oid else addr
             upd_str = upd.strftime("%d.%m.%Y %H:%M") if isinstance(upd, datetime) else str(upd or "")
 
+            source = h.get("source", "object")
+            iid = f"{source}:{int(h['id'])}"
+            type_label = h.get("source_label") or ("Командировочный" if source == "trip" else "Объектный")
+            
             self.tree.insert(
                 "",
                 "end",
-                iid=str(h["id"]),
-                values=(yr, month_ru, obj_display, dep_val, user_name, upd_str),
+                iid=iid,
+                values=(
+                    type_label,
+                    yr,
+                    month_ru,
+                    obj_display,
+                    dep_val,
+                    user_name,
+                    upd_str,
+                ),
             )
 
         self.lbl_count.config(text=f"Табелей: {len(headers)}")
@@ -4396,6 +4503,7 @@ class TimesheetRegistryPage(tk.Frame):
 
             header_row = (
                 [
+                    "Тип табеля",
                     "Год",
                     "Месяц",
                     "Адрес",
@@ -4417,11 +4525,16 @@ class TimesheetRegistryPage(tk.Frame):
 
             total_rows = 0
             for h in self._headers:
-                rows = load_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
+                if h.get("source") == "trip":
+                    rows = load_trip_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
+                else:
+                    rows = load_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
+            
                 user_display = h.get("full_name") or h.get("username") or ""
                 for r in rows:
                     ws.append(
                         [
+                            h.get("source_label") or ("Командировочный" if h.get("source") == "trip" else "Объектный"),
                             h["year"],
                             h["month"],
                             h.get("object_addr", ""),
@@ -4519,7 +4632,10 @@ class TimesheetRegistryPage(tk.Frame):
                     days_filled = 0
                 else:
                     days_in_period = (period_end - period_start).days + 1
-                    rows = load_timesheet_rows_by_header_id(int(h["id"]))
+                    if h.get("source") == "trip":
+                        rows = load_trip_timesheet_rows_by_header_id(int(h["id"]))
+                    else:
+                        rows = load_timesheet_rows_by_header_id(int(h["id"]))
                     days_filled = 0
                     for d_idx in range(days_in_period):
                         for row in rows:
@@ -4568,9 +4684,24 @@ class TimesheetRegistryPage(tk.Frame):
         sel = self.tree.selection()
         if not sel:
             return None
+    
         try:
-            hid = int(sel[0])
-            return next((h for h in self._headers if int(h["id"]) == hid), None)
+            raw = str(sel[0])
+            if ":" in raw:
+                source, id_part = raw.split(":", 1)
+                hid = int(id_part)
+            else:
+                source = "object"
+                hid = int(raw)
+    
+            return next(
+                (
+                    h for h in self._headers
+                    if int(h["id"]) == hid
+                    and str(h.get("source", "object")) == source
+                ),
+                None,
+            )
         except Exception:
             return None
 
@@ -4580,13 +4711,53 @@ class TimesheetRegistryPage(tk.Frame):
             return
     
         role = (getattr(self.app_ref, "current_user", None) or {}).get("role") or "specialist"
-        read_only = role != "admin"
+        read_only = str(role).lower() != "admin"
     
-        key = f"timesheet_{int(h['id'])}"
+        source = h.get("source", "object")
+        hid = int(h["id"])
+    
+        if source == "trip":
+            if TripTimesheetPage is None:
+                messagebox.showerror(
+                    "Командировочный табель",
+                    "Модуль командировочных табелей недоступен.",
+                    parent=self,
+                )
+                return
+    
+            key = f"trip_timesheet_{hid}"
+    
+            def builder(parent):
+                page = TripTimesheetPage(parent, self.app_ref)
+                page.after_idle(
+                    lambda: page.open_by_context(
+                        object_id=h.get("object_id"),
+                        object_addr=h.get("object_addr") or "",
+                        year=int(h.get("year") or datetime.now().year),
+                        month=int(h.get("month") or datetime.now().month),
+                    )
+                )
+    
+                # ВАЖНО:
+                # Сейчас TripTimesheetPage не поддерживает read_only.
+                # Поэтому это только визуальное открытие.
+                # Если нужен запрет редактирования для не-админов,
+                # нужно доработать TripTimesheetPage отдельно.
+                return page
+    
+            if hasattr(self.app_ref, "open_page_in_tab"):
+                self.app_ref.open_page_in_tab(key, builder)
+            else:
+                self.app_ref._show_page(key, builder)
+    
+            _set_trip_timesheet_tab_title(self.app_ref, key, h)
+            return
+    
+        key = f"timesheet_{hid}"
         builder = lambda parent: TimesheetPage(
             parent,
             app_ref=self.app_ref,
-            init_header_id=int(h["id"]),
+            init_header_id=hid,
             init_object_id=h.get("object_id"),
             init_object_addr=h.get("object_addr"),
             init_department=h.get("department"),
