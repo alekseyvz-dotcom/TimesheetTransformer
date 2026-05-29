@@ -1333,6 +1333,381 @@ def load_all_timesheet_headers(
         )
         return [dict(r) for r in cur.fetchall()]
 
+def _trip_department_expr() -> str:
+    return """
+        COALESCE((
+            SELECT string_agg(DISTINCT d.name, ', ' ORDER BY d.name)
+            FROM public.trip_timesheet_rows r
+            LEFT JOIN public.employees e
+                ON btrim(COALESCE(e.tbn, '')) = btrim(COALESCE(r.tbn, ''))
+            LEFT JOIN public.departments d
+                ON d.id = e.department_id
+            WHERE r.header_id = h.id
+              AND d.name IS NOT NULL
+              AND btrim(d.name) <> ''
+        ), 'Командировочный')
+    """
+
+
+def load_user_all_timesheet_headers(
+    user_id: int,
+    year: Optional[int],
+    month: Optional[int],
+    department: Optional[str],
+    object_addr_substr: Optional[str],
+) -> List[Dict[str, Any]]:
+    """
+    Для раздела 'Мои табели':
+    возвращает объектные + командировочные табели в едином формате.
+    """
+    obj_where: List[str] = ["h.user_id = %s"]
+    obj_params: List[Any] = [int(user_id)]
+
+    trip_where: List[str] = ["h.user_id = %s"]
+    trip_params: List[Any] = [int(user_id)]
+
+    if year is not None:
+        obj_where.append("h.year = %s")
+        obj_params.append(int(year))
+
+        trip_where.append("h.year = %s")
+        trip_params.append(int(year))
+
+    if month is not None:
+        obj_where.append("h.month = %s")
+        obj_params.append(int(month))
+
+        trip_where.append("h.month = %s")
+        trip_params.append(int(month))
+
+    dep_norm = normalize_spaces(department or "")
+    if dep_norm:
+        obj_where.append("COALESCE(h.department, '') ILIKE %s")
+        obj_params.append(f"%{dep_norm}%")
+
+        trip_where.append(f"{_trip_department_expr()} ILIKE %s")
+        trip_params.append(f"%{dep_norm}%")
+
+    addr_norm = normalize_spaces(object_addr_substr or "")
+    if addr_norm:
+        obj_where.append("h.object_addr ILIKE %s")
+        obj_params.append(f"%{addr_norm}%")
+
+        trip_where.append("h.object_addr ILIKE %s")
+        trip_params.append(f"%{addr_norm}%")
+
+    obj_where_sql = " AND ".join(obj_where)
+    trip_where_sql = " AND ".join(trip_where)
+
+    sql = f"""
+        SELECT *
+        FROM (
+            SELECT
+                'object'::text AS source,
+                'Объектный'::text AS source_label,
+                h.id,
+                h.object_id,
+                h.object_addr,
+                COALESCE(h.department, '') AS department,
+                h.year,
+                h.month,
+                h.user_id::int AS user_id,
+                u.username,
+                u.full_name,
+                h.created_at,
+                h.updated_at
+            FROM public.timesheet_headers h
+            JOIN public.app_users u ON u.id = h.user_id
+            WHERE {obj_where_sql}
+
+            UNION ALL
+
+            SELECT
+                'trip'::text AS source,
+                'Командировочный'::text AS source_label,
+                h.id,
+                h.object_id,
+                h.object_addr,
+                {_trip_department_expr()} AS department,
+                h.year,
+                h.month,
+                h.user_id::int AS user_id,
+                u.username,
+                u.full_name,
+                h.created_at,
+                h.updated_at
+            FROM public.trip_timesheet_headers h
+            JOIN public.app_users u ON u.id = h.user_id
+            WHERE {trip_where_sql}
+        ) x
+        ORDER BY x.year DESC, x.month DESC, x.updated_at DESC, x.object_addr, x.id DESC
+    """
+
+    with db_cursor(dict_rows=True) as (_conn, cur):
+        cur.execute(sql, obj_params + trip_params)
+        return [dict(r) for r in cur.fetchall()]
+
+
+def load_all_combined_timesheet_headers(
+    year: Optional[int],
+    month: Optional[int],
+    department: Optional[str],
+    object_addr_substr: Optional[str],
+    object_id_substr: Optional[str],
+    user_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Для раздела 'Реестр табелей':
+    возвращает объектные + командировочные табели в едином формате.
+    """
+    obj_where: List[str] = ["1=1"]
+    obj_params: List[Any] = []
+
+    trip_where: List[str] = ["1=1"]
+    trip_params: List[Any] = []
+
+    if year is not None:
+        obj_where.append("h.year = %s")
+        obj_params.append(int(year))
+
+        trip_where.append("h.year = %s")
+        trip_params.append(int(year))
+
+    if month is not None:
+        obj_where.append("h.month = %s")
+        obj_params.append(int(month))
+
+        trip_where.append("h.month = %s")
+        trip_params.append(int(month))
+
+    dep_norm = normalize_spaces(department or "")
+    if dep_norm:
+        obj_where.append("COALESCE(h.department, '') ILIKE %s")
+        obj_params.append(f"%{dep_norm}%")
+
+        trip_where.append(f"{_trip_department_expr()} ILIKE %s")
+        trip_params.append(f"%{dep_norm}%")
+
+    addr_norm = normalize_spaces(object_addr_substr or "")
+    if addr_norm:
+        obj_where.append("h.object_addr ILIKE %s")
+        obj_params.append(f"%{addr_norm}%")
+
+        trip_where.append("h.object_addr ILIKE %s")
+        trip_params.append(f"%{addr_norm}%")
+
+    object_id_norm = normalize_spaces(object_id_substr or "")
+    if object_id_norm:
+        obj_where.append("COALESCE(h.object_id, '') ILIKE %s")
+        obj_params.append(f"%{object_id_norm}%")
+
+        trip_where.append("COALESCE(h.object_id, '') ILIKE %s")
+        trip_params.append(f"%{object_id_norm}%")
+
+    if user_id is not None:
+        obj_where.append("h.user_id = %s")
+        obj_params.append(int(user_id))
+
+        trip_where.append("h.user_id = %s")
+        trip_params.append(int(user_id))
+
+    obj_where_sql = " AND ".join(obj_where)
+    trip_where_sql = " AND ".join(trip_where)
+
+    sql = f"""
+        SELECT *
+        FROM (
+            SELECT
+                'object'::text AS source,
+                'Объектный'::text AS source_label,
+                h.id,
+                h.object_id,
+                h.object_addr,
+                COALESCE(h.department, '') AS department,
+                h.year,
+                h.month,
+                h.user_id::int AS user_id,
+                u.username,
+                u.full_name,
+                h.created_at,
+                h.updated_at
+            FROM public.timesheet_headers h
+            JOIN public.app_users u ON u.id = h.user_id
+            WHERE {obj_where_sql}
+
+            UNION ALL
+
+            SELECT
+                'trip'::text AS source,
+                'Командировочный'::text AS source_label,
+                h.id,
+                h.object_id,
+                h.object_addr,
+                {_trip_department_expr()} AS department,
+                h.year,
+                h.month,
+                h.user_id::int AS user_id,
+                u.username,
+                u.full_name,
+                h.created_at,
+                h.updated_at
+            FROM public.trip_timesheet_headers h
+            JOIN public.app_users u ON u.id = h.user_id
+            WHERE {trip_where_sql}
+        ) x
+        ORDER BY x.year DESC, x.month DESC, x.updated_at DESC, x.object_addr, x.department, x.full_name
+    """
+
+    with db_cursor(dict_rows=True) as (_conn, cur):
+        cur.execute(sql, obj_params + trip_params)
+        return [dict(r) for r in cur.fetchall()]
+
+
+def load_trip_timesheet_rows_by_header_id(header_id: int) -> List[Dict[str, Any]]:
+    """
+    Строки командировочного табеля для отчётов/экспорта.
+    Возвращает hours_raw + totals + trip_periods.
+    """
+    with db_cursor(dict_rows=True) as (_conn, cur):
+        cur.execute(
+            """
+            SELECT year, month
+            FROM public.trip_timesheet_headers
+            WHERE id = %s
+            """,
+            (int(header_id),),
+        )
+        ym = cur.fetchone()
+        if not ym:
+            return []
+
+        year = int(ym.get("year"))
+        month = int(ym.get("month"))
+
+        cur.execute(
+            """
+            SELECT
+                r.id,
+                r.header_id,
+                r.fio,
+                r.tbn,
+                r.hours_raw,
+                r.total_days,
+                r.total_hours,
+                r.night_hours,
+                r.overtime_day,
+                r.overtime_night,
+                e.work_schedule,
+                d.name AS department,
+                e.position
+            FROM public.trip_timesheet_rows r
+            LEFT JOIN public.employees e
+                ON btrim(COALESCE(e.tbn, '')) = btrim(COALESCE(r.tbn, ''))
+            LEFT JOIN public.departments d
+                ON d.id = e.department_id
+            WHERE r.header_id = %s
+            ORDER BY r.fio, r.tbn
+            """,
+            (int(header_id),),
+        )
+
+        rows = [dict(r) for r in cur.fetchall()]
+        row_ids = [int(r["id"]) for r in rows if r.get("id") is not None]
+
+        periods_by_row_id: dict[int, list[dict[str, date]]] = {}
+
+        if row_ids:
+            cur.execute(
+                """
+                SELECT
+                    row_id,
+                    date_from,
+                    date_to
+                FROM public.trip_timesheet_periods
+                WHERE row_id = ANY(%s)
+                ORDER BY row_id, date_from, date_to
+                """,
+                (row_ids,),
+            )
+
+            for p in cur.fetchall():
+                rid = int(p.get("row_id"))
+                periods_by_row_id.setdefault(rid, []).append(
+                    {
+                        "from": p.get("date_from"),
+                        "to": p.get("date_to"),
+                    }
+                )
+
+        result: List[Dict[str, Any]] = []
+
+        for r in rows:
+            hours = normalize_hours_list(r.get("hours_raw"), year, month)
+            rid = int(r["id"])
+
+            result.append(
+                {
+                    "id": rid,
+                    "header_id": int(r["header_id"]),
+                    "fio": normalize_spaces(r.get("fio") or ""),
+                    "tbn": normalize_tbn(r.get("tbn")),
+                    "hours": hours,
+                    "hours_raw": hours,
+                    "total_days": int(r.get("total_days")) if r.get("total_days") is not None else None,
+                    "total_hours": float(r.get("total_hours")) if r.get("total_hours") is not None else None,
+                    "night_hours": float(r.get("night_hours")) if r.get("night_hours") is not None else None,
+                    "overtime_day": float(r.get("overtime_day")) if r.get("overtime_day") is not None else None,
+                    "overtime_night": float(r.get("overtime_night")) if r.get("overtime_night") is not None else None,
+                    "work_schedule": normalize_spaces(r.get("work_schedule") or ""),
+                    "department": normalize_spaces(r.get("department") or ""),
+                    "position": normalize_spaces(r.get("position") or ""),
+                    "trip_periods": periods_by_row_id.get(rid, []),
+                }
+            )
+
+        return result
+
+
+def load_trip_timesheet_rows_with_schedule_by_header_id(header_id: int) -> List[Dict[str, Any]]:
+    return load_trip_timesheet_rows_by_header_id(header_id)
+
+
+def load_timesheet_users_for_registry_combined() -> List[Tuple[int, str]]:
+    """
+    Пользователи, у которых есть объектные или командировочные табели.
+    """
+    try:
+        with db_cursor(dict_rows=True) as (_conn, cur):
+            cur.execute(
+                """
+                SELECT DISTINCT
+                    u.id,
+                    COALESCE(NULLIF(u.full_name, ''), u.username) AS display_name
+                FROM public.app_users u
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM public.timesheet_headers h
+                    WHERE h.user_id = u.id
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM public.trip_timesheet_headers th
+                    WHERE th.user_id = u.id
+                )
+                ORDER BY COALESCE(NULLIF(u.full_name, ''), u.username)
+                """
+            )
+
+            result: List[Tuple[int, str]] = []
+            for row in cur.fetchall():
+                uid = int(row.get("id"))
+                display = normalize_spaces(row.get("display_name") or "")
+                if display:
+                    result.append((uid, display))
+            return result
+    except Exception:
+        logger.exception("Не удалось загрузить список пользователей для общего реестра табелей")
+        return []
 
 # ============================================================
 # Справочники
@@ -1729,4 +2104,9 @@ __all__ = [
     "find_employee_day_conflicts",
     "update_timesheet_header_by_id",
     "load_timesheet_cell_audit",
+    "load_user_all_timesheet_headers",
+    "load_all_combined_timesheet_headers",
+    "load_trip_timesheet_rows_by_header_id",
+    "load_trip_timesheet_rows_with_schedule_by_header_id",
+    "load_timesheet_users_for_registry_combined",
 ]
