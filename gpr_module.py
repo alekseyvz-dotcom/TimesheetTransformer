@@ -588,6 +588,31 @@ class GprService:
                 """)
                 return [dict(r) for r in cur.fetchall()]
 
+    @staticmethod
+    def load_task_fact_upto(task_ids: List[int], cutoff: date) -> Dict[int, float]:
+        """
+        Накопительный факт по задачам на дату cutoff (включительно).
+        Возвращает: { task_id: fact_qty_upto }
+        """
+        if not task_ids:
+            return {}
+        with _DBConn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT task_id, COALESCE(SUM(fact_qty), 0) AS fact_qty_upto
+                    FROM public.gpr_task_facts
+                    WHERE task_id = ANY(%s)
+                      AND fact_date <= %s
+                    GROUP BY task_id
+                    """,
+                    (task_ids, cutoff),
+                )
+                out: Dict[int, float] = {}
+                for r in cur.fetchall():
+                    out[int(r["task_id"])] = float(r.get("fact_qty_upto") or 0.0)
+                return out
+
     # ── dictionaries ──
     @staticmethod
     def load_work_types() -> List[Dict[str, Any]]:
@@ -3510,7 +3535,8 @@ class GprPage(tk.Frame):
     ) -> List[Dict[str, Any]]:
         """
         Формирует строки среза:
-        план на период / факт на период.
+        - план на период / факт на период / отклонение за период
+        - план к дате (на конец периода) / факт к дате / общее отклонение
         """
         task_ids = [
             int(t["id"])
@@ -3524,6 +3550,9 @@ class GprPage(tk.Frame):
             period_to,
         )
 
+        # Накопительный факт на дату (включая period_to)
+        fact_upto_map = GprService.load_task_fact_upto(task_ids, period_to)  # NEW
+
         rows: List[Dict[str, Any]] = []
 
         for t in self.tasks:
@@ -3531,66 +3560,68 @@ class GprPage(tk.Frame):
 
             if row_kind in ("group", "title"):
                 rows.append(
-                    {
-                        "row_kind": row_kind,
-                        "name": t.get("name", ""),
-                    }
+                    {"row_kind": row_kind, "name": t.get("name", "")}
                 )
                 continue
 
             ds = _to_date(t.get("plan_start"))
             df = _to_date(t.get("plan_finish"))
 
-            # Работа попадает в срез, если:
-            # 1. она пересекается плановыми датами с периодом;
-            # 2. или по ней есть факт в периоде.
             tid = t.get("id")
             tid_int = int(tid) if tid else None
 
-            fact_period_info = (
-                period_fact_info.get(tid_int, {})
-                if tid_int
-                else {}
-            )
-
-            fact_qty_period = float(
-                fact_period_info.get("fact_qty_period") or 0
-            )
+            fact_period_info = period_fact_info.get(tid_int, {}) if tid_int else {}
+            fact_qty_period = float(fact_period_info.get("fact_qty_period") or 0)
 
             has_plan_overlap = False
             if ds and df:
-                has_plan_overlap = _overlap_days(
-                    ds,
-                    df,
-                    period_from,
-                    period_to,
-                ) > 0
+                has_plan_overlap = _overlap_days(ds, df, period_from, period_to) > 0
 
             if not has_plan_overlap and fact_qty_period <= 0:
+                # В срезе оставляем только реально попадающие работы
                 continue
 
             plan_qty_total = _safe_float(t.get("plan_qty"))
+
+            # План на период
             plan_qty_period = _calc_plan_qty_for_period(
-                plan_qty_total,
-                ds,
-                df,
-                period_from,
-                period_to,
+                plan_qty_total, ds, df, period_from, period_to
             )
 
-            fact_qty_total = 0.0
-            if tid_int:
-                fact_qty_total = float(self.facts.get(tid_int, 0) or 0)
+            # Факт накоп. за всё время (как и раньше)
+            fact_qty_total = float(self.facts.get(tid_int, 0) or 0) if tid_int else 0.0
 
-            deviation = None
+            # Отклонение за период
+            deviation_period = None
             period_pct = None
-
             if plan_qty_period is not None:
-                deviation = fact_qty_period - plan_qty_period
-
+                deviation_period = fact_qty_period - plan_qty_period
                 if plan_qty_period > 0:
                     period_pct = fact_qty_period / plan_qty_period * 100
 
+            # План к дате (на конец периода) — равномерное распределение
+            plan_qty_upto = None
+            if plan_qty_total is not None and ds and df:
+                cutoff = min(df, period_to)
+                if cutoff < ds:
+                    plan_qty_upto = 0.0
+                else:
+                    plan_qty_upto = _calc_plan_qty_for_period(
+                        plan_qty_total, ds, df, ds, cutoff
+                    )
+
+            # Факт к дате (на конец периода)
+            fact_qty_upto = float(fact_upto_map.get(tid_int, 0.0)) if tid_int else 0.0
+
+            # Общее отклонение (к концу периода)
+            deviation_total = None
+            total_pct_to_date = None
+            if plan_qty_upto is not None:
+                deviation_total = fact_qty_upto - plan_qty_upto
+                if plan_qty_upto > 0:
+                    total_pct_to_date = fact_qty_upto / plan_qty_upto * 100
+
+            # Старый общий % к общему плану (оставляем как было)
             total_pct = None
             if plan_qty_total and plan_qty_total > 0:
                 total_pct = fact_qty_total / plan_qty_total * 100
@@ -3605,13 +3636,22 @@ class GprPage(tk.Frame):
                     "plan_start": ds,
                     "plan_finish": df,
                     "status": t.get("status", "planned"),
+
                     "plan_qty_total": plan_qty_total,
                     "plan_qty_period": plan_qty_period,
+
                     "fact_qty_period": fact_qty_period,
-                    "deviation": deviation,
+                    "deviation": deviation_period,
                     "period_pct": period_pct,
+
+                    "plan_qty_upto": plan_qty_upto,           # NEW
+                    "fact_qty_upto": fact_qty_upto,           # NEW
+                    "deviation_total": deviation_total,       # NEW
+                    "total_pct_to_date": total_pct_to_date,   # NEW
+
                     "fact_qty_total": fact_qty_total,
                     "total_pct": total_pct,
+
                     "workers_last_period": fact_period_info.get("workers_last_period"),
                     "workers_max_period": fact_period_info.get("workers_max_period"),
                     "workers_sum_period": fact_period_info.get("workers_sum_period", 0),
@@ -3623,7 +3663,8 @@ class GprPage(tk.Frame):
     def _export_period_slice(self):
         """
         Экспортирует срез за выбранный период:
-        план на период / факт на период.
+        - план на период / факт на период / отклонение за период
+        - план к дате / факт к дате / отклонение общее (на конец периода)
         """
         if not self.plan_id:
             messagebox.showinfo(
@@ -3632,7 +3673,7 @@ class GprPage(tk.Frame):
                 parent=self,
             )
             return
-
+    
         if not self.tasks:
             messagebox.showinfo(
                 "ГПР",
@@ -3640,7 +3681,7 @@ class GprPage(tk.Frame):
                 parent=self,
             )
             return
-
+    
         if not HAS_OPENPYXL:
             messagebox.showwarning(
                 "ГПР",
@@ -3649,13 +3690,13 @@ class GprPage(tk.Frame):
                 parent=self,
             )
             return
-
+    
         dlg = DateRangeDialog(self, self.range_from, self.range_to)
         if not dlg.result:
             return
-
+    
         period_from, period_to = dlg.result
-
+    
         try:
             rows = self._build_period_slice_rows(period_from, period_to)
         except Exception as e:
@@ -3666,11 +3707,8 @@ class GprPage(tk.Frame):
                 parent=self,
             )
             return
-
-        task_rows_count = sum(
-            1 for r in rows if r.get("row_kind") == "task"
-        )
-
+    
+        task_rows_count = sum(1 for r in rows if r.get("row_kind") == "task")
         if task_rows_count <= 0:
             messagebox.showinfo(
                 "ГПР",
@@ -3678,29 +3716,22 @@ class GprPage(tk.Frame):
                 parent=self,
             )
             return
-
-        obj = next(
-            (o for o in self.objects if int(o["id"]) == self.object_db_id),
-            None,
-        )
-
+    
+        obj = next((o for o in self.objects if int(o["id"]) == self.object_db_id), None)
         if obj:
             obj_name = obj.get("short_name") or obj.get("address") or "объект"
             addr = obj.get("address") or ""
         else:
             obj_name = "объект"
             addr = ""
-
+    
         default_name = (
             f"ГПР_срез_{obj_name}_"
             f"{period_from.strftime('%Y%m%d')}_"
             f"{period_to.strftime('%Y%m%d')}.xlsx"
         )
-        default_name = "".join(
-            c if c.isalnum() or c in "._- ()" else "_"
-            for c in default_name
-        )
-
+        default_name = "".join(c if c.isalnum() or c in "._- ()" else "_" for c in default_name)
+    
         path = filedialog.asksaveasfilename(
             parent=self,
             title="Сохранить срез ГПР в Excel",
@@ -3708,30 +3739,24 @@ class GprPage(tk.Frame):
             initialfile=default_name,
             filetypes=[("Excel", "*.xlsx"), ("Все файлы", "*.*")],
         )
-
         if not path:
             return
-
+    
         try:
             wb = Workbook()
             ws = wb.active
             ws.title = "Срез периода"
-
+    
             thin_side = Side(style="thin", color="D0D0D0")
-            thin_border = Border(
-                left=thin_side,
-                right=thin_side,
-                top=thin_side,
-                bottom=thin_side,
-            )
-
+            thin_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+    
             header_fill = PatternFill("solid", fgColor="D6DCE4")
             group_fill = PatternFill("solid", fgColor="EEF5FF")
             title_fill = PatternFill("solid", fgColor="DFF1FF")
             negative_fill = PatternFill("solid", fgColor="F8D7DA")
             positive_fill = PatternFill("solid", fgColor="D4EDDA")
             neutral_fill = PatternFill("solid", fgColor="FFF3CD")
-
+    
             status_fill = {
                 "planned": PatternFill("solid", fgColor="D6EAFF"),
                 "in_progress": PatternFill("solid", fgColor="FFF3CD"),
@@ -3739,21 +3764,7 @@ class GprPage(tk.Frame):
                 "paused": PatternFill("solid", fgColor="FFF9C4"),
                 "canceled": PatternFill("solid", fgColor="F8D7DA"),
             }
-
-            ws.merge_cells("A1:P1")
-            title = (
-                f"Срез ГПР за период "
-                f"{_fmt_date(period_from)} — {_fmt_date(period_to)}"
-            )
-            ws.cell(1, 1, title).font = Font(bold=True, size=13)
-            ws.cell(1, 1).alignment = Alignment(horizontal="left")
-
-            ws.merge_cells("A2:P2")
-            obj_title = f"Объект: {obj_name}"
-            if addr:
-                obj_title += f" — {addr}"
-            ws.cell(2, 1, obj_title).font = Font(size=10, italic=True)
-
+    
             headers = [
                 "№",
                 "Тип работ",
@@ -3767,143 +3778,133 @@ class GprPage(tk.Frame):
                 "Факт на период",
                 "Отклонение",
                 "% периода",
+                "Отклонение общее",  # NEW
                 "Факт накоп.",
                 "% общий",
                 "Людей посл.",
                 "Людей сумма",
             ]
-
+    
             widths = [
-                6,
-                22,
-                40,
-                8,
-                12,
-                12,
-                16,
-                14,
-                16,
-                16,
-                14,
-                12,
-                14,
-                12,
-                12,
-                12,
+                6, 22, 40, 8, 12, 12, 16, 14, 16, 16, 14, 12,
+                16,  # ширина для "Отклонение общее"
+                14, 12, 12, 12,
             ]
-
+    
             header_row = 4
             data_row = header_row + 1
-
+    
+            # Заголовки отчета (динамическое слияние по ширине)
+            last_col_letter = get_column_letter(len(headers))
+            ws.merge_cells(f"A1:{last_col_letter}1")
+            title = f"Срез ГПР за период {_fmt_date(period_from)} — {_fmt_date(period_to)}"
+            ws.cell(1, 1, title).font = Font(bold=True, size=13)
+            ws.cell(1, 1).alignment = Alignment(horizontal="left")
+    
+            ws.merge_cells(f"A2:{last_col_letter}2")
+            obj_title = f"Объект: {obj_name}"
+            if addr:
+                obj_title += f" — {addr}"
+            ws.cell(2, 1, obj_title).font = Font(size=10, italic=True)
+    
+            # Заголовки таблицы
             for col_idx, header in enumerate(headers, start=1):
                 cell = ws.cell(header_row, col_idx, header)
                 cell.font = Font(bold=True)
                 cell.fill = header_fill
-                cell.alignment = Alignment(
-                    horizontal="center",
-                    vertical="center",
-                    wrap_text=True,
-                )
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
                 cell.border = thin_border
-
+    
             for col_idx, width in enumerate(widths, start=1):
                 ws.column_dimensions[get_column_letter(col_idx)].width = width
-
+    
             excel_no = 0
             row_num = data_row
-
+    
             total_plan_period = 0.0
             total_fact_period = 0.0
             total_plan_all = 0.0
             total_fact_all = 0.0
-
+            total_dev_total = 0.0  # NEW: сумма общего отклонения
+    
             for r in rows:
                 row_kind = (r.get("row_kind") or "task").strip()
-
+    
                 if row_kind == "group":
                     ws.cell(row_num, 2, "ГРУППА").font = Font(bold=True)
                     ws.cell(row_num, 3, r.get("name", "")).font = Font(bold=True)
-
                     for col in range(1, len(headers) + 1):
                         ws.cell(row_num, col).fill = group_fill
                         ws.cell(row_num, col).border = thin_border
-
                     row_num += 1
                     continue
-
+    
                 if row_kind == "title":
                     ws.cell(row_num, 2, "ТИТУЛ").font = Font(bold=True)
                     ws.cell(row_num, 3, r.get("name", "")).font = Font(bold=True)
-
                     for col in range(1, len(headers) + 1):
                         ws.cell(row_num, col).fill = title_fill
                         ws.cell(row_num, col).border = thin_border
-
                     row_num += 1
                     continue
-
+    
                 excel_no += 1
-
+    
                 st_code = r.get("status", "planned")
                 st_label = STATUS_LABELS.get(st_code, st_code)
-
+    
                 plan_total = r.get("plan_qty_total")
                 plan_period = r.get("plan_qty_period")
                 fact_period = float(r.get("fact_qty_period") or 0)
                 deviation = r.get("deviation")
                 period_pct = r.get("period_pct")
+    
+                deviation_total = r.get("deviation_total")  # NEW
                 fact_total = float(r.get("fact_qty_total") or 0)
                 total_pct = r.get("total_pct")
-
+    
                 if plan_period is not None:
                     total_plan_period += float(plan_period or 0)
-
                 total_fact_period += fact_period
-
                 if plan_total is not None:
                     total_plan_all += float(plan_total or 0)
-
                 total_fact_all += fact_total
-
+                if deviation_total is not None:
+                    total_dev_total += float(deviation_total or 0)
+    
                 values = [
-                    excel_no,
-                    r.get("work_type_name", ""),
-                    r.get("name", ""),
-                    r.get("uom_code", ""),
-                    _fmt_date(r.get("plan_start")),
-                    _fmt_date(r.get("plan_finish")),
-                    st_label,
-                    _fmt_qty(plan_total),
-                    _fmt_qty(plan_period),
-                    _fmt_qty(fact_period),
-                    _fmt_qty(deviation),
-                    f"{period_pct:.1f}%" if period_pct is not None else "",
-                    _fmt_qty(fact_total),
-                    f"{total_pct:.1f}%" if total_pct is not None else "",
-                    r.get("workers_last_period") or "",
-                    r.get("workers_sum_period") or "",
+                    excel_no,                              # 1
+                    r.get("work_type_name", ""),           # 2
+                    r.get("name", ""),                     # 3
+                    r.get("uom_code", ""),                 # 4
+                    _fmt_date(r.get("plan_start")),        # 5
+                    _fmt_date(r.get("plan_finish")),       # 6
+                    st_label,                              # 7
+                    _fmt_qty(plan_total),                  # 8
+                    _fmt_qty(plan_period),                 # 9
+                    _fmt_qty(fact_period),                 # 10
+                    _fmt_qty(deviation),                   # 11
+                    f"{period_pct:.1f}%" if period_pct is not None else "",  # 12
+                    _fmt_qty(deviation_total),             # 13 NEW
+                    _fmt_qty(fact_total),                  # 14
+                    f"{total_pct:.1f}%" if total_pct is not None else "",    # 15
+                    r.get("workers_last_period") or "",    # 16
+                    r.get("workers_sum_period") or "",     # 17
                 ]
-
+    
                 for col_idx, value in enumerate(values, start=1):
                     cell = ws.cell(row_num, col_idx, value)
                     cell.border = thin_border
-                    cell.alignment = Alignment(
-                        horizontal="center",
-                        vertical="center",
-                        wrap_text=True,
-                    )
-
+                    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
                     if col_idx in (2, 3):
-                        cell.alignment = Alignment(
-                            horizontal="left",
-                            vertical="center",
-                            wrap_text=True,
-                        )
-
+                        cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    
+                # Подсветка статуса
                 status_cell = ws.cell(row_num, 7)
                 if st_code in status_fill:
                     status_cell.fill = status_fill[st_code]
-
+    
+                # Подсветка отклонений (период и общее)
                 deviation_cell = ws.cell(row_num, 11)
                 if deviation is not None:
                     if deviation < 0:
@@ -3912,54 +3913,51 @@ class GprPage(tk.Frame):
                         deviation_cell.fill = positive_fill
                     else:
                         deviation_cell.fill = neutral_fill
-
+    
+                deviation_total_cell = ws.cell(row_num, 13)  # NEW
+                if deviation_total is not None:
+                    if deviation_total < 0:
+                        deviation_total_cell.fill = negative_fill
+                    elif deviation_total > 0:
+                        deviation_total_cell.fill = positive_fill
+                    else:
+                        deviation_total_cell.fill = neutral_fill
+    
                 row_num += 1
-
+    
+            # Итоги
             total_row = row_num + 1
-
             ws.cell(total_row, 2, "ИТОГО").font = Font(bold=True)
             ws.cell(total_row, 8, _fmt_qty(total_plan_all)).font = Font(bold=True)
             ws.cell(total_row, 9, _fmt_qty(total_plan_period)).font = Font(bold=True)
             ws.cell(total_row, 10, _fmt_qty(total_fact_period)).font = Font(bold=True)
-
+    
             total_dev = total_fact_period - total_plan_period
             ws.cell(total_row, 11, _fmt_qty(total_dev)).font = Font(bold=True)
-
+    
             if total_plan_period > 0:
-                ws.cell(
-                    total_row,
-                    12,
-                    f"{total_fact_period / total_plan_period * 100:.1f}%"
-                ).font = Font(bold=True)
-
-            ws.cell(total_row, 13, _fmt_qty(total_fact_all)).font = Font(bold=True)
-
+                ws.cell(total_row, 12, f"{total_fact_period / total_plan_period * 100:.1f}%").font = Font(bold=True)
+    
+            # NEW: итого по «Отклонение общее»
+            ws.cell(total_row, 13, _fmt_qty(total_dev_total)).font = Font(bold=True)
+    
+            ws.cell(total_row, 14, _fmt_qty(total_fact_all)).font = Font(bold=True)
+    
             if total_plan_all > 0:
-                ws.cell(
-                    total_row,
-                    14,
-                    f"{total_fact_all / total_plan_all * 100:.1f}%"
-                ).font = Font(bold=True)
-
+                ws.cell(total_row, 15, f"{total_fact_all / total_plan_all * 100:.1f}%").font = Font(bold=True)
+    
             for col in range(1, len(headers) + 1):
                 ws.cell(total_row, col).border = thin_border
-                ws.cell(total_row, col).fill = PatternFill(
-                    "solid",
-                    fgColor="E2F0D9",
-                )
-
-            ws.cell(
-                total_row + 2,
-                2,
-                f"Сформировано: {_today().strftime('%d.%m.%Y')}",
-            ).font = Font(italic=True, size=8, color="888888")
-
-            ws.freeze_panes = ws.cell(data_row, 1)
-            ws.auto_filter.ref = (
-                f"A{header_row}:"
-                f"{get_column_letter(len(headers))}{max(row_num - 1, header_row)}"
+                ws.cell(total_row, col).fill = PatternFill("solid", fgColor="E2F0D9")
+    
+            ws.cell(total_row + 2, 2, f"Сформировано: {_today().strftime('%d.%m.%Y')}").font = Font(
+                italic=True, size=8, color="888888"
             )
-
+    
+            ws.freeze_panes = ws.cell(data_row, 1)
+            ws.auto_filter.ref = f"A{header_row}:{get_column_letter(len(headers))}{max(row_num - 1, header_row)}"
+    
+            # Лист Ганта по срезу
             self._export_period_slice_gantt_sheet(
                 wb=wb,
                 rows=rows,
@@ -3968,16 +3966,16 @@ class GprPage(tk.Frame):
                 period_from=period_from,
                 period_to=period_to,
             )
-
+    
             wb.save(path)
-
+    
             messagebox.showinfo(
                 "ГПР",
                 f"Срез периода сохранён:\n{path}\n\n"
                 f"Листы: 'Срез периода' и 'Гант среза'",
                 parent=self,
             )
-
+    
         except PermissionError:
             messagebox.showerror(
                 "ГПР",
