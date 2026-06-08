@@ -4520,7 +4520,7 @@ class TimesheetRegistryPage(tk.Frame):
 
         self.lbl_count.config(text=f"Табелей: {len(headers)}")
 
-    def _export_to_excel(self):
+def _export_to_excel(self):
         if not self._headers:
             messagebox.showinfo("Экспорт", "Нет данных для выгрузки.", parent=self)
             return
@@ -4535,6 +4535,8 @@ class TimesheetRegistryPage(tk.Frame):
         if not path:
             return
 
+        codes_map = self._load_internal_codes_map()
+
         try:
             wb = Workbook()
             ws = wb.active
@@ -4547,6 +4549,7 @@ class TimesheetRegistryPage(tk.Frame):
                     "Месяц",
                     "Адрес",
                     "ID объекта",
+                    "Внутренний шифр",
                     "Подразделение",
                     "Пользователь",
                     "ФИО",
@@ -4558,7 +4561,7 @@ class TimesheetRegistryPage(tk.Frame):
             )
             ws.append(header_row)
 
-            widths = [6, 10, 40, 14, 22, 22, 28, 12, 28] + [6] * 31 + [10, 14, 16, 16, 16]
+            widths = [6, 10, 40, 14, 18, 22, 22, 28, 12, 28] + [6] * 31 + [10, 14, 16, 16, 16]
             for i, w in enumerate(widths, 1):
                 ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -4568,8 +4571,11 @@ class TimesheetRegistryPage(tk.Frame):
                     rows = load_trip_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
                 else:
                     rows = load_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
-            
+
                 user_display = h.get("full_name") or h.get("username") or ""
+                obj_id_val = normalize_spaces(str(h.get("object_id") or ""))
+                internal_code = codes_map.get(obj_id_val, "")
+
                 for r in rows:
                     ws.append(
                         [
@@ -4578,6 +4584,7 @@ class TimesheetRegistryPage(tk.Frame):
                             h["month"],
                             h.get("object_addr", ""),
                             h.get("object_id", ""),
+                            internal_code,
                             h.get("department", ""),
                             user_display,
                             r["fio"],
