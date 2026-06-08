@@ -3917,43 +3917,6 @@ class MyTimesheetsPage(tk.Frame):
         self.tree.delete(*self.tree.get_children())
         self._headers.clear()
 
-    def _load_internal_codes_map(self) -> Dict[str, str]:
-        """
-        Возвращает словарь {excel_id(str): internal_code(str)}
-        для объектов, встречающихся в текущих заголовках.
-        Используется при экспорте, чтобы подтянуть внутренний шифр.
-        """
-        codes: Dict[str, str] = {}
-
-        # Собираем уникальные object_id из текущих заголовков
-        obj_ids = {
-            normalize_spaces(str(h.get("object_id") or ""))
-            for h in self._headers
-        }
-        obj_ids.discard("")
-
-        if not obj_ids:
-            return codes
-
-        try:
-            with db_cursor() as (_conn, cur):
-                cur.execute(
-                    """
-                    SELECT excel_id, internal_code
-                      FROM public.objects
-                     WHERE excel_id = ANY(%s)
-                    """,
-                    (list(obj_ids),),
-                )
-                for excel_id, internal_code in cur.fetchall():
-                    key = normalize_spaces(str(excel_id or ""))
-                    if key:
-                        codes[key] = normalize_spaces(str(internal_code or ""))
-        except Exception:
-            logger.exception("Ошибка загрузки внутренних шифров объектов")
-
-        return codes
-
         user = getattr(self.app_ref, "current_user", None) or {}
         user_id = user.get("id")
         if not user_id:
@@ -4020,57 +3983,54 @@ class MyTimesheetsPage(tk.Frame):
 
         path = filedialog.asksaveasfilename(
             parent=self,
-            title="Сохранить реестр табелей в Excel",
+            title="Сохранить мои табели в Excel",
             defaultextension=".xlsx",
-            initialfile=f"Реестр_табелей_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            initialfile=f"Мои_табели_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
             filetypes=[("Excel", "*.xlsx"), ("Все", "*.*")],
         )
         if not path:
             return
 
-        # Подтягиваем внутренние шифры объектов
-        codes_map = self._load_internal_codes_map()
-
         try:
             wb = Workbook()
             ws = wb.active
-            ws.title = "Реестр табелей"
+            ws.title = "Мои табели"
 
-            header_row = (
+            header = (
                 [
                     "Тип табеля",
                     "Год",
                     "Месяц",
                     "Адрес",
                     "ID объекта",
-                    "Внутренний шифр",
                     "Подразделение",
-                    "Пользователь",
                     "ФИО",
                     "Табельный №",
+                    "ФИО бригадира",
                     "График работы",
                 ]
                 + [str(i) for i in range(1, 32)]
-                + ["Итого_дней", "Итого_часов", "В т.ч. ночных", "Переработка_день", "Переработка_ночь"]
+                + ["Итого дней", "Итого часов", "В т.ч. ночных", "Переработка день", "Переработка ночь"]
             )
-            ws.append(header_row)
+            ws.append(header)
 
-            widths = [6, 10, 40, 14, 18, 22, 22, 28, 12, 28] + [6] * 31 + [10, 14, 16, 16, 16]
+            widths = [6, 10, 40, 14, 22, 28, 12, 28, 28] + [6] * 31 + [10, 12, 16, 16, 16]
             for i, w in enumerate(widths, 1):
                 ws.column_dimensions[get_column_letter(i)].width = w
 
             total_rows = 0
             for h in self._headers:
                 if h.get("source") == "trip":
-                    rows = load_trip_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
+                    rows_data = load_trip_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
+                    brig_map = {}
                 else:
-                    rows = load_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
+                    rows_data = load_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
+                    brig_map = load_brigadiers_map_for_header(int(h["id"]))
 
-                user_display = h.get("full_name") or h.get("username") or ""
-                obj_id_val = normalize_spaces(str(h.get("object_id") or ""))
-                internal_code = codes_map.get(obj_id_val, "")
+                for r in rows_data:
+                    tbn = normalize_tbn(r.get("tbn"))
+                    brig_fio = brig_map.get(tbn, "") if tbn else ""
 
-                for r in rows:
                     ws.append(
                         [
                             h.get("source_label") or ("Командировочный" if h.get("source") == "trip" else "Объектный"),
@@ -4078,11 +4038,10 @@ class MyTimesheetsPage(tk.Frame):
                             h["month"],
                             h.get("object_addr", ""),
                             h.get("object_id", ""),
-                            internal_code,
                             h.get("department", ""),
-                            user_display,
-                            r["fio"],
-                            r["tbn"],
+                            r.get("fio", ""),
+                            r.get("tbn", ""),
+                            brig_fio,
                             r.get("work_schedule", ""),
                         ]
                         + (r.get("hours_raw") or [None] * 31)
@@ -4099,7 +4058,7 @@ class MyTimesheetsPage(tk.Frame):
             wb.save(path)
             messagebox.showinfo("Экспорт", f"Готово.\nСтрок: {total_rows}\nФайл: {path}", parent=self)
         except Exception as e:
-            logger.exception("Ошибка экспорта реестра табелей")
+            logger.exception("Ошибка экспорта моих табелей")
             messagebox.showerror("Экспорт", f"Ошибка:\n{e}", parent=self)
 
     def _get_selected_header(self) -> Optional[Dict[str, Any]]:
@@ -4522,6 +4481,41 @@ class TimesheetRegistryPage(tk.Frame):
 
         self.lbl_count.config(text=f"Табелей: {len(headers)}")
 
+    def _load_internal_codes_map(self) -> Dict[str, str]:
+        """
+        Возвращает словарь {object_id(str): internal_code(str)}
+        для объектов из текущего списка заголовков.
+        """
+        codes: Dict[str, str] = {}
+
+        obj_ids = {
+            normalize_spaces(str(h.get("object_id") or ""))
+            for h in self._headers
+        }
+        obj_ids.discard("")
+
+        if not obj_ids:
+            return codes
+
+        try:
+            with db_cursor() as (_conn, cur):
+                cur.execute(
+                    """
+                    SELECT excel_id, internal_code
+                      FROM public.objects
+                     WHERE excel_id = ANY(%s)
+                    """,
+                    (list(obj_ids),),
+                )
+                for excel_id, internal_code in cur.fetchall():
+                    key = normalize_spaces(str(excel_id or ""))
+                    if key:
+                        codes[key] = normalize_spaces(str(internal_code or ""))
+        except Exception:
+            logger.exception("Ошибка загрузки внутренних шифров объектов для реестра табелей")
+
+        return codes
+
     def _export_to_excel(self):
         if not self._headers:
             messagebox.showinfo("Экспорт", "Нет данных для выгрузки.", parent=self)
@@ -4537,6 +4531,8 @@ class TimesheetRegistryPage(tk.Frame):
         if not path:
             return
 
+        codes_map = self._load_internal_codes_map()
+
         try:
             wb = Workbook()
             ws = wb.active
@@ -4549,6 +4545,7 @@ class TimesheetRegistryPage(tk.Frame):
                     "Месяц",
                     "Адрес",
                     "ID объекта",
+                    "Внутренний шифр",
                     "Подразделение",
                     "Пользователь",
                     "ФИО",
@@ -4560,7 +4557,7 @@ class TimesheetRegistryPage(tk.Frame):
             )
             ws.append(header_row)
 
-            widths = [6, 10, 40, 14, 22, 22, 28, 12, 28] + [6] * 31 + [10, 14, 16, 16, 16]
+            widths = [6, 10, 40, 14, 18, 22, 22, 28, 12, 28] + [6] * 31 + [10, 14, 16, 16, 16]
             for i, w in enumerate(widths, 1):
                 ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -4570,8 +4567,11 @@ class TimesheetRegistryPage(tk.Frame):
                     rows = load_trip_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
                 else:
                     rows = load_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
-            
+
                 user_display = h.get("full_name") or h.get("username") or ""
+                obj_id_val = normalize_spaces(str(h.get("object_id") or ""))
+                internal_code = codes_map.get(obj_id_val, "")
+
                 for r in rows:
                     ws.append(
                         [
@@ -4580,6 +4580,7 @@ class TimesheetRegistryPage(tk.Frame):
                             h["month"],
                             h.get("object_addr", ""),
                             h.get("object_id", ""),
+                            internal_code,
                             h.get("department", ""),
                             user_display,
                             r["fio"],
