@@ -177,7 +177,9 @@ class ObjectsService:
                            short_name,
                            executor_department,
                            contract_type,
-                           status
+                           status,
+                           internal_code,
+                           nomenclature_group
                       FROM public.objects
                   ORDER BY
                        CASE
@@ -259,6 +261,8 @@ class ObjectsService:
         executor_department: Optional[str],
         contract_type: Optional[str],
         status: Optional[str] = None,
+        internal_code: Optional[str] = None,
+        nomenclature_group: Optional[str] = None,
     ) -> int:
         excel_id = _clean_text(excel_id) or None
         year = _clean_text(year) or None
@@ -270,6 +274,8 @@ class ObjectsService:
         executor_department = _clean_text(executor_department) or None
         contract_type = _clean_text(contract_type) or None
         status = _clean_text(status) or "Новый"
+        internal_code = _clean_text(internal_code) or None
+        nomenclature_group = _clean_text(nomenclature_group) or None
 
         if not address:
             raise ValueError("Адрес объекта обязателен.")
@@ -309,7 +315,9 @@ class ObjectsService:
                                    short_name = %s,
                                    executor_department = %s,
                                    contract_type = %s,
-                                   status = %s
+                                   status = %s,
+                                   internal_code = %s,
+                                   nomenclature_group = %s
                              WHERE id = %s
                             """,
                             (
@@ -324,6 +332,8 @@ class ObjectsService:
                                 executor_department,
                                 contract_type,
                                 status,
+                                internal_code,
+                                nomenclature_group,
                                 obj_id,
                             ),
                         )
@@ -359,9 +369,11 @@ class ObjectsService:
                             short_name,
                             executor_department,
                             contract_type,
-                            status
+                            status,
+                            internal_code,
+                            nomenclature_group
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
                         """,
                         (
@@ -376,6 +388,8 @@ class ObjectsService:
                             executor_department,
                             contract_type,
                             status,
+                            internal_code,
+                            nomenclature_group,
                         ),
                     )
                     return int(cur.fetchone()[0])
@@ -407,7 +421,6 @@ def get_unique_program_names() -> List[str]:
         logger.error("Ошибка получения списка программ: %s", e)
         return []
 
-
 def create_or_update_object(
     obj_id: Optional[int],
     excel_id: Optional[str],
@@ -421,6 +434,8 @@ def create_or_update_object(
     executor_department: Optional[str],
     contract_type: Optional[str],
     status: Optional[str] = None,
+    internal_code: Optional[str] = None,
+    nomenclature_group: Optional[str] = None,
 ) -> int:
     return ObjectsService.create_or_update_object(
         obj_id=obj_id,
@@ -435,8 +450,9 @@ def create_or_update_object(
         executor_department=executor_department,
         contract_type=contract_type,
         status=status,
+        internal_code=internal_code,
+        nomenclature_group=nomenclature_group,
     )
-
 
 def get_next_excel_id() -> str:
     return ObjectsService.get_next_excel_id()
@@ -550,6 +566,10 @@ class ObjectEditDialog(tk.Toplevel):
         row += 1
 
         self.var_contract_type, _ = add_row("Тип договора", "contract_type", width=26)
+        self.var_internal_code, _ = add_row("Внутренний шифр", "internal_code", width=40)
+        self.var_nomenclature_group, _ = add_row(
+            "Номенклатурная группа", "nomenclature_group", width=54
+        )
 
         btns = tk.Frame(frm, bg=C["panel"])
         btns.grid(row=row, column=0, columnspan=2, sticky="e", pady=(12, 0))
@@ -592,6 +612,8 @@ class ObjectEditDialog(tk.Toplevel):
             "contract_number": self.var_contract_number.get().strip() or None,
             "contract_date": cd_val,
             "contract_type": self.var_contract_type.get().strip() or None,
+            "internal_code": self.var_internal_code.get().strip() or None,
+            "nomenclature_group": self.var_nomenclature_group.get().strip() or None,
         }
         self.destroy()
 
@@ -752,6 +774,8 @@ class ObjectCreatePage(tk.Frame):
         add_right("Сокращённое наименование:", "short_name", width=40)
         add_right("Подразделение исполнителя:", "executor_department", width=34)
         add_right("Тип договора:", "contract_type", width=26)
+        add_right("Внутренний шифр:", "internal_code", width=40)
+        add_right("Номенклатурная группа:", "nomenclature_group", width=40)
 
         info = tk.Label(
             self,
@@ -803,6 +827,8 @@ class ObjectCreatePage(tk.Frame):
                 "short_name",
                 "executor_department",
                 "contract_type",
+                "internal_code",
+                "nomenclature_group",
             ):
                 try:
                     getattr(self, f"ent_{name}").configure(state="disabled")
@@ -841,6 +867,8 @@ class ObjectCreatePage(tk.Frame):
             self.var_short_name.set(d.get("short_name") or "")
             self.var_executor_department.set(d.get("executor_department") or "")
             self.var_contract_type.set(d.get("contract_type") or "")
+            self.var_internal_code.set(d.get("internal_code") or "")
+            self.var_nomenclature_group.set(d.get("nomenclature_group") or "")
         else:
             self._on_clear()
 
@@ -858,6 +886,8 @@ class ObjectCreatePage(tk.Frame):
             "short_name",
             "executor_department",
             "contract_type",
+            "internal_code",
+            "nomenclature_group",
         ):
             getattr(self, f"var_{name}").set("")
 
@@ -918,6 +948,8 @@ class ObjectCreatePage(tk.Frame):
                 executor_department=self.var_executor_department.get().strip() or None,
                 contract_type=self.var_contract_type.get().strip() or None,
                 status=self.obj_data.get("status") or "Новый",
+                internal_code=self.var_internal_code.get().strip() or None,
+                nomenclature_group=self.var_nomenclature_group.get().strip() or None,
             )
         except Exception as e:
             logger.exception("Ошибка сохранения объекта")
@@ -935,6 +967,8 @@ class ObjectCreatePage(tk.Frame):
             self.var_short_name.set("")
             self.var_contract_number.set("")
             self.var_contract_date.set("")
+            self.var_internal_code.set("")
+            self.var_nomenclature_group.set("")
             self.ent_address.focus_set()
 
             current_programs = list(self.cmb_program_name["values"])
@@ -968,6 +1002,7 @@ class ObjectsRegistryPage(tk.Frame):
 
         self.var_filter_addr = tk.StringVar()
         self.var_filter_excel = tk.StringVar()
+        self.var_filter_code = tk.StringVar()
         self.var_filter_program = tk.StringVar(value="Все")
         self.var_filter_status = tk.StringVar(value="Все")
         self.var_filter_year = tk.StringVar(value="Все")
@@ -1069,6 +1104,13 @@ class ObjectsRegistryPage(tk.Frame):
         ent_search = ttk.Entry(top, textvariable=self.var_search, width=32)
         ent_search.grid(row=1, column=5, columnspan=2, sticky="w", pady=3)
 
+        tk.Label(top, text="Внутр. шифр:", bg=C["panel"]).grid(
+            row=2, column=0, sticky="e", padx=(0, 6), pady=3
+        )
+        ent_code = ttk.Entry(top, textvariable=self.var_filter_code, width=28)
+        ent_code.grid(row=2, column=1, sticky="w", pady=3)
+        ent_code.bind("<Return>", lambda _e: self._load_data())
+
         btns = tk.Frame(top, bg=C["panel"])
         btns.grid(row=0, column=8, rowspan=2, sticky="e", padx=(12, 0))
 
@@ -1153,6 +1195,8 @@ class ObjectsRegistryPage(tk.Frame):
 
         cols = (
             "excel_id",
+            "internal_code",
+            "nomenclature_group",
             "address",
             "year",
             "program_name",
@@ -1177,6 +1221,8 @@ class ObjectsRegistryPage(tk.Frame):
 
         headings = {
             "excel_id": ("ID объекта", 100, "w"),
+            "internal_code": ("Внутренний шифр", 160, "w"),
+            "nomenclature_group": ("Номенклатурная группа", 220, "w"),
             "address": ("Адрес", 310, "w"),
             "year": ("Год", 70, "center"),
             "program_name": ("Программа", 180, "w"),
@@ -1224,6 +1270,8 @@ class ObjectsRegistryPage(tk.Frame):
         self.detail_vars = {
             "id": tk.StringVar(),
             "excel_id": tk.StringVar(),
+            "internal_code": tk.StringVar(),
+            "nomenclature_group": tk.StringVar(),
             "address": tk.StringVar(),
             "year": tk.StringVar(),
             "program_name": tk.StringVar(),
@@ -1239,6 +1287,8 @@ class ObjectsRegistryPage(tk.Frame):
         detail_fields = [
             ("ID БД", "id"),
             ("ID объекта", "excel_id"),
+            ("Внутренний шифр", "internal_code"),
+            ("Номенклатурная группа", "nomenclature_group"),
             ("Адрес", "address"),
             ("Год", "year"),
             ("Программа", "program_name"),
@@ -1317,6 +1367,7 @@ class ObjectsRegistryPage(tk.Frame):
     def _reset_filters(self):
         self.var_filter_addr.set("")
         self.var_filter_excel.set("")
+        self.var_filter_code.set("")
         self.var_filter_program.set("Все")
         self.var_filter_status.set("Все")
         self.var_filter_year.set("Все")
@@ -1355,6 +1406,8 @@ class ObjectsRegistryPage(tk.Frame):
             return True
         haystack = " | ".join([
             _clean_text(obj.get("excel_id")),
+            _clean_text(obj.get("internal_code")),
+            _clean_text(obj.get("nomenclature_group")),
             _clean_text(obj.get("address")),
             _clean_text(obj.get("year")),
             _clean_text(obj.get("program_name")),
@@ -1382,6 +1435,7 @@ class ObjectsRegistryPage(tk.Frame):
 
         addr_filter = _clean_text(self.var_filter_addr.get()).lower()
         excel_filter = _clean_text(self.var_filter_excel.get()).lower()
+        code_filter = _clean_text(self.var_filter_code.get()).lower()
         program_filter = _clean_text(self.var_filter_program.get())
         status_filter = _clean_text(self.var_filter_status.get())
         year_filter = _clean_text(self.var_filter_year.get())
@@ -1400,6 +1454,8 @@ class ObjectsRegistryPage(tk.Frame):
             if addr_filter and addr_filter not in addr.lower():
                 continue
             if excel_filter and excel_filter not in excel_id.lower():
+                continue
+            if code_filter and code_filter not in _clean_text(o.get("internal_code")).lower():
                 continue
             if program_filter != "Все" and program_name != program_filter:
                 continue
@@ -1441,6 +1497,8 @@ class ObjectsRegistryPage(tk.Frame):
                 iid=iid,
                 values=(
                     _clean_text(o.get("excel_id")),
+                    _clean_text(o.get("internal_code")),
+                    _clean_text(o.get("nomenclature_group")),
                     _clean_text(o.get("address")),
                     _clean_text(o.get("year")),
                     _clean_text(o.get("program_name")),
@@ -1490,6 +1548,8 @@ class ObjectsRegistryPage(tk.Frame):
 
         self.detail_vars["id"].set(str(obj.get("id") or ""))
         self.detail_vars["excel_id"].set(_clean_text(obj.get("excel_id")))
+        self.detail_vars["internal_code"].set(_clean_text(obj.get("internal_code")))
+        self.detail_vars["nomenclature_group"].set(_clean_text(obj.get("nomenclature_group")))
         self.detail_vars["address"].set(_clean_text(obj.get("address")))
         self.detail_vars["year"].set(_clean_text(obj.get("year")))
         self.detail_vars["program_name"].set(_clean_text(obj.get("program_name")))
@@ -1544,6 +1604,8 @@ class ObjectsRegistryPage(tk.Frame):
                 executor_department=updated["executor_department"],
                 contract_type=updated["contract_type"],
                 status=obj.get("status"),
+                internal_code=updated["internal_code"],
+                nomenclature_group=updated["nomenclature_group"],
             )
         except Exception as e:
             logger.exception("Ошибка обновления объекта")
@@ -1590,6 +1652,8 @@ class ObjectsRegistryPage(tk.Frame):
             rows.append({
                 "ID в БД": o.get("id"),
                 "ID объекта (excel_id)": _clean_text(o.get("excel_id")),
+                "Внутренний шифр": _clean_text(o.get("internal_code")),
+                "Номенклатурная группа": _clean_text(o.get("nomenclature_group")),
                 "Адрес": _clean_text(o.get("address")),
                 "Год": _clean_text(o.get("year")),
                 "Программа": _clean_text(o.get("program_name")),
