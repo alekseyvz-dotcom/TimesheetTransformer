@@ -14,8 +14,12 @@ from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
-from openpyxl.utils.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.worksheet.table import Table, TableStyleInfo
+
+try:
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+except ImportError:
+    ILLEGAL_CHARACTERS_RE = re.compile(r"[\000-\010]|[\013-\014]|[\016-\037]")
 
 db_connection_pool: Optional[pool.SimpleConnectionPool] = None
 
@@ -808,19 +812,16 @@ class TimesheetPlanFactPage(ttk.Frame):
             font=("Segoe UI", 8),
             foreground=PALETTE["text_muted"],
         ).pack(side="right", padx=8)
-
+    
     def _on_mode_change(self):
         mode = self.mode_var.get()
+    
         if mode == "month":
             self.day_frame.pack_forget()
-            self.month_frame.pack(side="left", padx=(12, 0),
-                                  before=self.object_type_combo.master.winfo_children()[0]
-                                  if False else None)
-            # Упрощённо: просто пакуем после переключателя
-            self.month_frame.pack(side="left", padx=(12, 0))
+            self.month_frame.pack(side="left", padx=(12, 0), before=self.object_type_combo)
         else:
             self.month_frame.pack_forget()
-            self.day_frame.pack(side="left", padx=(12, 0))
+            self.day_frame.pack(side="left", padx=(12, 0), before=self.object_type_combo)
 
     def _build_body(self):
         self.canvas = tk.Canvas(self, highlightthickness=0, bg="#F5F7FA")
