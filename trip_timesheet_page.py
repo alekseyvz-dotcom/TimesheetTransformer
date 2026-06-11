@@ -10,7 +10,8 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter, from_excel
+from openpyxl.utils import get_column_letter
+from openpyxl.utils.datetime import from_excel
 from openpyxl.worksheet.page import PageMargins
 
 from timesheet_common import (
