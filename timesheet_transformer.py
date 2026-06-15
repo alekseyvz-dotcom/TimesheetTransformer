@@ -32,7 +32,7 @@ DAY_COLS_HALF2_LETTERS = ["I", "K", "M", "N", "P", "R", "T", "V", "X", "Z", "AB"
 AO_COL_LETTER = "AO"
 
 # Убрали "К" из списка, чтобы часы командировок считались рабочими
-NON_WORKING_CODES = {"В", "НН", "ОТ", "ОД", "У", "УД", "Б", "ДО", "ПР", "ОЖ", "ОЗ", "НС", "Н", "НВ"}
+NON_WORKING_CODES = {"В", "НН", "ОТ", "ОД", "У", "УД", "Б", "ДО", "ПР", "ОЖ", "ОЗ", "НС", "НВ"}
 
 def exe_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -283,43 +283,58 @@ def extract_code_tokens(s: Any) -> List[str]:
     one = extract_code_token(s)
     return [one] if one else []
 
-def working_hours_by_code(code_val: Any, hours_val: Any) -> Optional[float]:
+def working_hours_by_code(code_val: Any, hours_val: Any) -> Optional[Any]:
     """
-    Возвращает только часы, относящиеся к рабочим кодам.
+    Возвращает часы, относящиеся к рабочим кодам.
+    Если в ячейке несколько рабочих значений через '/', сохраняет вид '8/4'.
     Примеры:
     - code='Я', hours='11' -> 11
+    - code='Я', hours='8/4' -> '8/4'
+    - code='Я/Н', hours='8/4' -> '8/4'
     - code='Я/ДО', hours='4/4.25' -> 4
     """
     code_tokens = extract_code_tokens(code_val)
+    hour_parts = split_slash_tokens(hours_val)
 
     if not code_tokens:
+        if len(hour_parts) > 1:
+            slash_value = format_slash_hours(hour_parts)
+            return slash_value if slash_value is not None else None
+
         n = to_number_value(hours_val)
         return n if n is not None else None
 
-    hour_parts = split_slash_tokens(hours_val)
-
-    if len(code_tokens) == 1 and len(hour_parts) <= 1:
+    if len(code_tokens) == 1:
         code = code_tokens[0]
         if is_non_working_code(code):
             return None
+
+        if len(hour_parts) > 1:
+            slash_value = format_slash_hours(hour_parts)
+            return slash_value if slash_value is not None else None
+
         n = to_number_value(hours_val)
         return n if n is not None else None
 
-    total = 0.0
-    got = False
+    working_parts = []
     max_len = min(len(code_tokens), len(hour_parts))
 
     for i in range(max_len):
         code = code_tokens[i].upper().strip()
         if is_non_working_code(code):
             continue
+
         n = token_to_number(hour_parts[i])
         if n is not None:
-            total += float(n)
-            got = True
+            working_parts.append(hour_parts[i])
 
-    if got:
-        return total
+    if len(working_parts) > 1:
+        slash_value = format_slash_hours(working_parts)
+        return slash_value if slash_value is not None else None
+
+    if len(working_parts) == 1:
+        n = token_to_number(working_parts[0])
+        return n if n is not None else None
 
     if any(not is_non_working_code(code) for code in code_tokens):
         n = to_number_value(hours_val)
@@ -406,6 +421,15 @@ def sum_slash_parts(s: str) -> Optional[float]:
     if cnt >= 1:
         return total
     return None
+
+def format_slash_hours(parts: List[str]) -> Optional[str]:
+    values = []
+    for part in parts:
+        n = token_to_number(part)
+        if n is None:
+            return None
+        values.append(int(n) if float(n).is_integer() else n)
+    return "/".join(str(v).replace(".", ",") for v in values)
 
 def to_number_value(v: Any) -> Optional[float]:
     if v is None or v == "":
@@ -653,6 +677,9 @@ def fix_numeric_range_py(ws, r1: int, r2: int, c1: int, c2: int):
             cell = ws.cell(r, c)
             v = cell.value
             if v is None or v == "":
+                continue
+            if isinstance(v, str) and "/" in v:
+                cell.number_format = "@"
                 continue
             if isinstance(v, (int, float)):
                 cell.value = float(v)
