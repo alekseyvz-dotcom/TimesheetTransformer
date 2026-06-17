@@ -2997,6 +2997,17 @@ class GprPage(tk.Frame):
 
         return None
 
+    def _get_insert_index_after_selection(self) -> int:
+        """
+        Возвращает индекс, куда нужно вставить новую строку:
+        - если строка выделена — сразу после неё;
+        - если ничего не выделено — в конец списка.
+        """
+        idx = self._find_task_idx()
+        if idx is None:
+            return len(self.tasks)
+        return idx + 1
+
     def _open_task_dialog(self, init=None):
         uid = (self.app_ref.current_user or {}).get("id")
 
@@ -3028,17 +3039,26 @@ class GprPage(tk.Frame):
         if not self.plan_id:
             messagebox.showinfo("ГПР", "Сначала откройте объект.", parent=self)
             return
-
+    
+        idx = self._find_task_idx()
+        base_start = self.range_from
+        base_finish = self.range_from
+    
+        if idx is not None and 0 <= idx < len(self.tasks):
+            selected_task = self.tasks[idx]
+            base_start = _to_date(selected_task.get("plan_start")) or self.range_from
+            base_finish = _to_date(selected_task.get("plan_finish")) or base_start
+    
         result = self._open_task_dialog(
             init={
-                "plan_start": self.range_from,
-                "plan_finish": self.range_from,
+                "plan_start": base_start,
+                "plan_finish": base_finish,
                 "row_kind": "task",
             }
         )
         if not result:
             return
-
+    
         t = dict(result)
         t["id"] = None
         t["row_kind"] = "task"
@@ -3050,14 +3070,17 @@ class GprPage(tk.Frame):
             ),
             "",
         )
-        t["sort_order"] = len(self.tasks) * 10
+    
         t["plan_start"] = _to_date(t.get("plan_start")) or _today()
         t["plan_finish"] = _to_date(t.get("plan_finish")) or _today()
-
-        self.tasks.append(t)
+    
+        insert_at = idx + 1 if idx is not None else len(self.tasks)
+        self.tasks.insert(insert_at, t)
+    
         self._recalc_sort_order()
         self._apply_filter()
         self._update_summary()
+        self._preserve_selection_by_task(t)
 
     def _add_group(self):
         if not self.plan_id:
@@ -3089,10 +3112,13 @@ class GprPage(tk.Frame):
             "sort_order": len(self.tasks) * 10,
         }
     
-        self.tasks.append(t)
+        insert_at = self._get_insert_index_after_selection()
+        self.tasks.insert(insert_at, t)
+        
         self._recalc_sort_order()
         self._apply_filter()
         self._update_summary()
+        self._preserve_selection_by_task(t)
 
     def _add_title(self):
         if not self.plan_id:
@@ -3124,10 +3150,13 @@ class GprPage(tk.Frame):
             "sort_order": len(self.tasks) * 10,
         }
     
-        self.tasks.append(t)
+        insert_at = self._get_insert_index_after_selection()
+        self.tasks.insert(insert_at, t)
+        
         self._recalc_sort_order()
         self._apply_filter()
         self._update_summary()
+        self._preserve_selection_by_task(t)
 
     def _edit_selected(self):
         idx = self._find_task_idx()
