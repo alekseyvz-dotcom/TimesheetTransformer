@@ -2182,7 +2182,10 @@ class GprPage(tk.Frame):
             messagebox.showinfo("ГПР", "Сначала откройте объект.", parent=self)
             return
     
-        task_rows = [t for t in self.tasks if (t.get("row_kind") or "task") == "task" and t.get("id")]
+        task_rows = [
+            t for t in self.tasks
+            if (t.get("row_kind") or "task") == "task" and t.get("id")
+        ]
         if not task_rows:
             messagebox.showinfo(
                 "ГПР",
@@ -2206,7 +2209,7 @@ class GprPage(tk.Frame):
     
         result = open_task_fact_batch_dialog(
             self,
-            tasks=self.tasks,
+            tasks=task_rows,
             user_id=uid,
             fact_date=_today(),
         )
@@ -2215,15 +2218,32 @@ class GprPage(tk.Frame):
             return
     
         try:
-            tids = [
-                t["id"] for t in self.tasks
-                if t.get("id") and (t.get("row_kind") or "task") == "task"
+            changed_ids = [
+                int(x) for x in (result.get("changed_task_ids") or [])
+                if x is not None
             ]
-            self.fact_info = GprService.load_task_fact_info(tids)
-            self.facts = {
-                task_id: float(v.get("fact_qty_total") or 0)
-                for task_id, v in self.fact_info.items()
-            }
+    
+            if changed_ids:
+                updated = GprService.load_task_fact_info(changed_ids)
+                for tid in changed_ids:
+                    if tid in updated:
+                        self.fact_info[tid] = updated[tid]
+                        self.facts[tid] = float(
+                            updated[tid].get("fact_qty_total") or 0
+                        )
+                    else:
+                        self.fact_info.pop(tid, None)
+                        self.facts.pop(tid, None)
+            else:
+                tids = [
+                    t["id"] for t in self.tasks
+                    if t.get("id") and (t.get("row_kind") or "task") == "task"
+                ]
+                self.fact_info = GprService.load_task_fact_info(tids)
+                self.facts = {
+                    task_id: float(v.get("fact_qty_total") or 0)
+                    for task_id, v in self.fact_info.items()
+                }
     
             self._apply_filter()
             self._update_summary()
