@@ -2209,7 +2209,7 @@ class GprPage(tk.Frame):
     
         result = open_task_fact_batch_dialog(
             self,
-            tasks=task_rows,
+            tasks=self.tasks,
             user_id=uid,
             fact_date=_today(),
         )
