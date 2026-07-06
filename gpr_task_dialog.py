@@ -1832,17 +1832,13 @@ class TaskEditDialogPro(tk.Toplevel):
 
 class TaskFactBatchDialog(tk.Toplevel):
     """
-    PRO+:
-    - фиксированная шапка
-    - корректное совпадение ширин шапки и тела
-    - работает прокрутка колесом мыши
-    - древовидное отображение title/group/task
-    - автоподгрузка существующего факта на выбранную дату/период
-    - подсветка строк с уже существующим фактом
-    - навигация Enter
+    Быстрый массовый ввод факта:
+    - слева Treeview со списком работ;
+    - справа панель редактирования выбранной строки;
+    - на 1000+ строках не зависает, потому что нет тысяч Entry-виджетов.
     """
 
-    COL_WIDTHS = [620, 200, 60, 100, 120, 90]
+    COL_WIDTHS = [340, 170, 60, 90, 90, 70, 230]
 
     def __init__(
         self,
@@ -1859,9 +1855,24 @@ class TaskFactBatchDialog(tk.Toplevel):
         self.result: Optional[Dict[str, Any]] = None
         self._destroyed = False
 
+        self._all_rows: List[Dict[str, Any]] = self._prepare_rows(self.tasks_src)
+        self._filtered_rows: List[Dict[str, Any]] = []
+
+        self._loaded_fact_map: Dict[int, Dict[str, Any]] = {}
+        self._pending_edits: Dict[int, Optional[Dict[str, Any]]] = {}
+
+        self._task_iid_map: Dict[int, str] = {}
+        self._iid_to_row: Dict[str, Dict[str, Any]] = {}
+
+        self._selected_task_id: Optional[int] = None
+        self._editor_task_id: Optional[int] = None
+        self._editor_dirty = False
+        self._ignore_tree_event = False
+        self._suspend_editor_trace = False
+
         self.title("📈 Массовое заполнение факта")
-        self.minsize(1220, 720)
-        self.geometry("1280x780")
+        self.minsize(1260, 760)
+        self.geometry("1280x800")
         self.resizable(True, True)
         self.configure(bg=C["bg"])
 
@@ -1871,15 +1882,9 @@ class TaskFactBatchDialog(tk.Toplevel):
         self.var_title = tk.StringVar(value="Все")
         self.var_group = tk.StringVar(value="Все")
 
-        self._all_rows: List[Dict[str, Any]] = self._prepare_rows(self.tasks_src)
-        self._filtered_rows: List[Dict[str, Any]] = []
-        self._row_widgets: Dict[int, Dict[str, Any]] = {}
-        self._loaded_fact_map: Dict[int, Dict[str, Any]] = {}
-
         self._build_ui()
         self._fill_filters()
-        self._apply_filter()
-        self._load_existing_facts_into_form()
+        self._reload_existing_facts(clear_pending=False)
 
         self.grab_set()
         self.after(20, self._center)
@@ -1942,10 +1947,15 @@ class TaskFactBatchDialog(tk.Toplevel):
                     "task": t,
                 }
             )
+
         return rows
 
     def _task_ids(self) -> List[int]:
-        return [int(r["task_id"]) for r in self._all_rows if r.get("row_kind") == "task" and r.get("task_id")]
+        return [
+            int(r["task_id"])
+            for r in self._all_rows
+            if r.get("row_kind") == "task" and r.get("task_id")
+        ]
 
     def _load_existing_facts(self) -> Dict[int, Dict[str, Any]]:
         task_ids = self._task_ids()
@@ -1964,6 +1974,7 @@ class TaskFactBatchDialog(tk.Toplevel):
                     """
                     SELECT
                         task_id,
+                        id,
                         fact_qty,
                         workers_count,
                         COALESCE(comment, '') AS comment
@@ -1974,10 +1985,12 @@ class TaskFactBatchDialog(tk.Toplevel):
                     """,
                     (task_ids, fact_date, period_type),
                 )
-                out = {}
+                out: Dict[int, Dict[str, Any]] = {}
                 for r in cur.fetchall():
                     d = dict(r)
-                    out[int(d["task_id"])] = {
+                    tid = int(d["task_id"])
+                    out[tid] = {
+                        "id": int(d["id"]),
                         "fact_qty": d.get("fact_qty"),
                         "workers_count": d.get("workers_count"),
                         "comment": d.get("comment") or "",
@@ -1985,6 +1998,31 @@ class TaskFactBatchDialog(tk.Toplevel):
                 return out
         finally:
             _release(conn)
+
+    def _display_state_for_task(self, task_id: int) -> Tuple[str, str, str]:
+        """
+        Возвращает:
+          fact_qty_text, workers_text, comment_text
+        """
+        if task_id in self._pending_edits:
+            pending = self._pending_edits[task_id]
+            if pending is None:
+                return "", "", ""
+            return (
+                _fmt_qty(pending.get("fact_qty")),
+                str(int(pending["workers_count"])) if pending.get("workers_count") is not None else "",
+                pending.get("comment") or "",
+            )
+
+        loaded = self._loaded_fact_map.get(task_id)
+        if loaded:
+            return (
+                _fmt_qty(loaded.get("fact_qty")),
+                str(int(loaded["workers_count"])) if loaded.get("workers_count") is not None else "",
+                loaded.get("comment") or "",
+            )
+
+        return "", "", ""
 
     # ─────────────────────────────────────────────────────
     # UI
@@ -2007,8 +2045,8 @@ class TaskFactBatchDialog(tk.Toplevel):
         tk.Label(row1, text="Дата факта:", bg=C["panel"], font=("Segoe UI", 9)).pack(side="left")
         self.ent_fact_date = ttk.Entry(row1, textvariable=self.var_fact_date, width=12)
         self.ent_fact_date.pack(side="left", padx=(6, 10))
-        self.ent_fact_date.bind("<FocusOut>", lambda _e: self._load_existing_facts_into_form())
-        self.ent_fact_date.bind("<Return>", lambda _e: self._load_existing_facts_into_form())
+        self.ent_fact_date.bind("<FocusOut>", lambda _e: self._on_fact_params_changed())
+        self.ent_fact_date.bind("<Return>", lambda _e: self._on_fact_params_changed())
 
         ttk.Button(row1, text="Сегодня", command=self._set_today).pack(side="left", padx=(0, 14))
 
@@ -2022,7 +2060,7 @@ class TaskFactBatchDialog(tk.Toplevel):
         )
         self.cmb_period.pack(side="left", padx=(6, 14))
         self.cmb_period.current(0)
-        self.cmb_period.bind("<<ComboboxSelected>>", lambda _e: self._load_existing_facts_into_form())
+        self.cmb_period.bind("<<ComboboxSelected>>", lambda _e: self._on_fact_params_changed())
 
         btns = tk.Frame(row1, bg=C["panel"])
         btns.pack(side="right")
@@ -2030,7 +2068,7 @@ class TaskFactBatchDialog(tk.Toplevel):
         ttk.Button(btns, text="Сохранить", command=self._on_ok).pack(side="right", padx=2)
         ttk.Button(btns, text="Отмена", command=self._on_cancel).pack(side="right", padx=2)
         ttk.Button(btns, text="Очистить всё", command=self._clear_inputs).pack(side="right", padx=2)
-        ttk.Button(btns, text="Подтянуть факт", command=self._load_existing_facts_into_form).pack(side="right", padx=2)
+        ttk.Button(btns, text="Подтянуть факт", command=self._reload_existing_facts_button).pack(side="right", padx=2)
 
         row2 = tk.Frame(top, bg=C["panel"])
         row2.pack(fill="x", pady=(8, 2))
@@ -2072,75 +2110,166 @@ class TaskFactBatchDialog(tk.Toplevel):
         )
         self.lbl_summary.pack(fill="x", padx=14, pady=(0, 4))
 
-        host = tk.Frame(self, bg=C["panel"], bd=1, relief="solid")
-        host.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        split = tk.PanedWindow(self, orient="horizontal", sashrelief="raised", bg=C["bg"])
+        split.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        self.header = tk.Frame(host, bg="#dbe5f1")
-        self.header.pack(fill="x", side="top")
+        left = tk.Frame(split, bg=C["panel"])
+        right = tk.Frame(split, bg=C["panel"])
+        split.add(left, minsize=820)
+        split.add(right, minsize=360)
 
-        body_wrap = tk.Frame(host, bg="white")
-        body_wrap.pack(fill="both", expand=True, side="top")
+        # Лист работ
+        tree_wrap = tk.Frame(left, bg=C["panel"])
+        tree_wrap.pack(fill="both", expand=True)
 
-        self.canvas = tk.Canvas(
-            body_wrap,
-            bg="white",
-            highlightthickness=0,
-            bd=0,
+        cols = ("name", "work_type", "uom", "plan", "fact", "workers", "comment")
+        self.tree = ttk.Treeview(
+            tree_wrap,
+            columns=cols,
+            show="headings",
+            selectmode="browse",
         )
-        self.vsb = ttk.Scrollbar(body_wrap, orient="vertical", command=self.canvas.yview)
 
-        self.inner = tk.Frame(self.canvas, bg="white")
-        self.inner_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        headers = {
+            "name": ("Работа", 340, "w"),
+            "work_type": ("Тип работ", 170, "w"),
+            "uom": ("Ед.", 60, "center"),
+            "plan": ("План", 90, "center"),
+            "fact": ("Факт", 90, "center"),
+            "workers": ("Людей", 70, "center"),
+            "comment": ("Комментарий", 230, "w"),
+        }
 
-        self.canvas.configure(yscrollcommand=self.vsb.set)
+        for c, (title, w, anchor) in headers.items():
+            self.tree.heading(c, text=title)
+            self.tree.column(c, width=w, anchor=anchor)
 
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.vsb.pack(side="right", fill="y")
+        vsb = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(tree_wrap, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        self.inner.bind("<Configure>", self._on_inner_configure)
-        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
 
-        self._build_header()
+        self.tree.tag_configure("title", background="#dceeff", font=("Segoe UI", 9, "bold"))
+        self.tree.tag_configure("group", background="#eef5ff", font=("Segoe UI", 9, "bold"))
+        self.tree.tag_configure("loaded", background="#e8f5e9")
+        self.tree.tag_configure("edited", background="#e3f2fd")
+        self.tree.tag_configure("deleted", background="#ffebee")
+        self.tree.tag_configure("task", background="#ffffff")
 
-        self._bind_mousewheel_recursive(self)
-        self._bind_mousewheel_recursive(self.canvas)
-        self._bind_mousewheel_recursive(self.inner)
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+        self.tree.bind("<Double-1>", lambda _e: self._focus_qty())
+        self.tree.bind("<Return>", lambda _e: self._focus_qty())
 
-    def _build_header(self):
-        for child in self.header.winfo_children():
-            child.destroy()
+        # Панель редактирования
+        self._build_editor(right)
 
-        headers = [
-            ("Работа", "w"),
-            ("Тип работ", "w"),
-            ("Ед.", "center"),
-            ("План", "center"),
-            ("Факт объём", "center"),
-            ("Людей", "center"),
-        ]
+    def _build_editor(self, parent):
+        box = tk.LabelFrame(
+            parent,
+            text=" Редактирование выбранной строки ",
+            bg=C["panel"],
+            fg=C["accent"],
+            font=("Segoe UI", 9, "bold"),
+            padx=10,
+            pady=8,
+        )
+        box.pack(fill="both", expand=True, padx=10, pady=10)
 
-        x = 0
-        for i, ((text, anchor), width) in enumerate(zip(headers, self.COL_WIDTHS)):
-            lbl = tk.Label(
-                self.header,
-                text=text,
-                bg="#dbe5f1",
-                fg="#123",
-                font=("Segoe UI", 9, "bold"),
-                bd=1,
-                relief="solid",
-                anchor=anchor,
-                padx=6,
-                pady=5,
-            )
-            lbl.place(x=x, y=0, width=width, height=28)
-            x += width
+        self.lbl_selected = tk.Label(
+            box,
+            text="Выберите строку в списке",
+            bg=C["panel"],
+            fg=C["text2"],
+            font=("Segoe UI", 9, "bold"),
+            justify="left",
+            anchor="w",
+        )
+        self.lbl_selected.pack(fill="x", pady=(0, 10))
 
-        self.header.configure(height=28)
-        self.header.pack_propagate(False)
+        self.lbl_selected_meta = tk.Label(
+            box,
+            text="",
+            bg=C["panel"],
+            fg=C["text2"],
+            font=("Segoe UI", 8),
+            justify="left",
+            anchor="w",
+            wraplength=320,
+        )
+        self.lbl_selected_meta.pack(fill="x", pady=(0, 12))
+
+        form = tk.Frame(box, bg=C["panel"])
+        form.pack(fill="x")
+
+        tk.Label(form, text="Объём:", bg=C["panel"], font=("Segoe UI", 9)).grid(row=0, column=0, sticky="e", padx=(0, 8), pady=4)
+        self.var_edit_qty = tk.StringVar()
+        self.ent_edit_qty = ttk.Entry(form, textvariable=self.var_edit_qty, width=16)
+        self.ent_edit_qty.grid(row=0, column=1, sticky="w", pady=4)
+
+        tk.Label(form, text="Людей:", bg=C["panel"], font=("Segoe UI", 9)).grid(row=1, column=0, sticky="e", padx=(0, 8), pady=4)
+        self.var_edit_workers = tk.StringVar()
+        self.ent_edit_workers = ttk.Entry(form, textvariable=self.var_edit_workers, width=16)
+        self.ent_edit_workers.grid(row=1, column=1, sticky="w", pady=4)
+
+        tk.Label(form, text="Комментарий:", bg=C["panel"], font=("Segoe UI", 9)).grid(row=2, column=0, sticky="ne", padx=(0, 8), pady=4)
+        self.var_edit_comment = tk.StringVar()
+        self.ent_edit_comment = ttk.Entry(form, textvariable=self.var_edit_comment, width=34)
+        self.ent_edit_comment.grid(row=2, column=1, sticky="ew", pady=4)
+
+        form.grid_columnconfigure(1, weight=1)
+
+        self.lbl_editor_hint = tk.Label(
+            box,
+            text="Enter: сохранить и перейти к следующей строке",
+            bg=C["panel"],
+            fg=C["text3"],
+            font=("Segoe UI", 8),
+            anchor="w",
+        )
+        self.lbl_editor_hint.pack(fill="x", pady=(8, 10))
+
+        btns = tk.Frame(box, bg=C["panel"])
+        btns.pack(fill="x", pady=(4, 0))
+
+        ttk.Button(btns, text="Применить", command=self._apply_current_row).pack(side="left", padx=2)
+        ttk.Button(btns, text="Применить и следующая", command=self._apply_and_next).pack(side="left", padx=2)
+        ttk.Button(btns, text="Очистить строку", command=self._clear_current_row).pack(side="left", padx=2)
+
+        self.lbl_editor_state = tk.Label(
+            box,
+            text="",
+            bg=C["panel"],
+            fg=C["text2"],
+            font=("Segoe UI", 8),
+            anchor="w",
+            justify="left",
+        )
+        self.lbl_editor_state.pack(fill="x", pady=(10, 0))
+
+        self._bind_editor_tracking()
+        self.ent_edit_qty.bind("<Return>", lambda _e: self.ent_edit_workers.focus_set())
+        self.ent_edit_workers.bind("<Return>", lambda _e: self.ent_edit_comment.focus_set())
+        self.ent_edit_comment.bind("<Return>", lambda _e: self._apply_and_next())
+        self.ent_edit_qty.bind("<Down>", lambda _e: self._apply_and_next())
+        self.ent_edit_workers.bind("<Down>", lambda _e: self._apply_and_next())
+        self.ent_edit_comment.bind("<Down>", lambda _e: self._apply_and_next())
+
+    def _bind_editor_tracking(self):
+        def mark_dirty(*_args):
+            if self._suspend_editor_trace:
+                return
+            self._editor_dirty = True
+            self._update_editor_state()
+
+        self.var_edit_qty.trace_add("write", mark_dirty)
+        self.var_edit_workers.trace_add("write", mark_dirty)
+        self.var_edit_comment.trace_add("write", mark_dirty)
 
     # ─────────────────────────────────────────────────────
-    # FILTER
+    # FILTER / RENDER
     # ─────────────────────────────────────────────────────
     def _fill_filters(self):
         titles = sorted({r["title_name"] for r in self._all_rows if r.get("title_name")})
@@ -2213,237 +2342,382 @@ class TaskFactBatchDialog(tk.Toplevel):
                     final_rows.append(row)
 
         self._filtered_rows = final_rows
-        self._build_table()
+        self._render_table()
         self._update_summary()
-        self._load_existing_facts_into_form()
+        self._restore_selection_after_render()
 
-    # ─────────────────────────────────────────────────────
-    # TABLE
-    # ─────────────────────────────────────────────────────
-    def _make_label(self, parent, text, bg, fg="#222", bold=False, anchor="w", padx=6, pady=3):
-        return tk.Label(
-            parent,
-            text=text,
-            bg=bg,
-            fg=fg,
-            font=("Segoe UI", 9, "bold" if bold else "normal"),
-            bd=1,
-            relief="solid",
-            anchor=anchor,
-            padx=padx,
-            pady=pady,
-        )
+    def _render_table(self):
+        self.tree.delete(*self.tree.get_children())
+        self._task_iid_map.clear()
+        self._iid_to_row.clear()
 
-    def _place_widget_row(self, widgets, row_y, height=28):
-        x = 0
-        for w, width in zip(widgets, self.COL_WIDTHS):
-            w.place(x=x, y=row_y, width=width, height=height)
-            x += width
-
-    def _bind_entry_nav(self, ent_qty, ent_workers, task_id):
-        ent_qty.bind("<Return>", lambda _e: ent_workers.focus_set(), add="+")
-        ent_workers.bind("<Return>", lambda _e: self._focus_next_qty(task_id), add="+")
-        ent_qty.bind("<Down>", lambda _e: self._focus_next_qty(task_id), add="+")
-        ent_workers.bind("<Down>", lambda _e: self._focus_next_workers(task_id), add="+")
-        ent_qty.bind("<Up>", lambda _e: self._focus_prev_qty(task_id), add="+")
-        ent_workers.bind("<Up>", lambda _e: self._focus_prev_workers(task_id), add="+")
-
-    def _visible_task_ids(self) -> List[int]:
-        return [int(r["task_id"]) for r in self._filtered_rows if r.get("row_kind") == "task" and r.get("task_id")]
-
-    def _focus_next_qty(self, task_id: int):
-        ids = self._visible_task_ids()
-        if task_id not in ids:
-            return "break"
-        i = ids.index(task_id)
-        if i + 1 < len(ids):
-            nxt = ids[i + 1]
-            w = self._row_widgets.get(nxt, {}).get("qty")
-            if w:
-                w.focus_set()
-        return "break"
-
-    def _focus_next_workers(self, task_id: int):
-        ids = self._visible_task_ids()
-        if task_id not in ids:
-            return "break"
-        i = ids.index(task_id)
-        if i + 1 < len(ids):
-            nxt = ids[i + 1]
-            w = self._row_widgets.get(nxt, {}).get("workers")
-            if w:
-                w.focus_set()
-        return "break"
-
-    def _focus_prev_qty(self, task_id: int):
-        ids = self._visible_task_ids()
-        if task_id not in ids:
-            return "break"
-        i = ids.index(task_id)
-        if i - 1 >= 0:
-            prv = ids[i - 1]
-            w = self._row_widgets.get(prv, {}).get("qty")
-            if w:
-                w.focus_set()
-        return "break"
-
-    def _focus_prev_workers(self, task_id: int):
-        ids = self._visible_task_ids()
-        if task_id not in ids:
-            return "break"
-        i = ids.index(task_id)
-        if i - 1 >= 0:
-            prv = ids[i - 1]
-            w = self._row_widgets.get(prv, {}).get("workers")
-            if w:
-                w.focus_set()
-        return "break"
-
-    def _build_table(self):
-        for child in self.inner.winfo_children():
-            child.destroy()
-        self._row_widgets.clear()
-
-        row_y = 0
-        row_h = 28
-        total_w = sum(self.COL_WIDTHS)
-
-        for row in self._filtered_rows:
+        for idx, row in enumerate(self._filtered_rows):
             row_kind = row["row_kind"]
 
             if row_kind == "title":
-                lbl = self._make_label(
-                    self.inner,
-                    row.get("display_name", ""),
-                    bg="#dceeff",
-                    fg="#0b5394",
-                    bold=True,
-                    anchor="w",
-                    padx=8,
-                    pady=4,
+                iid = f"title_{idx}"
+                self._iid_to_row[iid] = row
+                self.tree.insert(
+                    "",
+                    "end",
+                    iid=iid,
+                    values=(row.get("display_name") or "", "", "", "", "", "", ""),
+                    tags=("title",),
                 )
-                lbl.place(x=0, y=row_y, width=total_w, height=30)
-                row_y += 30
                 continue
 
             if row_kind == "group":
-                lbl = self._make_label(
-                    self.inner,
-                    f"   {row.get('display_name', '')}",
-                    bg="#eef5ff",
-                    fg="#1a3d7c",
-                    bold=True,
-                    anchor="w",
-                    padx=10,
-                    pady=4,
+                iid = f"group_{idx}"
+                self._iid_to_row[iid] = row
+                self.tree.insert(
+                    "",
+                    "end",
+                    iid=iid,
+                    values=(f"   {row.get('display_name') or ''}", "", "", "", "", "", ""),
+                    tags=("group",),
                 )
-                lbl.place(x=0, y=row_y, width=total_w, height=28)
-                row_y += 28
                 continue
 
-            bg = "#ffffff" if ((row_y // row_h) % 2 == 0) else "#f7f9fc"
+            task_id = int(row["task_id"])
+            iid = f"task_{task_id}"
+            self._task_iid_map[task_id] = iid
+            self._iid_to_row[iid] = row
 
-            w_name = self._make_label(
-                self.inner,
-                f"      {row.get('display_name', '')}",
-                bg=bg,
-                anchor="w",
-            )
-            w_type = self._make_label(
-                self.inner,
-                row.get("work_type_name") or "",
-                bg=bg,
-                anchor="w",
-            )
-            w_uom = self._make_label(
-                self.inner,
-                row.get("uom_code") or "",
-                bg=bg,
-                anchor="center",
-                padx=4,
-            )
-            w_plan = self._make_label(
-                self.inner,
-                _fmt_qty(row.get("plan_qty")),
-                bg=bg,
-                anchor="e",
-            )
+            fact_qty_text, workers_text, comment_text = self._display_state_for_task(task_id)
 
-            ent_qty_wrap = tk.Frame(self.inner, bg=bg, bd=1, relief="solid")
-            ent_qty = ttk.Entry(ent_qty_wrap, justify="right")
-            ent_qty.pack(fill="both", expand=True, padx=3, pady=3)
+            tags = ["task"]
+            if task_id in self._pending_edits:
+                if self._pending_edits[task_id] is None:
+                    tags = ["deleted"]
+                else:
+                    tags = ["edited"]
+            elif task_id in self._loaded_fact_map:
+                tags = ["loaded"]
 
-            ent_workers_wrap = tk.Frame(self.inner, bg=bg, bd=1, relief="solid")
-            ent_workers = ttk.Entry(ent_workers_wrap, justify="center")
-            ent_workers.pack(fill="both", expand=True, padx=3, pady=3)
-
-            self._place_widget_row(
-                [w_name, w_type, w_uom, w_plan, ent_qty_wrap, ent_workers_wrap],
-                row_y,
-                height=row_h,
+            self.tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(
+                    row.get("display_name") or "",
+                    row.get("work_type_name") or "",
+                    row.get("uom_code") or "",
+                    _fmt_qty(row.get("plan_qty")),
+                    fact_qty_text,
+                    workers_text,
+                    comment_text[:80],
+                ),
+                tags=tuple(tags),
             )
 
-            self._row_widgets[row["task_id"]] = {
-                "qty": ent_qty,
-                "workers": ent_workers,
-                "qty_wrap": ent_qty_wrap,
-                "workers_wrap": ent_workers_wrap,
-                "widgets": [w_name, w_type, w_uom, w_plan, ent_qty_wrap, ent_workers_wrap],
-                "row": row,
-                "base_bg": bg,
-            }
+    def _restore_selection_after_render(self):
+        if self._selected_task_id is not None:
+            iid = self._task_iid_map.get(self._selected_task_id)
+            if iid and self.tree.exists(iid):
+                self._ignore_tree_event = True
+                try:
+                    self.tree.selection_set(iid)
+                    self.tree.focus(iid)
+                    self.tree.see(iid)
+                finally:
+                    self.after_idle(self._reset_tree_event_flag)
+                self._load_editor_for_task(self._selected_task_id)
+                return
 
-            self._bind_mousewheel_recursive(ent_qty)
-            self._bind_mousewheel_recursive(ent_workers)
-            self._bind_mousewheel_recursive(ent_qty_wrap)
-            self._bind_mousewheel_recursive(ent_workers_wrap)
-            self._bind_entry_nav(ent_qty, ent_workers, row["task_id"])
+        # если ничего не выбрано — выбираем первую видимую работу
+        first_task_id = next(
+            (
+                int(r["task_id"])
+                for r in self._filtered_rows
+                if r.get("row_kind") == "task" and r.get("task_id")
+            ),
+            None,
+        )
+        if first_task_id is not None:
+            self._select_task(first_task_id)
+        else:
+            self._clear_editor()
+            self._selected_task_id = None
 
-            row_y += row_h
-
-        self.inner.configure(width=total_w, height=max(row_y, 10))
-
-    def _set_row_highlight(self, task_id: int, loaded: bool):
-        item = self._row_widgets.get(task_id)
-        if not item:
-            return
-
-        bg = "#e8f5e9" if loaded else item.get("base_bg", "#ffffff")
-
-        row = item["row"]
-        widgets = item["widgets"]
-
-        texts = [
-            f"      {row.get('display_name', '')}",
-            row.get("work_type_name") or "",
-            row.get("uom_code") or "",
-            _fmt_qty(row.get("plan_qty")),
-        ]
-
-        for w, txt in zip(widgets[:4], texts):
-            try:
-                w.configure(bg=bg, text=txt)
-            except Exception:
-                pass
-
-        for wrap in (item["qty_wrap"], item["workers_wrap"]):
-            try:
-                wrap.configure(bg=bg)
-            except Exception:
-                pass
+    def _reset_tree_event_flag(self):
+        self._ignore_tree_event = False
 
     def _update_summary(self):
         total_tasks = sum(1 for r in self._all_rows if r["row_kind"] == "task")
         shown_tasks = sum(1 for r in self._filtered_rows if r["row_kind"] == "task")
-        loaded_cnt = len([k for k in self._loaded_fact_map.keys() if k in self._row_widgets])
+        loaded_cnt = len(
+            [
+                tid for tid in self._loaded_fact_map.keys()
+                if tid in self._task_iid_map
+            ]
+        )
+        pending_cnt = sum(1 for v in self._pending_edits.values() if v is not None)
+        deleted_cnt = sum(1 for v in self._pending_edits.values() if v is None)
+
         self.lbl_summary.config(
-            text=f"Всего работ: {total_tasks}  |  Показано: {shown_tasks}  |  Загружено фактов: {loaded_cnt}"
+            text=(
+                f"Всего работ: {total_tasks}  |  "
+                f"Показано: {shown_tasks}  |  "
+                f"Загружено фактов: {loaded_cnt}  |  "
+                f"Изменено: {pending_cnt}  |  "
+                f"Удаление: {deleted_cnt}"
+            )
         )
 
     # ─────────────────────────────────────────────────────
-    # LOAD EXISTING FACTS
+    # SELECTION / EDITOR
     # ─────────────────────────────────────────────────────
-    def _load_existing_facts_into_form(self):
+    def _on_tree_select(self, _event=None):
+        if self._ignore_tree_event:
+            return
+
+        sel = self.tree.selection()
+        if not sel:
+            return
+
+        iid = sel[0]
+        row = self._iid_to_row.get(iid)
+        if not row:
+            return
+
+        if row["row_kind"] != "task":
+            self._selected_task_id = None
+            self._clear_editor()
+            return
+
+        task_id = int(row["task_id"])
+
+        if self._editor_dirty and self._editor_task_id is not None and task_id != self._editor_task_id:
+            res = messagebox.askyesnocancel(
+                "Факт",
+                "Сохранить изменения текущей строки?",
+                parent=self,
+            )
+            if res is None:
+                self._ignore_tree_event = True
+                try:
+                    prev_iid = self._task_iid_map.get(self._editor_task_id)
+                    if prev_iid:
+                        self.tree.selection_set(prev_iid)
+                        self.tree.focus(prev_iid)
+                        self.tree.see(prev_iid)
+                finally:
+                    self.after_idle(self._reset_tree_event_flag)
+                return
+            if res:
+                if not self._apply_current_row(quiet=True):
+                    self._ignore_tree_event = True
+                    try:
+                        prev_iid = self._task_iid_map.get(self._editor_task_id)
+                        if prev_iid:
+                            self.tree.selection_set(prev_iid)
+                            self.tree.focus(prev_iid)
+                            self.tree.see(prev_iid)
+                    finally:
+                        self.after_idle(self._reset_tree_event_flag)
+                    return
+            else:
+                self._editor_dirty = False
+
+        self._selected_task_id = task_id
+        self._load_editor_for_task(task_id)
+
+    def _load_editor_for_task(self, task_id: int):
+        row = next(
+            (r for r in self._filtered_rows if r.get("row_kind") == "task" and int(r["task_id"]) == int(task_id)),
+            None,
+        )
+        if not row:
+            self._clear_editor()
+            return
+
+        self._editor_task_id = task_id
+        self._suspend_editor_trace = True
+        try:
+            fact_qty, workers, comment = self._display_state_for_task(task_id)
+            self.var_edit_qty.set(fact_qty)
+            self.var_edit_workers.set(workers)
+            self.var_edit_comment.set(comment)
+        finally:
+            self._suspend_editor_trace = False
+
+        self._editor_dirty = False
+        self.lbl_selected.config(text=f"Выбрано: {row.get('display_name') or ''}")
+        self.lbl_selected_meta.config(
+            text=(
+                f"Тип работ: {row.get('work_type_name') or '—'}\n"
+                f"Ед.: {row.get('uom_code') or '—'}\n"
+                f"План: {_fmt_qty(row.get('plan_qty')) or '—'}\n"
+                f"Титул: {row.get('title_name') or '—'}\n"
+                f"Группа: {row.get('group_name') or '—'}"
+            )
+        )
+        self._update_editor_state()
+
+    def _clear_editor(self):
+        self._editor_task_id = None
+        self._suspend_editor_trace = True
+        try:
+            self.var_edit_qty.set("")
+            self.var_edit_workers.set("")
+            self.var_edit_comment.set("")
+        finally:
+            self._suspend_editor_trace = False
+
+        self._editor_dirty = False
+        self.lbl_selected.config(text="Выберите строку в списке")
+        self.lbl_selected_meta.config(text="")
+        self._update_editor_state()
+
+    def _update_editor_state(self):
+        if self._editor_task_id is None:
+            self.lbl_editor_state.config(text="Строка не выбрана.")
+            return
+
+        state = "изменена" if self._editor_dirty else "без изменений"
+        self.lbl_editor_state.config(
+            text=f"ID работы: {self._editor_task_id}  |  Состояние: {state}"
+        )
+
+    def _select_task(self, task_id: int):
+        iid = self._task_iid_map.get(task_id)
+        if not iid or not self.tree.exists(iid):
+            return
+
+        self._ignore_tree_event = True
+        try:
+            self.tree.selection_set(iid)
+            self.tree.focus(iid)
+            self.tree.see(iid)
+        finally:
+            self.after_idle(self._reset_tree_event_flag)
+
+        self._selected_task_id = task_id
+        self._load_editor_for_task(task_id)
+
+    def _focus_qty(self):
+        if self._editor_task_id is not None:
+            self.ent_edit_qty.focus_set()
+
+    def _apply_current_row(self, quiet: bool = False) -> bool:
+        if self._editor_task_id is None:
+            return True
+
+        task_id = int(self._editor_task_id)
+        qty_s = (self.var_edit_qty.get() or "").strip()
+        workers_s = (self.var_edit_workers.get() or "").strip()
+        comment = (self.var_edit_comment.get() or "").strip()
+
+        # пустая строка = удалить факт по этой работе, если он был
+        if not qty_s and not workers_s and not comment:
+            if task_id in self._loaded_fact_map or task_id in self._pending_edits:
+                self._pending_edits[task_id] = None
+            else:
+                self._pending_edits.pop(task_id, None)
+            self._editor_dirty = False
+            self._render_table()
+            self._update_summary()
+            self._update_editor_state()
+            return True
+
+        try:
+            qty = _safe_float(qty_s)
+            if qty is None or qty <= 0:
+                raise ValueError("Введите корректный объём факта больше 0")
+
+            workers = _safe_float(workers_s)
+            if workers is None or workers <= 0 or int(workers) != workers:
+                raise ValueError("Введите корректное количество людей больше 0")
+            workers = int(workers)
+
+            fact_date = _parse_date(self.var_fact_date.get())
+            period_label = (self.cmb_period.get() or "").strip()
+            period_type = FACT_PERIOD_FROM_LABEL.get(period_label, "day")
+
+            self._pending_edits[task_id] = {
+                "task_id": task_id,
+                "fact_date": fact_date,
+                "period_type": period_type,
+                "fact_qty": qty,
+                "workers_count": workers,
+                "comment": comment or None,
+            }
+
+            self._editor_dirty = False
+            self._render_table()
+            self._update_summary()
+            self._update_editor_state()
+            return True
+
+        except Exception as e:
+            if not quiet:
+                messagebox.showwarning("Факт", str(e), parent=self)
+            return False
+
+    def _apply_and_next(self):
+        if not self._apply_current_row():
+            return
+        nxt = self._next_visible_task_id(self._editor_task_id)
+        if nxt is not None:
+            self._select_task(nxt)
+
+    def _next_visible_task_id(self, task_id: Optional[int]) -> Optional[int]:
+        ids = [
+            int(r["task_id"])
+            for r in self._filtered_rows
+            if r.get("row_kind") == "task" and r.get("task_id")
+        ]
+        if task_id not in ids:
+            return None
+        idx = ids.index(task_id)
+        if idx + 1 < len(ids):
+            return ids[idx + 1]
+        return None
+
+    def _clear_current_row(self):
+        if self._editor_task_id is None:
+            return
+
+        self._suspend_editor_trace = True
+        try:
+            self.var_edit_qty.set("")
+            self.var_edit_workers.set("")
+            self.var_edit_comment.set("")
+        finally:
+            self._suspend_editor_trace = False
+
+        self._editor_dirty = True
+        self._update_editor_state()
+
+    # ─────────────────────────────────────────────────────
+    # LOADING / RELOAD
+    # ─────────────────────────────────────────────────────
+    def _on_fact_params_changed(self):
+        """
+        Смена даты/��ериода = новый набор фактов.
+        Чтобы не смешивать состояния, сбрасываем staged-изменения.
+        """
+        if self._pending_edits or self._editor_dirty:
+            if not messagebox.askyesno(
+                "Факт",
+                "Изменить дату/период и сбросить несохранённые изменения?",
+                parent=self,
+            ):
+                return
+
+        self._reload_existing_facts(clear_pending=True)
+
+    def _reload_existing_facts_button(self):
+        if self._pending_edits or self._editor_dirty:
+            if not messagebox.askyesno(
+                "Факт",
+                "Перезагрузить факт и сбросить несохранённые изменения?",
+                parent=self,
+            ):
+                return
+        self._reload_existing_facts(clear_pending=True)
+
+    def _reload_existing_facts(self, clear_pending: bool = False):
         try:
             self._loaded_fact_map = self._load_existing_facts()
         except Exception as e:
@@ -2455,105 +2729,90 @@ class TaskFactBatchDialog(tk.Toplevel):
             )
             self._loaded_fact_map = {}
 
-        for task_id, item in self._row_widgets.items():
-            item["qty"].delete(0, "end")
-            item["workers"].delete(0, "end")
+        if clear_pending:
+            self._pending_edits.clear()
+            self._editor_dirty = False
 
-            data = self._loaded_fact_map.get(task_id)
-            if data:
-                if data.get("fact_qty") is not None:
-                    item["qty"].insert(0, _fmt_qty(data.get("fact_qty")))
-                if data.get("workers_count") is not None:
-                    item["workers"].insert(0, str(int(data.get("workers_count"))))
-                self._set_row_highlight(task_id, True)
-            else:
-                self._set_row_highlight(task_id, False)
-
+        self._render_table()
         self._update_summary()
+        self._restore_selection_after_render()
 
     # ─────────────────────────────────────────────────────
     # ACTIONS
     # ─────────────────────────────────────────────────────
     def _set_today(self):
         self.var_fact_date.set(_fmt_date(_today()))
-        self._load_existing_facts_into_form()
+        self._on_fact_params_changed()
 
     def _clear_inputs(self):
-        for task_id, item in self._row_widgets.items():
-            item["qty"].delete(0, "end")
-            item["workers"].delete(0, "end")
-            self._set_row_highlight(task_id, False)
+        self._pending_edits.clear()
+        self._editor_dirty = False
+        self._render_table()
+        self._update_summary()
+        self._restore_selection_after_render()
 
     def _clear_visible_inputs(self):
-        for task_id in self._visible_task_ids():
-            item = self._row_widgets.get(task_id)
-            if not item:
-                continue
-            item["qty"].delete(0, "end")
-            item["workers"].delete(0, "end")
-            self._set_row_highlight(task_id, False)
+        visible_ids = [
+            int(r["task_id"])
+            for r in self._filtered_rows
+            if r.get("row_kind") == "task" and r.get("task_id")
+        ]
+        for tid in visible_ids:
+            self._pending_edits.pop(tid, None)
+        self._editor_dirty = False
+        self._render_table()
+        self._update_summary()
+        self._restore_selection_after_render()
 
-    def _collect_data(self) -> List[Dict[str, Any]]:
+    def _collect_data(self) -> Tuple[List[Dict[str, Any]], List[int]]:
         fact_date = _parse_date(self.var_fact_date.get())
         period_label = (self.cmb_period.get() or "").strip()
         period_type = FACT_PERIOD_FROM_LABEL.get(period_label, "day")
 
-        facts = []
-        for task_id, item in self._row_widgets.items():
-            qty_s = (item["qty"].get() or "").strip()
-            workers_s = (item["workers"].get() or "").strip()
+        upserts: List[Dict[str, Any]] = []
+        delete_ids: List[int] = []
 
-            if not qty_s and not workers_s:
+        for row in self._all_rows:
+            if row["row_kind"] != "task":
                 continue
 
-            qty = _safe_float(qty_s)
-            workers = _safe_float(workers_s)
+            task_id = int(row["task_id"])
 
-            if qty is None or qty <= 0:
-                raise ValueError(
-                    f"Задача «{item['row'].get('display_name', '')}»: "
-                    f"введите корректный факт объёма больше 0"
+            if task_id in self._pending_edits:
+                pending = self._pending_edits[task_id]
+                if pending is None:
+                    delete_ids.append(task_id)
+                else:
+                    pending = dict(pending)
+                    pending["task_id"] = task_id
+                    pending["fact_date"] = fact_date
+                    pending["period_type"] = period_type
+                    pending["comment"] = pending.get("comment") or None
+                    upserts.append(pending)
+                continue
+
+            loaded = self._loaded_fact_map.get(task_id)
+            if loaded:
+                upserts.append(
+                    {
+                        "task_id": task_id,
+                        "fact_date": fact_date,
+                        "period_type": period_type,
+                        "fact_qty": loaded.get("fact_qty"),
+                        "workers_count": loaded.get("workers_count"),
+                        "comment": loaded.get("comment") or None,
+                    }
                 )
 
-            if workers is None or workers <= 0 or int(workers) != workers:
-                raise ValueError(
-                    f"Задача «{item['row'].get('display_name', '')}»: "
-                    f"введите корректное количество людей больше 0"
-                )
+        return upserts, delete_ids
 
-            facts.append(
-                {
-                    "task_id": int(task_id),
-                    "fact_date": fact_date,
-                    "period_type": period_type,
-                    "fact_qty": qty,
-                    "workers_count": int(workers),
-                    "comment": None,
-                }
-            )
-
-        return facts
-
-    def _save_batch(self, facts: List[Dict[str, Any]]):
-        if not facts:
-            return
-
+    def _save_batch(self, facts: List[Dict[str, Any]], delete_ids: List[int]):
         conn = None
         try:
             conn = _conn()
             with conn, conn.cursor() as cur:
-                for f in facts:
-                    cur.execute(
-                        """
-                        INSERT INTO public.gpr_task_facts
-                            (task_id, fact_date, period_type, fact_qty, workers_count, comment, created_by)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (task_id, fact_date, period_type)
-                        DO UPDATE SET
-                            fact_qty = EXCLUDED.fact_qty,
-                            workers_count = EXCLUDED.workers_count,
-                            comment = EXCLUDED.comment
-                        """,
+                if facts:
+                    values = [
                         (
                             f["task_id"],
                             f["fact_date"],
@@ -2562,8 +2821,38 @@ class TaskFactBatchDialog(tk.Toplevel):
                             f["workers_count"],
                             f.get("comment"),
                             self.user_id,
-                        ),
+                        )
+                        for f in facts
+                    ]
+                    execute_values(
+                        cur,
+                        """
+                        INSERT INTO public.gpr_task_facts
+                            (task_id, fact_date, period_type, fact_qty, workers_count, comment, created_by)
+                        VALUES %s
+                        ON CONFLICT (task_id, fact_date, period_type)
+                        DO UPDATE SET
+                            fact_qty = EXCLUDED.fact_qty,
+                            workers_count = EXCLUDED.workers_count,
+                            comment = EXCLUDED.comment
+                        """,
+                        values,
                     )
+
+                if delete_ids:
+                    fact_date = _parse_date(self.var_fact_date.get())
+                    period_label = (self.cmb_period.get() or "").strip()
+                    period_type = FACT_PERIOD_FROM_LABEL.get(period_label, "day")
+                    cur.execute(
+                        """
+                        DELETE FROM public.gpr_task_facts
+                        WHERE task_id = ANY(%s)
+                          AND fact_date = %s
+                          AND period_type = %s
+                        """,
+                        (delete_ids, fact_date, period_type),
+                    )
+
         except Exception:
             logger.exception("TaskFactBatchDialog._save_batch error")
             raise
@@ -2572,24 +2861,46 @@ class TaskFactBatchDialog(tk.Toplevel):
 
     def _on_ok(self):
         try:
-            facts = self._collect_data()
-            if not facts:
+            if self._editor_dirty:
+                res = messagebox.askyesnocancel(
+                    "Факт",
+                    "Сохранить изменения текущей строки?",
+                    parent=self,
+                )
+                if res is None:
+                    return
+                if res:
+                    if not self._apply_current_row():
+                        return
+                else:
+                    self._editor_dirty = False
+
+            facts, delete_ids = self._collect_data()
+
+            if not facts and not delete_ids:
                 if not messagebox.askyesno(
                     "Факт",
                     "Нет заполненных строк. Закрыть окно?",
                     parent=self,
                 ):
                     return
-                self.result = {"saved": False, "count": 0}
+                self.result = {"saved": False, "count": 0, "deleted": 0, "changed_task_ids": []}
                 self._safe_destroy()
                 return
 
-            self._save_batch(facts)
+            self._save_batch(facts, delete_ids)
+
+            changed_ids = sorted(
+                {int(f["task_id"]) for f in facts} | {int(x) for x in delete_ids}
+            )
 
             self.result = {
                 "saved": True,
                 "count": len(facts),
+                "deleted": len(delete_ids),
+                "changed_task_ids": changed_ids,
                 "fact_date": _parse_date(self.var_fact_date.get()),
+                "period_type": FACT_PERIOD_FROM_LABEL.get((self.cmb_period.get() or "").strip(), "day"),
             }
             self._safe_destroy()
 
@@ -2633,34 +2944,6 @@ class TaskFactBatchDialog(tk.Toplevel):
             x = (sw - w) // 2
             y = (sh - h) // 2
         self.geometry(f"+{max(0, x)}+{max(0, y)}")
-
-    def _on_inner_configure(self, _e=None):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-
-    def _on_canvas_configure(self, _e=None):
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-
-    def _bind_mousewheel_recursive(self, widget):
-        try:
-            widget.bind("<MouseWheel>", self._on_mousewheel, add="+")
-            widget.bind("<Button-4>", self._on_mousewheel, add="+")
-            widget.bind("<Button-5>", self._on_mousewheel, add="+")
-            for child in widget.winfo_children():
-                self._bind_mousewheel_recursive(child)
-        except Exception:
-            pass
-
-    def _on_mousewheel(self, event):
-        try:
-            if event.delta:
-                self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
-            elif getattr(event, "num", None) == 4:
-                self.canvas.yview_scroll(-1, "units")
-            elif getattr(event, "num", None) == 5:
-                self.canvas.yview_scroll(1, "units")
-        except Exception:
-            pass
-        return "break"
         
 # ═══════════════════════════════════════════════════════════════
 #  API — фабрика для вызова из GprPage
