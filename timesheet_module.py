@@ -524,6 +524,9 @@ class TimesheetPage(tk.Frame):
 
         self._auto_save_job = None
         self._auto_save_delay_ms = 8000
+        self._saving = False
+        self._save_queued = False
+        
         self._fit_job = None
         self._filter_job = None
 
@@ -994,17 +997,34 @@ class TimesheetPage(tk.Frame):
     def _schedule_auto_save(self):
         if self.read_only:
             return
+
+        if self._saving:
+            self._save_queued = True
+            return
+    
         if self._auto_save_job is not None:
             try:
                 self.after_cancel(self._auto_save_job)
             except Exception:
                 pass
             self._auto_save_job = None
-        self._auto_save_job = self.after(self._auto_save_delay_ms, self._auto_save_callback)
+    
+        self._auto_save_job = self.after(
+            self._auto_save_delay_ms,
+            self._auto_save_callback,
+        )
 
     def _auto_save_callback(self):
         self._auto_save_job = None
-        self._save_all_internal(show_messages=False, is_auto=True)
+    
+        if self._saving:
+            self._save_queued = True
+            return
+    
+        self._save_all_internal(
+            show_messages=False,
+            is_auto=True,
+        )
 
     def _row_key(self, rec: Dict[str, Any]) -> str:
         return make_row_key(rec.get("fio", ""), rec.get("tbn", ""))
@@ -3502,192 +3522,237 @@ class TimesheetPage(tk.Frame):
     def _save_all_internal(self, show_messages: bool, is_auto: bool = False) -> bool:
         if self.read_only:
             if show_messages:
-                messagebox.showinfo("Объектный табель", "Сохранение недоступно в режиме просмотра.", parent=self)
-            return False
-
-        try:
-            self.grid.close_editor(commit=True)
-        except Exception:
-            pass
-
-        def fail(msg: str, level: str = "warning") -> bool:
-            if show_messages:
-                if level == "error":
-                    messagebox.showerror("Сохранение", msg, parent=self)
-                else:
-                    messagebox.showwarning("Сохранение", msg, parent=self)
-            if is_auto:
-                self._mark_save_error(msg if len(msg) < 80 else "Ошибка авто‑сохранения")
-            return False
-
-        # Изменения здесь: используем точные строки из полей ввода
-        object_addr = self.cmb_address.get().strip()
-        object_id = self.cmb_object_id.get().strip()
-        year, month = self.get_year_month()
-        department = normalize_spaces(self.cmb_department.get() or "")
-
-        if department == "Все":
-            return fail("Для сохранения выберите конкретное подразделение.")
-
-        user_id = self._safe_current_user_id()
-        if not user_id:
-            return fail("Не удалось определить пользователя.", level="error")
-
-        self._sync_object_id_values_silent()
-        
-        # Забираем адрес заново после синхронизации (строго strip без normalize_spaces)
-        object_addr = self.cmb_address.get().strip()
-        object_id = self.cmb_object_id.get().strip()
-
-        if not object_addr:
-            return fail("Не задан адрес объекта. Выберите адрес из списка.")
-
-        if self.address_options and object_addr not in self.address_options:
-            self.cmb_object_id.set("")
-            return fail("Адрес объекта введён вручную и не найден в справочнике.\nВыберите адрес из списка.")
-
-        objects_for_addr = [
-            (code.strip(), a.strip(), short_name)
-            for (code, a, short_name) in self.objects_full
-            if a and a.strip() == object_addr
-        ]
-        ids_for_addr = sorted({code for code, _, _ in objects_for_addr if code})
-        if len(ids_for_addr) > 1 and not object_id:
-            return fail("По выбранному адресу найдено несколько объектов.\nСначала выберите корректный ID объекта.")
-
-        if object_id and ids_for_addr and object_id not in ids_for_addr:
-            return fail("Выбранный ID объекта не соответствует адресу.\nИсправьте адрес или ID.")
-
-        for rec in self.model_rows_all:
-            rec["hours"] = normalize_hours_list(rec.get("hours"), year, month)
-            rec["_totals"] = calc_row_totals(rec["hours"], year, month)
-
-        validation_errors = validate_rows_before_save(self.model_rows_all, year, month)
-        if validation_errors:
-            preview = "\n".join(f"• {e}" for e in validation_errors[:15])
-            if len(validation_errors) > 15:
-                preview += f"\n• ... и ещё {len(validation_errors) - 15}"
-            return fail(f"Табель содержит ошибки:\n\n{preview}", level="error")
-
-        suspicious = find_suspicious_cells(self.model_rows_all, year, month)
-        if suspicious and not is_auto and show_messages:
-            dlg = SuspiciousHoursWarningDialog(self, suspicious, context="сохранением")
-            self.wait_window(dlg)
-            if not dlg.result:
-                return False
-        elif suspicious and is_auto:
-            logger.warning(
-                "Авто‑сохранение: обнаружено %s подозрительных значений часов (> %s)",
-                len(suspicious),
-                MAX_HOURS_PER_DAY,
-            )
-
-        employees_for_check = []
-        for rec in self.model_rows_all:
-            fio = normalize_spaces(rec.get("fio") or "")
-            tbn = normalize_tbn(rec.get("tbn"))
-            if fio or tbn:
-                employees_for_check.append((fio, tbn))
-
-        try:
-            duplicates = find_duplicate_employees_for_timesheet(
-                object_id=object_id or None,
-                object_addr=object_addr,
-                department=department,
-                year=year,
-                month=month,
-                user_id=user_id,
-                employees=employees_for_check,
-            )
-        except Exception as e:
-            logger.exception("Ошибка проверки дублей сотрудников между табелями")
-            return fail(f"Ошибка при проверке дублей сотрудников:\n{e}", level="error")
-
-        if duplicates:
-            lines = []
-            for d in duplicates[:20]:
-                emp_fio = d.get("fio") or ""
-                emp_tbn = d.get("tbn") or ""
-                uname = d.get("full_name") or d.get("username") or f"id={d.get('user_id')}"
-                lines.append(f"- {emp_fio} (таб.№ {emp_tbn}) — уже есть в табеле пользователя {uname}")
-
-            msg = (
-                "Найдены сотрудники, которые уже есть в табелях других пользователей "
-                "по этому объекту/подразделению/месяцу:\n\n"
-                + "\n".join(lines)
-            )
-            if len(duplicates) > 20:
-                msg += f"\n\n... и ещё {len(duplicates) - 20}"
-            msg += "\n\nСохранение отменено. Удалите этих сотрудников из табеля."
-            return fail(msg)
-
-        try:
-            if self._active_header_id:
-                header_id = update_timesheet_header_by_id(
-                    header_id=int(self._active_header_id),
-                    object_id=object_id or None,
-                    object_addr=object_addr,
-                    department=department,
-                    year=year,
-                    month=month,
-                    user_id=user_id,
-                )
-            else:
-                header_id = upsert_timesheet_header(
-                    object_id=object_id or None,
-                    object_addr=object_addr,
-                    department=department,
-                    year=year,
-                    month=month,
-                    user_id=user_id,
-                )
-            
-            replace_timesheet_rows(
-                header_id,
-                self.model_rows_all,
-                year,
-                month,
-                audit_user_id=user_id,
-                audit_source="save",
-                audit_detail=None,
-            )
-            self._active_header_id = header_id
-        except Exception as e:
-            logger.exception("Ошибка сохранения табеля в БД")
-            return fail(f"Ошибка сохранения в БД:\n{e}", level="error")
-
-        try:
-            fpath = self._current_file_path()
-            if fpath:
-                self._save_backup_excel(
-                    fpath=fpath,
-                    object_id=object_id,
-                    object_addr=object_addr,
-                    department=department,
-                    year=year,
-                    month=month,
-                )
-        except Exception as e:
-            logger.exception("Ошибка резервного сохранения в Excel")
-            if show_messages:
-                messagebox.showwarning(
-                    "Сохранение",
-                    f"В БД табель сохранён, но ошибка при записи в Excel:\n{e}",
+                messagebox.showinfo(
+                    "Объектный табель",
+                    "Сохранение недоступно в режиме просмотра.",
                     parent=self,
                 )
+            return False
+    
+        # Защита от повторного входа:
+        # например, если ручное сохранение нажали во время автосохранения.
+        if self._saving:
+            if show_messages:
+                messagebox.showinfo(
+                    "Сохранение",
+                    "Сохранение уже выполняется. Подождите завершения.",
+                    parent=self,
+                )
+    
+            if is_auto:
+                self._save_queued = True
+    
+            return False
+    
+        self._saving = True
+        self._save_queued = False
+    
+        try:
+            try:
+                self.grid.close_editor(commit=True)
+            except Exception:
+                pass
 
-        self._loaded_context = self._capture_current_context()
-        self._loaded_context["header_id"] = self._active_header_id
-        self._mark_saved(auto=is_auto)
+            def fail(msg: str, level: str = "warning") -> bool:
+                if show_messages:
+                    if level == "error":
+                        messagebox.showerror("Сохранение", msg, parent=self)
+                    else:
+                        messagebox.showwarning("Сохранение", msg, parent=self)
+                if is_auto:
+                    self._mark_save_error(msg if len(msg) < 80 else "Ошибка авто‑сохранения")
+                return False
 
-        if show_messages and not is_auto:
-            fpath = self._current_file_path()
-            if fpath:
-                messagebox.showinfo("Сохранение", f"Табель сохранён в БД и в файл:\n{fpath}", parent=self)
-            else:
-                messagebox.showinfo("Сохранение", "Табель сохранён в БД.", parent=self)
+            # Изменения здесь: используем точные строки из полей ввода
+            object_addr = self.cmb_address.get().strip()
+            object_id = self.cmb_object_id.get().strip()
+            year, month = self.get_year_month()
+            department = normalize_spaces(self.cmb_department.get() or "")
 
-        return True
+            if department == "Все":
+                return fail("Для сохранения выберите конкретное подразделение.")
+
+            user_id = self._safe_current_user_id()
+            if not user_id:
+                return fail("Не удалось определить пользователя.", level="error")
+
+            self._sync_object_id_values_silent()
+            
+            # Забираем адрес заново после синхронизации (строго strip без normalize_spaces)
+            object_addr = self.cmb_address.get().strip()
+            object_id = self.cmb_object_id.get().strip()
+
+            if not object_addr:
+                return fail("Не задан адрес объекта. Выберите адрес из списка.")
+
+            if self.address_options and object_addr not in self.address_options:
+                self.cmb_object_id.set("")
+                return fail("Адрес объекта введён вручную и не найден в справочнике.\nВыберите адрес из списка.")
+
+            objects_for_addr = [
+                (code.strip(), a.strip(), short_name)
+                for (code, a, short_name) in self.objects_full
+                if a and a.strip() == object_addr
+            ]
+            ids_for_addr = sorted({code for code, _, _ in objects_for_addr if code})
+            if len(ids_for_addr) > 1 and not object_id:
+                return fail("По выбранному адресу найдено несколько объектов.\nСначала выберите корректный ID объекта.")
+
+            if object_id and ids_for_addr and object_id not in ids_for_addr:
+                return fail("Выбранный ID объекта не соответствует адресу.\nИсправьте адрес или ID.")
+
+            for rec in self.model_rows_all:
+                rec["hours"] = normalize_hours_list(rec.get("hours"), year, month)
+                rec["_totals"] = calc_row_totals(rec["hours"], year, month)
+
+            validation_errors = validate_rows_before_save(self.model_rows_all, year, month)
+            if validation_errors:
+                preview = "\n".join(f"• {e}" for e in validation_errors[:15])
+                if len(validation_errors) > 15:
+                    preview += f"\n• ... и ещё {len(validation_errors) - 15}"
+                return fail(f"Табель содержит ошибки:\n\n{preview}", level="error")
+
+            suspicious = find_suspicious_cells(self.model_rows_all, year, month)
+            if suspicious and not is_auto and show_messages:
+                dlg = SuspiciousHoursWarningDialog(self, suspicious, context="сохранением")
+                self.wait_window(dlg)
+                if not dlg.result:
+                    return False
+            elif suspicious and is_auto:
+                logger.warning(
+                    "Авто‑сохранение: обнаружено %s подозрительных значений часов (> %s)",
+                    len(suspicious),
+                    MAX_HOURS_PER_DAY,
+                )
+
+            employees_for_check = []
+            for rec in self.model_rows_all:
+                fio = normalize_spaces(rec.get("fio") or "")
+                tbn = normalize_tbn(rec.get("tbn"))
+                if fio or tbn:
+                    employees_for_check.append((fio, tbn))
+
+            try:
+                duplicates = find_duplicate_employees_for_timesheet(
+                    object_id=object_id or None,
+                    object_addr=object_addr,
+                    department=department,
+                    year=year,
+                    month=month,
+                    user_id=user_id,
+                    employees=employees_for_check,
+                )
+            except Exception as e:
+                logger.exception("Ошибка проверки дублей сотрудников между табелями")
+                return fail(f"Ошибка при проверке дублей сотрудников:\n{e}", level="error")
+
+            if duplicates:
+                lines = []
+                for d in duplicates[:20]:
+                    emp_fio = d.get("fio") or ""
+                    emp_tbn = d.get("tbn") or ""
+                    uname = d.get("full_name") or d.get("username") or f"id={d.get('user_id')}"
+                    lines.append(f"- {emp_fio} (таб.№ {emp_tbn}) — уже есть в табеле пользователя {uname}")
+
+                msg = (
+                    "Найдены сотрудники, которые уже есть в табелях других пользователей "
+                    "по этому объекту/подразделению/месяцу:\n\n"
+                    + "\n".join(lines)
+                )
+                if len(duplicates) > 20:
+                    msg += f"\n\n... и ещё {len(duplicates) - 20}"
+                msg += "\n\nСохранение отменено. Удалите этих сотрудников из табеля."
+                return fail(msg)
+
+            try:
+                if self._active_header_id:
+                    header_id = update_timesheet_header_by_id(
+                        header_id=int(self._active_header_id),
+                        object_id=object_id or None,
+                        object_addr=object_addr,
+                        department=department,
+                        year=year,
+                        month=month,
+                        user_id=user_id,
+                    )
+                else:
+                    header_id = upsert_timesheet_header(
+                        object_id=object_id or None,
+                        object_addr=object_addr,
+                        department=department,
+                        year=year,
+                        month=month,
+                        user_id=user_id,
+                    )
+                
+                replace_timesheet_rows(
+                    header_id,
+                    self.model_rows_all,
+                    year,
+                    month,
+                    audit_user_id=user_id,
+                    audit_source="save",
+                    audit_detail=None,
+                )
+                self._active_header_id = header_id
+            except Exception as e:
+                logger.exception("Ошибка сохранения табеля в БД")
+                return fail(f"Ошибка сохранения в БД:\n{e}", level="error")
+
+            try:
+                fpath = self._current_file_path()
+                if fpath:
+                    self._save_backup_excel(
+                        fpath=fpath,
+                        object_id=object_id,
+                        object_addr=object_addr,
+                        department=department,
+                        year=year,
+                        month=month,
+                    )
+            except Exception as e:
+                logger.exception("Ошибка резервного сохранения в Excel")
+                if show_messages:
+                    messagebox.showwarning(
+                        "Сохранение",
+                        f"В БД табель сохранён, но ошибка при записи в Excel:\n{e}",
+                        parent=self,
+                    )
+
+            self._loaded_context = self._capture_current_context()
+            self._loaded_context["header_id"] = self._active_header_id
+            self._mark_saved(auto=is_auto)
+
+            if show_messages and not is_auto:
+                fpath = self._current_file_path()
+                if fpath:
+                    messagebox.showinfo(
+                        "Сохранение",
+                        f"Табель сохранён в БД и в файл:\n{fpath}",
+                        parent=self,
+                    )
+                else:
+                    messagebox.showinfo(
+                        "Сохранение",
+                        "Табель сохранён в БД.",
+                        parent=self,
+                    )
+
+            return True
+
+        finally:
+            self._saving = False
+
+            # Если во время сохранения были новые изменения,
+            # ставим одно дополнительное автосохранение.
+            if self._save_queued and not self.read_only:
+                self._save_queued = False
+
+                if self._auto_save_job is None:
+                    self._auto_save_job = self.after(
+                        250,
+                        self._auto_save_callback,
+                    )
 
     def save_all(self):
         self._save_all_internal(show_messages=True, is_auto=False)
