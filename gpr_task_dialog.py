@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, execute_values
 
 from gpr_module import (
     _conn, _release, _today, _fmt_date, _parse_date,
