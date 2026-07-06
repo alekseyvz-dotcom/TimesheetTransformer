@@ -1885,6 +1885,7 @@ class TaskFactBatchDialog(tk.Toplevel):
         self._build_ui()
         self._fill_filters()
         self._reload_existing_facts(clear_pending=False)
+        self._apply_filter()
 
         self.grab_set()
         self.after(20, self._center)
@@ -2086,7 +2087,7 @@ class TaskFactBatchDialog(tk.Toplevel):
             textvariable=self.var_title,
         )
         self.cmb_title.pack(side="left", padx=(6, 12))
-        self.cmb_title.bind("<<ComboboxSelected>>", lambda _e: self._apply_filter())
+        self.cmb_title.bind("<<ComboboxSelected>>", lambda _e: self._on_title_filter_changed())
 
         tk.Label(row2, text="Группа:", bg=C["panel"], font=("Segoe UI", 9)).pack(side="left")
         self.cmb_group = ttk.Combobox(
@@ -2272,75 +2273,155 @@ class TaskFactBatchDialog(tk.Toplevel):
     # FILTER / RENDER
     # ─────────────────────────────────────────────────────
     def _fill_filters(self):
-        titles = sorted({r["title_name"] for r in self._all_rows if r.get("title_name")})
-        groups = sorted({r["group_name"] for r in self._all_rows if r.get("group_name")})
-
+        def ordered_unique(values):
+            seen = set()
+            out = []
+            for v in values:
+                v = (v or "").strip()
+                if not v:
+                    continue
+                if v in seen:
+                    continue
+                seen.add(v)
+                out.append(v)
+            return out
+    
+        titles = ordered_unique(
+            r.get("display_name") or r.get("title_name") or ""
+            for r in self._all_rows
+            if r.get("row_kind") == "title"
+        )
+    
+        # Если титульных строк нет, но у задач есть title_name
+        if not titles:
+            titles = ordered_unique(
+                r.get("title_name") or ""
+                for r in self._all_rows
+                if r.get("row_kind") == "task"
+            )
+    
         self.cmb_title["values"] = ["Все"] + titles
-        self.cmb_group["values"] = ["Все"] + groups
-
         self.cmb_title.current(0)
-        self.cmb_group.current(0)
+    
+        self._refresh_group_filter_values()
+
+
+    def _fill_filters(self):
+        def ordered_unique(values):
+            seen = set()
+            out = []
+            for v in values:
+                v = (v or "").strip()
+                if not v:
+                    continue
+                if v in seen:
+                    continue
+                seen.add(v)
+                out.append(v)
+            return out
+    
+        titles = ordered_unique(
+            r.get("display_name") or r.get("title_name") or ""
+            for r in self._all_rows
+            if r.get("row_kind") == "title"
+        )
+    
+        # Если титульных строк нет, но у задач есть title_name
+        if not titles:
+            titles = ordered_unique(
+                r.get("title_name") or ""
+                for r in self._all_rows
+                if r.get("row_kind") == "task"
+            )
+    
+        self.cmb_title["values"] = ["Все"] + titles
+        self.cmb_title.current(0)
+    
+        self._refresh_group_filter_values()
+
+    def _on_title_filter_changed(self):
+        self._refresh_group_filter_values()
+        self._apply_filter()
 
     def _apply_filter(self):
         q = (self.var_search.get() or "").strip().lower()
         title_filter = (self.var_title.get() or "Все").strip()
         group_filter = (self.var_group.get() or "Все").strip()
-
-        visible_tasks: List[Dict[str, Any]] = []
+    
+        visible_task_ids = set()
         visible_titles = set()
         visible_groups = set()
-
+    
         for row in self._all_rows:
-            if row["row_kind"] != "task":
+            if row.get("row_kind") != "task":
                 continue
-
-            if title_filter != "Все" and (row.get("title_name") or "") != title_filter:
+    
+            title_name = row.get("title_name") or ""
+            group_name = row.get("group_name") or ""
+    
+            if title_filter != "Все" and title_name != title_filter:
                 continue
-            if group_filter != "Все" and (row.get("group_name") or "") != group_filter:
+    
+            if group_filter != "Все" and group_name != group_filter:
                 continue
-
+    
             if q:
                 hay = " ".join(
                     [
-                        row.get("title_name") or "",
-                        row.get("group_name") or "",
+                        title_name,
+                        group_name,
                         row.get("work_type_name") or "",
                         row.get("display_name") or "",
                         row.get("uom_code") or "",
+                        _fmt_qty(row.get("plan_qty")),
                     ]
                 ).lower()
+    
                 if q not in hay:
                     continue
-
-            visible_tasks.append(row)
-            if row.get("title_name"):
-                visible_titles.add(row["title_name"])
-            if row.get("group_name"):
-                visible_groups.add((row.get("title_name") or "", row["group_name"]))
-
+    
+            task_id = row.get("task_id")
+            if task_id:
+                visible_task_ids.add(int(task_id))
+    
+            if title_name:
+                visible_titles.add(title_name)
+    
+            if group_name:
+                visible_groups.add((title_name, group_name))
+    
         final_rows: List[Dict[str, Any]] = []
         added_titles = set()
         added_groups = set()
-
+    
         for row in self._all_rows:
-            row_kind = row["row_kind"]
-
+            row_kind = row.get("row_kind")
+    
             if row_kind == "title":
-                title_name = row.get("display_name") or ""
+                title_name = row.get("display_name") or row.get("title_name") or ""
+    
                 if title_name in visible_titles and title_name not in added_titles:
                     final_rows.append(row)
                     added_titles.add(title_name)
-
-            elif row_kind == "group":
-                key = (row.get("title_name") or "", row.get("display_name") or "")
-                if key in visible_groups and key not in added_groups:
+    
+                continue
+    
+            if row_kind == "group":
+                title_name = row.get("title_name") or ""
+                group_name = row.get("display_name") or row.get("group_name") or ""
+                group_key = (title_name, group_name)
+    
+                if group_key in visible_groups and group_key not in added_groups:
                     final_rows.append(row)
-                    added_groups.add(key)
-
-            elif row_kind == "task":
-                if row in visible_tasks:
+                    added_groups.add(group_key)
+    
+                continue
+    
+            if row_kind == "task":
+                task_id = row.get("task_id")
+                if task_id and int(task_id) in visible_task_ids:
                     final_rows.append(row)
-
+    
         self._filtered_rows = final_rows
         self._render_table()
         self._update_summary()
