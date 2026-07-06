@@ -321,7 +321,49 @@ def _load_timesheet_rows_for_audit(cur, header_id: int) -> List[Dict[str, Any]]:
 def _insert_timesheet_cell_audit_records(
     cur,
     *,
+    values: Sequence[tuple[Any, ...]],
+) -> int:
+    """
+    Пишет уже подготовленные записи аудита в БД.
+
+    ВАЖНО:
+    тяжелый расчет отличий старого/нового состояния табеля
+    вынесен из транзакции записи, чтобы не держать соединение
+    в состоянии idle in transaction.
+    """
+    if not values:
+        return 0
+
+    insert_query = """
+        INSERT INTO public.timesheet_cell_audit (
+            header_id,
+            object_db_id,
+            object_id,
+            object_addr,
+            department,
+            year,
+            month,
+            day_no,
+            work_date,
+            fio,
+            tbn,
+            old_value,
+            new_value,
+            changed_by,
+            action_source,
+            action_detail,
+            client_info
+        )
+        VALUES %s
+    """
+
+    execute_values(cur, insert_query, values)
+    return len(values)
+
+def _build_timesheet_cell_audit_values(
+    *,
     header_id: int,
+    header_meta: Mapping[str, Any],
     old_rows: Sequence[Mapping[str, Any]],
     new_rows: Sequence[Mapping[str, Any]],
     year: int,
@@ -329,21 +371,23 @@ def _insert_timesheet_cell_audit_records(
     audit_user_id: Optional[int] = None,
     audit_source: str = "save",
     audit_detail: Optional[str] = None,
-) -> int:
+) -> List[tuple[Any, ...]]:
     """
-    Сравнивает старое и новое состояние табеля и пишет изменения ячеек в журнал.
+    Сравнивает старое и новое состояние табеля и подготавливает записи аудита.
 
     Фиксируются:
-    - добавление значения: NULL -> "8"
-    - изменение значения: "8" -> "ОТ"
-    - очистка значения: "8" -> NULL
-    - удаление строки сотрудника: заполненные дни старой строки -> NULL
+    - добавление значения: NULL -> "8";
+    - изменение значения: "8" -> "ОТ";
+    - очистка значения: "8" -> NULL;
+    - удаление строки сотрудника: заполненные дни старой строки -> NULL.
+
+    ВАЖНО:
+    эта функция НЕ работает с БД. Она только считает diff в памяти.
+    Поэтому её можно выполнять вне write-транзакции.
     """
     year = int(year)
     month = int(month)
     header_id = int(header_id)
-
-    header_meta = _load_header_meta_by_id(cur, header_id) or {}
 
     object_db_id = header_meta.get("object_db_id")
     object_id = normalize_spaces(header_meta.get("object_id") or "")
@@ -368,7 +412,7 @@ def _insert_timesheet_cell_audit_records(
 
     all_keys = set(old_by_key.keys()) | set(new_by_key.keys())
     if not all_keys:
-        return 0
+        return []
 
     days_in_month = calendar.monthrange(year, month)[1]
 
@@ -425,34 +469,7 @@ def _insert_timesheet_cell_audit_records(
                 )
             )
 
-    if not values:
-        return 0
-
-    insert_query = """
-        INSERT INTO public.timesheet_cell_audit (
-            header_id,
-            object_db_id,
-            object_id,
-            object_addr,
-            department,
-            year,
-            month,
-            day_no,
-            work_date,
-            fio,
-            tbn,
-            old_value,
-            new_value,
-            changed_by,
-            action_source,
-            action_detail,
-            client_info
-        )
-        VALUES %s
-    """
-
-    execute_values(cur, insert_query, values)
-    return len(values)
+    return values
     
 # ============================================================
 # Объекты / заголовки табелей
@@ -658,18 +675,6 @@ def replace_timesheet_rows(
     audit_source: str = "save",
     audit_detail: Optional[str] = None,
 ) -> int:
-    """
-    Полная замена строк табеля + журнал изменений ячеек.
-
-    ВАЖНО:
-    - сначала загружается старое состояние строк;
-    - затем старое состояние сравнивается с новым;
-    - в timesheet_cell_audit пишутся только реально изменённые ячейки;
-    - затем строки табеля полностью заменяются;
-    - аудит и замена строк выполняются в одной транзакции.
-
-    Возвращает количество записей, добавленных в журнал аудита.
-    """
     header_id = int(header_id)
     year = int(year)
     month = int(month)
@@ -709,19 +714,37 @@ def replace_timesheet_rows(
             )
         )
 
-    with db_cursor() as (_conn, cur):
+    # 1. Коротко читаем старое состояние и метаданные.
+    # После выхода из db_cursor транзакция сразу закрывается.
+    with db_cursor(dict_rows=True) as (_conn, cur):
+        header_meta = _load_header_meta_by_id(cur, header_id) or {}
         old_rows = _load_timesheet_rows_for_audit(cur, header_id)
+
+    # 2. Считаем аудит вне транзакции записи.
+    audit_values = _build_timesheet_cell_audit_values(
+        header_id=header_id,
+        header_meta=header_meta,
+        old_rows=old_rows,
+        new_rows=rows,
+        year=year,
+        month=month,
+        audit_user_id=audit_user_id,
+        audit_source=audit_source,
+        audit_detail=audit_detail,
+    )
+
+    # 3. Короткая транзакция записи.
+    with db_cursor() as (_conn, cur):
+        # Защита от одновременного сохранения одного и того же табеля
+        # из разных окон/клиентов.
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(%s, %s)",
+            (0, header_id),
+        )
 
         audit_count = _insert_timesheet_cell_audit_records(
             cur,
-            header_id=header_id,
-            old_rows=old_rows,
-            new_rows=rows,
-            year=year,
-            month=month,
-            audit_user_id=audit_user_id,
-            audit_source=audit_source,
-            audit_detail=audit_detail,
+            values=audit_values,
         )
 
         cur.execute(
@@ -750,7 +773,6 @@ def replace_timesheet_rows(
             execute_values(cur, insert_query, values)
 
         return int(audit_count)
-
 
 def load_timesheet_rows_from_db(
     object_id: Optional[str],
