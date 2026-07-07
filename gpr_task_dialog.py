@@ -1884,8 +1884,10 @@ class TaskFactBatchDialog(tk.Toplevel):
 
         self._build_ui()
         self._fill_filters()
+        
+        # Показываем все строки сразу, потом подгружаем факт и рисуем один раз
+        self._filtered_rows = list(self._all_rows)
         self._reload_existing_facts(clear_pending=False)
-        self._apply_filter()
 
         self.grab_set()
         self.after(20, self._center)
@@ -2273,74 +2275,24 @@ class TaskFactBatchDialog(tk.Toplevel):
     # FILTER / RENDER
     # ─────────────────────────────────────────────────────
     def _fill_filters(self):
-        def ordered_unique(values):
-            seen = set()
-            out = []
-            for v in values:
-                v = (v or "").strip()
-                if not v:
-                    continue
-                if v in seen:
-                    continue
-                seen.add(v)
-                out.append(v)
-            return out
-    
-        titles = ordered_unique(
-            r.get("display_name") or r.get("title_name") or ""
+        titles = sorted({
+            r["title_name"]
             for r in self._all_rows
-            if r.get("row_kind") == "title"
-        )
-    
-        # Если титульных строк нет, но у задач есть title_name
-        if not titles:
-            titles = ordered_unique(
-                r.get("title_name") or ""
-                for r in self._all_rows
-                if r.get("row_kind") == "task"
-            )
+            if r.get("title_name")
+        })
+        groups = sorted({
+            r["group_name"]
+            for r in self._all_rows
+            if r.get("group_name")
+        })
     
         self.cmb_title["values"] = ["Все"] + titles
+        self.cmb_group["values"] = ["Все"] + groups
+    
         self.cmb_title.current(0)
-    
-        self._refresh_group_filter_values()
-
-
-    def _fill_filters(self):
-        def ordered_unique(values):
-            seen = set()
-            out = []
-            for v in values:
-                v = (v or "").strip()
-                if not v:
-                    continue
-                if v in seen:
-                    continue
-                seen.add(v)
-                out.append(v)
-            return out
-    
-        titles = ordered_unique(
-            r.get("display_name") or r.get("title_name") or ""
-            for r in self._all_rows
-            if r.get("row_kind") == "title"
-        )
-    
-        # Если титульных строк нет, но у задач есть title_name
-        if not titles:
-            titles = ordered_unique(
-                r.get("title_name") or ""
-                for r in self._all_rows
-                if r.get("row_kind") == "task"
-            )
-    
-        self.cmb_title["values"] = ["Все"] + titles
-        self.cmb_title.current(0)
-    
-        self._refresh_group_filter_values()
+        self.cmb_group.current(0)
 
     def _on_title_filter_changed(self):
-        self._refresh_group_filter_values()
         self._apply_filter()
 
     def _apply_filter(self):
@@ -2849,42 +2801,24 @@ class TaskFactBatchDialog(tk.Toplevel):
         fact_date = _parse_date(self.var_fact_date.get())
         period_label = (self.cmb_period.get() or "").strip()
         period_type = FACT_PERIOD_FROM_LABEL.get(period_label, "day")
-
+    
         upserts: List[Dict[str, Any]] = []
         delete_ids: List[int] = []
-
-        for row in self._all_rows:
-            if row["row_kind"] != "task":
+    
+        for task_id, pending in self._pending_edits.items():
+            task_id = int(task_id)
+    
+            if pending is None:
+                delete_ids.append(task_id)
                 continue
-
-            task_id = int(row["task_id"])
-
-            if task_id in self._pending_edits:
-                pending = self._pending_edits[task_id]
-                if pending is None:
-                    delete_ids.append(task_id)
-                else:
-                    pending = dict(pending)
-                    pending["task_id"] = task_id
-                    pending["fact_date"] = fact_date
-                    pending["period_type"] = period_type
-                    pending["comment"] = pending.get("comment") or None
-                    upserts.append(pending)
-                continue
-
-            loaded = self._loaded_fact_map.get(task_id)
-            if loaded:
-                upserts.append(
-                    {
-                        "task_id": task_id,
-                        "fact_date": fact_date,
-                        "period_type": period_type,
-                        "fact_qty": loaded.get("fact_qty"),
-                        "workers_count": loaded.get("workers_count"),
-                        "comment": loaded.get("comment") or None,
-                    }
-                )
-
+    
+            pending = dict(pending)
+            pending["task_id"] = task_id
+            pending["fact_date"] = fact_date
+            pending["period_type"] = period_type
+            pending["comment"] = pending.get("comment") or None
+            upserts.append(pending)
+    
         return upserts, delete_ids
 
     def _save_batch(self, facts: List[Dict[str, Any]], delete_ids: List[int]):
