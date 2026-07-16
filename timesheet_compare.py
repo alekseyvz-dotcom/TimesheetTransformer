@@ -641,8 +641,24 @@ class TimesheetComparePage(tk.Frame):
             except Exception: 
                 pass
 
-            self.var_status.set(f"Загружен табель 1С: {len(rows)} сотрудников")
-            self.lbl_hr_status.config(text=f"1С: {len(rows)} чел. ✓", fg="#a5d6a7")
+            unique_tbns = {
+                normalize_tbn(r.get("tbn")) or f"fio:{fio_sort_key(r.get('fio'))}"
+                for r in rows
+            }
+            duplicates_count = len(rows) - len(unique_tbns)
+
+            if duplicates_count > 0:
+                self.var_status.set(
+                    f"Загружен табель 1С: строк {len(rows)}, сотрудников {len(unique_tbns)}, "
+                    f"дублей по таб.№: {duplicates_count}"
+                )
+                self.lbl_hr_status.config(
+                    text=f"1С: {len(unique_tbns)} чел. / {len(rows)} строк ✓",
+                    fg="#a5d6a7"
+                )
+            else:
+                self.var_status.set(f"Загружен табель 1С: {len(rows)} сотрудников")
+                self.lbl_hr_status.config(text=f"1С: {len(rows)} чел. ✓", fg="#a5d6a7")
             
             self._rebuild_comparison()
 
@@ -758,6 +774,85 @@ class TimesheetComparePage(tk.Frame):
                 total += val
         return total
 
+    def _fmt_day_value(self, val: float) -> str:
+        """Форматирует числовое значение дня без лишних .0."""
+        if float(val).is_integer():
+            return str(int(val))
+        return f"{val:.2f}".rstrip("0").rstrip(".")
+
+    def _merge_hr_rows_by_tbn(self, hr_rows: List[Dict[str, Any]], days_count: int) -> Dict[str, Dict[str, Any]]:
+        """
+        Объединяет строки 1С по табельному номеру.
+
+        Нужно для ситуации, когда один сотрудник попал в выгрузку 1С дважды:
+        например, первая часть месяца в старом подразделении,
+        вторая часть месяца — в переименованном подразделении.
+
+        Логика:
+        - числовые значения по одному дню суммируются;
+        - одинаковые текстовые значения оставляются один раз;
+        - разные текстовые значения объединяются через '/';
+        - если есть число и текст в одном дне, отображается число + текст через '/'.
+        """
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+
+        for r in hr_rows:
+            tbn_key = normalize_tbn(r.get("tbn"))
+            if not tbn_key:
+                # На всякий случай, если табельный номер пустой,
+                # группируем по ФИО, чтобы не смешать всех пустых табельных.
+                tbn_key = f"fio:{fio_sort_key(r.get('fio'))}"
+
+            grouped.setdefault(tbn_key, []).append(r)
+
+        result: Dict[str, Dict[str, Any]] = {}
+
+        for tbn_key, rows in grouped.items():
+            first_row = rows[0]
+            merged_days = []
+
+            for i in range(days_count):
+                num_sum = 0.0
+                has_num = False
+                texts = []
+
+                for row in rows:
+                    days = row.get("days") or []
+                    v = days[i] if i < len(days) else None
+
+                    n = get_number_value(v)
+                    if n is not None:
+                        num_sum += n
+                        has_num = True
+                        continue
+
+                    txt = str(v or "").strip()
+                    if not txt or txt.lower() == "none":
+                        continue
+
+                    # Не дублируем одинаковые обозначения: В, К, ОТ и т.п.
+                    if txt not in texts:
+                        texts.append(txt)
+
+                parts = []
+
+                if has_num:
+                    parts.append(self._fmt_day_value(num_sum))
+
+                if texts:
+                    parts.extend(texts)
+
+                merged_days.append("/".join(parts) if parts else None)
+
+            result[tbn_key] = {
+                "fio": (first_row.get("fio") or "").strip(),
+                "tbn": (first_row.get("tbn") or "").strip(),
+                "days": merged_days,
+                "source_rows_count": len(rows),
+            }
+
+        return result
+
     def _render_compare_from_groups(self):
         """Отрисовывает таблицу результатов на основе подготовленных групп."""
         self.tree_compare.delete(*self.tree_compare.get_children())
@@ -862,8 +957,10 @@ class TimesheetComparePage(tk.Frame):
         only_diff = self.var_only_diff.get()
         days_count = active_days
 
-        # Словарь 1С по табельному номеру
-        hr_map  = {normalize_tbn(r["tbn"]): r for r in self._hr_rows}
+        # Словарь 1С по табельному номеру.
+        # Важно: один сотрудник может быть в 1С несколько раз,
+        # поэтому строки 1С сначала объединяем по табельному номеру.
+        hr_map = self._merge_hr_rows_by_tbn(self._hr_rows, days_count)
         
         # Словарь объектов по табельному номеру
         obj_map = {}
