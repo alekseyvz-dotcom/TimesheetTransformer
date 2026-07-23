@@ -1,12 +1,12 @@
 # gpr_dictionaries.py — профессиональные справочники ГПР
 from __future__ import annotations
-
+import os
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 
 from psycopg2.extras import RealDictCursor
 
@@ -736,6 +736,500 @@ class GprLaborDictionaryService:
         finally:
             _release(conn)
 
+class GprLaborExcelImportService:
+    """
+    Импорт работ и норм ЗТР из Excel.
+
+    Ожидаемые колонки:
+      - Раздел
+      - Вид работы
+      - Ед. изм.
+      - ЗТР
+
+    Раздел Excel становится типом работ.
+    Вид работы становится конкретной работой.
+    """
+
+    REQUIRED_HEADERS = {
+        "раздел": "section",
+        "вид работы": "work_name",
+        "ед. изм.": "uom_code",
+        "ед изм": "uom_code",
+        "единица измерения": "uom_code",
+        "зтр": "labor_hours_per_unit",
+    }
+
+    @staticmethod
+    def _norm_text(value: Any) -> str:
+        return " ".join(str(value or "").strip().split())
+
+    @staticmethod
+    def _header_key(value: Any) -> str:
+        text = GprLaborExcelImportService._norm_text(value).lower()
+        text = text.replace("ё", "е")
+        text = text.replace(".", "")
+        return text
+
+    @staticmethod
+    def read_excel_rows(file_path: str) -> Tuple[List[Dict[str, Any]], List[str], str]:
+        """
+        Читает Excel и возвращает:
+          rows       - подготовленные уникальные строки;
+          warnings   - предупреждения;
+          sheet_name - использованный лист.
+        """
+        try:
+            from openpyxl import load_workbook
+        except ImportError as exc:
+            raise RuntimeError(
+                "Не установлена библиотека openpyxl.\n"
+                "Установите её командой: pip install openpyxl"
+            ) from exc
+
+        wb = load_workbook(
+            filename=file_path,
+            read_only=True,
+            data_only=True,
+        )
+
+        try:
+            ws = wb.active
+            sheet_name = ws.title
+
+            rows_iter = ws.iter_rows(values_only=True)
+
+            try:
+                raw_header = next(rows_iter)
+            except StopIteration:
+                raise ValueError("Файл Excel пустой.")
+
+            column_map: Dict[str, int] = {}
+
+            for index, value in enumerate(raw_header):
+                header = GprLaborExcelImportService._header_key(value)
+                mapped = GprLaborExcelImportService.REQUIRED_HEADERS.get(header)
+                if mapped:
+                    column_map[mapped] = index
+
+            required_fields = {
+                "section": "Раздел",
+                "work_name": "Вид работы",
+                "uom_code": "Ед. изм.",
+                "labor_hours_per_unit": "ЗТР",
+            }
+
+            missing = [
+                title
+                for key, title in required_fields.items()
+                if key not in column_map
+            ]
+
+            if missing:
+                raise ValueError(
+                    "Не найдены обязательные колонки:\n- "
+                    + "\n- ".join(missing)
+                    + "\n\nОжидаются колонки: Раздел, Вид работы, Ед. изм., ЗТР."
+                )
+
+            prepared_rows: List[Dict[str, Any]] = []
+            warnings: List[str] = []
+            seen: Dict[Tuple[str, str, str], float] = {}
+
+            for excel_row_no, raw_row in enumerate(rows_iter, start=2):
+                section = GprLaborExcelImportService._norm_text(
+                    raw_row[column_map["section"]]
+                    if len(raw_row) > column_map["section"]
+                    else None
+                )
+                work_name = GprLaborExcelImportService._norm_text(
+                    raw_row[column_map["work_name"]]
+                    if len(raw_row) > column_map["work_name"]
+                    else None
+                )
+                uom_code = GprLaborExcelImportService._norm_text(
+                    raw_row[column_map["uom_code"]]
+                    if len(raw_row) > column_map["uom_code"]
+                    else None
+                )
+
+                raw_labor = (
+                    raw_row[column_map["labor_hours_per_unit"]]
+                    if len(raw_row) > column_map["labor_hours_per_unit"]
+                    else None
+                )
+                labor = _safe_float(raw_labor)
+
+                # Полностью пустую строку не считаем ошибкой.
+                if not section and not work_name and not uom_code and labor is None:
+                    continue
+
+                if not section:
+                    warnings.append(
+                        f"Строка {excel_row_no}: не указан раздел — строка пропущена."
+                    )
+                    continue
+
+                if not work_name:
+                    warnings.append(
+                        f"Строка {excel_row_no}: не указан вид работы — строка пропущена."
+                    )
+                    continue
+
+                if not uom_code:
+                    warnings.append(
+                        f"Строка {excel_row_no}: не указана единица измерения — строка пропущена."
+                    )
+                    continue
+
+                if labor is None or labor <= 0:
+                    warnings.append(
+                        f"Строка {excel_row_no}: ЗТР должен быть числом больше 0 — строка пропущена."
+                    )
+                    continue
+
+                key = (
+                    section.casefold(),
+                    work_name.casefold(),
+                    uom_code.casefold(),
+                )
+
+                # Одинаковые строки в Excel разрешены и игнорируются.
+                if key in seen:
+                    if abs(seen[key] - labor) < 0.0000001:
+                        warnings.append(
+                            f"Строка {excel_row_no}: дубликат строки проигнорирован."
+                        )
+                    else:
+                        warnings.append(
+                            f"Строка {excel_row_no}: для той же работы указано "
+                            f"другое значение ЗТР ({_fmt_qty(labor)}). "
+                            "Строка пропущена."
+                        )
+                    continue
+
+                seen[key] = labor
+
+                prepared_rows.append(
+                    {
+                        "excel_row_no": excel_row_no,
+                        "section": section,
+                        "work_name": work_name,
+                        "uom_code": uom_code,
+                        "labor_hours_per_unit": labor,
+                    }
+                )
+
+            if not prepared_rows:
+                raise ValueError(
+                    "В Excel не найдено ни одной корректной строки для импорта."
+                )
+
+            return prepared_rows, warnings, sheet_name
+
+        finally:
+            wb.close()
+
+    @staticmethod
+    def import_rows(
+        rows: List[Dict[str, Any]],
+        *,
+        effective_from: date,
+        source_name: str,
+        user_id: Optional[int],
+        import_note: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Импортирует строки в одной транзакции.
+
+        При повторном импорте:
+        - если норма имеет ту же дату effective_from — она обновляется;
+        - если дата новая — старая активная норма закрывается предыдущим днем;
+        - если есть будущая норма — новая ограничивается днем до будущей нормы.
+        """
+        conn = None
+
+        result = {
+            "work_types_created": 0,
+            "uoms_created": 0,
+            "work_items_created": 0,
+            "norms_created": 0,
+            "norms_updated": 0,
+            "errors": [],
+        }
+
+        try:
+            conn = _conn()
+
+            with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # ─────────────────────────────────────────────
+                # Кэш типов работ
+                # ─────────────────────────────────────────────
+                cur.execute("""
+                    SELECT id, name
+                    FROM public.gpr_work_types
+                """)
+                work_types_cache = {
+                    GprLaborExcelImportService._norm_text(row["name"]).casefold(): int(row["id"])
+                    for row in cur.fetchall()
+                }
+
+                # ─────────────────────────────────────────────
+                # Кэш единиц измерения
+                # ─────────────────────────────────────────────
+                cur.execute("""
+                    SELECT code, name
+                    FROM public.gpr_uom
+                """)
+                uom_cache = {
+                    GprLaborExcelImportService._norm_text(row["code"]).casefold(): row["code"]
+                    for row in cur.fetchall()
+                }
+
+                # ─────────────────────────────────────────────
+                # Кэш работ
+                # ─────────────────────────────────────────────
+                cur.execute("""
+                    SELECT id, work_type_id, name, uom_code
+                    FROM public.gpr_work_items
+                """)
+
+                work_items_cache: Dict[Tuple[int, str, str], int] = {}
+
+                for row in cur.fetchall():
+                    key = (
+                        int(row["work_type_id"]),
+                        GprLaborExcelImportService._norm_text(row["name"]).casefold(),
+                        GprLaborExcelImportService._norm_text(row["uom_code"]).casefold(),
+                    )
+                    work_items_cache[key] = int(row["id"])
+
+                for item in rows:
+                    section = item["section"]
+                    work_name = item["work_name"]
+                    uom_code_from_excel = item["uom_code"]
+                    labor_hours = item["labor_hours_per_unit"]
+
+                    # ─────────────────────────────────────────
+                    # 1. Тип работ = Раздел Excel
+                    # ─────────────────────────────────────────
+                    section_key = section.casefold()
+                    work_type_id = work_types_cache.get(section_key)
+
+                    if not work_type_id:
+                        cur.execute("""
+                            INSERT INTO public.gpr_work_types (
+                                code,
+                                name,
+                                sort_order,
+                                is_active
+                            )
+                            VALUES (NULL, %s, 100, true)
+                            RETURNING id
+                        """, (section,))
+
+                        work_type_id = int(cur.fetchone()["id"])
+                        work_types_cache[section_key] = work_type_id
+                        result["work_types_created"] += 1
+
+                    # ─────────────────────────────────────────
+                    # 2. Единица измерения
+                    # ─────────────────────────────────────────
+                    uom_key = uom_code_from_excel.casefold()
+                    uom_code = uom_cache.get(uom_key)
+
+                    if not uom_code:
+                        cur.execute("""
+                            INSERT INTO public.gpr_uom (code, name)
+                            VALUES (%s, %s)
+                        """, (
+                            uom_code_from_excel,
+                            uom_code_from_excel,
+                        ))
+
+                        uom_code = uom_code_from_excel
+                        uom_cache[uom_key] = uom_code
+                        result["uoms_created"] += 1
+
+                    # ─────────────────────────────────────────
+                    # 3. Конкретная работа
+                    # ─────────────────────────────────────────
+                    work_key = (
+                        work_type_id,
+                        work_name.casefold(),
+                        uom_code.casefold(),
+                    )
+
+                    work_item_id = work_items_cache.get(work_key)
+
+                    if not work_item_id:
+                        cur.execute("""
+                            INSERT INTO public.gpr_work_items (
+                                work_type_id,
+                                code,
+                                name,
+                                uom_code,
+                                sort_order,
+                                is_active,
+                                note,
+                                created_by,
+                                updated_by
+                            )
+                            VALUES (
+                                %s, NULL, %s, %s,
+                                100, true, %s, %s, %s
+                            )
+                            RETURNING id
+                        """, (
+                            work_type_id,
+                            work_name,
+                            uom_code,
+                            import_note,
+                            user_id,
+                            user_id,
+                        ))
+
+                        work_item_id = int(cur.fetchone()["id"])
+                        work_items_cache[work_key] = work_item_id
+                        result["work_items_created"] += 1
+
+                    # ─────────────────────────────────────────
+                    # 4. Норма ЗТР
+                    # ─────────────────────────────────────────
+                    # Блокируем все нормы данной работы.
+                    cur.execute("""
+                        SELECT id,
+                               effective_from,
+                               effective_to
+                        FROM public.gpr_labor_norms
+                        WHERE work_item_id = %s
+                        ORDER BY effective_from, id
+                        FOR UPDATE
+                    """, (work_item_id,))
+
+                    existing_norms = [dict(row) for row in cur.fetchall()]
+
+                    same_start_norm = next(
+                        (
+                            norm
+                            for norm in existing_norms
+                            if norm["effective_from"] == effective_from
+                        ),
+                        None,
+                    )
+
+                    previous_norm = None
+                    next_norm = None
+
+                    for norm in existing_norms:
+                        norm_from = norm["effective_from"]
+
+                        if norm_from < effective_from:
+                            if (
+                                previous_norm is None
+                                or norm_from > previous_norm["effective_from"]
+                            ):
+                                previous_norm = norm
+
+                        elif norm_from > effective_from:
+                            if (
+                                next_norm is None
+                                or norm_from < next_norm["effective_from"]
+                            ):
+                                next_norm = norm
+
+                    # Если новая редакция нормы начинается позже старой,
+                    # закрываем старую норму днем ранее.
+                    if previous_norm:
+                        prev_end = previous_norm.get("effective_to")
+
+                        if prev_end is None or prev_end >= effective_from:
+                            cur.execute("""
+                                UPDATE public.gpr_labor_norms
+                                SET effective_to = %s,
+                                    updated_by = %s
+                                WHERE id = %s
+                            """, (
+                                effective_from - timedelta(days=1),
+                                user_id,
+                                previous_norm["id"],
+                            ))
+
+                    # Если в справочнике уже есть будущая версия,
+                    # новая норма действует только до дня перед ней.
+                    calculated_effective_to = (
+                        next_norm["effective_from"] - timedelta(days=1)
+                        if next_norm
+                        else None
+                    )
+
+                    if same_start_norm:
+                        cur.execute("""
+                            UPDATE public.gpr_labor_norms
+                            SET effective_to = %s,
+                                labor_hours_per_unit = %s,
+                                default_productivity_factor = 1.000000,
+                                source_name = %s,
+                                source_code = NULL,
+                                source_version = NULL,
+                                note = %s,
+                                is_active = true,
+                                updated_by = %s
+                            WHERE id = %s
+                        """, (
+                            calculated_effective_to,
+                            labor_hours,
+                            source_name,
+                            import_note,
+                            user_id,
+                            same_start_norm["id"],
+                        ))
+
+                        result["norms_updated"] += 1
+
+                    else:
+                        cur.execute("""
+                            INSERT INTO public.gpr_labor_norms (
+                                work_item_id,
+                                effective_from,
+                                effective_to,
+                                labor_hours_per_unit,
+                                default_productivity_factor,
+                                source_name,
+                                source_code,
+                                source_version,
+                                note,
+                                is_active,
+                                created_by,
+                                updated_by
+                            )
+                            VALUES (
+                                %s, %s, %s, %s,
+                                1.000000,
+                                %s, NULL, NULL, %s,
+                                true, %s, %s
+                            )
+                        """, (
+                            work_item_id,
+                            effective_from,
+                            calculated_effective_to,
+                            labor_hours,
+                            source_name,
+                            import_note,
+                            user_id,
+                            user_id,
+                        ))
+
+                        result["norms_created"] += 1
+
+            return result
+
+        except Exception:
+            logger.exception("Ошибка импорта норм ЗТР из Excel")
+            raise
+
+        finally:
+            _release(conn)
+
 # ═══════════════════════════════════════════════════════════════
 #  DIALOGS
 # ═══════════════════════════════════════════════════════════════
@@ -1383,6 +1877,124 @@ class _LaborNormDialog(simpledialog.Dialog):
             )
             return False
 
+class _LaborExcelImportDialog(simpledialog.Dialog):
+    """Параметры импорта норм ЗТР из Excel."""
+
+    def __init__(self, parent, file_path: str):
+        self.file_path = file_path
+        self.result: Optional[Dict[str, Any]] = None
+        super().__init__(parent, title="Импорт норм ЗТР из Excel")
+
+    def body(self, master):
+        master.grid_columnconfigure(1, weight=1)
+
+        file_name = os.path.basename(self.file_path)
+
+        tk.Label(
+            master,
+            text=(
+                f"Файл: {file_name}\n\n"
+                "Все строки будут импортированы как версии норм ЗТР.\n"
+                "Если повторно загрузить тот же файл с той же датой,\n"
+                "существующие нормы будут обновлены без дублей."
+            ),
+            justify="left",
+            anchor="w",
+            fg=C["text2"],
+        ).grid(
+            row=0,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(0, 12),
+        )
+
+        self.var_effective_from = tk.StringVar(value=_today().isoformat())
+        self.var_source_name = tk.StringVar(
+            value=f"Импорт Excel: {file_name}"
+        )
+
+        tk.Label(master, text="Действует с *:").grid(
+            row=1,
+            column=0,
+            sticky="e",
+            padx=(0, 8),
+            pady=5,
+        )
+
+        self.ent_effective_from = ttk.Entry(
+            master,
+            textvariable=self.var_effective_from,
+            width=26,
+        )
+        self.ent_effective_from.grid(
+            row=1,
+            column=1,
+            sticky="ew",
+            pady=5,
+        )
+
+        tk.Label(master, text="Источник нормы:").grid(
+            row=2,
+            column=0,
+            sticky="e",
+            padx=(0, 8),
+            pady=5,
+        )
+
+        ttk.Entry(
+            master,
+            textvariable=self.var_source_name,
+            width=50,
+        ).grid(
+            row=2,
+            column=1,
+            sticky="ew",
+            pady=5,
+        )
+
+        tk.Label(
+            master,
+            text=(
+                "Дата вводится в формате ГГГГ-ММ-ДД или ДД.ММ.ГГГГ.\n"
+                "Коэффициент производительности при импорте: 1.000000."
+            ),
+            fg=C["text3"],
+            justify="left",
+            anchor="w",
+        ).grid(
+            row=3,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            pady=(8, 0),
+        )
+
+        return self.ent_effective_from
+
+    def validate(self):
+        try:
+            effective_from = _parse_date_iso(
+                self.var_effective_from.get(),
+                "Дата начала действия",
+            )
+        except ValueError as exc:
+            messagebox.showwarning(
+                "Импорт Excel",
+                str(exc),
+                parent=self,
+            )
+            return False
+
+        self.result = {
+            "effective_from": effective_from,
+            "source_name": (
+                self.var_source_name.get().strip()
+                or f"Импорт Excel: {os.path.basename(self.file_path)}"
+            ),
+        }
+        return True
+
 # ═══════════════════════════════════════════════════════════════
 #  PAGE
 # ═══════════════════════════════════════════════════════════════
@@ -1798,6 +2410,12 @@ class GprDictionariesPage(tk.Frame):
             bar_work,
             text="➕ Добавить работу",
             command=self._labor_add_item,
+        ).pack(side="left", padx=2)
+
+        ttk.Button(
+            bar_work,
+            text="📥 Импорт Excel",
+            command=self._labor_import_excel,
         ).pack(side="left", padx=2)
 
         ttk.Button(
@@ -2222,6 +2840,104 @@ class GprDictionariesPage(tk.Frame):
 
         self._labor_load_items()
 
+    def _labor_import_excel(self):
+        file_path = filedialog.askopenfilename(
+            parent=self,
+            title="Выберите Excel-файл с нормами ЗТР",
+            filetypes=[
+                ("Excel files", "*.xlsx *.xlsm"),
+                ("All files", "*.*"),
+            ],
+        )
+
+        if not file_path:
+            return
+
+        try:
+            rows, warnings, sheet_name = (
+                GprLaborExcelImportService.read_excel_rows(file_path)
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Импорт Excel",
+                f"Не удалось прочитать файл:\n\n{exc}",
+                parent=self,
+            )
+            return
+
+        dlg = _LaborExcelImportDialog(self, file_path)
+        if not dlg.result:
+            return
+
+        preview_text = (
+            f"Файл: {os.path.basename(file_path)}\n"
+            f"Лист: {sheet_name}\n"
+            f"Корректных строк для импорта: {len(rows)}\n"
+            f"Предупреждений при чтении: {len(warnings)}\n\n"
+            "Продолжить импорт?"
+        )
+
+        if not messagebox.askyesno(
+            "Импорт Excel",
+            preview_text,
+            parent=self,
+        ):
+            return
+
+        import_note = (
+            f"Импортировано из файла {os.path.basename(file_path)}, "
+            f"лист «{sheet_name}»."
+        )
+
+        try:
+            result = GprLaborExcelImportService.import_rows(
+                rows,
+                effective_from=dlg.result["effective_from"],
+                source_name=dlg.result["source_name"],
+                user_id=_user_id(self.app_ref),
+                import_note=import_note,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Импорт Excel",
+                (
+                    "Импорт не выполнен. Все изменения отменены.\n\n"
+                    f"Ошибка:\n{exc}"
+                ),
+                parent=self,
+            )
+            return
+
+        self._labor_load_caches()
+        self._labor_load_items()
+
+        summary = (
+            "Импорт завершён успешно.\n\n"
+            f"Создано типов работ: {result['work_types_created']}\n"
+            f"Создано единиц измерения: {result['uoms_created']}\n"
+            f"Создано работ: {result['work_items_created']}\n"
+            f"Создано норм: {result['norms_created']}\n"
+            f"Обновлено норм: {result['norms_updated']}"
+        )
+
+        if warnings:
+            preview_warnings = warnings[:15]
+            summary += (
+                f"\n\nПредупреждений: {len(warnings)}\n"
+                + "\n".join(f"• {text}" for text in preview_warnings)
+            )
+
+            if len(warnings) > len(preview_warnings):
+                summary += (
+                    f"\n• ... ещё {len(warnings) - len(preview_warnings)}"
+                )
+
+        messagebox.showinfo(
+            "Импорт Excel",
+            summary,
+            parent=self,
+        )
+    
     def _labor_edit_item(self):
         item = self._labor_item_sel()
         if not item:
