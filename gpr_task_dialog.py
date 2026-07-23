@@ -1808,10 +1808,16 @@ class TaskEditDialogPro(tk.Toplevel):
         self._selected_work_items = []
         self._bulk_mode = False
 
-        self._set_name_entry_state("normal")
+        self.ent_name.configure(state="normal")
         self.ent_name.delete(0, "end")
-        self.lbl_selected_works.config(text="")
+        self.ent_name.configure(state="readonly")
 
+        self.lbl_selected_works.config(
+            text="Выберите работы из справочника.",
+            fg=C["text3"],
+        )
+
+        self._refresh_labor_info()
         self._open_work_items_selector()
 
     def _selected_work_type(self) -> Optional[Dict[str, Any]]:
@@ -1963,6 +1969,10 @@ class TaskEditDialogPro(tk.Toplevel):
                 text=text,
                 fg=C["error"] if without_norm else C["success"],
             )
+
+        self._refresh_labor_info()
+        self._refresh_overview()
+        self._mark_dirty()
 
     def _set_name_entry_state(self, state: str):
         try:
@@ -2217,56 +2227,35 @@ class TaskEditDialogPro(tk.Toplevel):
         self.lbl_info.config(text=f"ID задачи: {tid}" if tid else "Новая задача")
 
     def _refresh_overview(self):
+        """
+        Обновляет только доступные элементы новой упрощённой карточки.
+
+        Старый блок «Сводка по задаче» был удалён из интерфейса,
+        поэтому здесь не должно быть обращений к:
+        self.lbl_meta, self.prg_progress, self.lbl_kpi.
+        """
         tid = self.init.get("id")
         creator = self.init.get("creator_name") or "—"
         created_at = _fmt_dt(self.init.get("created_at"))
         updated_at = _fmt_dt(self.init.get("updated_at"))
 
-        meta_parts = [f"ID: {tid}" if tid else "Новая задача", f"Создал: {creator}"]
+        meta_parts = [
+            f"ID: {tid}" if tid else "Новая работа",
+        ]
+
+        if tid:
+            meta_parts.append(f"Создал: {creator}")
+
         if created_at:
             meta_parts.append(f"Создано: {created_at}")
+
         if updated_at:
-            meta_parts.append(f"Обновлено: {updated_at}")
+            meta_parts.append(f"Изменено: {updated_at}")
 
-        meta_text = "  |  ".join(meta_parts)
-        self.lbl_meta.config(text=meta_text)
-        self.lbl_head_meta.config(text=meta_text)
+        self.lbl_head_meta.config(text="  |  ".join(meta_parts))
 
-        plan_qty = _safe_float(self.ent_qty.get())
-        if plan_qty is None:
-            plan_qty = _safe_float(self.init.get("plan_qty"))
-
-        total_fact = sum(_safe_float(x.get("fact_qty")) or 0 for x in self._facts)
-        remain = None if plan_qty is None else max(0.0, plan_qty - total_fact)
-
-        if plan_qty and plan_qty > 0:
-            pct = min(100.0, total_fact / plan_qty * 100.0)
-        else:
-            pct = 0.0
-
-        self.prg_progress["value"] = pct
-
-        uom = None
-        ui = self.cmb_uom.current()
-        if ui > 0 and (ui - 1) < len(self.uoms):
-            uom = self.uoms[ui - 1]["code"]
-        elif self.init.get("uom_code"):
-            uom = self.init.get("uom_code")
-
-        uom_s = f" {uom}" if uom else ""
-
-        if plan_qty is not None:
-            self.lbl_kpi.config(
-                text=(
-                    f"План: {_fmt_qty(plan_qty)}{uom_s}  |  "
-                    f"Факт: {_fmt_qty(total_fact)}{uom_s}  |  "
-                    f"Остаток: {_fmt_qty(remain)}{uom_s}  |  "
-                    f"{pct:.1f}%"
-                )
-            )
-        else:
-            self.lbl_kpi.config(text=f"Факт: {_fmt_qty(total_fact)}{uom_s}")
-
+        # Вкладка факта остаётся в старой структуре,
+        # поэтому её сводку продолжаем обновлять.
         if self._has_fact_tab and hasattr(self, "lbl_fact_summary"):
             self._update_fact_summary()
 
