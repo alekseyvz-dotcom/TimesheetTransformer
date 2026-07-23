@@ -126,6 +126,7 @@ brigades_module = None
 gpr_module = None
 gpr_task_dialog = None
 gpr_dictionaries = None
+gpr_planning_module = None
 work_schedules_manager = None
 trip_timesheet_page_module = None
 EstimateResourceDecoder = None
@@ -137,7 +138,7 @@ def perform_heavy_imports():
            analytics_module, timesheet_plan_fact_module, timesheet_transformer, employees_module, \
            timesheet_compare, meals_employees_module, lodging_module, \
            meals_reports_module, employee_card_module, payroll_module, \
-           brigades_module, gpr_module, gpr_task_dialog, gpr_dictionaries, work_schedules_manager, \
+           brigades_module, gpr_module, gpr_task_dialog, gpr_dictionaries, gpr_planning_module, work_schedules_manager, \
            trip_timesheet_page_module
 
     import BudgetAnalyzer
@@ -153,6 +154,7 @@ def perform_heavy_imports():
     import gpr_module as gpr_module
     import gpr_dictionaries as gpr_dictionaries
     import gpr_task_dialog as gpr_task_dialog
+    import gpr_planning_module as gpr_planning_module
     import analytics_module
     import timesheet_plan_fact_page as timesheet_plan_fact_module
     import employees as employees_module
@@ -1721,6 +1723,7 @@ if __name__ == "__main__":
                 gpr_module,
                 gpr_task_dialog,
                 gpr_dictionaries,
+                gpr_planning_module,
                 analytics_module,
                 timesheet_plan_fact_module,
                 employees_module,
