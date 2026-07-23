@@ -350,7 +350,6 @@ class GprPlanningService:
                         shift_hours,
                         is_manual,
                         comment,
-                        updated_at
                     )
                     VALUES %s
                     ON CONFLICT (task_id, period_type, period_start)
