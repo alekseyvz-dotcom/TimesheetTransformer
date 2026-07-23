@@ -442,6 +442,10 @@ class GprExcelImportService:
                         "row_kind": "group",
                         "work_type_id": default_work_type_id,
                         "work_type_name": "",
+                        "work_item_id": None,
+                        "labor_norm_id": None,
+                        "labor_hours_per_unit": None,
+                        "productivity_factor": None,
                         "name": name_text,
                         "uom_code": None,
                         "plan_qty": None,
@@ -463,6 +467,10 @@ class GprExcelImportService:
                         "row_kind": "title",
                         "work_type_id": default_work_type_id,
                         "work_type_name": "",
+                        "work_item_id": None,
+                        "labor_norm_id": None,
+                        "labor_hours_per_unit": None,
+                        "productivity_factor": None,
                         "name": name_text,
                         "uom_code": None,
                         "plan_qty": None,
@@ -919,29 +927,58 @@ class GprService:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """
-                        SELECT t.id, t.parent_id, t.work_type_id,
-                               wt.name AS work_type_name,
-                               t.name, t.uom_code, t.plan_qty,
-                               t.plan_start, t.plan_finish,
-                               t.status, t.sort_order, t.is_milestone,
-                               t.row_kind,
-                               t.created_by, t.created_at, t.updated_at
-                        FROM public.gpr_tasks t
-                        JOIN public.gpr_work_types wt ON wt.id = t.work_type_id
-                        WHERE t.plan_id = %s
-                          AND COALESCE(t.is_deleted, false) = false
-                        ORDER BY t.sort_order, wt.sort_order, wt.name,
-                                 t.name, t.plan_start, t.id
+                    SELECT
+                        t.id,
+                        t.parent_id,
+                        t.work_type_id,
+                        wt.name AS work_type_name,
+
+                        t.work_item_id,
+                        t.labor_norm_id,
+                        t.labor_hours_per_unit,
+                        t.productivity_factor,
+
+                        t.name,
+                        t.uom_code,
+                        t.plan_qty,
+                        t.plan_start,
+                        t.plan_finish,
+                        t.status,
+                        t.sort_order,
+                        t.is_milestone,
+                        t.row_kind,
+                        t.created_by,
+                        t.created_at,
+                        t.updated_at
+                    FROM public.gpr_tasks t
+                    JOIN public.gpr_work_types wt
+                        ON wt.id = t.work_type_id
+                    WHERE t.plan_id = %s
+                      AND COALESCE(t.is_deleted, false) = false
+                    ORDER BY
+                        t.sort_order,
+                        wt.sort_order,
+                        wt.name,
+                        t.name,
+                        t.plan_start,
+                        t.id
                     """,
                     (plan_id,),
                 )
+
                 rows = []
+
                 for r in cur.fetchall():
                     d = dict(r)
                     d["row_kind"] = (d.get("row_kind") or "task").strip()
                     d["plan_start"] = _to_date(d.get("plan_start"))
                     d["plan_finish"] = _to_date(d.get("plan_finish"))
+
+                    if d.get("productivity_factor") is None:
+                        d["productivity_factor"] = 1.0
+
                     rows.append(d)
+
                 return rows
 
     @staticmethod
@@ -954,49 +991,79 @@ class GprService:
 
     @staticmethod
     def replace_plan_tasks(
-        plan_id: int, user_id: Optional[int], tasks: List[Dict[str, Any]]
+        plan_id: int,
+        user_id: Optional[int],
+        tasks: List[Dict[str, Any]],
     ) -> None:
+        """
+        Полностью синхронизирует строки ГПР с БД.
 
+        Новые строки вставляются.
+        Существующие обновляются.
+        Удалённые из редактора строки мягко архивируются.
+
+        Для задач типа task дополнительно хранится связь с конкретной
+        работой и снимок нормы ЗТР на дату создания задачи.
+        """
         with _DBConn() as conn:
             with conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    # Все задачи плана (включая уже архивные)
                     cur.execute(
                         """
-                        SELECT id, COALESCE(is_deleted, false) AS is_deleted
+                        SELECT
+                            id,
+                            COALESCE(is_deleted, false) AS is_deleted
                         FROM public.gpr_tasks
                         WHERE plan_id = %s
                         """,
                         (plan_id,),
                     )
+
                     existing_rows = cur.fetchall()
-                    existing_ids: Set[int] = {int(r["id"]) for r in existing_rows}
-                    existing_active_ids: Set[int] = {
-                        int(r["id"]) for r in existing_rows if not r["is_deleted"]
+
+                    existing_ids: Set[int] = {
+                        int(row["id"])
+                        for row in existing_rows
                     }
-    
+
+                    existing_active_ids: Set[int] = {
+                        int(row["id"])
+                        for row in existing_rows
+                        if not row["is_deleted"]
+                    }
+
                     seen_ids: Set[int] = set()
                     inserts: List[Tuple[Any, ...]] = []
-    
+
                     for i, t in enumerate(tasks):
                         row_kind = (t.get("row_kind") or "task").strip()
+
                         if row_kind not in ("task", "group", "title"):
                             row_kind = "task"
-    
+
                         name = (t.get("name") or "").strip()
                         if not name:
-                            raise ValueError(f"Строка {i + 1}: пустое название")
-    
+                            raise ValueError(
+                                f"Строка {i + 1}: пустое название"
+                            )
+
                         work_type_id = t.get("work_type_id")
                         if work_type_id is None:
-                            raise ValueError(f"Строка {i + 1} '{name}': не указан тип работ")
-    
+                            raise ValueError(
+                                f"Строка {i + 1} «{name}»: "
+                                "не указан тип работ"
+                            )
+
                         try:
                             work_type_id = int(work_type_id)
-                        except (ValueError, TypeError):
-                            raise ValueError(f"Строка {i + 1} '{name}': неверный work_type_id")
-    
+                        except (ValueError, TypeError) as exc:
+                            raise ValueError(
+                                f"Строка {i + 1} «{name}»: "
+                                "неверный идентификатор типа работ"
+                            ) from exc
+
                         parent_id = t.get("parent_id")
+
                         if parent_id in ("", 0):
                             parent_id = None
                         elif parent_id is not None:
@@ -1004,141 +1071,257 @@ class GprService:
                                 parent_id = int(parent_id)
                             except (ValueError, TypeError):
                                 parent_id = None
-    
-                        ps = _to_date(t.get("plan_start"))
-                        pf = _to_date(t.get("plan_finish"))
-    
+
+                        plan_start = _to_date(t.get("plan_start"))
+                        plan_finish = _to_date(t.get("plan_finish"))
+
                         if row_kind == "task":
-                            if not ps or not pf:
-                                raise ValueError(f"Задача '{name}': невалидные даты")
-                            if pf < ps:
-                                raise ValueError(f"Задача '{name}': окончание раньше начала")
+                            if not plan_start or not plan_finish:
+                                raise ValueError(
+                                    f"Задача «{name}»: "
+                                    "не указаны даты начала или окончания"
+                                )
+
+                            if plan_finish < plan_start:
+                                raise ValueError(
+                                    f"Задача «{name}»: "
+                                    "окончание раньше начала"
+                                )
                         else:
-                            # Для group/title держим технические даты,
-                            # чтобы не ломать текущую схему БД.
-                            if not ps:
-                                ps = _today()
-                            if not pf:
-                                pf = ps
-    
+                            # Технические даты для групп и титулов.
+                            if not plan_start:
+                                plan_start = _today()
+
+                            if not plan_finish:
+                                plan_finish = plan_start
+
                         status = (t.get("status") or "planned").strip()
                         if status not in STATUS_LIST:
                             status = "planned"
-    
-                        sort_order = int(
-                            t.get("sort_order")
-                            if t.get("sort_order") is not None
-                            else i * 10
-                        )
-    
+
+                        try:
+                            sort_order = int(
+                                t.get("sort_order")
+                                if t.get("sort_order") is not None
+                                else i * 10
+                            )
+                        except (ValueError, TypeError):
+                            sort_order = i * 10
+
                         is_milestone = bool(t.get("is_milestone") or False)
                         uom_code = t.get("uom_code") or None
-                        plan_qty = t.get("plan_qty")
-    
+                        plan_qty = _safe_float(t.get("plan_qty"))
+
+                        # ─────────────────────────────────────
+                        # Связь с профессиональным справочником.
+                        # Для групп и титулов всё должно быть NULL.
+                        # ─────────────────────────────────────
+                        work_item_id = None
+                        labor_norm_id = None
+                        labor_hours_per_unit = None
+                        productivity_factor = None
+
+                        if row_kind == "task":
+                            raw_work_item_id = t.get("work_item_id")
+                            raw_labor_norm_id = t.get("labor_norm_id")
+
+                            if raw_work_item_id is not None:
+                                try:
+                                    work_item_id = int(raw_work_item_id)
+                                except (TypeError, ValueError):
+                                    work_item_id = None
+
+                            if raw_labor_norm_id is not None:
+                                try:
+                                    labor_norm_id = int(raw_labor_norm_id)
+                                except (TypeError, ValueError):
+                                    labor_norm_id = None
+
+                            labor_hours_per_unit = _safe_float(
+                                t.get("labor_hours_per_unit")
+                            )
+
+                            productivity_factor = _safe_float(
+                                t.get("productivity_factor")
+                            )
+
+                            if (
+                                productivity_factor is None
+                                or productivity_factor <= 0
+                            ):
+                                productivity_factor = 1.0
+
                         task_id = t.get("id")
+
                         if task_id is not None:
                             try:
                                 task_id = int(task_id)
                             except (ValueError, TypeError):
                                 task_id = None
-    
-                        # ── update existing ──
+
+                        # ─────────────────────────────────────
+                        # Обновление существующей строки.
+                        # ─────────────────────────────────────
                         if task_id and task_id in existing_ids:
                             cur.execute(
                                 """
                                 UPDATE public.gpr_tasks
-                                   SET parent_id=%s,
-                                       work_type_id=%s,
-                                       name=%s,
-                                       uom_code=%s,
-                                       plan_qty=%s,
-                                       plan_start=%s,
-                                       plan_finish=%s,
-                                       status=%s,
-                                       sort_order=%s,
-                                       is_milestone=%s,
-                                       row_kind=%s,
-                                       is_deleted=false,
-                                       deleted_at=NULL,
-                                       deleted_by=NULL
-                                 WHERE id=%s
-                                   AND plan_id=%s
+                                SET
+                                    parent_id = %s,
+                                    work_type_id = %s,
+
+                                    work_item_id = %s,
+                                    labor_norm_id = %s,
+                                    labor_hours_per_unit = %s,
+                                    productivity_factor = %s,
+
+                                    name = %s,
+                                    uom_code = %s,
+                                    plan_qty = %s,
+                                    plan_start = %s,
+                                    plan_finish = %s,
+                                    status = %s,
+                                    sort_order = %s,
+                                    is_milestone = %s,
+                                    row_kind = %s,
+
+                                    is_deleted = false,
+                                    deleted_at = NULL,
+                                    deleted_by = NULL,
+                                    updated_at = now()
+
+                                WHERE id = %s
+                                  AND plan_id = %s
                                 """,
                                 (
                                     parent_id,
                                     work_type_id,
+
+                                    work_item_id,
+                                    labor_norm_id,
+                                    labor_hours_per_unit,
+                                    productivity_factor,
+
                                     name,
                                     uom_code,
                                     plan_qty,
-                                    ps,
-                                    pf,
+                                    plan_start,
+                                    plan_finish,
                                     status,
                                     sort_order,
                                     is_milestone,
                                     row_kind,
+
                                     task_id,
                                     plan_id,
                                 ),
                             )
+
                             seen_ids.add(task_id)
+
+                        # ─────────────────────────────────────
+                        # Вставка новой строки.
+                        # ─────────────────────────────────────
                         else:
-                            # ── insert new ──
                             inserts.append(
                                 (
                                     plan_id,
                                     work_type_id,
                                     parent_id,
+
+                                    work_item_id,
+                                    labor_norm_id,
+                                    labor_hours_per_unit,
+                                    productivity_factor,
+
                                     name,
                                     uom_code,
                                     plan_qty,
-                                    ps,
-                                    pf,
+                                    plan_start,
+                                    plan_finish,
                                     status,
                                     is_milestone,
                                     sort_order,
                                     user_id,
+                                    user_id,
                                     row_kind,
                                 )
                             )
-    
+
                     if inserts:
                         execute_values(
                             cur,
                             """
-                            INSERT INTO public.gpr_tasks
-                            (plan_id, work_type_id, parent_id, name, uom_code, plan_qty,
-                             plan_start, plan_finish, status, is_milestone,
-                             sort_order, created_by, row_kind)
+                            INSERT INTO public.gpr_tasks (
+                                plan_id,
+                                work_type_id,
+                                parent_id,
+
+                                work_item_id,
+                                labor_norm_id,
+                                labor_hours_per_unit,
+                                productivity_factor,
+
+                                name,
+                                uom_code,
+                                plan_qty,
+                                plan_start,
+                                plan_finish,
+                                status,
+                                is_milestone,
+                                sort_order,
+                                created_by,
+                                updated_by,
+                                row_kind
+                            )
                             VALUES %s
                             """,
                             inserts,
                         )
-    
-                    # Всё, что было активным, но не пришло в новом списке — архивируем
-                    ids_to_soft_delete = list(existing_active_ids - seen_ids)
+
+                    # Архивируем активные строки, которых больше нет
+                    # в текущем наборе редактора.
+                    ids_to_soft_delete = list(
+                        existing_active_ids - seen_ids
+                    )
+
                     if ids_to_soft_delete:
                         cur.execute(
                             """
                             UPDATE public.gpr_tasks
-                               SET is_deleted=true,
-                                   deleted_at=now(),
-                                   deleted_by=%s,
-                                   status=CASE
-                                       WHEN status IN ('planned', 'in_progress', 'paused')
-                                       THEN 'canceled'
-                                       ELSE status
-                                   END
-                             WHERE id = ANY(%s)
-                               AND plan_id=%s
+                            SET
+                                is_deleted = true,
+                                deleted_at = now(),
+                                deleted_by = %s,
+                                status = CASE
+                                    WHEN status IN (
+                                        'planned',
+                                        'in_progress',
+                                        'paused'
+                                    )
+                                    THEN 'canceled'
+                                    ELSE status
+                                END,
+                                updated_at = now()
+
+                            WHERE id = ANY(%s)
+                              AND plan_id = %s
                             """,
-                            (user_id, ids_to_soft_delete, plan_id),
+                            (
+                                user_id,
+                                ids_to_soft_delete,
+                                plan_id,
+                            ),
                         )
-    
+
                     cur.execute(
-                        "UPDATE public.gpr_plans SET updated_at=now() WHERE id=%s",
+                        """
+                        UPDATE public.gpr_plans
+                        SET updated_at = now()
+                        WHERE id = %s
+                        """,
                         (plan_id,),
                     )
-
     @staticmethod
     def update_task_status(task_id: int, new_status: str) -> None:
         if new_status not in STATUS_LIST:
@@ -2515,7 +2698,7 @@ class GprPage(tk.Frame):
         style.configure("GPR.Treeview", rowheight=24)
         style.configure("GPR.Treeview.Heading", font=("Segoe UI", 9, "bold"))
     
-        cols = ("type", "name", "start", "finish", "uom", "qty", "workers", "status")
+        cols = ("type", "name", "start", "finish", "uom", "qty", "labor", "workers", "status")
         self.tree = ttk.Treeview(
             tree_wrap,
             columns=cols,
@@ -2531,6 +2714,7 @@ class GprPage(tk.Frame):
             "finish": ("Конец", 85),
             "uom": ("Ед.", 50),
             "qty": ("Объём", 75),
+            "labor": ("ЗТР", 70),
             "workers": ("Людей", 70),
             "status": ("Статус", 100),
         }
@@ -2540,7 +2724,7 @@ class GprPage(tk.Frame):
             anc = (
                 "center"
                 if c in ("start", "finish", "uom", "workers", "status")
-                else ("e" if c == "qty" else "w")
+                else ("e" if c in ("qty", "labor") else "w")
             )
             self.tree.column(c, width=w, anchor=anc)
     
@@ -2895,10 +3079,10 @@ class GprPage(tk.Frame):
             row_kind = (t.get("row_kind") or "task").strip()
     
             if row_kind == "group":
-                values = ("", f"📁 {t.get('name', '')}", "", "", "", "", "", "")
+                values = ("", f"📁 {t.get('name', '')}", "", "", "", "", "", "", "")
                 self.tree.insert("", "end", iid=iid, values=values, tags=("group",))
             elif row_kind == "title":
-                values = ("", f"🟦 {t.get('name', '')}", "", "", "", "", "", "")
+                values = ("", f"🟦 {t.get('name', '')}", "", "", "", "", "", "", "")
                 self.tree.insert("", "end", iid=iid, values=values, tags=("title",))
             else:
                 st_label = STATUS_LABELS.get(
@@ -2923,6 +3107,7 @@ class GprPage(tk.Frame):
                         _fmt_date(t.get("plan_finish")),
                         t.get("uom_code") or "",
                         _fmt_qty(t.get("plan_qty")),
+                        _fmt_qty(t.get("labor_hours_per_unit")),
                         workers_last,
                         st_label,
                     ),
@@ -3055,20 +3240,126 @@ class GprPage(tk.Frame):
         dlg = TaskEditDialog(self, self.work_types, self.uoms, init=init)
         return dlg.result
 
+    def _prepare_new_task_row(
+        self,
+        data: Dict[str, Any],
+        *,
+        fallback_start: Optional[date] = None,
+        fallback_finish: Optional[date] = None,
+    ) -> Dict[str, Any]:
+        """
+        Готовит новую строку задачи для self.tasks.
+
+        Используется и для одной работы, и для массового выбора
+        работ из профессионального справочника.
+        """
+        t = dict(data)
+
+        work_type_id = t.get("work_type_id")
+        if work_type_id is None:
+            raise ValueError("Не указан тип работ")
+
+        work_type_id = int(work_type_id)
+
+        t["id"] = None
+        t["parent_id"] = t.get("parent_id")
+        t["row_kind"] = "task"
+        t["work_type_id"] = work_type_id
+
+        t["work_type_name"] = next(
+            (
+                w["name"]
+                for w in self.work_types
+                if int(w["id"]) == work_type_id
+            ),
+            "",
+        )
+
+        t["plan_start"] = (
+            _to_date(t.get("plan_start"))
+            or fallback_start
+            or _today()
+        )
+
+        t["plan_finish"] = (
+            _to_date(t.get("plan_finish"))
+            or fallback_finish
+            or t["plan_start"]
+        )
+
+        if t["plan_finish"] < t["plan_start"]:
+            raise ValueError(
+                f"Для работы «{t.get('name') or '—'}» "
+                "дата окончания раньше даты начала."
+            )
+
+        t["status"] = (
+            t.get("status")
+            if t.get("status") in STATUS_LIST
+            else "planned"
+        )
+
+        t["is_milestone"] = bool(t.get("is_milestone"))
+
+        t["plan_qty"] = _safe_float(t.get("plan_qty"))
+
+        # Данные профессионального справочника.
+        if t.get("work_item_id") is not None:
+            try:
+                t["work_item_id"] = int(t["work_item_id"])
+            except (TypeError, ValueError):
+                t["work_item_id"] = None
+        else:
+            t["work_item_id"] = None
+
+        if t.get("labor_norm_id") is not None:
+            try:
+                t["labor_norm_id"] = int(t["labor_norm_id"])
+            except (TypeError, ValueError):
+                t["labor_norm_id"] = None
+        else:
+            t["labor_norm_id"] = None
+
+        t["labor_hours_per_unit"] = _safe_float(
+            t.get("labor_hours_per_unit")
+        )
+
+        factor = _safe_float(t.get("productivity_factor"))
+        t["productivity_factor"] = (
+            factor
+            if factor is not None and factor > 0
+            else 1.0
+        )
+
+        return t
+        
     def _add_task(self):
         if not self.plan_id:
-            messagebox.showinfo("ГПР", "Сначала откройте объект.", parent=self)
+            messagebox.showinfo(
+                "ГПР",
+                "Сначала откройте объект.",
+                parent=self,
+            )
             return
-    
-        idx = self._find_task_idx()
+
+        selected_idx = self._find_task_idx()
+
         base_start = self.range_from
         base_finish = self.range_from
-    
-        if idx is not None and 0 <= idx < len(self.tasks):
-            selected_task = self.tasks[idx]
-            base_start = _to_date(selected_task.get("plan_start")) or self.range_from
-            base_finish = _to_date(selected_task.get("plan_finish")) or base_start
-    
+
+        if selected_idx is not None and 0 <= selected_idx < len(self.tasks):
+            selected_task = self.tasks[selected_idx]
+
+            base_start = (
+                _to_date(selected_task.get("plan_start"))
+                or self.range_from
+            )
+
+            base_finish = (
+                _to_date(selected_task.get("plan_finish"))
+                or base_start
+            )
+
         result = self._open_task_dialog(
             init={
                 "plan_start": base_start,
@@ -3076,32 +3367,91 @@ class GprPage(tk.Frame):
                 "row_kind": "task",
             }
         )
+
         if not result:
             return
-    
-        t = dict(result)
-        t["id"] = None
-        t["row_kind"] = "task"
-        t["work_type_name"] = next(
-            (
-                w["name"]
-                for w in self.work_types
-                if int(w["id"]) == int(t["work_type_id"])
-            ),
-            "",
+
+        insert_at = (
+            selected_idx + 1
+            if selected_idx is not None
+            else len(self.tasks)
         )
-    
-        t["plan_start"] = _to_date(t.get("plan_start")) or _today()
-        t["plan_finish"] = _to_date(t.get("plan_finish")) or _today()
-    
-        insert_at = idx + 1 if idx is not None else len(self.tasks)
-        self.tasks.insert(insert_at, t)
-    
+
+        # ──────────────────────────────────────────────────
+        # Множественный выбор работ из gpr_task_dialog.py.
+        # ──────────────────────────────────────────────────
+        bulk_tasks = result.get("_bulk_tasks")
+
+        if bulk_tasks:
+            prepared_tasks: List[Dict[str, Any]] = []
+
+            try:
+                for task_data in bulk_tasks:
+                    prepared_tasks.append(
+                        self._prepare_new_task_row(
+                            task_data,
+                            fallback_start=base_start,
+                            fallback_finish=base_finish,
+                        )
+                    )
+            except Exception as exc:
+                messagebox.showwarning(
+                    "ГПР",
+                    f"Не удалось подготовить список работ:\n{exc}",
+                    parent=self,
+                )
+                return
+
+            if not prepared_tasks:
+                messagebox.showinfo(
+                    "ГПР",
+                    "Не выбрано ни одной работы.",
+                    parent=self,
+                )
+                return
+
+            self.tasks[insert_at:insert_at] = prepared_tasks
+
+            self._recalc_sort_order()
+            self._apply_filter()
+            self._update_summary()
+
+            self._preserve_selection_by_task(prepared_tasks[0])
+
+            self.lbl_bottom.config(
+                text=(
+                    f"Добавлено работ из справочника: "
+                    f"{len(prepared_tasks)}. "
+                    "Нажмите «СОХРАНИТЬ» для записи в БД."
+                )
+            )
+
+            return
+
+        # ──────────────────────────────────────────────────
+        # Обычное добавление одной работы.
+        # ──────────────────────────────────────────────────
+        try:
+            task = self._prepare_new_task_row(
+                result,
+                fallback_start=base_start,
+                fallback_finish=base_finish,
+            )
+        except Exception as exc:
+            messagebox.showwarning(
+                "ГПР",
+                f"Не удалось добавить работу:\n{exc}",
+                parent=self,
+            )
+            return
+
+        self.tasks.insert(insert_at, task)
+
         self._recalc_sort_order()
         self._apply_filter()
         self._update_summary()
-        self._preserve_selection_by_task(t)
-
+        self._preserve_selection_by_task(task)
+        
     def _add_group(self):
         if not self.plan_id:
             messagebox.showinfo("ГПР", "Сначала откройте объект.", parent=self)
@@ -3206,6 +3556,16 @@ class GprPage(tk.Frame):
     
         result = self._open_task_dialog(init=t0)
         if not result:
+            return
+
+        if result.get("_bulk_tasks"):
+            messagebox.showwarning(
+                "ГПР",
+                "При редактировании одной существующей задачи "
+                "нельзя добавить несколько работ.\n\n"
+                "Для массового добавления используйте кнопку «➕ Работа».",
+                parent=self,
+            )
             return
     
         upd = dict(result)
@@ -3381,6 +3741,12 @@ class GprPage(tk.Frame):
                     row_kind=row_kind,
                     work_type_id=wid,
                     work_type_name="" if row_kind != "task" else wn,
+
+                    work_item_id=None,
+                    labor_norm_id=None,
+                    labor_hours_per_unit=None,
+                    productivity_factor=1.0,
+
                     name=x["name"],
                     uom_code=x.get("uom_code"),
                     plan_qty=x.get("default_qty"),
