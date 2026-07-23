@@ -833,6 +833,35 @@ class _WorkItemsMultiSelectDialog(tk.Toplevel):
         if not self.allow_multiple and len(selected) > 1:
             selected = selected[:1]
 
+        without_norm = [
+            item
+            for item in selected
+            if not item.get("labor_norm_id")
+            or item.get("labor_hours_per_unit") is None
+        ]
+
+        if without_norm:
+            names = "\n".join(
+                f"• {item.get('name') or 'Без названия'}"
+                for item in without_norm[:10]
+            )
+
+            if len(without_norm) > 10:
+                names += f"\n• ... ещё {len(without_norm) - 10}"
+
+            messagebox.showwarning(
+                "Не найдены нормы ЗТР",
+                (
+                    f"Для выбранных работ не найдены действующие нормы "
+                    f"на дату {_fmt_date(self.norm_date)}:\n\n"
+                    f"{names}\n\n"
+                    "Проверьте даты действия норм в справочнике "
+                    "или дату начала работ в ГПР."
+                ),
+                parent=self,
+            )
+            return
+
         self.result = selected
         self._safe_destroy()
 
@@ -942,7 +971,7 @@ class TaskEditDialogPro(tk.Toplevel):
 
         self.grab_set()
         self.after(10, self._center)
-        self.after(30, lambda: self.ent_name.focus_set())
+        self.after(30, lambda: self.cmb_wt.focus_set())
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
 
     # ══════════════════════════════════════════════════════
@@ -1035,254 +1064,364 @@ class TaskEditDialogPro(tk.Toplevel):
         self.bind("<Control-s>", lambda _e: self._on_ok())
 
     def _build_main_tab(self, parent):
-        # ── overview ──
-        ov = tk.LabelFrame(
+        parent.grid_columnconfigure(0, weight=1)
+
+        # ── Выбор работ ───────────────────────────────────
+        grp_work = tk.LabelFrame(
             parent,
-            text=" 📌 Сводка по задаче ",
-            font=("Segoe UI", 9, "bold"),
+            text=" 1. Выбор работ ",
+            font=("Segoe UI", 10, "bold"),
             bg=C["panel"],
             fg=C["accent"],
             padx=12,
-            pady=8,
+            pady=10,
         )
-        ov.pack(fill="x", padx=12, pady=(10, 4))
+        grp_work.pack(fill="x", padx=12, pady=(12, 6))
+        grp_work.grid_columnconfigure(1, weight=1)
 
-        self.lbl_meta = tk.Label(
-            ov,
-            text="",
+        tk.Label(
+            grp_work,
+            text="Тип работ:",
             bg=C["panel"],
-            fg=C["text2"],
-            font=("Segoe UI", 8),
-            anchor="w",
-            justify="left",
+            font=("Segoe UI", 9),
+        ).grid(
+            row=0,
+            column=0,
+            sticky="e",
+            padx=(0, 8),
+            pady=4,
         )
-        self.lbl_meta.pack(fill="x")
 
-        ov2 = tk.Frame(ov, bg=C["panel"])
-        ov2.pack(fill="x", pady=(8, 0))
-
-        self.prg_progress = ttk.Progressbar(
-            ov2,
-            orient="horizontal",
-            mode="determinate",
-            maximum=100.0,
-            length=280,
-        )
-        self.prg_progress.pack(side="left", padx=(0, 10))
-
-        self.lbl_kpi = tk.Label(
-            ov2,
-            text="",
-            bg=C["panel"],
-            fg=C["accent"],
-            font=("Segoe UI", 9, "bold"),
-            anchor="w",
-        )
-        self.lbl_kpi.pack(side="left", fill="x", expand=True)
-
-        # ── work ──
-        grp1 = tk.LabelFrame(
-            parent,
-            text=" 🔧 Работа ",
-            font=("Segoe UI", 9, "bold"),
-            bg=C["panel"],
-            fg=C["accent"],
-            padx=12,
-            pady=8,
-        )
-        grp1.pack(fill="x", padx=12, pady=(4, 4))
-        grp1.grid_columnconfigure(1, weight=1)
-
-        r = 0
-        tk.Label(grp1, text="Тип работ *:", bg=C["panel"], font=("Segoe UI", 9)).grid(
-            row=r, column=0, sticky="e", padx=(0, 8), pady=4
-        )
         wt_vals = [w["name"] for w in self.work_types]
-        wt_frame = tk.Frame(grp1, bg=C["panel"])
-        wt_frame.grid(row=r, column=1, sticky="w", pady=4)
-        
+
         self.cmb_wt = ttk.Combobox(
-            wt_frame,
+            grp_work,
             state="readonly",
-            width=44,
+            width=52,
             values=wt_vals,
             font=("Segoe UI", 9),
         )
-        self.cmb_wt.pack(side="left")
-        
+        self.cmb_wt.grid(
+            row=0,
+            column=1,
+            sticky="ew",
+            pady=4,
+        )
+
         self.btn_select_work_items = ttk.Button(
-            wt_frame,
-            text="☑ Выбрать работы",
+            grp_work,
+            text="☑ Выбрать работы из справочника",
             command=self._open_work_items_selector,
         )
-        self.btn_select_work_items.pack(side="left", padx=(8, 0))
-        
-        r += 1
+        self.btn_select_work_items.grid(
+            row=0,
+            column=2,
+            sticky="w",
+            padx=(8, 0),
+            pady=4,
+        )
 
-        tk.Label(grp1, text="Вид работ *:", bg=C["panel"], font=("Segoe UI", 9)).grid(
-            row=r, column=0, sticky="e", padx=(0, 8), pady=4
-        )
-        name_frame = tk.Frame(grp1, bg=C["panel"])
-        name_frame.grid(row=r, column=1, sticky="ew", pady=4)
-        name_frame.grid_columnconfigure(0, weight=1)
-        
-        self.ent_name = ttk.Entry(
-            name_frame,
-            width=52,
-            font=("Segoe UI", 9),
-        )
-        self.ent_name.grid(row=0, column=0, sticky="ew")
-        
-        self.lbl_selected_works = tk.Label(
-            name_frame,
-            text="",
+        tk.Label(
+            grp_work,
+            text="Выбрано:",
             bg=C["panel"],
-            fg=C["success"],
-            font=("Segoe UI", 8),
+            font=("Segoe UI", 9),
+        ).grid(
+            row=1,
+            column=0,
+            sticky="ne",
+            padx=(0, 8),
+            pady=(8, 4),
+        )
+
+        self.lbl_selected_works = tk.Label(
+            grp_work,
+            text="Сначала выберите тип работ и нажмите «Выбрать работы».",
+            bg=C["panel"],
+            fg=C["text3"],
+            font=("Segoe UI", 9),
             anchor="w",
+            justify="left",
+            wraplength=650,
         )
         self.lbl_selected_works.grid(
             row=1,
+            column=1,
+            columnspan=2,
+            sticky="ew",
+            pady=(8, 4),
+        )
+
+        # Техническое поле для совместимости существующего кода.
+        # Пользователь его не видит и изменить не может.
+        self.ent_name = ttk.Entry(grp_work)
+        self.ent_name.grid_remove()
+
+        # ── Норма ─────────────────────────────────────────
+        grp_norm = tk.LabelFrame(
+            parent,
+            text=" 2. Норма и плановый объём ",
+            font=("Segoe UI", 10, "bold"),
+            bg=C["panel"],
+            fg=C["accent"],
+            padx=12,
+            pady=10,
+        )
+        grp_norm.pack(fill="x", padx=12, pady=6)
+        grp_norm.grid_columnconfigure(1, weight=1)
+
+        tk.Label(
+            grp_norm,
+            text="Единица:",
+            bg=C["panel"],
+            font=("Segoe UI", 9),
+        ).grid(
+            row=0,
             column=0,
-            sticky="w",
-            pady=(3, 0),
+            sticky="e",
+            padx=(0, 8),
+            pady=4,
         )
-        
-        r += 1
 
-        tk.Label(grp1, text="Ед. изм.:", bg=C["panel"], font=("Segoe UI", 9)).grid(
-            row=r, column=0, sticky="e", padx=(0, 8), pady=4
-        )
-        uom_frame = tk.Frame(grp1, bg=C["panel"])
-        uom_frame.grid(row=r, column=1, sticky="w", pady=4)
+        uom_vals = ["—"] + [
+            f"{u['code']} — {u['name']}"
+            for u in self.uoms
+        ]
 
-        uom_vals = ["—"] + [f"{u['code']} — {u['name']}" for u in self.uoms]
         self.cmb_uom = ttk.Combobox(
-            uom_frame,
+            grp_norm,
             state="readonly",
             width=20,
             values=uom_vals,
             font=("Segoe UI", 9),
         )
-        self.cmb_uom.pack(side="left")
-
-        tk.Label(uom_frame, text="   Объём план:", bg=C["panel"], font=("Segoe UI", 9)).pack(
-            side="left", padx=(16, 4)
+        self.cmb_uom.grid(
+            row=0,
+            column=1,
+            sticky="w",
+            pady=4,
         )
-        self.ent_qty = ttk.Entry(uom_frame, width=14, font=("Segoe UI", 9))
-        self.ent_qty.pack(side="left")
 
-        # ── dates ──
-        grp2 = tk.LabelFrame(
-            parent,
-            text=" 📅 Сроки ",
-            font=("Segoe UI", 9, "bold"),
+        tk.Label(
+            grp_norm,
+            text="Норма ЗТР:",
             bg=C["panel"],
-            fg=C["accent"],
-            padx=12,
-            pady=8,
-        )
-        grp2.pack(fill="x", padx=12, pady=4)
-        grp2.grid_columnconfigure(1, weight=1)
-
-        r = 0
-        tk.Label(grp2, text="Начало *:", bg=C["panel"], font=("Segoe UI", 9)).grid(
-            row=r, column=0, sticky="e", padx=(0, 8), pady=4
-        )
-        date_frame = tk.Frame(grp2, bg=C["panel"])
-        date_frame.grid(row=r, column=1, sticky="w", pady=4)
-
-        self.ent_start = ttk.Entry(date_frame, width=12, font=("Segoe UI", 9))
-        self.ent_start.pack(side="left")
-
-        ttk.Button(date_frame, text="Сегодня", command=self._set_start_today).pack(
-            side="left", padx=(6, 12)
+            font=("Segoe UI", 9),
+        ).grid(
+            row=0,
+            column=2,
+            sticky="e",
+            padx=(24, 8),
+            pady=4,
         )
 
-        tk.Label(date_frame, text="Окончание *:", bg=C["panel"], font=("Segoe UI", 9)).pack(
-            side="left", padx=(0, 4)
-        )
-        self.ent_finish = ttk.Entry(date_frame, width=12, font=("Segoe UI", 9))
-        self.ent_finish.pack(side="left")
-
-        ttk.Button(date_frame, text="= началу", command=self._copy_start_to_finish).pack(
-            side="left", padx=(6, 12)
-        )
-
-        tk.Label(date_frame, text="Длительность:", bg=C["panel"], font=("Segoe UI", 9)).pack(
-            side="left", padx=(0, 4)
-        )
-        self.lbl_duration = tk.Label(
-            date_frame,
+        self.lbl_labor_norm = tk.Label(
+            grp_norm,
             text="—",
             bg=C["panel"],
-            font=("Segoe UI", 9, "bold"),
-            fg=C["accent"],
-        )
-        self.lbl_duration.pack(side="left")
-
-        r += 1
-        tk.Label(
-            grp2,
-            text="Формат: ДД.ММ.ГГГГ",
-            bg=C["panel"],
-            font=("Segoe UI", 7),
             fg=C["text3"],
-        ).grid(row=r, column=1, sticky="w", pady=(0, 2))
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+        )
+        self.lbl_labor_norm.grid(
+            row=0,
+            column=3,
+            sticky="w",
+            pady=4,
+        )
 
-        # ── status ──
-        grp3 = tk.LabelFrame(
+        tk.Label(
+            grp_norm,
+            text="Плановый объём:",
+            bg=C["panel"],
+            font=("Segoe UI", 9),
+        ).grid(
+            row=1,
+            column=0,
+            sticky="e",
+            padx=(0, 8),
+            pady=8,
+        )
+
+        self.ent_qty = ttk.Entry(
+            grp_norm,
+            width=18,
+            font=("Segoe UI", 9),
+        )
+        self.ent_qty.grid(
+            row=1,
+            column=1,
+            sticky="w",
+            pady=8,
+        )
+
+        tk.Label(
+            grp_norm,
+            text="Плановая трудоёмкость:",
+            bg=C["panel"],
+            font=("Segoe UI", 9),
+        ).grid(
+            row=1,
+            column=2,
+            sticky="e",
+            padx=(24, 8),
+            pady=8,
+        )
+
+        self.lbl_total_labor = tk.Label(
+            grp_norm,
+            text="—",
+            bg=C["panel"],
+            fg=C["accent"],
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+        )
+        self.lbl_total_labor.grid(
+            row=1,
+            column=3,
+            sticky="w",
+            pady=8,
+        )
+
+        self.lbl_norm_info = tk.Label(
+            grp_norm,
+            text="Норма определяется на дату начала работы.",
+            bg=C["panel"],
+            fg=C["text3"],
+            font=("Segoe UI", 8),
+            anchor="w",
+        )
+        self.lbl_norm_info.grid(
+            row=2,
+            column=1,
+            columnspan=3,
+            sticky="w",
+        )
+
+        # ── Сроки ─────────────────────────────────────────
+        grp_dates = tk.LabelFrame(
             parent,
-            text=" 📊 Статус и параметры ",
-            font=("Segoe UI", 9, "bold"),
+            text=" 3. Сроки ",
+            font=("Segoe UI", 10, "bold"),
             bg=C["panel"],
             fg=C["accent"],
             padx=12,
-            pady=8,
+            pady=10,
         )
-        grp3.pack(fill="x", padx=12, pady=4)
-        grp3.grid_columnconfigure(1, weight=1)
+        grp_dates.pack(fill="x", padx=12, pady=6)
 
-        r = 0
-        tk.Label(grp3, text="Статус:", bg=C["panel"], font=("Segoe UI", 9)).grid(
-            row=r, column=0, sticky="e", padx=(0, 8), pady=4
+        tk.Label(
+            grp_dates,
+            text="Начало:",
+            bg=C["panel"],
+            font=("Segoe UI", 9),
+        ).pack(side="left")
+
+        self.ent_start = ttk.Entry(
+            grp_dates,
+            width=12,
+            font=("Segoe UI", 9),
         )
-        status_frame = tk.Frame(grp3, bg=C["panel"])
-        status_frame.grid(row=r, column=1, sticky="w", pady=4)
+        self.ent_start.pack(side="left", padx=(6, 6))
 
-        st_vals = [STATUS_LABELS.get(s, s) for s in STATUS_LIST]
+        ttk.Button(
+            grp_dates,
+            text="Сегодня",
+            command=self._set_start_today,
+        ).pack(side="left", padx=(0, 18))
+
+        tk.Label(
+            grp_dates,
+            text="Окончание:",
+            bg=C["panel"],
+            font=("Segoe UI", 9),
+        ).pack(side="left")
+
+        self.ent_finish = ttk.Entry(
+            grp_dates,
+            width=12,
+            font=("Segoe UI", 9),
+        )
+        self.ent_finish.pack(side="left", padx=(6, 6))
+
+        ttk.Button(
+            grp_dates,
+            text="= началу",
+            command=self._copy_start_to_finish,
+        ).pack(side="left", padx=(0, 18))
+
+        tk.Label(
+            grp_dates,
+            text="Длительность:",
+            bg=C["panel"],
+            font=("Segoe UI", 9),
+        ).pack(side="left")
+
+        self.lbl_duration = tk.Label(
+            grp_dates,
+            text="—",
+            bg=C["panel"],
+            fg=C["accent"],
+            font=("Segoe UI", 9, "bold"),
+        )
+        self.lbl_duration.pack(side="left", padx=(6, 0))
+
+        # ── Статус ────────────────────────────────────────
+        grp_status = tk.LabelFrame(
+            parent,
+            text=" 4. Статус ",
+            font=("Segoe UI", 10, "bold"),
+            bg=C["panel"],
+            fg=C["accent"],
+            padx=12,
+            pady=10,
+        )
+        grp_status.pack(fill="x", padx=12, pady=(6, 10))
+
+        tk.Label(
+            grp_status,
+            text="Статус:",
+            bg=C["panel"],
+            font=("Segoe UI", 9),
+        ).pack(side="left")
+
+        st_vals = [
+            STATUS_LABELS.get(status, status)
+            for status in STATUS_LIST
+        ]
+
         self.cmb_status = ttk.Combobox(
-            status_frame,
+            grp_status,
             state="readonly",
-            width=18,
+            width=20,
             values=st_vals,
             font=("Segoe UI", 9),
         )
-        self.cmb_status.pack(side="left")
+        self.cmb_status.pack(side="left", padx=(6, 8))
 
         self.cv_status = tk.Canvas(
-            status_frame,
+            grp_status,
             width=16,
             height=16,
             bg=C["panel"],
             highlightthickness=0,
         )
-        self.cv_status.pack(side="left", padx=(8, 0))
+        self.cv_status.pack(side="left", padx=(0, 16))
 
         ttk.Button(
-            status_frame,
+            grp_status,
             text="Статус по факту",
             command=self._apply_status_from_fact,
-        ).pack(side="left", padx=(12, 0))
+        ).pack(side="left", padx=(0, 18))
 
-        r += 1
         self.var_milestone = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            grp3,
-            text="Веха (milestone) — ключевое событие",
-            variable=self.var_milestone,
-        ).grid(row=r, column=0, columnspan=2, sticky="w", pady=(4, 2))
 
+        ttk.Checkbutton(
+            grp_status,
+            text="Веха",
+            variable=self.var_milestone,
+        ).pack(side="left")
+        
     def _build_assign_tab(self, parent):
         task_id = self.init.get("id")
         if not task_id:
@@ -1593,12 +1732,32 @@ class TaskEditDialogPro(tk.Toplevel):
     #  BINDINGS / DIRTY
     # ══════════════════════════════════════════════════════
     def _bind_change_tracking(self):
-        for w in (self.ent_name, self.ent_qty, self.ent_start, self.ent_finish):
-            w.bind("<KeyRelease>", lambda _e: self._on_main_field_changed(), add="+")
-            w.bind("<FocusOut>", lambda _e: self._on_main_field_changed(), add="+")
+        for widget in (
+            self.ent_qty,
+            self.ent_start,
+            self.ent_finish,
+        ):
+            widget.bind(
+                "<KeyRelease>",
+                lambda _e: self._on_main_field_changed(),
+                add="+",
+            )
+            widget.bind(
+                "<FocusOut>",
+                lambda _e: self._on_main_field_changed(),
+                add="+",
+            )
 
-        for w in (self.cmb_wt, self.cmb_uom, self.cmb_status):
-            w.bind("<<ComboboxSelected>>", lambda _e: self._on_main_field_changed(), add="+")
+        for widget in (
+            self.cmb_wt,
+            self.cmb_uom,
+            self.cmb_status,
+        ):
+            widget.bind(
+                "<<ComboboxSelected>>",
+                lambda _e: self._on_main_field_changed(),
+                add="+",
+            )
 
         self.cmb_wt.bind(
             "<<ComboboxSelected>>",
@@ -1606,8 +1765,16 @@ class TaskEditDialogPro(tk.Toplevel):
             add="+",
         )
 
-        self.cmb_status.bind("<<ComboboxSelected>>", lambda _e: self._update_status_color(), add="+")
-        self.var_milestone.trace_add("write", lambda *_: self._mark_dirty())
+        self.cmb_status.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self._update_status_color(),
+            add="+",
+        )
+
+        self.var_milestone.trace_add(
+            "write",
+            lambda *_: self._mark_dirty(),
+        )
 
     def _mark_dirty(self):
         self._dirty = True
@@ -1621,6 +1788,7 @@ class TaskEditDialogPro(tk.Toplevel):
     def _on_main_field_changed(self):
         self._update_duration()
         self._update_status_color()
+        self._refresh_labor_info()
         self._refresh_overview()
         self._mark_dirty()
 
@@ -1716,46 +1884,59 @@ class TaskEditDialogPro(tk.Toplevel):
         self._bulk_mode = len(self._selected_work_items) > 1
 
         if not self._selected_work_items:
-            self._set_name_entry_state("normal")
-            self.lbl_selected_works.config(text="")
+            self.ent_name.configure(state="normal")
+            self.ent_name.delete(0, "end")
+            self.ent_name.configure(state="readonly")
+
+            self.lbl_selected_works.config(
+                text="Работы не выбраны.",
+                fg=C["text3"],
+            )
+
+            self._refresh_labor_info()
             return
 
         # Одна работа: подставляем имя и единицу измерения.
         if len(self._selected_work_items) == 1:
             item = self._selected_work_items[0]
 
-            self._set_name_entry_state("normal")
+            self.ent_name.configure(state="normal")
             self.ent_name.delete(0, "end")
             self.ent_name.insert(0, item.get("name") or "")
+            self.ent_name.configure(state="readonly")
 
             self._set_uom_code(item.get("uom_code"))
 
-            norm_text = ""
-            if item.get("labor_hours_per_unit") is not None:
-                norm_text = (
-                    f"Выбрана работа из справочника. "
-                    f"Норма ЗТР: {_fmt_qty(item.get('labor_hours_per_unit'))} чел.-ч/ед."
+            norm = _safe_float(item.get("labor_hours_per_unit"))
+
+            if norm is None:
+                text = (
+                    f"⚠ {item.get('name') or 'Работа'}\n"
+                    "Для выбранной даты не найдена действующая норма ЗТР."
                 )
+                color = C["error"]
             else:
-                norm_text = (
-                    "Выбрана работа из справочника. "
-                    "Актуальная норма ЗТР не найдена."
+                text = (
+                    f"✓ {item.get('name') or 'Работа'}\n"
+                    f"Ед. изм.: {item.get('uom_code') or '—'}   |   "
+                    f"ЗТР: {_fmt_qty(norm)} чел.-ч / ед."
                 )
+                color = C["success"]
 
             self.lbl_selected_works.config(
-                text=norm_text,
-                fg=C["success"] if item.get("labor_norm_id") else C["warning"],
+                text=text,
+                fg=color,
             )
 
         # Несколько работ: имя и единица у каждой задачи будут свои.
         else:
-            self._set_name_entry_state("normal")
+            self.ent_name.configure(state="normal")
             self.ent_name.delete(0, "end")
             self.ent_name.insert(
                 0,
-                f"Будет добавлено работ: {len(self._selected_work_items)}",
+                f"Выбрано работ: {len(self._selected_work_items)}",
             )
-            self._set_name_entry_state("readonly")
+            self.ent_name.configure(state="readonly")
 
             self.cmb_uom.current(0)
 
@@ -1763,25 +1944,25 @@ class TaskEditDialogPro(tk.Toplevel):
                 1
                 for item in self._selected_work_items
                 if item.get("labor_norm_id")
+                and item.get("labor_hours_per_unit") is not None
             )
 
             without_norm = len(self._selected_work_items) - with_norm
 
-            note = (
+            text = (
                 f"Выбрано работ: {len(self._selected_work_items)}. "
-                f"С нормой ЗТР: {with_norm}."
+                f"Нормы найдены: {with_norm}."
             )
 
             if without_norm:
-                note += f" Без актуальной нормы: {without_norm}."
+                text += (
+                    f"\n⚠ Без нормы на выбранную дату: {without_norm}."
+                )
 
             self.lbl_selected_works.config(
-                text=note,
-                fg=C["warning"] if without_norm else C["success"],
+                text=text,
+                fg=C["error"] if without_norm else C["success"],
             )
-
-        self._mark_dirty()
-        self._refresh_overview()
 
     def _set_name_entry_state(self, state: str):
         try:
@@ -1800,6 +1981,95 @@ class TaskEditDialogPro(tk.Toplevel):
                 return
 
         self.cmb_uom.current(0)
+
+    def _refresh_labor_info(self):
+        """
+        Обновляет отображение нормы ЗТР и общей трудоёмкости.
+        """
+        if not hasattr(self, "lbl_labor_norm"):
+            return
+
+        if len(self._selected_work_items) != 1:
+            if len(self._selected_work_items) > 1:
+                self.lbl_labor_norm.config(
+                    text="индивидуально по каждой работе",
+                    fg=C["text2"],
+                )
+                self.lbl_total_labor.config(
+                    text="рассчитывается отдельно",
+                    fg=C["text2"],
+                )
+                self.lbl_norm_info.config(
+                    text=(
+                        "Для нескольких работ единица, ЗТР и трудоёмкость "
+                        "определяются индивидуально по каждой строке ГПР."
+                    ),
+                    fg=C["text3"],
+                )
+            else:
+                self.lbl_labor_norm.config(text="—", fg=C["text3"])
+                self.lbl_total_labor.config(text="—", fg=C["text3"])
+                self.lbl_norm_info.config(
+                    text="Выберите работу из справочника.",
+                    fg=C["text3"],
+                )
+            return
+
+        item = self._selected_work_items[0]
+
+        norm = _safe_float(item.get("labor_hours_per_unit"))
+        factor = _safe_float(
+            item.get("default_productivity_factor")
+        ) or 1.0
+
+        if norm is None:
+            self.lbl_labor_norm.config(
+                text="не найдена",
+                fg=C["error"],
+            )
+            self.lbl_total_labor.config(
+                text="—",
+                fg=C["text3"],
+            )
+            self.lbl_norm_info.config(
+                text=(
+                    f"Нет действующей нормы на дату "
+                    f"{_fmt_date(self._get_norm_date())}."
+                ),
+                fg=C["error"],
+            )
+            return
+
+        self.lbl_labor_norm.config(
+            text=f"{_fmt_qty(norm)} чел.-ч / ед.",
+            fg=C["success"],
+        )
+
+        qty = _safe_float(self.ent_qty.get())
+
+        if qty is not None:
+            total = qty * norm * factor
+            self.lbl_total_labor.config(
+                text=f"{_fmt_qty(total)} чел.-ч",
+                fg=C["accent"],
+            )
+        else:
+            self.lbl_total_labor.config(
+                text="укажите объём",
+                fg=C["text3"],
+            )
+
+        source = item.get("norm_source_name") or "Справочник норм"
+
+        self.lbl_norm_info.config(
+            text=(
+                f"Норма действует с "
+                f"{_fmt_date(item.get('norm_effective_from'))}. "
+                f"Источник: {source}. "
+                f"Коэффициент: {_fmt_qty(factor)}."
+            ),
+            fg=C["text3"],
+        )
 
     # ══════════════════════════════════════════════════════
     #  INIT / LOAD
@@ -1884,6 +2154,7 @@ class TaskEditDialogPro(tk.Toplevel):
         self._update_duration()
         self._update_status_color()
         self._update_info()
+        self._refresh_labor_info()
 
     def _load_assignments(self):
         if not self._has_assign_tab:
@@ -2058,8 +2329,9 @@ class TaskEditDialogPro(tk.Toplevel):
         except ValueError:
             self.cmb_status.current(0)
 
-        self._update_status_color()
+        self._refresh_labor_info()
         self._mark_dirty()
+        self._refresh_overview()
 
     # ══════════════════════════════════════════════════════
     #  EMPLOYEES / ASSIGNMENTS
@@ -2536,6 +2808,11 @@ class TaskEditDialogPro(tk.Toplevel):
 
             wt_id = int(self.work_types[wi]["id"])
 
+            if not self._selected_work_items:
+                raise ValueError(
+                    "Выберите работу из справочника."
+                )
+
             qty = _safe_float(self.ent_qty.get())
 
             ds = _parse_date(self.ent_start.get())
@@ -2598,22 +2875,39 @@ class TaskEditDialogPro(tk.Toplevel):
             # ───────────────────────────────────────────────
             # Обычное создание или редактирование одной задачи.
             # ───────────────────────────────────────────────
-            nm = self.ent_name.get().strip()
+            selected_item = (
+                self._selected_work_items[0]
+                if len(self._selected_work_items) == 1
+                else None
+            )
+
+            if not selected_item:
+                raise ValueError(
+                    "Для одной задачи должна быть выбрана одна работа "
+                    "из справочника."
+                )
+
+            nm = (selected_item.get("name") or "").strip()
 
             if not nm:
-                raise ValueError("Введите вид работ")
+                raise ValueError(
+                    "У выбранной работы не заполнено наименование."
+                )
+
+            if (
+                not selected_item.get("labor_norm_id")
+                or selected_item.get("labor_hours_per_unit") is None
+            ):
+                raise ValueError(
+                    "Для выбранной работы не найдена действующая норма ЗТР. "
+                    "Проверьте дату начала работы и даты действия нормы."
+                )
 
             uom = None
             ui = self.cmb_uom.current()
 
             if ui > 0 and (ui - 1) < len(self.uoms):
                 uom = self.uoms[ui - 1]["code"]
-
-            selected_item = (
-                self._selected_work_items[0]
-                if len(self._selected_work_items) == 1
-                else None
-            )
 
             self.result = {
                 "work_type_id": wt_id,
