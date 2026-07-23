@@ -7,6 +7,7 @@ import calendar
 from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Set
 from pathlib import Path
+from gpr_planning_module import GprPlanningPanel
 
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
@@ -2099,10 +2100,21 @@ class GprPage(tk.Frame):
 
         self.tab_registry = tk.Frame(self.nb_main, bg=C["bg"])
         self.tab_editor = tk.Frame(self.nb_main, bg=C["bg"])
+        self.tab_planning = tk.Frame(self.nb_main, bg=C["bg"])
 
         self.nb_main.add(self.tab_registry, text="  📚 Реестр ГПР  ")
         self.nb_main.add(self.tab_editor, text="  🛠 Редактор ГПР  ")
+        self.nb_main.add(
+            self.tab_planning,
+            text="  📅 Планирование  ",
+        )
 
+        self.planning_panel = GprPlanningPanel(
+            self.tab_planning,
+            get_tasks_callback=self._get_tasks_for_planning,
+            on_saved_callback=self._after_planning_saved,
+        )
+        self.planning_panel.pack(fill="both", expand=True)
         self._build_registry_tab(self.tab_registry)
         self._build_editor_tab(self.tab_editor)
 
@@ -2251,6 +2263,40 @@ class GprPage(tk.Frame):
 
         self._apply_registry_filter()
 
+    def _get_tasks_for_planning(self):
+        """
+        Возвращает список задач открытого ГПР.
+    
+        ВАЖНО:
+        замените self.tasks на фактическое имя списка,
+        в котором ваш GprPage хранит задачи текущего графика.
+        """
+        return list(getattr(self, "tasks", []) or [])
+    
+    
+    def _after_planning_saved(self):
+        """
+        Вызывается после сохранения недельного плана.
+    
+        Недельное планирование не изменяет даты и общий объём задачи,
+        поэтому редактор ГПР можно не перезагружать из БД.
+        Но обновляем текущую отрисовку и статус.
+        """
+        try:
+            self._apply_filter()
+            self._update_summary()
+    
+            self.lbl_bottom.config(
+                text=(
+                    f"Объект: {self.object_db_id or '—'}  |  "
+                    "Недельный план сохранён."
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Не удалось обновить интерфейс после сохранения недельного плана"
+            )
+    
     def _apply_registry_filter(self):
         q = (self.var_registry_search.get() or "").strip().lower()
         mode = self.cmb_registry_filter.get().strip()
@@ -3020,10 +3066,19 @@ class GprPage(tk.Frame):
         self._update_plan_info()
         self._apply_filter()
         self._update_summary()
+        
+        if hasattr(self, "planning_panel"):
+            try:
+                self.planning_panel.reload()
+            except Exception:
+                logger.exception(
+                    "Не удалось обновить вкладку планирования после открытия объекта"
+                )
+        
         self.lbl_bottom.config(
             text=f"Объект: {name}  |  Строк: {len(self.tasks)}"
         )
-    
+        
         self.nb_main.select(self.tab_editor)
 
     # ══════════════════════════════════════════════════════
@@ -3823,6 +3878,13 @@ class GprPage(tk.Frame):
             self._update_plan_info()
             self._apply_filter()
             self._update_summary()
+            if hasattr(self, "planning_panel"):
+                try:
+                    self.planning_panel.reload()
+                except Exception:
+                    logger.exception(
+                        "Не удалось обновить планирование после сохранения ГПР"
+                    )
             self._refresh_registry()
             messagebox.showinfo("ГПР", "Сохранено успешно.", parent=self)
         except Exception as e:
