@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
@@ -28,6 +28,86 @@ def _fmt_dt(v) -> str:
         return v.strip()
     return ""
 
+class _GprWorkItemService:
+    """Загрузка конкретных работ и актуальных норм ЗТР из справочника."""
+
+    @staticmethod
+    def load_by_work_type(
+        work_type_id: int,
+        norm_date: Optional[date] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Возвращает активные работы выбранного типа.
+
+        Для каждой работы подгружается активная норма, действующая
+        на norm_date. Если нормы нет — работа всё равно доступна для выбора.
+        """
+        if not work_type_id:
+            return []
+
+        norm_date = norm_date or _today()
+
+        conn = None
+        try:
+            conn = _conn()
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        wi.id,
+                        wi.work_type_id,
+                        COALESCE(wi.code, '') AS code,
+                        wi.name,
+                        wi.uom_code,
+                        COALESCE(wi.note, '') AS note,
+
+                        n.id AS labor_norm_id,
+                        n.labor_hours_per_unit,
+                        n.default_productivity_factor,
+                        n.effective_from AS norm_effective_from,
+                        n.effective_to AS norm_effective_to,
+                        COALESCE(n.source_name, '') AS norm_source_name,
+                        COALESCE(n.source_code, '') AS norm_source_code
+
+                    FROM public.gpr_work_items wi
+
+                    LEFT JOIN LATERAL (
+                        SELECT
+                            ln.id,
+                            ln.labor_hours_per_unit,
+                            ln.default_productivity_factor,
+                            ln.effective_from,
+                            ln.effective_to,
+                            ln.source_name,
+                            ln.source_code
+                        FROM public.gpr_labor_norms ln
+                        WHERE ln.work_item_id = wi.id
+                          AND ln.is_active = true
+                          AND ln.effective_from <= %s
+                          AND (
+                              ln.effective_to IS NULL
+                              OR ln.effective_to >= %s
+                          )
+                        ORDER BY ln.effective_from DESC, ln.id DESC
+                        LIMIT 1
+                    ) n ON true
+
+                    WHERE wi.work_type_id = %s
+                      AND wi.is_active = true
+
+                    ORDER BY wi.sort_order, wi.name
+                    """,
+                    (norm_date, norm_date, work_type_id),
+                )
+                return [dict(row) for row in cur.fetchall()]
+        except Exception:
+            logger.exception(
+                "Ошибка загрузки работ типа %s",
+                work_type_id,
+            )
+            raise
+        finally:
+            _release(conn)
 
 # ═══════════════════════════════════════════════════════════════
 #  Сервис: работники
@@ -360,6 +440,441 @@ class _AssignmentEditDialog(simpledialog.Dialog):
             "note": self._note,
         }
 
+class _WorkItemsMultiSelectDialog(tk.Toplevel):
+    """
+    Выбор одной или нескольких конкретных работ из gpr_work_items.
+
+    Результат:
+        self.result = List[Dict[str, Any]] или None при отмене.
+    """
+
+    def __init__(
+        self,
+        parent,
+        work_type: Dict[str, Any],
+        norm_date: Optional[date] = None,
+        preselected_ids: Optional[List[int]] = None,
+        allow_multiple: bool = True,
+    ):
+        super().__init__(parent)
+        self.transient(parent)
+
+        self.work_type = work_type
+        self.norm_date = norm_date or _today()
+        self.allow_multiple = allow_multiple
+
+        self.result: Optional[List[Dict[str, Any]]] = None
+        self._destroyed = False
+
+        self._all_items: List[Dict[str, Any]] = []
+        self._visible_items: List[Dict[str, Any]] = []
+        self._checked_ids = {
+            int(x)
+            for x in (preselected_ids or [])
+            if x is not None
+        }
+
+        self.var_search = tk.StringVar()
+
+        self.title(
+            f"Выбор работ: {work_type.get('name') or ''}"
+        )
+        self.minsize(820, 520)
+        self.geometry("900x600")
+        self.configure(bg=C["bg"])
+
+        self._build_ui()
+        self._load_items()
+
+        self.grab_set()
+        self.after(20, self._center)
+        self.after(50, self.ent_search.focus_set())
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+    def _build_ui(self):
+        hdr = tk.Frame(self, bg=C["accent"], pady=7)
+        hdr.pack(fill="x")
+
+        tk.Label(
+            hdr,
+            text="☑  Выбор работ из справочника",
+            font=("Segoe UI", 11, "bold"),
+            bg=C["accent"],
+            fg="white",
+            padx=12,
+        ).pack(side="left")
+
+        top = tk.Frame(self, bg=C["panel"], padx=12, pady=10)
+        top.pack(fill="x", padx=10, pady=(10, 4))
+
+        tk.Label(
+            top,
+            text=(
+                f"Тип работ: {self.work_type.get('name') or '—'}\n"
+                f"Дата подбора нормы: {_fmt_date(self.norm_date)}"
+            ),
+            bg=C["panel"],
+            fg=C["text2"],
+            font=("Segoe UI", 9),
+            justify="left",
+            anchor="w",
+        ).pack(side="left")
+
+        search_frame = tk.Frame(self, bg=C["panel"], padx=12, pady=6)
+        search_frame.pack(fill="x", padx=10, pady=(0, 4))
+
+        tk.Label(
+            search_frame,
+            text="Поиск:",
+            bg=C["panel"],
+            font=("Segoe UI", 9),
+        ).pack(side="left")
+
+        self.ent_search = ttk.Entry(
+            search_frame,
+            textvariable=self.var_search,
+            width=42,
+        )
+        self.ent_search.pack(side="left", padx=(6, 10))
+        self.ent_search.bind(
+            "<KeyRelease>",
+            lambda _e: self._apply_filter(),
+        )
+
+        ttk.Button(
+            search_frame,
+            text="☑ Выбрать все",
+            command=self._check_all_visible,
+        ).pack(side="left", padx=2)
+
+        ttk.Button(
+            search_frame,
+            text="☐ Снять все",
+            command=self._uncheck_all_visible,
+        ).pack(side="left", padx=2)
+
+        self.lbl_count = tk.Label(
+            search_frame,
+            text="",
+            bg=C["panel"],
+            fg=C["text2"],
+            font=("Segoe UI", 8),
+        )
+        self.lbl_count.pack(side="right")
+
+        table_frame = tk.Frame(self, bg=C["panel"])
+        table_frame.pack(
+            fill="both",
+            expand=True,
+            padx=10,
+            pady=(0, 8),
+        )
+
+        cols = ("selected", "code", "name", "uom", "norm", "source")
+
+        self.tree = ttk.Treeview(
+            table_frame,
+            columns=cols,
+            show="headings",
+            selectmode="browse",
+        )
+
+        columns = [
+            ("selected", "Выбор", 65, "center"),
+            ("code", "Код", 100, "w"),
+            ("name", "Наименование работы", 390, "w"),
+            ("uom", "Ед.", 65, "center"),
+            ("norm", "ЗТР", 95, "e"),
+            ("source", "Источник нормы", 170, "w"),
+        ]
+
+        for code, title, width, anchor in columns:
+            self.tree.heading(code, text=title)
+            self.tree.column(code, width=width, anchor=anchor)
+
+        vsb = ttk.Scrollbar(
+            table_frame,
+            orient="vertical",
+            command=self.tree.yview,
+        )
+        hsb = ttk.Scrollbar(
+            table_frame,
+            orient="horizontal",
+            command=self.tree.xview,
+        )
+
+        self.tree.configure(
+            yscrollcommand=vsb.set,
+            xscrollcommand=hsb.set,
+        )
+
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+
+        self.tree.tag_configure(
+            "has_norm",
+            background="#e8f5e9",
+        )
+        self.tree.tag_configure(
+            "no_norm",
+            background="#fff3e0",
+        )
+        self.tree.tag_configure(
+            "checked",
+            font=("Segoe UI", 9, "bold"),
+        )
+
+        self.tree.bind("<Button-1>", self._on_tree_click)
+        self.tree.bind("<Double-1>", self._on_tree_double_click)
+        self.tree.bind("<space>", self._toggle_selected_tree_row)
+        self.tree.bind("<Return>", self._toggle_selected_tree_row)
+
+        hint = tk.Label(
+            self,
+            text=(
+                "Нажмите на строку, пробел или двойной клик, чтобы поставить / снять отметку. "
+                "Работы без нормы можно добавить, но расчёт ЗТР для них будет недоступен."
+            ),
+            bg=C["bg"],
+            fg=C["text3"],
+            font=("Segoe UI", 8),
+            justify="left",
+            anchor="w",
+        )
+        hint.pack(fill="x", padx=14, pady=(0, 5))
+
+        bot = tk.Frame(self, bg=C["bg"], pady=8)
+        bot.pack(fill="x")
+
+        ttk.Button(
+            bot,
+            text="Отмена",
+            command=self._on_cancel,
+        ).pack(side="right", padx=(4, 14))
+
+        self.btn_ok = tk.Button(
+            bot,
+            text="✅ Добавить выбранные",
+            command=self._on_ok,
+            bg=C["btn_bg"],
+            fg=C["btn_fg"],
+            activebackground="#0d47a1",
+            activeforeground="white",
+            relief="flat",
+            cursor="hand2",
+            padx=16,
+            pady=5,
+        )
+        self.btn_ok.pack(side="right", padx=4)
+
+    def _load_items(self):
+        try:
+            self._all_items = _GprWorkItemService.load_by_work_type(
+                int(self.work_type["id"]),
+                self.norm_date,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Выбор работ",
+                f"Не удалось загрузить работы:\n{exc}",
+                parent=self,
+            )
+            self._all_items = []
+
+        self._apply_filter()
+
+    def _apply_filter(self):
+        query = (self.var_search.get() or "").strip().casefold()
+
+        if query:
+            self._visible_items = [
+                item
+                for item in self._all_items
+                if query in (item.get("name") or "").casefold()
+                or query in (item.get("code") or "").casefold()
+                or query in (item.get("uom_code") or "").casefold()
+            ]
+        else:
+            self._visible_items = list(self._all_items)
+
+        self._render()
+
+    def _render(self):
+        self.tree.delete(*self.tree.get_children())
+
+        for item in self._visible_items:
+            item_id = int(item["id"])
+            checked = item_id in self._checked_ids
+
+            marker = "☑" if checked else "☐"
+            norm = item.get("labor_hours_per_unit")
+
+            source_parts = [
+                item.get("norm_source_name") or "",
+                item.get("norm_source_code") or "",
+            ]
+            source = " | ".join(
+                x for x in source_parts if x.strip()
+            )
+
+            tags = ["has_norm" if norm is not None else "no_norm"]
+            if checked:
+                tags.append("checked")
+
+            self.tree.insert(
+                "",
+                "end",
+                iid=str(item_id),
+                values=(
+                    marker,
+                    item.get("code") or "",
+                    item.get("name") or "",
+                    item.get("uom_code") or "",
+                    _fmt_qty(norm),
+                    source,
+                ),
+                tags=tuple(tags),
+            )
+
+        selected_count = len(self._checked_ids)
+        self.lbl_count.config(
+            text=(
+                f"Показано: {len(self._visible_items)}  |  "
+                f"Выбрано: {selected_count}"
+            )
+        )
+
+        self.btn_ok.config(
+            text=(
+                f"✅ Добавить выбранные ({selected_count})"
+                if selected_count
+                else "✅ Добавить выбранные"
+            )
+        )
+
+    def _toggle_item(self, item_id: int):
+        if not self.allow_multiple:
+            self._checked_ids.clear()
+
+        if item_id in self._checked_ids:
+            self._checked_ids.remove(item_id)
+        else:
+            self._checked_ids.add(item_id)
+
+        self._render()
+
+    def _on_tree_click(self, event):
+        region = self.tree.identify_region(event.x, event.y)
+        if region not in ("cell", "tree"):
+            return
+
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+
+        try:
+            self._toggle_item(int(iid))
+        except ValueError:
+            return
+
+    def _on_tree_double_click(self, event):
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+
+        try:
+            self._toggle_item(int(iid))
+        except ValueError:
+            return
+
+    def _toggle_selected_tree_row(self, _event=None):
+        selection = self.tree.selection()
+        if not selection:
+            return "break"
+
+        try:
+            self._toggle_item(int(selection[0]))
+        except ValueError:
+            pass
+
+        return "break"
+
+    def _check_all_visible(self):
+        if not self.allow_multiple:
+            return
+
+        for item in self._visible_items:
+            self._checked_ids.add(int(item["id"]))
+
+        self._render()
+
+    def _uncheck_all_visible(self):
+        for item in self._visible_items:
+            self._checked_ids.discard(int(item["id"]))
+
+        self._render()
+
+    def _on_ok(self):
+        if not self._checked_ids:
+            messagebox.showwarning(
+                "Выбор работ",
+                "Отметьте хотя бы одну работу.",
+                parent=self,
+            )
+            return
+
+        selected = [
+            item
+            for item in self._all_items
+            if int(item["id"]) in self._checked_ids
+        ]
+
+        if not self.allow_multiple and len(selected) > 1:
+            selected = selected[:1]
+
+        self.result = selected
+        self._safe_destroy()
+
+    def _on_cancel(self):
+        self.result = None
+        self._safe_destroy()
+
+    def _safe_destroy(self):
+        if self._destroyed:
+            return
+
+        self._destroyed = True
+
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
+
+    def _center(self):
+        self.update_idletasks()
+
+        width = self.winfo_width()
+        height = self.winfo_height()
+
+        if self.master and self.master.winfo_exists():
+            parent_width = self.master.winfo_width()
+            parent_height = self.master.winfo_height()
+            parent_x = self.master.winfo_rootx()
+            parent_y = self.master.winfo_rooty()
+
+            x = parent_x + (parent_width - width) // 2
+            y = parent_y + (parent_height - height) // 2
+        else:
+            x = (self.winfo_screenwidth() - width) // 2
+            y = (self.winfo_screenheight() - height) // 2
+
+        self.geometry(f"+{max(0, x)}+{max(0, y)}")
 
 # ═══════════════════════════════════════════════════════════════
 #  Профессиональный диалог работы ГПР
@@ -400,6 +915,10 @@ class TaskEditDialogPro(tk.Toplevel):
         self._destroyed = False
         self._dirty = False
         self._search_after_id: Optional[str] = None
+
+        self._selected_work_items: List[Dict[str, Any]] = []
+        self._bulk_mode = False
+        self._suspend_work_type_dialog = False
 
         task_name = self.init.get("name", "")
         if task_name:
@@ -579,17 +1098,56 @@ class TaskEditDialogPro(tk.Toplevel):
             row=r, column=0, sticky="e", padx=(0, 8), pady=4
         )
         wt_vals = [w["name"] for w in self.work_types]
+        wt_frame = tk.Frame(grp1, bg=C["panel"])
+        wt_frame.grid(row=r, column=1, sticky="w", pady=4)
+        
         self.cmb_wt = ttk.Combobox(
-            grp1, state="readonly", width=44, values=wt_vals, font=("Segoe UI", 9)
+            wt_frame,
+            state="readonly",
+            width=44,
+            values=wt_vals,
+            font=("Segoe UI", 9),
         )
-        self.cmb_wt.grid(row=r, column=1, sticky="w", pady=4)
+        self.cmb_wt.pack(side="left")
+        
+        self.btn_select_work_items = ttk.Button(
+            wt_frame,
+            text="☑ Выбрать работы",
+            command=self._open_work_items_selector,
+        )
+        self.btn_select_work_items.pack(side="left", padx=(8, 0))
+        
         r += 1
 
         tk.Label(grp1, text="Вид работ *:", bg=C["panel"], font=("Segoe UI", 9)).grid(
             row=r, column=0, sticky="e", padx=(0, 8), pady=4
         )
-        self.ent_name = ttk.Entry(grp1, width=52, font=("Segoe UI", 9))
-        self.ent_name.grid(row=r, column=1, sticky="ew", pady=4)
+        name_frame = tk.Frame(grp1, bg=C["panel"])
+        name_frame.grid(row=r, column=1, sticky="ew", pady=4)
+        name_frame.grid_columnconfigure(0, weight=1)
+        
+        self.ent_name = ttk.Entry(
+            name_frame,
+            width=52,
+            font=("Segoe UI", 9),
+        )
+        self.ent_name.grid(row=0, column=0, sticky="ew")
+        
+        self.lbl_selected_works = tk.Label(
+            name_frame,
+            text="",
+            bg=C["panel"],
+            fg=C["success"],
+            font=("Segoe UI", 8),
+            anchor="w",
+        )
+        self.lbl_selected_works.grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=(3, 0),
+        )
+        
         r += 1
 
         tk.Label(grp1, text="Ед. изм.:", bg=C["panel"], font=("Segoe UI", 9)).grid(
@@ -1042,6 +1600,12 @@ class TaskEditDialogPro(tk.Toplevel):
         for w in (self.cmb_wt, self.cmb_uom, self.cmb_status):
             w.bind("<<ComboboxSelected>>", lambda _e: self._on_main_field_changed(), add="+")
 
+        self.cmb_wt.bind(
+            "<<ComboboxSelected>>",
+            self._on_work_type_selected,
+            add="+",
+        )
+
         self.cmb_status.bind("<<ComboboxSelected>>", lambda _e: self._update_status_color(), add="+")
         self.var_milestone.trace_add("write", lambda *_: self._mark_dirty())
 
@@ -1060,10 +1624,203 @@ class TaskEditDialogPro(tk.Toplevel):
         self._refresh_overview()
         self._mark_dirty()
 
+    def _on_work_type_selected(self, _event=None):
+        """
+        При смене типа работ у новой задачи автоматически открываем
+        окно выбора конкретных работ из справочника.
+        """
+        if self._suspend_work_type_dialog:
+            return
+
+        # При редактировании уже существующей задачи не создаём
+        # несколько новых задач автоматически.
+        if self.init.get("id"):
+            return
+
+        self._selected_work_items = []
+        self._bulk_mode = False
+
+        self._set_name_entry_state("normal")
+        self.ent_name.delete(0, "end")
+        self.lbl_selected_works.config(text="")
+
+        self._open_work_items_selector()
+
+    def _selected_work_type(self) -> Optional[Dict[str, Any]]:
+        index = self.cmb_wt.current()
+
+        if 0 <= index < len(self.work_types):
+            return self.work_types[index]
+
+        return None
+
+    def _get_norm_date(self) -> date:
+        """
+        Дата, на которую подбирается норма.
+        Используем дату начала задачи; если она пока не заполнена —
+        сегодняшнюю дату.
+        """
+        try:
+            return _parse_date(self.ent_start.get())
+        except Exception:
+            return _today()
+
+    def _open_work_items_selector(self):
+        work_type = self._selected_work_type()
+
+        if not work_type:
+            messagebox.showwarning(
+                "Работы ГПР",
+                "Сначала выберите тип работ.",
+                parent=self,
+            )
+            return
+
+        # Редактирование существующей задачи: только один выбор.
+        is_edit_mode = bool(self.init.get("id"))
+
+        preselected_ids = [
+            int(item["id"])
+            for item in self._selected_work_items
+            if item.get("id")
+        ]
+
+        if not preselected_ids and self.init.get("work_item_id"):
+            preselected_ids = [int(self.init["work_item_id"])]
+
+        dlg = _WorkItemsMultiSelectDialog(
+            self,
+            work_type=work_type,
+            norm_date=self._get_norm_date(),
+            preselected_ids=preselected_ids,
+            allow_multiple=not is_edit_mode,
+        )
+
+        self.wait_window(dlg)
+
+        if not dlg.result:
+            return
+
+        selected_items = dlg.result
+
+        if is_edit_mode and len(selected_items) > 1:
+            selected_items = selected_items[:1]
+
+        self._apply_selected_work_items(selected_items)
+
+    def _apply_selected_work_items(
+        self,
+        selected_items: List[Dict[str, Any]],
+    ):
+        self._selected_work_items = list(selected_items or [])
+        self._bulk_mode = len(self._selected_work_items) > 1
+
+        if not self._selected_work_items:
+            self._set_name_entry_state("normal")
+            self.lbl_selected_works.config(text="")
+            return
+
+        # Одна работа: подставляем имя и единицу измерения.
+        if len(self._selected_work_items) == 1:
+            item = self._selected_work_items[0]
+
+            self._set_name_entry_state("normal")
+            self.ent_name.delete(0, "end")
+            self.ent_name.insert(0, item.get("name") or "")
+
+            self._set_uom_code(item.get("uom_code"))
+
+            norm_text = ""
+            if item.get("labor_hours_per_unit") is not None:
+                norm_text = (
+                    f"Выбрана работа из справочника. "
+                    f"Норма ЗТР: {_fmt_qty(item.get('labor_hours_per_unit'))} чел.-ч/ед."
+                )
+            else:
+                norm_text = (
+                    "Выбрана работа из справочника. "
+                    "Актуальная норма ЗТР не найдена."
+                )
+
+            self.lbl_selected_works.config(
+                text=norm_text,
+                fg=C["success"] if item.get("labor_norm_id") else C["warning"],
+            )
+
+        # Несколько работ: имя и единица у каждой задачи будут свои.
+        else:
+            self._set_name_entry_state("normal")
+            self.ent_name.delete(0, "end")
+            self.ent_name.insert(
+                0,
+                f"Будет добавлено работ: {len(self._selected_work_items)}",
+            )
+            self._set_name_entry_state("readonly")
+
+            self.cmb_uom.current(0)
+
+            with_norm = sum(
+                1
+                for item in self._selected_work_items
+                if item.get("labor_norm_id")
+            )
+
+            without_norm = len(self._selected_work_items) - with_norm
+
+            note = (
+                f"Выбрано работ: {len(self._selected_work_items)}. "
+                f"С нормой ЗТР: {with_norm}."
+            )
+
+            if without_norm:
+                note += f" Без актуальной нормы: {without_norm}."
+
+            self.lbl_selected_works.config(
+                text=note,
+                fg=C["warning"] if without_norm else C["success"],
+            )
+
+        self._mark_dirty()
+        self._refresh_overview()
+
+    def _set_name_entry_state(self, state: str):
+        try:
+            self.ent_name.configure(state=state)
+        except tk.TclError:
+            pass
+
+    def _set_uom_code(self, uom_code: Optional[str]):
+        if not uom_code:
+            self.cmb_uom.current(0)
+            return
+
+        for index, uom in enumerate(self.uoms, start=1):
+            if uom.get("code") == uom_code:
+                self.cmb_uom.current(index)
+                return
+
+        self.cmb_uom.current(0)
+
     # ══════════════════════════════════════════════════════
     #  INIT / LOAD
     # ══════════════════════════════════════════════════════
     def _fill_init(self):
+
+        if self.init.get("work_item_id"):
+            self._selected_work_items = [
+                {
+                    "id": self.init.get("work_item_id"),
+                    "work_type_id": self.init.get("work_type_id"),
+                    "name": self.init.get("name") or "",
+                    "uom_code": self.init.get("uom_code"),
+                    "labor_norm_id": self.init.get("labor_norm_id"),
+                    "labor_hours_per_unit": self.init.get("labor_hours_per_unit"),
+                    "default_productivity_factor": self.init.get(
+                        "productivity_factor",
+                        1,
+                    ),
+                }
+            ]
         iw = self.init.get("work_type_id")
         if iw is not None:
             for i, w in enumerate(self.work_types):
@@ -1077,6 +1834,23 @@ class TaskEditDialogPro(tk.Toplevel):
             self.cmb_wt.current(0)
 
         self.ent_name.insert(0, self.init.get("name", ""))
+
+        if self._selected_work_items:
+            item = self._selected_work_items[0]
+
+            if item.get("labor_hours_per_unit") is not None:
+                self.lbl_selected_works.config(
+                    text=(
+                        "Работа связана со справочником. "
+                        f"Норма ЗТР: {_fmt_qty(item.get('labor_hours_per_unit'))} чел.-ч/ед."
+                    ),
+                    fg=C["success"],
+                )
+            else:
+                self.lbl_selected_works.config(
+                    text="Работа связана со справочником, но норма ЗТР не сохранена.",
+                    fg=C["warning"],
+                )
 
         iu = self.init.get("uom_code")
         if iu:
@@ -1759,63 +2533,152 @@ class TaskEditDialogPro(tk.Toplevel):
             wi = self.cmb_wt.current()
             if wi < 0:
                 raise ValueError("Выберите тип работ")
+
             wt_id = int(self.work_types[wi]["id"])
-
-            nm = self.ent_name.get().strip()
-            if not nm:
-                raise ValueError("Введите вид работ")
-
-            uom = None
-            ui = self.cmb_uom.current()
-            if ui > 0 and (ui - 1) < len(self.uoms):
-                uom = self.uoms[ui - 1]["code"]
 
             qty = _safe_float(self.ent_qty.get())
 
             ds = _parse_date(self.ent_start.get())
             df = _parse_date(self.ent_finish.get())
+
             if df < ds:
                 raise ValueError("Дата окончания раньше даты начала")
 
             si = self.cmb_status.current()
             st = STATUS_LIST[si] if 0 <= si < len(STATUS_LIST) else "planned"
 
-            facts_changed = bool(self._has_fact_tab and self.init.get("id"))
-            if facts_changed:
-                original_facts = self.init.get("_orig_facts_count")
-                # просто внешний флаг по фактическому наличию изменений
-                # если ранее было 0, а сейчас 0 — всё равно false
-                # но у нас есть dirty и сравнение не храним, поэтому считаем
-                # факт изменённым при любой работе на существующей задаче:
-                facts_changed = True
+            is_milestone = bool(self.var_milestone.get())
+
+            # ───────────────────────────────────────────────
+            # Массовое создание задач по выбранным работам.
+            # Доступно только при создании новой записи.
+            # ───────────────────────────────────────────────
+            if self._bulk_mode and not self.init.get("id"):
+                bulk_tasks: List[Dict[str, Any]] = []
+
+                for item in self._selected_work_items:
+                    bulk_tasks.append(
+                        {
+                            "work_type_id": wt_id,
+                            "work_item_id": int(item["id"]),
+                            "labor_norm_id": item.get("labor_norm_id"),
+
+                            # Снимок нормы на момент создания задачи.
+                            "labor_hours_per_unit": item.get(
+                                "labor_hours_per_unit"
+                            ),
+                            "productivity_factor": item.get(
+                                "default_productivity_factor"
+                            ) or 1.0,
+
+                            "name": item.get("name") or "",
+                            "uom_code": item.get("uom_code"),
+                            "plan_qty": qty,
+                            "plan_start": ds,
+                            "plan_finish": df,
+                            "status": st,
+                            "is_milestone": is_milestone,
+                        }
+                    )
+
+                if not bulk_tasks:
+                    raise ValueError("Не выбрано ни одной работы")
+
+                self.result = {
+                    "_bulk_tasks": bulk_tasks,
+                    "_assignments": [],
+                    "_facts": [],
+                    "_facts_changed": False,
+                }
+
+                self._dirty = False
+                self._safe_destroy()
+                return
+
+            # ───────────────────────────────────────────────
+            # Обычное создание или редактирование одной задачи.
+            # ───────────────────────────────────────────────
+            nm = self.ent_name.get().strip()
+
+            if not nm:
+                raise ValueError("Введите вид работ")
+
+            uom = None
+            ui = self.cmb_uom.current()
+
+            if ui > 0 and (ui - 1) < len(self.uoms):
+                uom = self.uoms[ui - 1]["code"]
+
+            selected_item = (
+                self._selected_work_items[0]
+                if len(self._selected_work_items) == 1
+                else None
+            )
 
             self.result = {
                 "work_type_id": wt_id,
+                "work_item_id": (
+                    int(selected_item["id"])
+                    if selected_item and selected_item.get("id")
+                    else None
+                ),
+                "labor_norm_id": (
+                    selected_item.get("labor_norm_id")
+                    if selected_item
+                    else None
+                ),
+                "labor_hours_per_unit": (
+                    selected_item.get("labor_hours_per_unit")
+                    if selected_item
+                    else None
+                ),
+                "productivity_factor": (
+                    selected_item.get(
+                        "default_productivity_factor",
+                        1.0,
+                    )
+                    if selected_item
+                    else 1.0
+                ),
                 "name": nm,
                 "uom_code": uom,
                 "plan_qty": qty,
                 "plan_start": ds,
                 "plan_finish": df,
                 "status": st,
-                "is_milestone": bool(self.var_milestone.get()),
-                "_assignments": list(self._assignments) if self._has_assign_tab else [],
-                "_facts": list(self._facts) if self._has_fact_tab else [],
+                "is_milestone": is_milestone,
+                "_assignments": (
+                    list(self._assignments)
+                    if self._has_assign_tab
+                    else []
+                ),
+                "_facts": (
+                    list(self._facts)
+                    if self._has_fact_tab
+                    else []
+                ),
                 "_facts_changed": bool(self._has_fact_tab),
             }
+
             self._dirty = False
             self._safe_destroy()
 
-        except ValueError as e:
-            messagebox.showwarning("Работа ГПР", str(e), parent=self)
+        except ValueError as exc:
+            messagebox.showwarning(
+                "Работа ГПР",
+                str(exc),
+                parent=self,
+            )
             try:
                 self.nb.select(0)
             except tk.TclError:
                 pass
-        except Exception as e:
+
+        except Exception as exc:
             logger.exception("TaskEditDialogPro._on_ok unexpected error")
             messagebox.showerror(
                 "Ошибка",
-                f"Непредвиденная ошибка:\n{e}",
+                f"Непредвиденная ошибка:\n{exc}",
                 parent=self,
             )
 
