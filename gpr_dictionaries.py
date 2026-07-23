@@ -101,6 +101,30 @@ def _fmt_dt(v) -> str:
         return v.strftime("%d.%m.%Y %H:%M")
     return str(v or "—")
 
+def _fmt_date_iso(v) -> str:
+    """Дата для ввода в справочнике норм: ГГГГ-ММ-ДД."""
+    if isinstance(v, datetime):
+        return v.date().isoformat()
+    if isinstance(v, date):
+        return v.isoformat()
+    return str(v or "").strip()
+
+
+def _parse_date_iso(value: str, field_name: str = "Дата") -> date:
+    text = (value or "").strip()
+    if not text:
+        raise ValueError(f"{field_name} обязательна.")
+
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            pass
+
+    raise ValueError(
+        f"{field_name} должна быть указана в формате ГГГГ-ММ-ДД "
+        f"или ДД.ММ.ГГГГ."
+    )
 
 def _user_id(app_ref) -> Optional[int]:
     try:
@@ -351,6 +375,366 @@ class GprTemplateService:
         finally:
             _release(conn)
 
+
+class GprLaborDictionaryService:
+    """Справочник работ и версий нормативов ЗТР."""
+
+    @staticmethod
+    def load_work_items(search: str = "") -> List[Dict[str, Any]]:
+        conn = None
+        try:
+            conn = _conn()
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                params: List[Any] = []
+                where = ""
+
+                if search.strip():
+                    q = f"%{search.strip()}%"
+                    where = """
+                        WHERE wi.name ILIKE %s
+                           OR COALESCE(wi.code, '') ILIKE %s
+                           OR wt.name ILIKE %s
+                           OR wi.uom_code ILIKE %s
+                    """
+                    params = [q, q, q, q]
+
+                cur.execute(
+                    f"""
+                    SELECT
+                        wi.id,
+                        wi.work_type_id,
+                        wt.name AS work_type_name,
+                        COALESCE(wi.code, '') AS code,
+                        wi.name,
+                        wi.uom_code,
+                        COALESCE(u.name, '') AS uom_name,
+                        wi.sort_order,
+                        wi.is_active,
+                        COALESCE(wi.note, '') AS note,
+                        wi.created_at,
+                        wi.updated_at,
+
+                        current_norm.id AS current_norm_id,
+                        current_norm.labor_hours_per_unit AS current_labor_hours_per_unit,
+                        current_norm.default_productivity_factor
+                            AS current_productivity_factor,
+                        current_norm.effective_from AS current_norm_from,
+                        current_norm.effective_to AS current_norm_to,
+                        COALESCE(current_norm.source_name, '') AS current_norm_source
+
+                    FROM public.gpr_work_items wi
+                    JOIN public.gpr_work_types wt
+                        ON wt.id = wi.work_type_id
+                    LEFT JOIN public.gpr_uom u
+                        ON u.code = wi.uom_code
+
+                    LEFT JOIN LATERAL (
+                        SELECT n.*
+                        FROM public.gpr_labor_norms n
+                        WHERE n.work_item_id = wi.id
+                          AND n.is_active = true
+                          AND n.effective_from <= CURRENT_DATE
+                          AND (
+                              n.effective_to IS NULL
+                              OR n.effective_to >= CURRENT_DATE
+                          )
+                        ORDER BY n.effective_from DESC, n.id DESC
+                        LIMIT 1
+                    ) current_norm ON true
+
+                    {where}
+
+                    ORDER BY
+                        wi.is_active DESC,
+                        wt.sort_order,
+                        wt.name,
+                        wi.sort_order,
+                        wi.name
+                    """,
+                    params,
+                )
+                return [dict(row) for row in cur.fetchall()]
+        finally:
+            _release(conn)
+
+    @staticmethod
+    def load_norms(work_item_id: int) -> List[Dict[str, Any]]:
+        conn = None
+        try:
+            conn = _conn()
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        n.id,
+                        n.work_item_id,
+                        n.effective_from,
+                        n.effective_to,
+                        n.labor_hours_per_unit,
+                        n.default_productivity_factor,
+                        COALESCE(n.source_name, '') AS source_name,
+                        COALESCE(n.source_code, '') AS source_code,
+                        COALESCE(n.source_version, '') AS source_version,
+                        COALESCE(n.note, '') AS note,
+                        n.is_active,
+                        n.created_at,
+                        n.updated_at,
+                        COALESCE(cu.full_name, '') AS creator_name,
+                        COALESCE(uu.full_name, '') AS updater_name
+                    FROM public.gpr_labor_norms n
+                    LEFT JOIN public.app_users cu
+                        ON cu.id = n.created_by
+                    LEFT JOIN public.app_users uu
+                        ON uu.id = n.updated_by
+                    WHERE n.work_item_id = %s
+                    ORDER BY n.effective_from DESC, n.id DESC
+                    """,
+                    (work_item_id,),
+                )
+                return [dict(row) for row in cur.fetchall()]
+        finally:
+            _release(conn)
+
+    @staticmethod
+    def create_work_item(
+        *,
+        work_type_id: int,
+        code: Optional[str],
+        name: str,
+        uom_code: str,
+        sort_order: int,
+        note: Optional[str],
+        user_id: Optional[int],
+    ) -> int:
+        conn = None
+        try:
+            conn = _conn()
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO public.gpr_work_items (
+                        work_type_id,
+                        code,
+                        name,
+                        uom_code,
+                        sort_order,
+                        is_active,
+                        note,
+                        created_by,
+                        updated_by
+                    )
+                    VALUES (%s, %s, %s, %s, %s, true, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        work_type_id,
+                        (code or "").strip() or None,
+                        name.strip(),
+                        uom_code,
+                        sort_order,
+                        (note or "").strip() or None,
+                        user_id,
+                        user_id,
+                    ),
+                )
+                return int(cur.fetchone()[0])
+        finally:
+            _release(conn)
+
+    @staticmethod
+    def update_work_item(
+        work_item_id: int,
+        *,
+        work_type_id: int,
+        code: Optional[str],
+        name: str,
+        uom_code: str,
+        sort_order: int,
+        note: Optional[str],
+        user_id: Optional[int],
+    ) -> None:
+        conn = None
+        try:
+            conn = _conn()
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE public.gpr_work_items
+                    SET
+                        work_type_id = %s,
+                        code = %s,
+                        name = %s,
+                        uom_code = %s,
+                        sort_order = %s,
+                        note = %s,
+                        updated_by = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        work_type_id,
+                        (code or "").strip() or None,
+                        name.strip(),
+                        uom_code,
+                        sort_order,
+                        (note or "").strip() or None,
+                        user_id,
+                        work_item_id,
+                    ),
+                )
+        finally:
+            _release(conn)
+
+    @staticmethod
+    def toggle_work_item(
+        work_item_id: int,
+        user_id: Optional[int],
+    ) -> None:
+        conn = None
+        try:
+            conn = _conn()
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE public.gpr_work_items
+                    SET
+                        is_active = NOT is_active,
+                        updated_by = %s
+                    WHERE id = %s
+                    """,
+                    (user_id, work_item_id),
+                )
+        finally:
+            _release(conn)
+
+    @staticmethod
+    def create_labor_norm(
+        *,
+        work_item_id: int,
+        effective_from: date,
+        effective_to: Optional[date],
+        labor_hours_per_unit: float,
+        default_productivity_factor: float,
+        source_name: Optional[str],
+        source_code: Optional[str],
+        source_version: Optional[str],
+        note: Optional[str],
+        user_id: Optional[int],
+    ) -> int:
+        conn = None
+        try:
+            conn = _conn()
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO public.gpr_labor_norms (
+                        work_item_id,
+                        effective_from,
+                        effective_to,
+                        labor_hours_per_unit,
+                        default_productivity_factor,
+                        source_name,
+                        source_code,
+                        source_version,
+                        note,
+                        is_active,
+                        created_by,
+                        updated_by
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        true, %s, %s
+                    )
+                    RETURNING id
+                    """,
+                    (
+                        work_item_id,
+                        effective_from,
+                        effective_to,
+                        labor_hours_per_unit,
+                        default_productivity_factor,
+                        (source_name or "").strip() or None,
+                        (source_code or "").strip() or None,
+                        (source_version or "").strip() or None,
+                        (note or "").strip() or None,
+                        user_id,
+                        user_id,
+                    ),
+                )
+                return int(cur.fetchone()[0])
+        finally:
+            _release(conn)
+
+    @staticmethod
+    def update_labor_norm(
+        norm_id: int,
+        *,
+        effective_from: date,
+        effective_to: Optional[date],
+        labor_hours_per_unit: float,
+        default_productivity_factor: float,
+        source_name: Optional[str],
+        source_code: Optional[str],
+        source_version: Optional[str],
+        note: Optional[str],
+        user_id: Optional[int],
+    ) -> None:
+        conn = None
+        try:
+            conn = _conn()
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE public.gpr_labor_norms
+                    SET
+                        effective_from = %s,
+                        effective_to = %s,
+                        labor_hours_per_unit = %s,
+                        default_productivity_factor = %s,
+                        source_name = %s,
+                        source_code = %s,
+                        source_version = %s,
+                        note = %s,
+                        updated_by = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        effective_from,
+                        effective_to,
+                        labor_hours_per_unit,
+                        default_productivity_factor,
+                        (source_name or "").strip() or None,
+                        (source_code or "").strip() or None,
+                        (source_version or "").strip() or None,
+                        (note or "").strip() or None,
+                        user_id,
+                        norm_id,
+                    ),
+                )
+        finally:
+            _release(conn)
+
+    @staticmethod
+    def toggle_labor_norm(
+        norm_id: int,
+        user_id: Optional[int],
+    ) -> None:
+        conn = None
+        try:
+            conn = _conn()
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE public.gpr_labor_norms
+                    SET
+                        is_active = NOT is_active,
+                        updated_by = %s
+                    WHERE id = %s
+                    """,
+                    (user_id, norm_id),
+                )
+        finally:
+            _release(conn)
 
 # ═══════════════════════════════════════════════════════════════
 #  DIALOGS
@@ -672,6 +1056,333 @@ class _TemplateTaskDialog(simpledialog.Dialog):
         }
         return True
 
+class _WorkItemDialog(simpledialog.Dialog):
+    """Создание и редактирование конкретной работы."""
+
+    def __init__(
+        self,
+        parent,
+        work_types: List[Dict[str, Any]],
+        uoms: List[Dict[str, Any]],
+        init: Optional[Dict[str, Any]] = None,
+    ):
+        self.work_types = work_types or []
+        self.uoms = uoms or []
+        self.init = init or {}
+        self.result: Optional[Dict[str, Any]] = None
+        super().__init__(parent, title="Карточка работы")
+
+    def body(self, master):
+        master.grid_columnconfigure(1, weight=1)
+
+        self.var_code = tk.StringVar(value=self.init.get("code", "") or "")
+        self.var_name = tk.StringVar(value=self.init.get("name", "") or "")
+        self.var_sort = tk.StringVar(
+            value=str(self.init.get("sort_order", 100))
+        )
+
+        tk.Label(master, text="Тип работ *:").grid(
+            row=0, column=0, sticky="e", padx=(0, 8), pady=5
+        )
+        self.cmb_work_type = ttk.Combobox(
+            master,
+            state="readonly",
+            width=48,
+            values=[
+                f"{w.get('code') or '—'} — {w['name']}"
+                for w in self.work_types
+            ],
+        )
+        self.cmb_work_type.grid(
+            row=0, column=1, sticky="ew", pady=5
+        )
+
+        tk.Label(master, text="Код работы:").grid(
+            row=1, column=0, sticky="e", padx=(0, 8), pady=5
+        )
+        self.ent_code = ttk.Entry(
+            master,
+            textvariable=self.var_code,
+            width=50,
+        )
+        self.ent_code.grid(row=1, column=1, sticky="ew", pady=5)
+
+        tk.Label(master, text="Наименование *:").grid(
+            row=2, column=0, sticky="e", padx=(0, 8), pady=5
+        )
+        self.ent_name = ttk.Entry(
+            master,
+            textvariable=self.var_name,
+            width=50,
+        )
+        self.ent_name.grid(row=2, column=1, sticky="ew", pady=5)
+
+        tk.Label(master, text="Ед. измерения *:").grid(
+            row=3, column=0, sticky="e", padx=(0, 8), pady=5
+        )
+        self.cmb_uom = ttk.Combobox(
+            master,
+            state="readonly",
+            width=48,
+            values=[
+                f"{u['code']} — {u['name']}"
+                for u in self.uoms
+            ],
+        )
+        self.cmb_uom.grid(row=3, column=1, sticky="ew", pady=5)
+
+        tk.Label(master, text="Порядок:").grid(
+            row=4, column=0, sticky="e", padx=(0, 8), pady=5
+        )
+        self.ent_sort = ttk.Entry(
+            master,
+            textvariable=self.var_sort,
+            width=12,
+        )
+        self.ent_sort.grid(row=4, column=1, sticky="w", pady=5)
+
+        tk.Label(master, text="Примечание:").grid(
+            row=5, column=0, sticky="ne", padx=(0, 8), pady=5
+        )
+        self.txt_note = tk.Text(master, height=4, width=50, wrap="word")
+        self.txt_note.grid(row=5, column=1, sticky="ew", pady=5)
+        self.txt_note.insert("1.0", self.init.get("note", "") or "")
+
+        work_type_id = self.init.get("work_type_id")
+        for i, row in enumerate(self.work_types):
+            if work_type_id is not None and int(row["id"]) == int(work_type_id):
+                self.cmb_work_type.current(i)
+                break
+
+        uom_code = self.init.get("uom_code")
+        for i, row in enumerate(self.uoms):
+            if uom_code and row["code"] == uom_code:
+                self.cmb_uom.current(i)
+                break
+
+        return self.cmb_work_type
+
+    def validate(self):
+        wt_idx = self.cmb_work_type.current()
+        if wt_idx < 0:
+            messagebox.showwarning(
+                "Работа",
+                "Выберите тип работ.",
+                parent=self,
+            )
+            return False
+
+        name = self.var_name.get().strip()
+        if not name:
+            messagebox.showwarning(
+                "Работа",
+                "Введите наименование работы.",
+                parent=self,
+            )
+            return False
+
+        uom_idx = self.cmb_uom.current()
+        if uom_idx < 0:
+            messagebox.showwarning(
+                "Работа",
+                "Выберите единицу измерения.",
+                parent=self,
+            )
+            return False
+
+        try:
+            sort_order = int(self.var_sort.get().strip() or "0")
+        except ValueError:
+            messagebox.showwarning(
+                "Работа",
+                "Порядок сортировки должен быть целым числом.",
+                parent=self,
+            )
+            return False
+
+        self.result = {
+            "work_type_id": int(self.work_types[wt_idx]["id"]),
+            "code": self.var_code.get().strip(),
+            "name": name,
+            "uom_code": self.uoms[uom_idx]["code"],
+            "sort_order": sort_order,
+            "note": self.txt_note.get("1.0", "end").strip(),
+        }
+        return True
+
+
+class _LaborNormDialog(simpledialog.Dialog):
+    """Создание и редактирование версии норматива ЗТР."""
+
+    def __init__(
+        self,
+        parent,
+        work_item: Dict[str, Any],
+        init: Optional[Dict[str, Any]] = None,
+    ):
+        self.work_item = work_item
+        self.init = init or {}
+        self.result: Optional[Dict[str, Any]] = None
+        super().__init__(parent, title="Норматив ЗТР")
+
+    def body(self, master):
+        master.grid_columnconfigure(1, weight=1)
+
+        header = (
+            f"Работа: {self.work_item.get('name')}\n"
+            f"Тип: {self.work_item.get('work_type_name') or '—'}\n"
+            f"Ед. изм.: {self.work_item.get('uom_code') or '—'}"
+        )
+        tk.Label(
+            master,
+            text=header,
+            foreground=C["text2"],
+            justify="left",
+            anchor="w",
+        ).grid(
+            row=0,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(0, 10),
+        )
+
+        self.var_from = tk.StringVar(
+            value=_fmt_date_iso(
+                self.init.get("effective_from") or _today()
+            )
+        )
+        self.var_to = tk.StringVar(
+            value=_fmt_date_iso(self.init.get("effective_to"))
+        )
+        self.var_labor = tk.StringVar(
+            value=_fmt_qty(self.init.get("labor_hours_per_unit"))
+        )
+        self.var_factor = tk.StringVar(
+            value=_fmt_qty(
+                self.init.get("default_productivity_factor", 1)
+            )
+        )
+        self.var_source_name = tk.StringVar(
+            value=self.init.get("source_name", "") or ""
+        )
+        self.var_source_code = tk.StringVar(
+            value=self.init.get("source_code", "") or ""
+        )
+        self.var_source_version = tk.StringVar(
+            value=self.init.get("source_version", "") or ""
+        )
+
+        fields = [
+            ("Действует с *:", self.var_from, 16),
+            ("Действует по:", self.var_to, 16),
+            ("ЗТР, чел.-ч/ед. *:", self.var_labor, 16),
+            ("Коэффициент *:", self.var_factor, 16),
+            ("Источник:", self.var_source_name, 42),
+            ("Код источника:", self.var_source_code, 42),
+            ("Редакция / версия:", self.var_source_version, 42),
+        ]
+
+        for i, (label, variable, width) in enumerate(fields, start=1):
+            tk.Label(master, text=label).grid(
+                row=i,
+                column=0,
+                sticky="e",
+                padx=(0, 8),
+                pady=4,
+            )
+            ttk.Entry(
+                master,
+                textvariable=variable,
+                width=width,
+            ).grid(
+                row=i,
+                column=1,
+                sticky="ew",
+                pady=4,
+            )
+
+        tk.Label(master, text="Примечание:").grid(
+            row=8,
+            column=0,
+            sticky="ne",
+            padx=(0, 8),
+            pady=4,
+        )
+        self.txt_note = tk.Text(master, height=4, width=44, wrap="word")
+        self.txt_note.grid(row=8, column=1, sticky="ew", pady=4)
+        self.txt_note.insert("1.0", self.init.get("note", "") or "")
+
+        tk.Label(
+            master,
+            text=(
+                "Формат дат: ГГГГ-ММ-ДД или ДД.ММ.ГГГГ.\n"
+                "Пустая дата «Действует по» означает бессрочную норму."
+            ),
+            fg=C["text3"],
+            justify="left",
+            anchor="w",
+        ).grid(
+            row=9,
+            column=0,
+            columnspan=2,
+            sticky="w",
+            pady=(8, 0),
+        )
+
+        return master.nametowidget(master.winfo_children()[2])
+
+    def validate(self):
+        try:
+            effective_from = _parse_date_iso(
+                self.var_from.get(),
+                "Дата начала действия",
+            )
+
+            effective_to = None
+            if self.var_to.get().strip():
+                effective_to = _parse_date_iso(
+                    self.var_to.get(),
+                    "Дата окончания действия",
+                )
+
+            if effective_to and effective_to < effective_from:
+                raise ValueError(
+                    "Дата окончания действия не может быть раньше даты начала."
+                )
+
+            labor_hours_per_unit = _safe_float(self.var_labor.get())
+            if labor_hours_per_unit is None or labor_hours_per_unit <= 0:
+                raise ValueError(
+                    "Норматив ЗТР должен быть числом больше 0."
+                )
+
+            factor = _safe_float(self.var_factor.get())
+            if factor is None or factor <= 0:
+                raise ValueError(
+                    "Коэффициент должен быть числом больше 0."
+                )
+
+            self.result = {
+                "effective_from": effective_from,
+                "effective_to": effective_to,
+                "labor_hours_per_unit": labor_hours_per_unit,
+                "default_productivity_factor": factor,
+                "source_name": self.var_source_name.get().strip(),
+                "source_code": self.var_source_code.get().strip(),
+                "source_version": self.var_source_version.get().strip(),
+                "note": self.txt_note.get("1.0", "end").strip(),
+            }
+            return True
+
+        except ValueError as exc:
+            messagebox.showwarning(
+                "Норматив ЗТР",
+                str(exc),
+                parent=self,
+            )
+            return False
+
 # ═══════════════════════════════════════════════════════════════
 #  PAGE
 # ═══════════════════════════════════════════════════════════════
@@ -713,6 +1424,10 @@ class GprDictionariesPage(tk.Frame):
         tab_uom = tk.Frame(self.nb, bg=C["panel"])
         self.nb.add(tab_uom, text="  Единицы измерения  ")
         self._build_uom_tab(tab_uom)
+
+        tab_labor = tk.Frame(self.nb, bg=C["panel"])
+        self.nb.add(tab_labor, text="  Работы и нормы ЗТР  ")
+        self._build_labor_tab(tab_labor)
 
         tab_tpl = tk.Frame(self.nb, bg=C["panel"])
         self.nb.add(tab_tpl, text="  Шаблоны  ")
@@ -1009,6 +1724,689 @@ class GprDictionariesPage(tk.Frame):
         finally:
             _release(conn)
         self._uom_load()
+
+    # ══════════════════════════════════════════════════════
+    #  РАБОТЫ И НОРМЫ ЗТР
+    # ══════════════════════════════════════════════════════
+    def _build_labor_tab(self, parent):
+        self._labor_items_data: List[Dict[str, Any]] = []
+        self._labor_norms_data: List[Dict[str, Any]] = []
+        self._labor_wt_cache: List[Dict[str, Any]] = []
+        self._labor_uom_cache: List[Dict[str, Any]] = []
+
+        search_bar = tk.Frame(parent, bg=C["panel"])
+        search_bar.pack(fill="x", padx=8, pady=(8, 4))
+
+        tk.Label(
+            search_bar,
+            text="Поиск работы:",
+            bg=C["panel"],
+        ).pack(side="left")
+
+        self.var_labor_search = tk.StringVar()
+        ent_search = ttk.Entry(
+            search_bar,
+            textvariable=self.var_labor_search,
+            width=36,
+        )
+        ent_search.pack(side="left", padx=(6, 8))
+        ent_search.bind("<KeyRelease>", lambda _e: self._labor_load_items())
+
+        ttk.Button(
+            search_bar,
+            text="🔃 Обновить",
+            command=self._labor_load_items,
+        ).pack(side="left", padx=2)
+
+        self.lbl_labor_summary = tk.Label(
+            search_bar,
+            text="",
+            bg=C["panel"],
+            fg=C["text2"],
+            font=("Segoe UI", 8),
+        )
+        self.lbl_labor_summary.pack(side="right", padx=8)
+
+        pw = tk.PanedWindow(
+            parent,
+            orient="horizontal",
+            sashrelief="raised",
+            bg=C["bg"],
+        )
+        pw.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        left = tk.Frame(pw, bg=C["panel"])
+        right = tk.Frame(pw, bg=C["panel"])
+
+        pw.add(left, minsize=560)
+        pw.add(right, minsize=520)
+
+        # ── Левая панель: работы ──
+        work_box = tk.LabelFrame(
+            left,
+            text=" Конкретные работы ",
+            bg=C["panel"],
+            padx=8,
+            pady=6,
+        )
+        work_box.pack(fill="both", expand=True)
+
+        bar_work = tk.Frame(work_box, bg=C["panel"])
+        bar_work.pack(fill="x")
+
+        ttk.Button(
+            bar_work,
+            text="➕ Добавить работу",
+            command=self._labor_add_item,
+        ).pack(side="left", padx=2)
+
+        ttk.Button(
+            bar_work,
+            text="✏️ Редактировать",
+            command=self._labor_edit_item,
+        ).pack(side="left", padx=2)
+
+        ttk.Button(
+            bar_work,
+            text="🔄 Вкл/Выкл",
+            command=self._labor_toggle_item,
+        ).pack(side="left", padx=2)
+
+        cols = (
+            "type",
+            "code",
+            "name",
+            "uom",
+            "norm",
+            "from",
+            "active",
+        )
+        self.labor_item_tree = ttk.Treeview(
+            work_box,
+            columns=cols,
+            show="headings",
+            selectmode="browse",
+            height=20,
+        )
+
+        for col, title, width, anchor in [
+            ("type", "Тип работ", 160, "w"),
+            ("code", "Код", 90, "w"),
+            ("name", "Наименование работы", 250, "w"),
+            ("uom", "Ед.", 60, "center"),
+            ("norm", "ЗТР", 80, "e"),
+            ("from", "Действует с", 95, "center"),
+            ("active", "Статус", 75, "center"),
+        ]:
+            self.labor_item_tree.heading(col, text=title)
+            self.labor_item_tree.column(col, width=width, anchor=anchor)
+
+        vsb_items = ttk.Scrollbar(
+            work_box,
+            orient="vertical",
+            command=self.labor_item_tree.yview,
+        )
+        self.labor_item_tree.configure(yscrollcommand=vsb_items.set)
+
+        self.labor_item_tree.pack(
+            side="left",
+            fill="both",
+            expand=True,
+            pady=(6, 0),
+        )
+        vsb_items.pack(side="right", fill="y", pady=(6, 0))
+
+        self.labor_item_tree.tag_configure(
+            "inactive",
+            foreground="#aaa",
+        )
+        self.labor_item_tree.tag_configure(
+            "without_norm",
+            background="#fff3e0",
+        )
+        self.labor_item_tree.bind(
+            "<<TreeviewSelect>>",
+            lambda _e: self._labor_load_norms(),
+        )
+        self.labor_item_tree.bind(
+            "<Double-1>",
+            lambda _e: self._labor_edit_item(),
+        )
+
+        # ── Правая панель: нормы ──
+        norm_box = tk.LabelFrame(
+            right,
+            text=" Нормативы ЗТР выбранной работы ",
+            bg=C["panel"],
+            padx=8,
+            pady=6,
+        )
+        norm_box.pack(fill="both", expand=True)
+
+        self.lbl_labor_item_info = tk.Label(
+            norm_box,
+            text="Выберите работу в списке слева.",
+            bg=C["panel"],
+            fg=C["text2"],
+            justify="left",
+            anchor="w",
+        )
+        self.lbl_labor_item_info.pack(fill="x", pady=(0, 6))
+
+        bar_norm = tk.Frame(norm_box, bg=C["panel"])
+        bar_norm.pack(fill="x")
+
+        ttk.Button(
+            bar_norm,
+            text="➕ Новая норма",
+            command=self._labor_add_norm,
+        ).pack(side="left", padx=2)
+
+        ttk.Button(
+            bar_norm,
+            text="✏️ Редактировать",
+            command=self._labor_edit_norm,
+        ).pack(side="left", padx=2)
+
+        ttk.Button(
+            bar_norm,
+            text="🔄 Вкл/Выкл",
+            command=self._labor_toggle_norm,
+        ).pack(side="left", padx=2)
+
+        cols_norm = (
+            "from",
+            "to",
+            "labor",
+            "factor",
+            "source",
+            "status",
+        )
+        self.labor_norm_tree = ttk.Treeview(
+            norm_box,
+            columns=cols_norm,
+            show="headings",
+            selectmode="browse",
+            height=20,
+        )
+
+        for col, title, width, anchor in [
+            ("from", "Действует с", 100, "center"),
+            ("to", "Действует по", 100, "center"),
+            ("labor", "ЗТР, чел.-ч/ед.", 110, "e"),
+            ("factor", "Коэфф.", 75, "e"),
+            ("source", "Источник", 190, "w"),
+            ("status", "Статус", 75, "center"),
+        ]:
+            self.labor_norm_tree.heading(col, text=title)
+            self.labor_norm_tree.column(col, width=width, anchor=anchor)
+
+        vsb_norms = ttk.Scrollbar(
+            norm_box,
+            orient="vertical",
+            command=self.labor_norm_tree.yview,
+        )
+        self.labor_norm_tree.configure(yscrollcommand=vsb_norms.set)
+
+        self.labor_norm_tree.pack(
+            side="left",
+            fill="both",
+            expand=True,
+            pady=(6, 0),
+        )
+        vsb_norms.pack(side="right", fill="y", pady=(6, 0))
+
+        self.labor_norm_tree.tag_configure(
+            "inactive",
+            foreground="#aaa",
+        )
+        self.labor_norm_tree.tag_configure(
+            "current",
+            background="#e8f5e9",
+        )
+        self.labor_norm_tree.bind(
+            "<Double-1>",
+            lambda _e: self._labor_edit_norm(),
+        )
+
+        self._labor_load_caches()
+        self._labor_load_items()
+
+    def _labor_load_caches(self):
+        conn = None
+        try:
+            conn = _conn()
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, COALESCE(code, '') AS code, name, sort_order
+                    FROM public.gpr_work_types
+                    WHERE is_active = true
+                    ORDER BY sort_order, name
+                    """
+                )
+                self._labor_wt_cache = [
+                    dict(row) for row in cur.fetchall()
+                ]
+
+                cur.execute(
+                    """
+                    SELECT code, name
+                    FROM public.gpr_uom
+                    ORDER BY code
+                    """
+                )
+                self._labor_uom_cache = [
+                    dict(row) for row in cur.fetchall()
+                ]
+        finally:
+            _release(conn)
+
+    def _labor_load_items(self):
+        selected_id = None
+        current = self._labor_item_sel()
+        if current:
+            selected_id = int(current["id"])
+
+        try:
+            self._labor_items_data = GprLaborDictionaryService.load_work_items(
+                self.var_labor_search.get()
+                if hasattr(self, "var_labor_search")
+                else ""
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Нормы ЗТР",
+                f"Ошибка загрузки работ:\n{exc}",
+                parent=self,
+            )
+            return
+
+        self.labor_item_tree.delete(
+            *self.labor_item_tree.get_children()
+        )
+
+        selected_iid = None
+        no_norm_count = 0
+
+        for item in self._labor_items_data:
+            norm = item.get("current_labor_hours_per_unit")
+            if norm is None:
+                no_norm_count += 1
+
+            active = "Активна" if item.get("is_active") else "Откл."
+            tags: Tuple[str, ...] = ()
+
+            if not item.get("is_active"):
+                tags = ("inactive",)
+            elif norm is None:
+                tags = ("without_norm",)
+
+            iid = self.labor_item_tree.insert(
+                "",
+                "end",
+                values=(
+                    item.get("work_type_name") or "",
+                    item.get("code") or "",
+                    item.get("name") or "",
+                    item.get("uom_code") or "",
+                    _fmt_qty(norm),
+                    _fmt_date_iso(item.get("current_norm_from")),
+                    active,
+                ),
+                tags=tags,
+            )
+
+            if selected_id and int(item["id"]) == selected_id:
+                selected_iid = iid
+
+        self.lbl_labor_summary.config(
+            text=(
+                f"Работ: {len(self._labor_items_data)}"
+                f"  |  Без актуальной нормы: {no_norm_count}"
+            )
+        )
+
+        if selected_iid:
+            self.labor_item_tree.selection_set(selected_iid)
+            self.labor_item_tree.focus(selected_iid)
+            self.labor_item_tree.see(selected_iid)
+            self._labor_load_norms()
+        else:
+            self._labor_clear_norms()
+
+    def _labor_item_sel(self) -> Optional[Dict[str, Any]]:
+        sel = self.labor_item_tree.selection()
+        if not sel:
+            return None
+
+        idx = self.labor_item_tree.index(sel[0])
+        if 0 <= idx < len(self._labor_items_data):
+            return self._labor_items_data[idx]
+
+        return None
+
+    def _labor_norm_sel(self) -> Optional[Dict[str, Any]]:
+        sel = self.labor_norm_tree.selection()
+        if not sel:
+            return None
+
+        idx = self.labor_norm_tree.index(sel[0])
+        if 0 <= idx < len(self._labor_norms_data):
+            return self._labor_norms_data[idx]
+
+        return None
+
+    def _labor_clear_norms(self):
+        self.labor_norm_tree.delete(
+            *self.labor_norm_tree.get_children()
+        )
+        self._labor_norms_data = []
+        self.lbl_labor_item_info.config(
+            text="Выберите работу в списке слева."
+        )
+
+    def _labor_load_norms(self):
+        item = self._labor_item_sel()
+        if not item:
+            self._labor_clear_norms()
+            return
+
+        try:
+            self._labor_norms_data = GprLaborDictionaryService.load_norms(
+                int(item["id"])
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Нормы ЗТР",
+                f"Ошибка загрузки норм:\n{exc}",
+                parent=self,
+            )
+            return
+
+        self.labor_norm_tree.delete(
+            *self.labor_norm_tree.get_children()
+        )
+
+        self.lbl_labor_item_info.config(
+            text=(
+                f"Работа: {item.get('name') or '—'}\n"
+                f"Тип работ: {item.get('work_type_name') or '—'}\n"
+                f"Единица измерения: {item.get('uom_code') or '—'}"
+            )
+        )
+
+        today = _today()
+
+        for norm in self._labor_norms_data:
+            is_current = (
+                bool(norm.get("is_active"))
+                and norm.get("effective_from") <= today
+                and (
+                    norm.get("effective_to") is None
+                    or norm.get("effective_to") >= today
+                )
+            )
+
+            active = "Активна" if norm.get("is_active") else "Откл."
+            source_parts = [
+                norm.get("source_name") or "",
+                norm.get("source_code") or "",
+                norm.get("source_version") or "",
+            ]
+            source = " | ".join(
+                x for x in source_parts if x.strip()
+            )
+
+            tags: Tuple[str, ...] = ()
+            if not norm.get("is_active"):
+                tags = ("inactive",)
+            elif is_current:
+                tags = ("current",)
+
+            self.labor_norm_tree.insert(
+                "",
+                "end",
+                values=(
+                    _fmt_date_iso(norm.get("effective_from")),
+                    _fmt_date_iso(norm.get("effective_to")) or "Бессрочно",
+                    _fmt_qty(norm.get("labor_hours_per_unit")),
+                    _fmt_qty(norm.get("default_productivity_factor")),
+                    source,
+                    active,
+                ),
+                tags=tags,
+            )
+
+    def _labor_add_item(self):
+        if not self._labor_wt_cache or not self._labor_uom_cache:
+            self._labor_load_caches()
+
+        if not self._labor_wt_cache:
+            messagebox.showwarning(
+                "Работы",
+                "Нет активных типов работ.",
+                parent=self,
+            )
+            return
+
+        if not self._labor_uom_cache:
+            messagebox.showwarning(
+                "Работы",
+                "Нет единиц измерения.",
+                parent=self,
+            )
+            return
+
+        dlg = _WorkItemDialog(
+            self,
+            work_types=self._labor_wt_cache,
+            uoms=self._labor_uom_cache,
+            init={"sort_order": 100},
+        )
+        if not dlg.result:
+            return
+
+        try:
+            GprLaborDictionaryService.create_work_item(
+                **dlg.result,
+                user_id=_user_id(self.app_ref),
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Работы",
+                f"Не удалось создать работу:\n{exc}",
+                parent=self,
+            )
+            return
+
+        self._labor_load_items()
+
+    def _labor_edit_item(self):
+        item = self._labor_item_sel()
+        if not item:
+            messagebox.showinfo(
+                "Работы",
+                "Выберите работу.",
+                parent=self,
+            )
+            return
+
+        self._labor_load_caches()
+
+        dlg = _WorkItemDialog(
+            self,
+            work_types=self._labor_wt_cache,
+            uoms=self._labor_uom_cache,
+            init=item,
+        )
+        if not dlg.result:
+            return
+
+        try:
+            GprLaborDictionaryService.update_work_item(
+                int(item["id"]),
+                **dlg.result,
+                user_id=_user_id(self.app_ref),
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Работы",
+                f"Не удалось изменить работу:\n{exc}",
+                parent=self,
+            )
+            return
+
+        self._labor_load_items()
+
+    def _labor_toggle_item(self):
+        item = self._labor_item_sel()
+        if not item:
+            messagebox.showinfo(
+                "Работы",
+                "Выберите работу.",
+                parent=self,
+            )
+            return
+
+        action = "отключить" if item.get("is_active") else "включить"
+        if not messagebox.askyesno(
+            "Работы",
+            f"{action.capitalize()} работу «{item.get('name')}»?",
+            parent=self,
+        ):
+            return
+
+        try:
+            GprLaborDictionaryService.toggle_work_item(
+                int(item["id"]),
+                _user_id(self.app_ref),
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Работы",
+                f"Не удалось изменить статус работы:\n{exc}",
+                parent=self,
+            )
+            return
+
+        self._labor_load_items()
+
+    def _labor_add_norm(self):
+        item = self._labor_item_sel()
+        if not item:
+            messagebox.showinfo(
+                "Нормы ЗТР",
+                "Сначала выберите работу.",
+                parent=self,
+            )
+            return
+
+        dlg = _LaborNormDialog(self, item)
+        if not dlg.result:
+            return
+
+        try:
+            GprLaborDictionaryService.create_labor_norm(
+                work_item_id=int(item["id"]),
+                **dlg.result,
+                user_id=_user_id(self.app_ref),
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Нормы ЗТР",
+                (
+                    "Не удалось создать норматив.\n\n"
+                    f"{exc}\n\n"
+                    "Проверьте, что период действия не пересекается "
+                    "с уже существующей нормой."
+                ),
+                parent=self,
+            )
+            return
+
+        self._labor_load_items()
+
+    def _labor_edit_norm(self):
+        item = self._labor_item_sel()
+        norm = self._labor_norm_sel()
+
+        if not item:
+            messagebox.showinfo(
+                "Нормы ЗТР",
+                "Сначала выберите работу.",
+                parent=self,
+            )
+            return
+
+        if not norm:
+            messagebox.showinfo(
+                "Нормы ЗТР",
+                "Выберите норматив.",
+                parent=self,
+            )
+            return
+
+        dlg = _LaborNormDialog(self, item, init=norm)
+        if not dlg.result:
+            return
+
+        try:
+            GprLaborDictionaryService.update_labor_norm(
+                int(norm["id"]),
+                **dlg.result,
+                user_id=_user_id(self.app_ref),
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Нормы ЗТР",
+                (
+                    "Не удалось изменить норматив.\n\n"
+                    f"{exc}\n\n"
+                    "Проверьте период действия нормы."
+                ),
+                parent=self,
+            )
+            return
+
+        self._labor_load_items()
+
+    def _labor_toggle_norm(self):
+        norm = self._labor_norm_sel()
+        if not norm:
+            messagebox.showinfo(
+                "Нормы ЗТР",
+                "Выберите норматив.",
+                parent=self,
+            )
+            return
+
+        action = "отключить" if norm.get("is_active") else "включить"
+
+        if not messagebox.askyesno(
+            "Нормы ЗТР",
+            (
+                f"{action.capitalize()} норматив "
+                f"{_fmt_qty(norm.get('labor_hours_per_unit'))} чел.-ч/ед.?"
+            ),
+            parent=self,
+        ):
+            return
+
+        try:
+            GprLaborDictionaryService.toggle_labor_norm(
+                int(norm["id"]),
+                _user_id(self.app_ref),
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Нормы ЗТР",
+                f"Не удалось изменить статус норматива:\n{exc}",
+                parent=self,
+            )
+            return
+
+        self._labor_load_items()
 
     # ══════════════════════════════════════════════════════
     #  ШАБЛОНЫ + ЗАДАЧИ ШАБЛОНОВ (professional)
