@@ -349,7 +349,7 @@ class GprPlanningService:
                         planned_workers_count,
                         shift_hours,
                         is_manual,
-                        comment,
+                        comment
                     )
                     VALUES %s
                     ON CONFLICT (task_id, period_type, period_start)
