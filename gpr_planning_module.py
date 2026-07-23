@@ -3,27 +3,115 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 from psycopg2.extras import RealDictCursor, execute_values
 
-from gpr_module import (
-    _conn,
-    _release,
-    _fmt_date,
-    _parse_date,
-    _fmt_qty,
-    _safe_float,
-    _to_date,
-    C,
-)
-
 logger = logging.getLogger(__name__)
 
+_db_pool = None
+
 PERIOD_TYPE_WEEK = "week"
+
+# Независимая палитра модуля.
+# При желании позднее можно вынести общую тему в отдельный файл.
+C = {
+    "bg": "#edf1f5",
+    "panel": "#f7f9fb",
+    "text": "#1f2937",
+    "text2": "#5b6776",
+    "text3": "#7f8a98",
+    "accent": "#2f74c0",
+    "success": "#2f855a",
+    "warning": "#c97a20",
+    "error": "#c05656",
+}
+
+
+def set_db_pool(pool) -> None:
+    """
+    Вызывается из main_app.py после инициализации подключения к БД.
+    """
+    global _db_pool
+    _db_pool = pool
+
+
+def _conn():
+    """Получает соединение из центрального пула приложения."""
+    if _db_pool is None:
+        raise RuntimeError(
+            "Пул БД не передан в gpr_planning_module. "
+            "Проверьте вызов set_db_pool()."
+        )
+    return _db_pool.getconn()
+
+
+def _release(conn) -> None:
+    """Возвращает соединение в пул."""
+    if conn is not None and _db_pool is not None:
+        _db_pool.putconn(conn)
+
+
+def _as_date(value: Any) -> Optional[date]:
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        return value.date()
+
+    if isinstance(value, date):
+        return value
+
+    if isinstance(value, str):
+        value = value.strip()
+
+        for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(value, fmt).date()
+            except ValueError:
+                pass
+
+    return None
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+
+    try:
+        return float(str(value).replace(",", ".").replace(" ", ""))
+    except (ValueError, TypeError):
+        return None
+
+
+def _fmt_date(value: Any) -> str:
+    day = _as_date(value)
+    return day.strftime("%d.%m.%Y") if day else "—"
+
+
+def _fmt_qty(value: Any, digits: int = 3) -> str:
+    number = _safe_float(value)
+
+    if number is None:
+        return "—"
+
+    text = f"{number:.{digits}f}".rstrip("0").rstrip(".")
+    return text.replace(".", ",")
+
+
+def _round_qty(value: Any, digits: int = 3) -> float:
+    number = _safe_float(value) or 0.0
+    quant = Decimal("1").scaleb(-digits)
+
+    return float(
+        Decimal(str(number)).quantize(
+            quant,
+            rounding=ROUND_HALF_UP,
+        )
+    )
 
 
 # ═══════════════════════════════════════════════════════════════
