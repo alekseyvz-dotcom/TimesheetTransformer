@@ -1120,7 +1120,7 @@ class GprService:
                         work_item_id = None
                         labor_norm_id = None
                         labor_hours_per_unit = None
-                        productivity_factor = None
+                        productivity_factor = 1.0
 
                         if row_kind == "task":
                             raw_work_item_id = t.get("work_item_id")
