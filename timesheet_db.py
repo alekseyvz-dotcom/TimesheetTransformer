@@ -2093,6 +2093,93 @@ def load_timesheet_cell_audit(
 
         return [dict(row) for row in cur.fetchall()]
 
+from typing import Any, Optional
+
+
+def get_timesheet_lock_level(header_id: int) -> int:
+    with db_cursor(dict_rows=True) as (_conn, cur):
+        cur.execute(
+            """
+            SELECT lock_level
+            FROM public.timesheet_headers
+            WHERE id = %s
+            """,
+            (int(header_id),),
+        )
+        row = cur.fetchone()
+
+    return int(row["lock_level"]) if row else 0
+
+
+def set_timesheet_lock(
+    header_id: int,
+    lock_level: int,
+    locked_by: int,
+) -> dict[str, Any]:
+    lock_level = int(lock_level)
+
+    if lock_level not in (0, 1, 2):
+        raise ValueError("Недопустимый уровень блокировки.")
+
+    with db_cursor(dict_rows=True) as (_conn, cur):
+        cur.execute(
+            """
+            UPDATE public.timesheet_headers
+            SET
+                lock_level = %s,
+                locked_at = CASE
+                    WHEN %s = 0 THEN NULL
+                    ELSE now()
+                END,
+                locked_by = CASE
+                    WHEN %s = 0 THEN NULL
+                    ELSE %s
+                END,
+                updated_at = now()
+            WHERE id = %s
+            RETURNING
+                id,
+                lock_level,
+                locked_at,
+                locked_by
+            """,
+            (
+                lock_level,
+                lock_level,
+                lock_level,
+                locked_by,
+                int(header_id),
+            ),
+        )
+        row = cur.fetchone()
+
+    if not row:
+        raise RuntimeError("Табель не найден.")
+
+    return row
+
+def unlock_timesheet(header_id: int) -> dict[str, Any]:
+    with db_cursor(dict_rows=True) as (_conn, cur):
+        cur.execute(
+            """
+            UPDATE public.timesheet_headers
+            SET
+                lock_level = 0,
+                locked_at = NULL,
+                locked_by = NULL,
+                updated_at = now()
+            WHERE id = %s
+            RETURNING id, lock_level
+            """,
+            (int(header_id),),
+        )
+        row = cur.fetchone()
+
+    if not row:
+        raise RuntimeError("Табель не найден.")
+
+    return row
+
 # ============================================================
 # Экспортируемые имена
 # ============================================================
