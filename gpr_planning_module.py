@@ -54,8 +54,8 @@ def _release(conn) -> None:
     if conn is not None and _db_pool is not None:
         _db_pool.putconn(conn)
 
-
 def _as_date(value: Any) -> Optional[date]:
+    """Безопасное преобразование значения в date."""
     if value is None:
         return None
 
@@ -68,29 +68,108 @@ def _as_date(value: Any) -> Optional[date]:
     if isinstance(value, str):
         value = value.strip()
 
-        for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
+        if not value:
+            return None
+
+        for fmt in (
+            "%d.%m.%Y",
+            "%Y-%m-%d",
+            "%Y-%m-%d %H:%M:%S",
+        ):
             try:
                 return datetime.strptime(value, fmt).date()
             except ValueError:
-                pass
+                continue
 
     return None
 
-
 def _safe_float(value: Any) -> Optional[float]:
-    if value is None or value == "":
+    """Безопасное преобразование значения в float."""
+    if value is None:
         return None
 
+    if isinstance(value, str):
+        value = value.strip()
+
+        if not value:
+            return None
+
+        value = value.replace(",", ".").replace(" ", "")
+
     try:
-        return float(str(value).replace(",", ".").replace(" ", ""))
+        return float(value)
     except (ValueError, TypeError):
         return None
 
+def _safe_int(value: Any) -> Optional[int]:
+    """Безопасное преобразование значения в целое число."""
+    number = _safe_float(value)
+
+    if number is None:
+        return None
+
+    if int(number) != number:
+        return None
+
+    return int(number)
 
 def _fmt_date(value: Any) -> str:
     day = _as_date(value)
     return day.strftime("%d.%m.%Y") if day else "—"
 
+def _get_task_workers(task: Dict[str, Any]) -> Optional[int]:
+    """
+    Получает количество плановых работников из задачи.
+
+    Поддерживаются разные возможные названия поля,
+    чтобы модуль не зависел от конкретного alias в SQL-запросе.
+    """
+
+    worker_keys = (
+        "planned_workers_count",
+        "planned_workers",
+        "workers_count",
+        "workers",
+        "plan_workers_count",
+        "brigade_count",
+        "planned_team_size",
+    )
+
+    for key in worker_keys:
+        value = task.get(key)
+
+        if value is None or value == "":
+            continue
+
+        workers = _safe_int(value)
+
+        if workers is not None and workers > 0:
+            return workers
+
+    return None
+
+
+def _get_task_shift_hours(
+    task: Dict[str, Any],
+) -> float:
+    """
+    Получает длительность смены.
+    Если значение не задано, используется 8 часов.
+    """
+
+    shift_keys = (
+        "shift_hours",
+        "planned_shift_hours",
+        "work_shift_hours",
+    )
+
+    for key in shift_keys:
+        value = _safe_float(task.get(key))
+
+        if value is not None and value > 0:
+            return value
+
+    return 8.0
 
 def _fmt_qty(value: Any, digits: int = 3) -> str:
     number = _safe_float(value)
@@ -102,8 +181,16 @@ def _fmt_qty(value: Any, digits: int = 3) -> str:
     return text.replace(".", ",")
 
 
-def _round_qty(value: Any, digits: int = 3) -> float:
-    number = _safe_float(value) or 0.0
+def _round_qty(
+    value: Any,
+    digits: int = 3,
+) -> float:
+    """Округление через Decimal без ошибок float."""
+    number = _safe_float(value)
+
+    if number is None:
+        return 0.0
+
     quant = Decimal("1").scaleb(-digits)
 
     return float(
@@ -113,42 +200,9 @@ def _round_qty(value: Any, digits: int = 3) -> float:
         )
     )
 
-
 # ═══════════════════════════════════════════════════════════════
 # Вспомогательные функции дат и чисел
 # ═══════════════════════════════════════════════════════════════
-
-def _as_date(value: Any) -> Optional[date]:
-    """Безопасно приводит значение к date."""
-    if value is None:
-        return None
-
-    if isinstance(value, datetime):
-        return value.date()
-
-    if isinstance(value, date):
-        return value
-
-    try:
-        return _to_date(value)
-    except Exception:
-        return None
-
-
-def _round_qty(value: Optional[float], digits: int = 3) -> float:
-    """Округление без типичных ошибок float."""
-    if value is None:
-        return 0.0
-
-    quant = Decimal("1").scaleb(-digits)
-
-    return float(
-        Decimal(str(value)).quantize(
-            quant,
-            rounding=ROUND_HALF_UP,
-        )
-    )
-
 
 def _monday(day: date) -> date:
     """Понедельник недели, в которой находится day."""
@@ -171,16 +225,24 @@ def _is_default_workday(day: date) -> bool:
 
 
 def _working_days_between(
-    start: date,
-    finish: date,
+    start: Optional[date],
+    finish: Optional[date],
 ) -> List[date]:
-    """Список рабочих дней в диапазоне включительно."""
-    result: List[date] = []
+    """Возвращает рабочие дни в диапазоне включительно."""
 
+    if start is None or finish is None:
+        return []
+
+    if finish < start:
+        return []
+
+    result: List[date] = []
     current = start
+
     while current <= finish:
         if _is_default_workday(current):
             result.append(current)
+
         current += timedelta(days=1)
 
     return result
@@ -268,6 +330,21 @@ class GprPlanningService:
                     item["period_finish"] = _as_date(
                         item.get("period_finish")
                     )
+                    item["planned_workers_count"] = _safe_int(
+                        item.get("planned_workers_count")
+                    )
+                    
+                    item["shift_hours"] = _safe_float(
+                        item.get("shift_hours")
+                    )
+                    
+                    item["plan_qty"] = _safe_float(
+                        item.get("plan_qty")
+                    )
+                    
+                    item["plan_labor_hours"] = _safe_float(
+                        item.get("plan_labor_hours")
+                    )
 
                     result.setdefault(task_id, []).append(item)
 
@@ -305,12 +382,19 @@ class GprPlanningService:
             if not task_id or not period_start or not period_finish:
                 continue
 
-            workers = _safe_float(
+            workers = _safe_int(
                 row.get("planned_workers_count")
             )
+            
+            if workers is not None and workers <= 0:
+                workers = None
 
-            if workers is not None:
-                workers = int(workers)
+            shift_hours = _safe_float(
+                row.get("shift_hours")
+            )
+            
+            if shift_hours is None or shift_hours <= 0:
+                shift_hours = 8.0
 
             values.append(
                 (
@@ -321,7 +405,7 @@ class GprPlanningService:
                     _safe_float(row.get("plan_qty")),
                     _safe_float(row.get("plan_labor_hours")),
                     workers,
-                    _safe_float(row.get("shift_hours")),
+                    shift_hours,
                     bool(row.get("is_manual")),
                     (row.get("comment") or "").strip() or None,
                 )
@@ -529,14 +613,13 @@ class GprPlanningService:
         )
         factor = _safe_float(
             task.get("productivity_factor")
-        ) or 1.0
-
-        default_workers = _safe_float(
-            task.get("planned_workers_count")
         )
-        default_shift_hours = _safe_float(
-            task.get("shift_hours")
-        ) or 8.0
+        
+        if factor is None or factor <= 0:
+            factor = 1.0
+
+        default_workers = _get_task_workers(task)
+        default_shift_hours = _get_task_shift_hours(task)
 
         output: List[Dict[str, Any]] = []
         distributed_qty = 0.0
@@ -552,25 +635,50 @@ class GprPlanningService:
                 and not force
             ):
                 row = dict(existing)
+            
                 row["task_id"] = int(task_id)
                 row["period_type"] = PERIOD_TYPE_WEEK
+            
+                if row.get("planned_workers_count") is None:
+                    row["planned_workers_count"] = default_workers
+            
+                if row.get("shift_hours") is None:
+                    row["shift_hours"] = default_shift_hours
+            
+                if row.get("working_days") is None:
+                    row["working_days"] = period["working_days"]
+            
                 output.append(row)
-
+            
                 distributed_qty += (
                     _safe_float(row.get("plan_qty")) or 0.0
                 )
+            
                 continue
 
             # На последнюю автоматически распределяемую неделю
             # отдаём остаток — так сумма не потеряет объём из-за округления.
             is_last = index == len(periods) - 1
 
+            remaining_qty = max(
+                0.0,
+                plan_qty - distributed_qty,
+            )
+            
+            is_last = index == len(periods) - 1
+            
             if is_last:
-                week_qty = max(0.0, plan_qty - distributed_qty)
+                week_qty = remaining_qty
             else:
                 weight = weights[index]
+            
                 week_qty = _round_qty(
                     plan_qty * weight / total_weight
+                )
+            
+                week_qty = min(
+                    week_qty,
+                    remaining_qty,
                 )
 
             distributed_qty += week_qty
@@ -590,11 +698,7 @@ class GprPlanningService:
                     "period_finish": period["period_finish"],
                     "plan_qty": week_qty,
                     "plan_labor_hours": labor_hours,
-                    "planned_workers_count": (
-                        int(default_workers)
-                        if default_workers is not None
-                        else None
-                    ),
+                    "planned_workers_count": default_workers,
                     "shift_hours": default_shift_hours,
                     "is_manual": False,
                     "comment": "",
@@ -1199,7 +1303,10 @@ class GprPlanningPanel(tk.Frame):
             )
             factor = _safe_float(
                 task.get("productivity_factor")
-            ) or 1.0
+            )
+            
+            if factor is None or factor <= 0:
+                factor = 1.0
 
             total_labor = None
 
@@ -1233,61 +1340,74 @@ class GprPlanningPanel(tk.Frame):
         for index, row in enumerate(
             self._plans_by_task.get(task_id, [])
         ):
+            period_start = _as_date(
+                row.get("period_start")
+            )
+        
+            period_finish = _as_date(
+                row.get("period_finish")
+            )
+        
             working_days = row.get("working_days")
-
+        
             if working_days is None:
                 working_days = len(
                     _working_days_between(
-                        _as_date(row.get("period_start")),
-                        _as_date(row.get("period_finish")),
+                        period_start,
+                        period_finish,
                     )
                 )
-
-            workers = _safe_float(
+        
+            workers = _safe_int(
                 row.get("planned_workers_count")
             )
+        
             shift_hours = _safe_float(
                 row.get("shift_hours")
-            ) or 8.0
-
+            )
+        
+            if shift_hours is None or shift_hours <= 0:
+                shift_hours = 8.0
+        
             labor = _safe_float(
                 row.get("plan_labor_hours")
             )
-
+        
             capacity = None
             balance = None
-
+        
             if workers is not None and workers > 0:
-                capacity = workers * shift_hours * working_days
-
+                capacity = _round_qty(
+                    workers
+                    * shift_hours
+                    * working_days
+                )
+        
                 if labor is not None:
-                    balance = capacity - labor
-
+                    balance = _round_qty(
+                        capacity - labor
+                    )
+        
             tag = "normal"
-
-            if row.get("is_manual"):
-                tag = "manual"
-
+        
             if balance is not None and balance < 0:
                 tag = "overload"
-
+            elif row.get("is_manual"):
+                tag = "manual"
+        
             self.week_tree.insert(
                 "",
                 "end",
                 iid=str(index),
                 values=(
                     (
-                        f"{_fmt_date(row.get('period_start'))} — "
-                        f"{_fmt_date(row.get('period_finish'))}"
+                        f"{_fmt_date(period_start)} — "
+                        f"{_fmt_date(period_finish)}"
                     ),
                     working_days,
                     _fmt_qty(row.get("plan_qty")),
                     _fmt_qty(labor),
-                    (
-                        int(workers)
-                        if workers is not None
-                        else ""
-                    ),
+                    workers if workers is not None else "",
                     _fmt_qty(shift_hours),
                     _fmt_qty(capacity),
                     _fmt_qty(balance),
@@ -1359,9 +1479,12 @@ class GprPlanningPanel(tk.Frame):
             _fmt_qty(row.get("plan_qty"))
         )
 
-        workers = row.get("planned_workers_count")
+        workers = _safe_int(
+            row.get("planned_workers_count")
+        )
+        
         self.var_workers.set(
-            str(int(workers))
+            str(workers)
             if workers is not None
             else ""
         )
@@ -1509,10 +1632,12 @@ class GprPlanningPanel(tk.Frame):
             )
             return
 
-        workers = _safe_float(self.var_workers.get())
-
-        if workers is not None:
-            if workers <= 0 or int(workers) != workers:
+        workers_text = self.var_workers.get().strip()
+        
+        if workers_text:
+            workers = _safe_int(workers_text)
+        
+            if workers is None or workers <= 0:
                 messagebox.showwarning(
                     "Планирование",
                     (
@@ -1522,8 +1647,8 @@ class GprPlanningPanel(tk.Frame):
                     parent=self,
                 )
                 return
-
-            workers = int(workers)
+        else:
+            workers = None
 
         shift_hours = _safe_float(
             self.var_shift_hours.get()
@@ -1547,7 +1672,10 @@ class GprPlanningPanel(tk.Frame):
         )
         factor = _safe_float(
             task.get("productivity_factor")
-        ) or 1.0
+        )
+        
+        if factor is None or factor <= 0:
+            factor = 1.0
 
         labor_hours = None
 
@@ -1574,11 +1702,12 @@ class GprPlanningPanel(tk.Frame):
 
     def _restore_auto_for_selected_week(self):
         """Возвращает автоматический расчёт только одной недели."""
+    
         if self._selected_task_id is None:
             return
-
+    
         selected = self.week_tree.selection()
-
+    
         if not selected:
             messagebox.showinfo(
                 "Планирование",
@@ -1586,42 +1715,94 @@ class GprPlanningPanel(tk.Frame):
                 parent=self,
             )
             return
-
+    
         try:
             index = int(selected[0])
         except (ValueError, TypeError):
             return
-
+    
         task = self._task_by_id.get(
             self._selected_task_id,
         )
-
+    
         if not task:
             return
-
+    
         old_rows = self._plans_by_task.get(
             self._selected_task_id,
             [],
         )
-
-        auto_rows = (
-            GprPlanningService.generate_task_week_plan(
-                task=task,
-                existing_rows={},
-                force=True,
-            )
-        )
-
-        if not (
-            0 <= index < len(old_rows)
-            and index < len(auto_rows)
-        ):
+    
+        if not (0 <= index < len(old_rows)):
             return
-
-        old_rows[index] = auto_rows[index]
-
+    
+        periods = GprPlanningService.build_week_periods(
+            _as_date(task.get("plan_start")),
+            _as_date(task.get("plan_finish")),
+        )
+    
+        if not (0 <= index < len(periods)):
+            return
+    
+        period = periods[index]
+    
+        norm = _safe_float(
+            task.get("labor_hours_per_unit")
+        )
+    
+        factor = _safe_float(
+            task.get("productivity_factor")
+        )
+    
+        if factor is None or factor <= 0:
+            factor = 1.0
+    
+        task_qty = _safe_float(
+            task.get("plan_qty")
+        ) or 0.0
+    
+        total_work_days = sum(
+            item["working_days"]
+            for item in periods
+        )
+    
+        if total_work_days > 0:
+            weight = period["working_days"]
+            week_qty = _round_qty(
+                task_qty
+                * weight
+                / total_work_days
+            )
+        else:
+            week_qty = _round_qty(
+                task_qty / len(periods)
+            )
+    
+        labor_hours = None
+    
+        if norm is not None:
+            labor_hours = _round_qty(
+                week_qty * norm * factor
+            )
+    
+        old_row = old_rows[index]
+    
+        old_row.update(
+            {
+                "period_start": period["period_start"],
+                "period_finish": period["period_finish"],
+                "plan_qty": week_qty,
+                "plan_labor_hours": labor_hours,
+                "planned_workers_count": _get_task_workers(task),
+                "shift_hours": _get_task_shift_hours(task),
+                "is_manual": False,
+                "comment": "",
+                "working_days": period["working_days"],
+            }
+        )
+    
         self._dirty = True
-
+    
         self._render_weeks()
         self._select_week_index(index)
         self._update_summary()
@@ -1834,7 +2015,10 @@ class GprPlanningPanel(tk.Frame):
         )
         factor = _safe_float(
             task.get("productivity_factor")
-        ) or 1.0
+        )
+        
+        if factor is None or factor <= 0:
+            factor = 1.0
 
         total_labor = None
 
