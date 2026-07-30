@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 import logging
 import calendar
+import math
 from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Set
 from pathlib import Path
@@ -196,6 +197,90 @@ def _safe_int(v) -> Optional[int]:
 
     return int(number)
 
+def _working_days_between(
+    start: Optional[date],
+    finish: Optional[date],
+) -> int:
+    """Количество рабочих дней с понедельника по пятницу включительно."""
+    if start is None or finish is None or finish < start:
+        return 0
+
+    result = 0
+    current = start
+
+    while current <= finish:
+        if current.weekday() < 5:
+            result += 1
+
+        current += timedelta(days=1)
+
+    return result
+
+
+def _calc_planned_workers(
+    plan_qty: Any,
+    labor_hours_per_unit: Any,
+    productivity_factor: Any,
+    plan_start: Any,
+    plan_finish: Any,
+    shift_hours: Any = 8.0,
+) -> Optional[int]:
+    """
+    Рассчитывает плановое количество работников.
+
+    Формула:
+        ceil(
+            plan_qty * labor_hours_per_unit * productivity_factor
+            /
+            (рабочие дни * shift_hours)
+        )
+    """
+
+    qty = _safe_float(plan_qty)
+    norm = _safe_float(labor_hours_per_unit)
+    factor = _safe_float(productivity_factor)
+    shift = _safe_float(shift_hours)
+
+    start = _to_date(plan_start)
+    finish = _to_date(plan_finish)
+
+    if qty is None or qty <= 0:
+        return None
+
+    if norm is None or norm <= 0:
+        return None
+
+    if factor is None or factor <= 0:
+        factor = 1.0
+
+    if shift is None or shift <= 0:
+        shift = 8.0
+
+    working_days = _working_days_between(
+        start,
+        finish,
+    )
+
+    if working_days <= 0:
+        return None
+
+    total_labor_hours = (
+        qty
+        * norm
+        * factor
+    )
+
+    capacity_per_worker = (
+        working_days
+        * shift
+    )
+
+    workers = math.ceil(
+        total_labor_hours
+        / capacity_per_worker
+    )
+
+    return max(1, workers)
 
 def _fmt_qty(v) -> str:
     f = _safe_float(v)
