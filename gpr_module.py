@@ -7,7 +7,10 @@ import calendar
 from datetime import datetime, date, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Set
 from pathlib import Path
-from gpr_planning_module import GprPlanningPanel
+from gpr_planning_module import (
+    GprPlanningPanel,
+    set_db_pool as set_planning_db_pool,
+)
 
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
@@ -67,8 +70,14 @@ db_connection_pool = None
 
 
 def set_db_pool(pool):
+    """
+    Устанавливает общий пул соединений для основного
+    и планировочного модулей.
+    """
     global db_connection_pool
+
     db_connection_pool = pool
+    set_planning_db_pool(pool)
 
 
 class _DBConn:
@@ -175,6 +184,17 @@ def _safe_float(v) -> Optional[float]:
         return float(str(v).replace(",", ".").strip())
     except (ValueError, TypeError):
         return None
+
+def _safe_int(v) -> Optional[int]:
+    number = _safe_float(v)
+
+    if number is None:
+        return None
+
+    if int(number) != number:
+        return None
+
+    return int(number)
 
 
 def _fmt_qty(v) -> str:
@@ -938,6 +958,8 @@ class GprService:
                         t.labor_norm_id,
                         t.labor_hours_per_unit,
                         t.productivity_factor,
+                        t.planned_workers_count,
+                        t.shift_hours,
 
                         t.name,
                         t.uom_code,
@@ -971,13 +993,54 @@ class GprService:
 
                 for r in cur.fetchall():
                     d = dict(r)
-                    d["row_kind"] = (d.get("row_kind") or "task").strip()
-                    d["plan_start"] = _to_date(d.get("plan_start"))
-                    d["plan_finish"] = _to_date(d.get("plan_finish"))
-
-                    if d.get("productivity_factor") is None:
+                
+                    d["row_kind"] = (
+                        d.get("row_kind") or "task"
+                    ).strip()
+                
+                    d["plan_start"] = _to_date(
+                        d.get("plan_start")
+                    )
+                
+                    d["plan_finish"] = _to_date(
+                        d.get("plan_finish")
+                    )
+                
+                    d["plan_qty"] = _safe_float(
+                        d.get("plan_qty")
+                    )
+                
+                    d["labor_hours_per_unit"] = _safe_float(
+                        d.get("labor_hours_per_unit")
+                    )
+                
+                    d["productivity_factor"] = _safe_float(
+                        d.get("productivity_factor")
+                    )
+                
+                    if (
+                        d["productivity_factor"] is None
+                        or d["productivity_factor"] <= 0
+                    ):
                         d["productivity_factor"] = 1.0
-
+                
+                    d["planned_workers_count"] = _safe_int(
+                        d.get("planned_workers_count")
+                    )
+                
+                    if (
+                        d["planned_workers_count"] is not None
+                        and d["planned_workers_count"] <= 0
+                    ):
+                        d["planned_workers_count"] = None
+                
+                    d["shift_hours"] = _safe_float(
+                        d.get("shift_hours")
+                    )
+                
+                    if d["shift_hours"] is None or d["shift_hours"] <= 0:
+                        d["shift_hours"] = 8.0
+                
                     rows.append(d)
 
                 return rows
@@ -1109,9 +1172,32 @@ class GprService:
                         except (ValueError, TypeError):
                             sort_order = i * 10
 
-                        is_milestone = bool(t.get("is_milestone") or False)
+                        is_milestone = bool(
+                            t.get("is_milestone") or False
+                        )
+                        
                         uom_code = t.get("uom_code") or None
-                        plan_qty = _safe_float(t.get("plan_qty"))
+                        
+                        plan_qty = _safe_float(
+                            t.get("plan_qty")
+                        )
+                        
+                        planned_workers_count = _safe_int(
+                            t.get("planned_workers_count")
+                        )
+                        
+                        if (
+                            planned_workers_count is not None
+                            and planned_workers_count <= 0
+                        ):
+                            planned_workers_count = None
+                        
+                        shift_hours = _safe_float(
+                            t.get("shift_hours")
+                        )
+                        
+                        if shift_hours is None or shift_hours <= 0:
+                            shift_hours = 8.0
 
                         # ─────────────────────────────────────
                         # Связь с профессиональным справочником.
@@ -1175,6 +1261,8 @@ class GprService:
                                     labor_norm_id = %s,
                                     labor_hours_per_unit = %s,
                                     productivity_factor = %s,
+                                    planned_workers_count = %s,
+                                    shift_hours = %s,
 
                                     name = %s,
                                     uom_code = %s,
@@ -1202,6 +1290,8 @@ class GprService:
                                     labor_norm_id,
                                     labor_hours_per_unit,
                                     productivity_factor,
+                                    planned_workers_count,
+                                    shift_hours,
 
                                     name,
                                     uom_code,
@@ -1234,6 +1324,8 @@ class GprService:
                                     labor_norm_id,
                                     labor_hours_per_unit,
                                     productivity_factor,
+                                    planned_workers_count,
+                                    shift_hours,
 
                                     name,
                                     uom_code,
@@ -1257,12 +1349,14 @@ class GprService:
                                 plan_id,
                                 work_type_id,
                                 parent_id,
-
+                        
                                 work_item_id,
                                 labor_norm_id,
                                 labor_hours_per_unit,
                                 productivity_factor,
-
+                                planned_workers_count,
+                                shift_hours,
+                        
                                 name,
                                 uom_code,
                                 plan_qty,
@@ -1514,6 +1608,56 @@ class TaskEditDialog(simpledialog.Dialog):
         self.ent_qty.grid(row=r, column=1, sticky="w", pady=3)
         r += 1
 
+        tk.Label(
+            m,
+            text="Плановая бригада:",
+        ).grid(
+            row=r,
+            column=0,
+            sticky="e",
+            padx=(0, 6),
+            pady=3,
+        )
+        
+        self.ent_workers = ttk.Entry(
+            m,
+            width=18,
+        )
+        
+        self.ent_workers.grid(
+            row=r,
+            column=1,
+            sticky="w",
+            pady=3,
+        )
+        
+        r += 1
+        
+        tk.Label(
+            m,
+            text="Часов в смене:",
+        ).grid(
+            row=r,
+            column=0,
+            sticky="e",
+            padx=(0, 6),
+            pady=3,
+        )
+        
+        self.ent_shift_hours = ttk.Entry(
+            m,
+            width=18,
+        )
+        
+        self.ent_shift_hours.grid(
+            row=r,
+            column=1,
+            sticky="w",
+            pady=3,
+        )
+        
+        r += 1
+
         tk.Label(m, text="Начало *:").grid(
             row=r, column=0, sticky="e", padx=(0, 6), pady=3
         )
@@ -1573,6 +1717,29 @@ class TaskEditDialog(simpledialog.Dialog):
         if self.init.get("plan_qty") is not None:
             self.ent_qty.insert(0, _fmt_qty(self.init["plan_qty"]))
 
+        workers = _safe_int(
+            self.init.get("planned_workers_count")
+        )
+        
+        if workers is not None:
+            self.ent_workers.insert(
+                0,
+                str(workers)
+            )
+        
+        shift_hours = _safe_float(
+            self.init.get("shift_hours")
+        )
+        
+        self.ent_shift_hours.insert(
+            0,
+            _fmt_qty(
+                shift_hours
+                if shift_hours is not None and shift_hours > 0
+                else 8
+            )
+        )
+
         d0 = _to_date(self.init.get("plan_start")) or _today()
         d1 = _to_date(self.init.get("plan_finish")) or _today()
         self.ent_s.insert(0, _fmt_date(d0))
@@ -1602,6 +1769,27 @@ class TaskEditDialog(simpledialog.Dialog):
                 uom = self.uoms[ui - 1]["code"]
 
             qty = _safe_float(self.ent_qty.get())
+            workers_text = self.ent_workers.get().strip()
+            
+            if workers_text:
+                workers = _safe_int(workers_text)
+            
+                if workers is None or workers <= 0:
+                    raise ValueError(
+                        "Плановая бригада должна быть "
+                        "целым числом больше 0."
+                    )
+            else:
+                workers = None
+            
+            shift_hours = _safe_float(
+                self.ent_shift_hours.get()
+            )
+            
+            if shift_hours is None or shift_hours <= 0:
+                raise ValueError(
+                    "Часов в смене должно быть больше 0."
+                )
             ds = _parse_date(self.ent_s.get())
             df = _parse_date(self.ent_f.get())
             if df < ds:
@@ -1619,6 +1807,8 @@ class TaskEditDialog(simpledialog.Dialog):
                 plan_finish=df,
                 status=st,
                 is_milestone=bool(self.var_ms.get()),
+                planned_workers_count=workers,
+                shift_hours=shift_hours,
             )
             return True
         except Exception as e:
@@ -2263,16 +2453,34 @@ class GprPage(tk.Frame):
 
         self._apply_registry_filter()
 
-    def _get_tasks_for_planning(self):
-        """
-        Возвращает список задач открытого ГПР.
+    def _get_tasks_for_planning(
+        self,
+    ) -> List[Dict[str, Any]]:
+        if not self.plan_id:
+            return []
     
-        ВАЖНО:
-        замените self.tasks на фактическое имя списка,
-        в котором ваш GprPage хранит задачи текущего графика.
-        """
-        return list(getattr(self, "tasks", []) or [])
+        tasks = [
+            dict(task)
+            for task in self.tasks
+            if task.get("id")
+            and (
+                task.get("row_kind") or "task"
+            ).strip() == "task"
+        ]
     
+        for task in tasks:
+            logger.info(
+                (
+                    "Планирование: task_id=%s, name=%s, "
+                    "planned_workers_count=%r, shift_hours=%r"
+                ),
+                task.get("id"),
+                task.get("name"),
+                task.get("planned_workers_count"),
+                task.get("shift_hours"),
+            )
+    
+        return tasks
     
     def _after_planning_saved(self):
         """
@@ -3385,7 +3593,22 @@ class GprPage(tk.Frame):
             if factor is not None and factor > 0
             else 1.0
         )
-
+        t["planned_workers_count"] = _safe_int(
+            t.get("planned_workers_count")
+        )
+        
+        if (
+            t["planned_workers_count"] is not None
+            and t["planned_workers_count"] <= 0
+        ):
+            t["planned_workers_count"] = None
+        
+        t["shift_hours"] = _safe_float(
+            t.get("shift_hours")
+        )
+        
+        if t["shift_hours"] is None or t["shift_hours"] <= 0:
+            t["shift_hours"] = 8.0
         return t
         
     def _add_task(self):
@@ -3637,6 +3860,36 @@ class GprPage(tk.Frame):
         )
         upd["plan_start"] = _to_date(upd.get("plan_start")) or _today()
         upd["plan_finish"] = _to_date(upd.get("plan_finish")) or _today()
+
+
+        # Не теряем плановую бригаду и длительность смены,
+        # если внешний диалог их не вернул.
+        if "planned_workers_count" not in upd:
+            upd["planned_workers_count"] = (
+                t0.get("planned_workers_count")
+            )
+        
+        upd["planned_workers_count"] = _safe_int(
+            upd.get("planned_workers_count")
+        )
+        
+        if (
+            upd["planned_workers_count"] is not None
+            and upd["planned_workers_count"] <= 0
+        ):
+            upd["planned_workers_count"] = None
+        
+        if "shift_hours" not in upd:
+            upd["shift_hours"] = t0.get(
+                "shift_hours"
+            )
+        
+        upd["shift_hours"] = _safe_float(
+            upd.get("shift_hours")
+        )
+        
+        if upd["shift_hours"] is None or upd["shift_hours"] <= 0:
+            upd["shift_hours"] = 8.0
     
         task_id = t0.get("id")
         assignments = upd.pop("_assignments", None)
