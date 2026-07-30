@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Callable, Dict, List, Optional
@@ -199,6 +200,48 @@ def _round_qty(
             rounding=ROUND_HALF_UP,
         )
     )
+
+def _calc_week_workers(
+    labor_hours: Any,
+    working_days: Any,
+    shift_hours: Any,
+    fallback_workers: Optional[int] = None,
+) -> Optional[int]:
+    """
+    Рассчитывает количество работников на неделю.
+
+    Формула:
+
+        ceil(
+            недельный ЗТР
+            / (рабочие дни недели × часов в смене)
+        )
+    """
+
+    labor = _safe_float(labor_hours)
+    days = _safe_int(working_days)
+    shift = _safe_float(shift_hours)
+
+    if shift is None or shift <= 0:
+        shift = 8.0
+
+    if (
+        labor is not None
+        and labor > 0
+        and days is not None
+        and days > 0
+    ):
+        return max(
+            1,
+            math.ceil(
+                labor / (days * shift)
+            ),
+        )
+
+    if fallback_workers is not None and fallback_workers > 0:
+        return fallback_workers
+
+    return None
 
 # ═══════════════════════════════════════════════════════════════
 # Вспомогательные функции дат и чисел
@@ -580,7 +623,8 @@ class GprPlanningService:
         if not periods:
             return []
 
-        existing_rows = existing_rows or {}
+        if existing_rows is None:
+            existing_rows = {}
 
         if isinstance(existing_rows, list):
             existing_map = {
@@ -639,14 +683,19 @@ class GprPlanningService:
                 row["task_id"] = int(task_id)
                 row["period_type"] = PERIOD_TYPE_WEEK
             
-                if row.get("planned_workers_count") is None:
-                    row["planned_workers_count"] = default_workers
-            
                 if row.get("shift_hours") is None:
                     row["shift_hours"] = default_shift_hours
-            
+                
                 if row.get("working_days") is None:
                     row["working_days"] = period["working_days"]
+                
+                if row.get("planned_workers_count") is None:
+                    row["planned_workers_count"] = _calc_week_workers(
+                        labor_hours=row.get("plan_labor_hours"),
+                        working_days=row.get("working_days"),
+                        shift_hours=row.get("shift_hours"),
+                        fallback_workers=default_workers,
+                    )
             
                 output.append(row)
             
@@ -664,8 +713,6 @@ class GprPlanningService:
                 0.0,
                 plan_qty - distributed_qty,
             )
-            
-            is_last = index == len(periods) - 1
             
             if is_last:
                 week_qty = remaining_qty
@@ -690,6 +737,13 @@ class GprPlanningService:
                     week_qty * norm * factor
                 )
 
+            week_workers = _calc_week_workers(
+                labor_hours=labor_hours,
+                working_days=period["working_days"],
+                shift_hours=default_shift_hours,
+                fallback_workers=default_workers,
+            )
+            
             output.append(
                 {
                     "task_id": int(task_id),
@@ -698,14 +752,13 @@ class GprPlanningService:
                     "period_finish": period["period_finish"],
                     "plan_qty": week_qty,
                     "plan_labor_hours": labor_hours,
-                    "planned_workers_count": default_workers,
+                    "planned_workers_count": week_workers,
                     "shift_hours": default_shift_hours,
                     "is_manual": False,
                     "comment": "",
                     "working_days": period["working_days"],
                 }
             )
-
         return output
 
     @staticmethod
@@ -1111,7 +1164,7 @@ class GprPlanningPanel(tk.Frame):
 
         tk.Label(
             editor,
-            text="Плановая бригада:",
+            text="Плановые люди:",
             bg=C["panel"],
             font=("Segoe UI", 9),
         ).grid(
@@ -1126,6 +1179,11 @@ class GprPlanningPanel(tk.Frame):
             editor,
             textvariable=self.var_workers,
             width=10,
+        )
+        
+        self.ent_workers.bind(
+            "<Key>",
+            lambda _event: "break",
         )
         self.ent_workers.grid(
             row=0,
@@ -1632,24 +1690,8 @@ class GprPlanningPanel(tk.Frame):
             )
             return
 
-        workers_text = self.var_workers.get().strip()
+        workers = None
         
-        if workers_text:
-            workers = _safe_int(workers_text)
-        
-            if workers is None or workers <= 0:
-                messagebox.showwarning(
-                    "Планирование",
-                    (
-                        "Количество работников должно быть "
-                        "целым числом больше 0."
-                    ),
-                    parent=self,
-                )
-                return
-        else:
-            workers = None
-
         shift_hours = _safe_float(
             self.var_shift_hours.get()
         )
@@ -1678,21 +1720,51 @@ class GprPlanningPanel(tk.Frame):
             factor = 1.0
 
         labor_hours = None
-
+        
         if norm is not None:
             labor_hours = _round_qty(
                 qty * norm * factor
             )
-
-        row = rows[index]
-        row["plan_qty"] = _round_qty(qty)
-        row["plan_labor_hours"] = labor_hours
-        row["planned_workers_count"] = workers
-        row["shift_hours"] = shift_hours
-        row["comment"] = (
+        
+        selected_row = rows[index]
+        
+        period_start = _as_date(
+            selected_row.get("period_start")
+        )
+        
+        period_finish = _as_date(
+            selected_row.get("period_finish")
+        )
+        
+        working_days = selected_row.get(
+            "working_days"
+        )
+        
+        if working_days is None:
+            working_days = len(
+                _working_days_between(
+                    period_start,
+                    period_finish,
+                )
+            )
+        
+        workers = _calc_week_workers(
+            labor_hours=labor_hours,
+            working_days=working_days,
+            shift_hours=shift_hours,
+            fallback_workers=_get_task_workers(task),
+        )
+        
+        selected_row["working_days"] = working_days
+        
+        selected_row["plan_qty"] = _round_qty(qty)
+        selected_row["plan_labor_hours"] = labor_hours
+        selected_row["planned_workers_count"] = workers
+        selected_row["shift_hours"] = shift_hours
+        selected_row["comment"] = (
             self.var_comment.get() or ""
         ).strip()
-        row["is_manual"] = True
+        selected_row["is_manual"] = True
 
         self._dirty = True
 
@@ -1787,14 +1859,23 @@ class GprPlanningPanel(tk.Frame):
     
         old_row = old_rows[index]
     
+        shift_hours = _get_task_shift_hours(task)
+        
+        week_workers = _calc_week_workers(
+            labor_hours=labor_hours,
+            working_days=period["working_days"],
+            shift_hours=shift_hours,
+            fallback_workers=_get_task_workers(task),
+        )
+        
         old_row.update(
             {
                 "period_start": period["period_start"],
                 "period_finish": period["period_finish"],
                 "plan_qty": week_qty,
                 "plan_labor_hours": labor_hours,
-                "planned_workers_count": _get_task_workers(task),
-                "shift_hours": _get_task_shift_hours(task),
+                "planned_workers_count": week_workers,
+                "shift_hours": shift_hours,
                 "is_manual": False,
                 "comment": "",
                 "working_days": period["working_days"],
@@ -2004,39 +2085,60 @@ class GprPlanningPanel(tk.Frame):
             self._selected_task_id,
             {},
         )
-
+    
         if not task:
             self._clear_right_panel()
             return
-
-        qty = _safe_float(task.get("plan_qty"))
+    
+        qty = _safe_float(
+            task.get("plan_qty")
+        )
+    
         norm = _safe_float(
             task.get("labor_hours_per_unit")
         )
+    
         factor = _safe_float(
             task.get("productivity_factor")
         )
-        
+    
         if factor is None or factor <= 0:
             factor = 1.0
-
+    
         total_labor = None
-
+        task_workers = None
+    
         if qty is not None and norm is not None:
             total_labor = qty * norm * factor
-
+    
+            task_workers = _calc_week_workers(
+                labor_hours=total_labor,
+                working_days=len(
+                    _working_days_between(
+                        _as_date(task.get("plan_start")),
+                        _as_date(task.get("plan_finish")),
+                    )
+                ),
+                shift_hours=_get_task_shift_hours(task),
+                fallback_workers=_get_task_workers(task),
+            )
+    
         self.lbl_task_title.config(
-            text=task.get("name") or "Без наименования"
+            text=task.get("name")
+            or "Без наименования"
         )
-
+    
         self.lbl_task_meta.config(
             text=(
-                f"Срок: {_fmt_date(task.get('plan_start'))} — "
+                f"Срок: "
+                f"{_fmt_date(task.get('plan_start'))} — "
                 f"{_fmt_date(task.get('plan_finish'))}\n"
                 f"Объём: {_fmt_qty(qty)} "
                 f"{task.get('uom_code') or ''}   |   "
                 f"ЗТР: {_fmt_qty(norm)} чел.-ч/ед.   |   "
-                f"Всего: {_fmt_qty(total_labor)} чел.-ч"
+                f"Всего: {_fmt_qty(total_labor)} чел.-ч   |   "
+                f"Плановые люди: "
+                f"{task_workers if task_workers is not None else '—'}"
             )
         )
 
