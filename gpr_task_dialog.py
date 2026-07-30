@@ -11,9 +11,19 @@ from tkinter import ttk, messagebox, simpledialog
 from psycopg2.extras import RealDictCursor, execute_values
 
 from gpr_module import (
-    _conn, _release, _today, _fmt_date, _parse_date,
-    _fmt_qty, _safe_float, _to_date,
-    C, STATUS_LABELS, STATUS_LIST, STATUS_COLORS,
+    _conn,
+    _release,
+    _today,
+    _fmt_date,
+    _parse_date,
+    _fmt_qty,
+    _safe_float,
+    _to_date,
+    _calc_planned_workers,
+    C,
+    STATUS_LABELS,
+    STATUS_LIST,
+    STATUS_COLORS,
 )
 
 logger = logging.getLogger(__name__)
@@ -1283,6 +1293,62 @@ class TaskEditDialogPro(tk.Toplevel):
             pady=8,
         )
 
+        tk.Label(
+            grp_norm,
+            text="Плановые люди:",
+            bg=C["panel"],
+            font=("Segoe UI", 9),
+        ).grid(
+            row=2,
+            column=0,
+            sticky="e",
+            padx=(0, 8),
+            pady=4,
+        )
+        
+        self.lbl_planned_workers = tk.Label(
+            grp_norm,
+            text="—",
+            bg=C["panel"],
+            fg=C["accent"],
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+        )
+        self.lbl_planned_workers.grid(
+            row=2,
+            column=1,
+            sticky="w",
+            pady=4,
+        )
+        
+        tk.Label(
+            grp_norm,
+            text="Смена:",
+            bg=C["panel"],
+            font=("Segoe UI", 9),
+        ).grid(
+            row=2,
+            column=2,
+            sticky="e",
+            padx=(24, 8),
+            pady=4,
+        )
+        
+        self.lbl_shift_hours = tk.Label(
+            grp_norm,
+            text="8 ч",
+            bg=C["panel"],
+            fg=C["text2"],
+            font=("Segoe UI", 9),
+            anchor="w",
+        )
+        self.lbl_shift_hours.grid(
+            row=2,
+            column=3,
+            sticky="w",
+            pady=4,
+        )
+
         self.lbl_norm_info = tk.Label(
             grp_norm,
             text="Норма определяется на дату начала работы.",
@@ -1292,7 +1358,7 @@ class TaskEditDialogPro(tk.Toplevel):
             anchor="w",
         )
         self.lbl_norm_info.grid(
-            row=2,
+            row=3,
             column=1,
             columnspan=3,
             sticky="w",
@@ -2000,6 +2066,12 @@ class TaskEditDialogPro(tk.Toplevel):
             return
 
         if len(self._selected_work_items) != 1:
+            self.lbl_planned_workers.config(
+                text="—",
+                fg=C["text3"],
+            )
+
+        if len(self._selected_work_items) != 1:
             if len(self._selected_work_items) > 1:
                 self.lbl_labor_norm.config(
                     text="индивидуально по каждой работе",
@@ -2032,6 +2104,17 @@ class TaskEditDialogPro(tk.Toplevel):
             item.get("default_productivity_factor")
         ) or 1.0
 
+        shift_hours = _safe_float(
+            self.init.get("shift_hours")
+        )
+        
+        if shift_hours is None or shift_hours <= 0:
+            shift_hours = 8.0
+        
+        self.lbl_shift_hours.config(
+            text=f"{_fmt_qty(shift_hours)} ч"
+        )
+
         if norm is None:
             self.lbl_labor_norm.config(
                 text="не найдена",
@@ -2055,17 +2138,53 @@ class TaskEditDialogPro(tk.Toplevel):
             fg=C["success"],
         )
 
-        qty = _safe_float(self.ent_qty.get())
-
+        qty = _safe_float(
+            self.ent_qty.get()
+        )
+        
+        plan_start = _to_date(
+            self.ent_start.get()
+        )
+        
+        plan_finish = _to_date(
+            self.ent_finish.get()
+        )
+        
         if qty is not None:
             total = qty * norm * factor
+        
             self.lbl_total_labor.config(
                 text=f"{_fmt_qty(total)} чел.-ч",
                 fg=C["accent"],
             )
+        
+            planned_workers = _calc_planned_workers(
+                plan_qty=qty,
+                labor_hours_per_unit=norm,
+                productivity_factor=factor,
+                plan_start=plan_start,
+                plan_finish=plan_finish,
+                shift_hours=shift_hours,
+            )
+        
+            if planned_workers is None:
+                self.lbl_planned_workers.config(
+                    text="—",
+                    fg=C["text3"],
+                )
+            else:
+                self.lbl_planned_workers.config(
+                    text=f"{planned_workers} чел.",
+                    fg=C["success"],
+                )
         else:
             self.lbl_total_labor.config(
                 text="укажите объём",
+                fg=C["text3"],
+            )
+        
+            self.lbl_planned_workers.config(
+                text="—",
                 fg=C["text3"],
             )
 
@@ -2815,6 +2934,38 @@ class TaskEditDialogPro(tk.Toplevel):
 
             is_milestone = bool(self.var_milestone.get())
 
+            selected_item_for_workers = (
+                self._selected_work_items[0]
+                if len(self._selected_work_items) == 1
+                else None
+            )
+            
+            planned_workers_count = None
+            shift_hours = _safe_float(
+                self.init.get("shift_hours")
+            )
+            
+            if shift_hours is None or shift_hours <= 0:
+                shift_hours = 8.0
+            
+            if selected_item_for_workers:
+                planned_workers_count = _calc_planned_workers(
+                    plan_qty=qty,
+                    labor_hours_per_unit=(
+                        selected_item_for_workers.get(
+                            "labor_hours_per_unit"
+                        )
+                    ),
+                    productivity_factor=(
+                        selected_item_for_workers.get(
+                            "default_productivity_factor"
+                        ) or 1.0
+                    ),
+                    plan_start=ds,
+                    plan_finish=df,
+                    shift_hours=shift_hours,
+                )
+
             # ───────────────────────────────────────────────
             # Массовое создание задач по выбранным работам.
             # Доступно только при создании новой записи.
@@ -2828,15 +2979,27 @@ class TaskEditDialogPro(tk.Toplevel):
                             "work_type_id": wt_id,
                             "work_item_id": int(item["id"]),
                             "labor_norm_id": item.get("labor_norm_id"),
-
-                            # Снимок нормы на момент создания задачи.
                             "labor_hours_per_unit": item.get(
                                 "labor_hours_per_unit"
                             ),
                             "productivity_factor": item.get(
                                 "default_productivity_factor"
                             ) or 1.0,
-
+                
+                            "planned_workers_count": _calc_planned_workers(
+                                plan_qty=qty,
+                                labor_hours_per_unit=item.get(
+                                    "labor_hours_per_unit"
+                                ),
+                                productivity_factor=item.get(
+                                    "default_productivity_factor"
+                                ) or 1.0,
+                                plan_start=ds,
+                                plan_finish=df,
+                                shift_hours=shift_hours,
+                            ),
+                            "shift_hours": shift_hours,
+                
                             "name": item.get("name") or "",
                             "uom_code": item.get("uom_code"),
                             "plan_qty": qty,
@@ -2930,6 +3093,8 @@ class TaskEditDialogPro(tk.Toplevel):
                 "plan_finish": df,
                 "status": st,
                 "is_milestone": is_milestone,
+                "planned_workers_count": planned_workers_count,
+                "shift_hours": shift_hours,
                 "_assignments": (
                     list(self._assignments)
                     if self._has_assign_tab
