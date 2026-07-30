@@ -141,7 +141,7 @@ def _setup_print_sheet_params(ws, *, last_col_letter: str, last_row: int, title_
     )
 
     ws.sheet_view.showGridLines = False
-    ws.freeze_panes = "E8"
+    ws.freeze_panes = "G8"
     ws.print_title_rows = title_rows
     ws.print_area = f"A1:{last_col_letter}{last_row}"
 
@@ -164,7 +164,15 @@ def build_printable_trip_timesheet_sheet(
     days_in_month = month_days(year, month)
     month_ru = MONTH_NAMES.get(month, str(month))
 
-    fixed_headers = ["№", "ФИО", "Таб. №", "Командировка"]
+    fixed_headers = [
+        "№",
+        "ФИО",
+        "Таб. №",
+        "Должность",
+        "Подразделение",
+        "Командировка",
+    ]
+    
     day_headers = [str(i) for i in range(1, days_in_month + 1)]
     total_headers = ["Дни", "Часы"]
     headers = fixed_headers + day_headers + total_headers
@@ -222,9 +230,11 @@ def build_printable_trip_timesheet_sheet(
     ws.column_dimensions["A"].width = 5
     ws.column_dimensions["B"].width = 30
     ws.column_dimensions["C"].width = 11
-    ws.column_dimensions["D"].width = 24 # Слегка сузили, чтобы перенос срабатывал красивее
-
-    first_day_col = 5
+    ws.column_dimensions["D"].width = 28  # Должность
+    ws.column_dimensions["E"].width = 28  # Подразделение
+    ws.column_dimensions["F"].width = 24  # Командировка
+    
+    first_day_col = 7
     last_day_col = first_day_col + days_in_month - 1
     for col_idx in range(first_day_col, last_day_col + 1):
         ws.column_dimensions[get_column_letter(col_idx)].width = 4.2
@@ -239,6 +249,8 @@ def build_printable_trip_timesheet_sheet(
     for rec in rows:
         fio = normalize_spaces(rec.get("fio") or "")
         tbn = normalize_tbn(rec.get("tbn"))
+        position = normalize_spaces(rec.get("position") or "")
+        department = normalize_spaces(rec.get("department") or "")
         hours = normalize_hours_list(rec.get("hours"), year, month)
         totals = calc_row_totals(hours, year, month)
         
@@ -259,6 +271,8 @@ def build_printable_trip_timesheet_sheet(
             {
                 "fio": fio,
                 "tbn": tbn,
+                "position": position,
+                "department": department,
                 "hours": hours,
                 "_totals": totals,
                 "trip_period": trip_period,
@@ -269,14 +283,18 @@ def build_printable_trip_timesheet_sheet(
     for idx, rec in enumerate(normalized_rows, start=1):
         fio = rec["fio"]
         tbn = rec["tbn"]
+        position = rec["position"]
+        department = rec["department"]
         hours = rec["hours"]
         totals = rec["_totals"]
         trip_period = rec["trip_period"]
-
+        
         row_values = [
             idx,
             fio,
             tbn,
+            position,
+            department,
             trip_period,
             *[_excel_safe_value(v) for v in hours[:days_in_month]],
             _excel_safe_value(format_summary_value(totals.get("days"))),
@@ -285,9 +303,8 @@ def build_printable_trip_timesheet_sheet(
 
         for col_idx, value in enumerate(row_values, start=1):
             cell = ws.cell(current_row, col_idx, value)
-            if col_idx in (2, 4):
-                # wrap=True включен по умолчанию в _apply_print_style
-                _apply_print_style(cell, h="left") 
+            if col_idx in (2, 4, 5, 6):
+                _apply_print_style(cell, h="left")
             else:
                 _apply_print_style(cell, h="center")
 
@@ -300,12 +317,12 @@ def build_printable_trip_timesheet_sheet(
 
     summary = calc_rows_summary(normalized_rows, year, month)
 
-    ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=4)
+    ws.merge_cells(start_row=current_row, start_column=1, end_row=current_row, end_column=6)
     total_cell = ws.cell(current_row, 1)
     total_cell.value = "ИТОГО"
     _apply_print_style(total_cell, bold=True, fill=PRINT_TOTAL_FILL)
 
-    for col_idx in range(5, totals_start_col):
+    for col_idx in range(7, totals_start_col):
         cell = ws.cell(current_row, col_idx, "")
         _apply_print_style(cell, bold=True, fill=PRINT_TOTAL_FILL)
 
@@ -2322,8 +2339,6 @@ class TripTimesheetPage(tk.Frame):
             row["work_schedule"] = normalize_spaces(meta.get("work_schedule") or row.get("work_schedule") or "")
         
             self.rows.append(row)
-            existing_keys.add(key)
-            added += 1
             existing_keys.add(key)
             added += 1
 
