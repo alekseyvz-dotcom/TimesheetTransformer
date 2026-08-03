@@ -703,8 +703,29 @@ class TimesheetComparePage(tk.Frame):
                         "days": list(raw[:31]),
                     })
 
+
             # 2. Загрузка командировочных табелей.
+            # Подразделение могло быть переименовано, поэтому командировки
+            # отбираем не по названию подразделения, а по составу сотрудников
+            # выбранных объектных табелей.
+            
             global DB_POOL
+            
+            # Сохраняем состав сотрудников именно обычных объектных табелей.
+            # Это нужно сделать до добавления командировочных строк в obj_rows.
+            regular_obj_rows = list(obj_rows)
+            
+            selected_tbns = {
+                normalize_tbn(row.get("tbn"))
+                for row in regular_obj_rows
+                if normalize_tbn(row.get("tbn"))
+            }
+            
+            selected_fios = {
+                fio_sort_key(row.get("fio"))
+                for row in regular_obj_rows
+                if fio_sort_key(row.get("fio"))
+            }
             
             if not DB_POOL:
                 logging.error(
@@ -721,21 +742,7 @@ class TimesheetComparePage(tk.Frame):
             
                 try:
                     with conn.cursor() as cur:
-                        dep_param = (agg.get("department") or "").strip()
-            
-                        params = [agg["year"], agg["month"]]
-                        dep_sql = ""
-            
-                        if dep_param and dep_param != "Все":
-                            # trip_timesheet_rows.department — подразделение,
-                            # сохранённое непосредственно в командировочном табеле.
-                            dep_sql = """
-                                AND LOWER(BTRIM(COALESCE(tr.department, '')))
-                                    = LOWER(BTRIM(%s))
-                            """
-                            params.append(dep_param)
-            
-                        sql = f"""
+                        sql = """
                             SELECT
                                 th.object_addr,
                                 th.object_id,
@@ -748,24 +755,22 @@ class TimesheetComparePage(tk.Frame):
                               ON tr.header_id = th.id
                             WHERE th.year = %s
                               AND th.month = %s
-                              {dep_sql}
                             ORDER BY
                                 th.object_addr,
                                 tr.fio,
                                 tr.tbn
                         """
             
-                        cur.execute(sql, tuple(params))
-                        trip_rows = cur.fetchall()
-            
-                        logging.info(
-                            "Командировочные табели: год=%s, месяц=%s, "
-                            "подразделение=%r, найдено строк=%s",
-                            agg["year"],
-                            agg["month"],
-                            dep_param,
-                            len(trip_rows),
+                        cur.execute(
+                            sql,
+                            (
+                                agg["year"],
+                                agg["month"],
+                            ),
                         )
+            
+                        trip_rows = cur.fetchall()
+                        matched_trip_rows = 0
             
                         for row in trip_rows:
                             (
@@ -777,20 +782,78 @@ class TimesheetComparePage(tk.Frame):
                                 trip_department,
                             ) = row
             
+                            trip_tbn_key = normalize_tbn(tbn)
+                            trip_fio_key = fio_sort_key(fio)
+            
+                            # Основное сопоставление — по табельному номеру.
+                            matched_by_tbn = (
+                                bool(trip_tbn_key)
+                                and trip_tbn_key in selected_tbns
+                            )
+            
+                            # ФИО используется как резервный вариант:
+                            # 1. если в командировке отсутствует табельный номер;
+                            # 2. если в старом объектном табеле у сотрудника
+                            #    отсутствовал табельный номер.
+                            matched_by_fio = (
+                                bool(trip_fio_key)
+                                and trip_fio_key in selected_fios
+                                and (
+                                    not trip_tbn_key
+                                    or trip_tbn_key not in selected_tbns
+                                )
+                            )
+            
+                            if not matched_by_tbn and not matched_by_fio:
+                                continue
+            
                             obj_name = (obj_addr or "").strip()
             
                             if obj_id:
                                 obj_name = f"[{obj_id}] {obj_name}"
             
+                            department_label = (
+                                (trip_department or "").strip()
+                                or "подразделение не указано"
+                            )
+            
                             obj_rows.append({
                                 "fio": (fio or "").strip(),
                                 "tbn": (tbn or "").strip(),
                                 "object_display": (
-                                    f"✈ [Командировка] {obj_name}"
+                                    f"✈ [Командировка] {obj_name} "
+                                    f"({department_label})"
                                 ),
-                                "days": list(hours_raw[:31]) if hours_raw else [],
-                                "department": (trip_department or "").strip(),
+                                "days": (
+                                    list(hours_raw[:31])
+                                    if hours_raw
+                                    else []
+                                ),
+                                "department": (
+                                    (trip_department or "").strip()
+                                ),
                             })
+            
+                            matched_trip_rows += 1
+            
+                        logging.info(
+                            "Загрузка командировок: "
+                            "год=%s, месяц=%s, выбранное подразделение=%r, "
+                            "сотрудников в объектных табелях=%s, "
+                            "всего командировочных строк за месяц=%s, "
+                            "подошло строк=%s",
+                            agg["year"],
+                            agg["month"],
+                            agg.get("department"),
+                            len(selected_tbns),
+                            len(trip_rows),
+                            matched_trip_rows,
+                        )
+            
+                        self.var_status.set(
+                            f"Объектных строк: {len(regular_obj_rows)}; "
+                            f"командировочных строк: {matched_trip_rows}"
+                        )
             
                 except Exception as e:
                     logging.exception(
