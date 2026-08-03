@@ -703,53 +703,107 @@ class TimesheetComparePage(tk.Frame):
                         "days": list(raw[:31]),
                     })
 
-            # 2. Загрузка КОМАНДИРОВОЧНЫХ табелей напрямую через SQL
+            # 2. Загрузка командировочных табелей.
             global DB_POOL
-            if DB_POOL:
+            
+            if not DB_POOL:
+                logging.error(
+                    "DB_POOL не установлен — командировочные табели не загружены"
+                )
+                messagebox.showwarning(
+                    "Командировочные табели",
+                    "Пул подключения к БД не установлен.\n"
+                    "Командировочные табели не были загружены.",
+                    parent=self,
+                )
+            else:
                 conn = DB_POOL.getconn()
+            
                 try:
                     with conn.cursor() as cur:
-                        dep_param = agg["department"]
+                        dep_param = (agg.get("department") or "").strip()
+            
                         params = [agg["year"], agg["month"]]
                         dep_sql = ""
-                        
-                        # Если выбрано конкретное подразделение, фильтруем по нему через таблицу employees
+            
                         if dep_param and dep_param != "Все":
-                            dep_sql = " AND d.name = %s "
+                            # trip_timesheet_rows.department — подразделение,
+                            # сохранённое непосредственно в командировочном табеле.
+                            dep_sql = """
+                                AND LOWER(BTRIM(COALESCE(tr.department, '')))
+                                    = LOWER(BTRIM(%s))
+                            """
                             params.append(dep_param)
-
+            
                         sql = f"""
-                            SELECT 
-                                th.object_addr, 
-                                th.object_id, 
-                                tr.fio, 
-                                tr.tbn, 
-                                tr.hours_raw
+                            SELECT
+                                th.object_addr,
+                                th.object_id,
+                                tr.fio,
+                                tr.tbn,
+                                tr.hours_raw,
+                                tr.department
                             FROM trip_timesheet_headers th
-                            JOIN trip_timesheet_rows tr ON th.id = tr.header_id
-                            LEFT JOIN employees e ON e.tbn = tr.tbn
-                            LEFT JOIN departments d ON d.id = e.department_id
-                            WHERE th.year = %s 
-                              AND th.month = %s 
+                            JOIN trip_timesheet_rows tr
+                              ON tr.header_id = th.id
+                            WHERE th.year = %s
+                              AND th.month = %s
                               {dep_sql}
+                            ORDER BY
+                                th.object_addr,
+                                tr.fio,
+                                tr.tbn
                         """
+            
                         cur.execute(sql, tuple(params))
-                        
-                        for row in cur.fetchall():
-                            obj_addr, obj_id, fio, tbn, hours_raw = row
-                            
+                        trip_rows = cur.fetchall()
+            
+                        logging.info(
+                            "Командировочные табели: год=%s, месяц=%s, "
+                            "подразделение=%r, найдено строк=%s",
+                            agg["year"],
+                            agg["month"],
+                            dep_param,
+                            len(trip_rows),
+                        )
+            
+                        for row in trip_rows:
+                            (
+                                obj_addr,
+                                obj_id,
+                                fio,
+                                tbn,
+                                hours_raw,
+                                trip_department,
+                            ) = row
+            
                             obj_name = (obj_addr or "").strip()
+            
                             if obj_id:
                                 obj_name = f"[{obj_id}] {obj_name}"
-                            
+            
                             obj_rows.append({
                                 "fio": (fio or "").strip(),
                                 "tbn": (tbn or "").strip(),
-                                "object_display": f"✈ [Командировка] {obj_name}",
+                                "object_display": (
+                                    f"✈ [Командировка] {obj_name}"
+                                ),
                                 "days": list(hours_raw[:31]) if hours_raw else [],
+                                "department": (trip_department or "").strip(),
                             })
+            
                 except Exception as e:
-                    logging.exception("Ошибка загрузки командировочных табелей")
+                    logging.exception(
+                        "Ошибка загрузки командировочных табелей"
+                    )
+            
+                    messagebox.showerror(
+                        "Ошибка командировочных табелей",
+                        "Не удалось загрузить командировочные табели:\n"
+                        f"{e}",
+                        parent=self,
+                    )
+            
                 finally:
                     DB_POOL.putconn(conn)
 
