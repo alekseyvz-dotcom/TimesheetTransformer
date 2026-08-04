@@ -19,6 +19,8 @@ from timesheet_db import (
 
 logger = logging.getLogger(__name__)
 
+class TripTimesheetConflictError(RuntimeError):
+    """Табель был изменён другим пользователем после его открытия."""
 
 def _norm_header_object_id(value: Optional[str]) -> str:
     return normalize_spaces(value or "")
@@ -233,12 +235,12 @@ def upsert_trip_timesheet_header(
 
         return int(row[0])
 
-def replace_trip_timesheet_rows(
+def _prepare_trip_timesheet_values(
     header_id: int,
     rows: Sequence[Mapping[str, Any]],
     year: int,
     month: int,
-) -> None:
+) -> Tuple[List[tuple[Any, ...]], List[Mapping[str, Any]]]:
     values: List[tuple[Any, ...]] = []
     original_records: List[Mapping[str, Any]] = []
 
@@ -258,13 +260,12 @@ def replace_trip_timesheet_rows(
             month,
         )
 
-        totals = rec.get("_totals")
-        if not isinstance(totals, dict):
-            totals = calc_row_totals(
-                hours_list,
-                year,
-                month,
-            )
+        # Итоги обязательно пересчитываются перед записью.
+        totals = calc_row_totals(
+            hours_list,
+            year,
+            month,
+        )
 
         total_days = int(totals.get("days") or 0) or None
         total_hours = float(totals.get("hours") or 0.0) or None
@@ -290,6 +291,29 @@ def replace_trip_timesheet_rows(
 
         original_records.append(rec)
 
+    return values, original_records
+
+def replace_trip_timesheet_rows(
+    header_id: int,
+    rows: Sequence[Mapping[str, Any]],
+    year: int,
+    month: int,
+    *,
+    allow_empty: bool = False,
+) -> None:
+    values, original_records = _prepare_trip_timesheet_values(
+        header_id=header_id,
+        rows=rows,
+        year=year,
+        month=month,
+    )
+
+    if not values and not allow_empty:
+        raise RuntimeError(
+            "Сохранение отменено: табель не содержит ни одной "
+            "заполненной строки. Массовое удаление заблокировано."
+        )
+
     with db_cursor() as (_conn, cur):
         cur.execute(
             """
@@ -302,7 +326,9 @@ def replace_trip_timesheet_rows(
         if not values:
             return
 
-        insert_query = """
+        returned_ids = execute_values(
+            cur,
+            """
             INSERT INTO trip_timesheet_rows
                 (
                     header_id,
@@ -319,14 +345,16 @@ def replace_trip_timesheet_rows(
                 )
             VALUES %s
             RETURNING id
-        """
-
-        returned_ids = execute_values(
-            cur,
-            insert_query,
+            """,
             values,
             fetch=True,
         )
+
+        if len(returned_ids) != len(original_records):
+            raise RuntimeError(
+                "Количество созданных строк не совпадает "
+                "с количеством сохраняемых сотрудников."
+            )
 
         period_values: List[tuple[Any, Any, Any]] = []
 
@@ -334,24 +362,33 @@ def replace_trip_timesheet_rows(
             returned_ids,
             original_records,
         ):
-            row_id = row_id_tuple[0]
-            periods = rec.get("trip_periods") or []
+            row_id = int(row_id_tuple[0])
 
-            for period in periods:
+            for period in rec.get("trip_periods") or []:
                 date_from = period.get("from")
                 date_to = period.get("to")
 
-                if date_from and date_to:
-                    period_values.append(
-                        (
-                            row_id,
-                            date_from,
-                            date_to,
-                        )
+                if not date_from or not date_to:
+                    continue
+
+                if date_to < date_from:
+                    raise RuntimeError(
+                        f"Некорректный период командировки: "
+                        f"{date_from} — {date_to}."
                     )
 
+                period_values.append(
+                    (
+                        row_id,
+                        date_from,
+                        date_to,
+                    )
+                )
+
         if period_values:
-            period_insert_query = """
+            execute_values(
+                cur,
+                """
                 INSERT INTO trip_timesheet_periods
                     (
                         row_id,
@@ -359,14 +396,305 @@ def replace_trip_timesheet_rows(
                         date_to
                     )
                 VALUES %s
-            """
-
-            execute_values(
-                cur,
-                period_insert_query,
+                """,
                 period_values,
             )
 
+def save_trip_timesheet_atomic(
+    *,
+    object_id: Optional[str],
+    object_addr: str,
+    year: int,
+    month: int,
+    user_id: int,
+    rows: Sequence[Mapping[str, Any]],
+    expected_header_id: Optional[int],
+    expected_revision: Optional[int],
+) -> Tuple[int, int]:
+    """
+    Атомарно сохраняет заголовок, строки и периоды табеля.
+
+    Защищает от перезаписи данных, если другой пользователь
+    сохранил тот же табель после его открытия.
+    """
+    object_id_norm = _norm_header_object_id(object_id)
+    object_addr_norm = _norm_header_address(object_addr)
+
+    if not object_addr_norm:
+        raise RuntimeError(
+            "Не задан адрес объекта для сохранения командировочного табеля."
+        )
+
+    if user_id is None:
+        raise RuntimeError(
+            "Не удалось определить пользователя для сохранения табеля."
+        )
+
+    try:
+        user_id_int = int(user_id)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Некорректный user_id={user_id!r}."
+        ) from exc
+
+    if not rows:
+        raise RuntimeError(
+            "Сохранение пустого табеля заблокировано. "
+            "В табеле нет сотрудников."
+        )
+
+    with db_cursor() as (_conn, cur):
+        object_db_id = find_object_db_id_by_excel_or_address(
+            cur,
+            object_id_norm or None,
+            object_addr_norm,
+        )
+
+        if object_db_id is None:
+            raise RuntimeError(
+                f"В БД не найден объект "
+                f"(excel_id={object_id_norm!r}, "
+                f"address={object_addr_norm!r})."
+            )
+
+        object_db_id = int(object_db_id)
+
+        # Не позволяет двум экземплярам программы одновременно
+        # сохранять один объект и один период.
+        lock_key = (
+            f"trip_timesheet:"
+            f"{object_db_id}:"
+            f"{int(year)}:"
+            f"{int(month)}"
+        )
+
+        cur.execute(
+            """
+            SELECT pg_advisory_xact_lock(hashtext(%s))
+            """,
+            (lock_key,),
+        )
+
+        cur.execute(
+            """
+            SELECT
+                h.id,
+                COALESCE(h.revision, 0)
+            FROM trip_timesheet_headers h
+            WHERE h.object_db_id = %s
+              AND h.year = %s
+              AND h.month = %s
+            ORDER BY h.updated_at DESC NULLS LAST, h.id DESC
+            LIMIT 1
+            FOR UPDATE
+            """,
+            (
+                object_db_id,
+                int(year),
+                int(month),
+            ),
+        )
+
+        existing = cur.fetchone()
+
+        if existing:
+            header_id = int(existing[0])
+            current_revision = int(existing[1] or 0)
+
+            if expected_header_id is None:
+                raise TripTimesheetConflictError(
+                    "Пока табель был открыт, другой пользователь "
+                    "создал и сохранил его. Откройте табель заново."
+                )
+
+            if int(expected_header_id) != header_id:
+                raise TripTimesheetConflictError(
+                    "Открытая версия табеля больше не является актуальной. "
+                    "Откройте табель заново."
+                )
+
+            if expected_revision is None:
+                raise TripTimesheetConflictError(
+                    "Не удалось проверить версию открытого табеля. "
+                    "Откройте табель заново."
+                )
+
+            if int(expected_revision) != current_revision:
+                raise TripTimesheetConflictError(
+                    "Табель уже был изменён другим пользователем. "
+                    "Ваши данные не были записаны. "
+                    "Откройте табель заново и повторите изменения."
+                )
+        else:
+            if expected_header_id is not None:
+                raise TripTimesheetConflictError(
+                    "Заголовок открытого табеля был удалён или изменён. "
+                    "Откройте табель заново."
+                )
+
+            cur.execute(
+                """
+                INSERT INTO trip_timesheet_headers
+                    (
+                        object_id,
+                        object_addr,
+                        year,
+                        month,
+                        user_id,
+                        object_db_id,
+                        revision,
+                        created_at,
+                        updated_at
+                    )
+                VALUES
+                    (%s, %s, %s, %s, %s, %s, 0, now(), now())
+                RETURNING id
+                """,
+                (
+                    object_id_norm,
+                    object_addr_norm,
+                    int(year),
+                    int(month),
+                    user_id_int,
+                    object_db_id,
+                ),
+            )
+
+            created = cur.fetchone()
+
+            if not created:
+                raise RuntimeError(
+                    "Не удалось создать заголовок командировочного табеля."
+                )
+
+            header_id = int(created[0])
+            current_revision = 0
+
+        values, original_records = _prepare_trip_timesheet_values(
+            header_id=header_id,
+            rows=rows,
+            year=year,
+            month=month,
+        )
+
+        if not values:
+            raise RuntimeError(
+                "Сохранение отменено: после проверки не осталось "
+                "ни одной заполненной строки."
+            )
+
+        cur.execute(
+            """
+            DELETE FROM trip_timesheet_rows
+            WHERE header_id = %s
+            """,
+            (header_id,),
+        )
+
+        returned_ids = execute_values(
+            cur,
+            """
+            INSERT INTO trip_timesheet_rows
+                (
+                    header_id,
+                    fio,
+                    tbn,
+                    position,
+                    department,
+                    hours_raw,
+                    total_days,
+                    total_hours,
+                    night_hours,
+                    overtime_day,
+                    overtime_night
+                )
+            VALUES %s
+            RETURNING id
+            """,
+            values,
+            fetch=True,
+        )
+
+        if len(returned_ids) != len(original_records):
+            raise RuntimeError(
+                "Не удалось сохранить все строки табеля. "
+                "Операция полностью отменена."
+            )
+
+        period_values: List[tuple[Any, Any, Any]] = []
+
+        for row_id_tuple, rec in zip(
+            returned_ids,
+            original_records,
+        ):
+            row_id = int(row_id_tuple[0])
+
+            for period in rec.get("trip_periods") or []:
+                date_from = period.get("from")
+                date_to = period.get("to")
+
+                if not date_from or not date_to:
+                    continue
+
+                if date_to < date_from:
+                    raise RuntimeError(
+                        f"Дата окончания командировки {date_to} "
+                        f"раньше даты начала {date_from}."
+                    )
+
+                period_values.append(
+                    (
+                        row_id,
+                        date_from,
+                        date_to,
+                    )
+                )
+
+        if period_values:
+            execute_values(
+                cur,
+                """
+                INSERT INTO trip_timesheet_periods
+                    (
+                        row_id,
+                        date_from,
+                        date_to
+                    )
+                VALUES %s
+                """,
+                period_values,
+            )
+
+        new_revision = current_revision + 1
+
+        cur.execute(
+            """
+            UPDATE trip_timesheet_headers
+            SET
+                object_id = %s,
+                object_addr = %s,
+                object_db_id = %s,
+                user_id = %s,
+                revision = %s,
+                updated_at = now()
+            WHERE id = %s
+            """,
+            (
+                object_id_norm,
+                object_addr_norm,
+                object_db_id,
+                user_id_int,
+                new_revision,
+                header_id,
+            ),
+        )
+
+        if cur.rowcount != 1:
+            raise RuntimeError(
+                "Не удалось обновить версию командировочного табеля."
+            )
+
+        return header_id, new_revision
 
 def load_trip_timesheet_rows_from_db(
     object_id: Optional[str],
@@ -429,6 +757,90 @@ def load_trip_timesheet_rows_from_db(
                 rows_map[r_id]["trip_periods"].append({"from": d_from, "to": d_to})
 
         return list(rows_map.values())
+
+def load_trip_timesheet_with_revision(
+    object_id: Optional[str],
+    object_addr: str,
+    year: int,
+    month: int,
+) -> Tuple[List[Dict[str, Any]], Optional[int], Optional[int]]:
+    """
+    Возвращает:
+        rows, header_id, revision
+    """
+    object_id_norm = _norm_header_object_id(object_id)
+    object_addr_norm = _norm_header_address(object_addr)
+
+    with db_cursor() as (_conn, cur):
+        object_db_id = None
+
+        try:
+            object_db_id = find_object_db_id_by_excel_or_address(
+                cur,
+                object_id_norm or None,
+                object_addr_norm,
+            )
+        except Exception:
+            object_db_id = None
+
+        if object_db_id is not None:
+            cur.execute(
+                """
+                SELECT
+                    h.id,
+                    COALESCE(h.revision, 0)
+                FROM trip_timesheet_headers h
+                WHERE h.object_db_id = %s
+                  AND h.year = %s
+                  AND h.month = %s
+                ORDER BY h.updated_at DESC NULLS LAST, h.id DESC
+                LIMIT 1
+                """,
+                (
+                    int(object_db_id),
+                    int(year),
+                    int(month),
+                ),
+            )
+        else:
+            header_id = _find_trip_header_id_by_key(
+                cur,
+                object_id_norm or None,
+                object_addr_norm,
+                int(year),
+                int(month),
+            )
+
+            if header_id is None:
+                return [], None, None
+
+            cur.execute(
+                """
+                SELECT
+                    h.id,
+                    COALESCE(h.revision, 0)
+                FROM trip_timesheet_headers h
+                WHERE h.id = %s
+                """,
+                (int(header_id),),
+            )
+
+        header_row = cur.fetchone()
+
+        if not header_row:
+            return [], None, None
+
+        header_id = int(header_row[0])
+        revision = int(header_row[1] or 0)
+
+        rows = _load_trip_rows_by_header_id_cur(
+            cur,
+            header_id=header_id,
+            year=int(year),
+            month=int(month),
+        )
+
+        return rows, header_id, revision
 
 def _load_trip_rows_by_header_id_cur(
     cur,
@@ -689,9 +1101,9 @@ def load_trip_timesheet_rows_by_header_id(header_id: int) -> List[Dict[str, Any]
                 r.id,
                 r.fio,
                 r.tbn,
-                r.hours_raw,
                 r.position,
                 r.department,
+                r.hours_raw,
                 p.date_from as trip_date_from,
                 p.date_to as trip_date_to,
                 r.total_days,
@@ -783,6 +1195,8 @@ def load_trip_timesheet_full_by_header_id(header_id: int) -> Optional[Dict[str, 
                 r_id = r.get("row_id")
                 fio = r.get("fio") or ""
                 tbn = r.get("tbn") or ""
+                position = r.get("position") or ""
+                department = r.get("department") or ""
                 hours_raw = r.get("hours_raw")
                 trip_date_from = r.get("trip_date_from")
                 trip_date_to = r.get("trip_date_to")
@@ -892,9 +1306,12 @@ def find_duplicate_employees_for_trip_timesheet(
     return result
 
 __all__ = [
+    "TripTimesheetConflictError",
     "upsert_trip_timesheet_header",
     "replace_trip_timesheet_rows",
+    "save_trip_timesheet_atomic",
     "load_trip_timesheet_rows_from_db",
+    "load_trip_timesheet_with_revision",
     "load_trip_timesheet_rows_for_copy",
     "load_trip_timesheet_rows_by_header_id",
     "load_trip_timesheet_full_by_header_id",
