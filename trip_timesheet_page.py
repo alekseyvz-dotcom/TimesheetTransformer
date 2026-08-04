@@ -26,10 +26,14 @@ from timesheet_common import (
     parse_hours_value,
     safe_filename,
 )
-from timesheet_db import (
-    find_fired_employees_in_timesheet,
-    load_employees_from_db,
-    load_objects_short_for_timesheet,
+from trip_timesheet_db import (
+    TripTimesheetConflictError,
+    find_duplicate_employees_for_trip_timesheet,
+    find_trip_timesheet_header_id,
+    load_trip_timesheet_rows_for_copy,
+    load_trip_timesheet_rows_from_db,
+    load_trip_timesheet_with_revision,
+    save_trip_timesheet_atomic,
 )
 from timesheet_dialogs import (
     AutoCompleteCombobox,
@@ -613,7 +617,12 @@ class TripTimesheetPage(tk.Frame):
         self.app = app
 
         self.current_header_id: Optional[int] = None
+        self.current_revision: Optional[int] = None
+        
         self.rows: List[Dict[str, Any]] = []
+        
+        self._loaded_row_count = 0
+        self._loaded_total_hours = 0.0
 
         today = date.today()
         self.var_year = tk.IntVar(value=today.year)
@@ -1010,20 +1019,23 @@ class TripTimesheetPage(tk.Frame):
         self._set_status_text(text)
 
     def _schedule_auto_save(self) -> None:
+        """
+        Автосохранение отключено.
+    
+        Табель сохраняется только вручную, чтобы случайная очистка
+        или старая копия не записались в БД автоматически.
+        """
         if self._auto_save_job is not None:
             try:
                 self.after_cancel(self._auto_save_job)
             except Exception:
                 pass
+    
             self._auto_save_job = None
-
-        self._auto_save_job = self.after(self._auto_save_delay_ms, self._auto_save_callback)
-
+    
+    
     def _auto_save_callback(self) -> None:
         self._auto_save_job = None
-        if not self._dirty:
-            return
-        self._save_timesheet_internal(show_messages=False, is_auto=True)
 
     def _capture_current_context(self) -> Dict[str, Any]:
         object_id, object_addr = self._parse_selected_object()
@@ -1084,18 +1096,34 @@ class TripTimesheetPage(tk.Frame):
     def _confirm_leave_with_unsaved(self) -> bool:
         if not self._dirty:
             return True
-
+    
         answer = messagebox.askyesnocancel(
             "Несохранённые изменения",
-            "Есть несохранённые изменения.\n\nСохранить перед переключением?",
+            (
+                "Есть несохранённые изменения.\n\n"
+                "Сохранить перед переключением?"
+            ),
             parent=self,
         )
+    
         if answer is None:
             return False
-
+    
         if answer is True:
-            return self._save_timesheet_internal(show_messages=True, is_auto=False)
-
+            return self._save_timesheet_internal(
+                show_messages=True,
+                is_auto=False,
+            )
+    
+        if self._auto_save_job is not None:
+            try:
+                self.after_cancel(self._auto_save_job)
+            except Exception:
+                pass
+    
+            self._auto_save_job = None
+    
+        self._dirty = False
         return True
 
     # =========================================================
@@ -2315,7 +2343,7 @@ class TripTimesheetPage(tk.Frame):
             self._update_trip_info_from_selection()
             return
     
-        self._open_timesheet()
+        self._open_timesheet(confirm_unsaved=False)
 
     def _on_address_select(self) -> None:
         if self._suppress_events:
@@ -2352,7 +2380,7 @@ class TripTimesheetPage(tk.Frame):
             self._update_trip_info_from_selection()
             return
     
-        self._open_timesheet()
+        self._open_timesheet(confirm_unsaved=False)
 
     def _on_object_id_select(self) -> None:
         if self._suppress_events:
@@ -2371,7 +2399,7 @@ class TripTimesheetPage(tk.Frame):
             self._update_trip_info_from_selection()
             return
     
-        self._open_timesheet()
+        self._open_timesheet(confirm_unsaved=False)
 
     # =========================================================
     # Работа со строками
@@ -2508,116 +2536,287 @@ class TripTimesheetPage(tk.Frame):
     # =========================================================
     # Открытие / загрузка / сохранение
     # =========================================================
-    def _open_timesheet(self) -> None:
+    def _open_timesheet(
+        self,
+        confirm_unsaved: bool = True,
+    ) -> None:
         object_id, object_addr = self._parse_selected_object()
         year, month = self._get_year_month()
-
+    
         if not object_addr:
-            messagebox.showwarning("Внимание", "Выберите объект.", parent=self)
-            return
-
-        if not self._confirm_leave_with_unsaved():
-            self._restore_controls_to_loaded_context()
-            return
-
-        try:
-            rows = load_trip_timesheet_rows_from_db(
-                object_id=object_id or None,
-                object_addr=object_addr,
-                year=year,
-                month=month,
+            messagebox.showwarning(
+                "Внимание",
+                "Выберите объект.",
+                parent=self,
             )
-            self.current_header_id = find_trip_timesheet_header_id(
+            return
+    
+        if confirm_unsaved:
+            if not self._confirm_leave_with_unsaved():
+                self._restore_controls_to_loaded_context()
+                return
+    
+        try:
+            (
+                rows,
+                header_id,
+                revision,
+            ) = load_trip_timesheet_with_revision(
                 object_id=object_id or None,
                 object_addr=object_addr,
                 year=year,
                 month=month,
             )
         except Exception as exc:
-            messagebox.showerror("Ошибка", f"Не удалось открыть табель:\n{exc}", parent=self)
+            logger.exception(
+                "Не удалось открыть командировочный табель"
+            )
+    
+            messagebox.showerror(
+                "Ошибка",
+                f"Не удалось открыть табель:\n{exc}",
+                parent=self,
+            )
             return
-
+    
         self._set_rows(rows)
+    
+        self.current_header_id = header_id
+        self.current_revision = revision
+    
+        loaded_summary = calc_rows_summary(
+            self.rows,
+            year,
+            month,
+        )
+    
+        self._loaded_row_count = len(self.rows)
+        self._loaded_total_hours = float(
+            loaded_summary.get("hours") or 0
+        )
+    
         self._loaded_context = self._capture_current_context()
         self._dirty = False
-        self.var_status.set(f"Открыт командировочный табель: {object_addr}, {month:02d}.{year}.")
+    
+        if header_id is None:
+            self.var_status.set(
+                f"Новый командировочный табель: "
+                f"{object_addr}, {month:02d}.{year}."
+            )
+        else:
+            self.var_status.set(
+                f"Открыт командировочный табель: "
+                f"{object_addr}, {month:02d}.{year}. "
+                f"Версия: {revision}."
+            )
+    
         self._update_trip_info_from_selection()
 
     def _save_timesheet(self) -> None:
-        self._save_timesheet_internal(show_messages=True, is_auto=False)
+        if self._auto_save_job is not None:
+            try:
+                self.after_cancel(self._auto_save_job)
+            except Exception:
+                pass
+    
+            self._auto_save_job = None
+    
+        self._save_timesheet_internal(
+            show_messages=True,
+            is_auto=False,
+        )
 
-    def _save_timesheet_internal(self, show_messages: bool = True, is_auto: bool = False) -> bool:
+    def _save_timesheet_internal(
+        self,
+        show_messages: bool = True,
+        is_auto: bool = False,
+    ) -> bool:
+        # Автоматическое сохранение полностью запрещено.
+        if is_auto:
+            self._mark_save_error(
+                "Автосохранение отключено. Нажмите «Сохранить»."
+            )
+            return False
+    
         object_id, object_addr = self._parse_selected_object()
         year, month = self._get_year_month()
-
+    
         if not object_addr:
             if show_messages:
-                messagebox.showwarning("Внимание", "Выберите объект.", parent=self)
-            if is_auto:
-                self._mark_save_error("Ошибка авто‑сохранения: не выбран объект")
-            return False
-
-        if not self.rows:
-            if show_messages and not is_auto:
-                if not messagebox.askyesno(
-                    "Сохранение",
-                    "В табеле нет строк. Всё равно создать/сохранить пустой табель?",
+                messagebox.showwarning(
+                    "Внимание",
+                    "Выберите объект.",
                     parent=self,
-                ):
-                    return False
-
+                )
+            return False
+    
+        if not self.rows:
+            if show_messages:
+                messagebox.showerror(
+                    "Сохранение заблокировано",
+                    (
+                        "В табеле нет сотрудников.\n\n"
+                        "Сохранение пустого табеля запрещено, "
+                        "чтобы не удалить все данные."
+                    ),
+                    parent=self,
+                )
+            return False
+    
         errors = self._validate_before_save()
+    
         if errors:
             if show_messages:
-                messagebox.showerror("Ошибка", "\n".join(errors), parent=self)
-            if is_auto:
-                self._mark_save_error("Ошибка авто‑сохранения: есть ошибки в данных")
+                messagebox.showerror(
+                    "Ошибка",
+                    "\n".join(errors),
+                    parent=self,
+                )
             return False
-
+    
         user_id = self._get_current_user_id()
-        
+    
         if user_id is None:
             if show_messages:
                 messagebox.showerror(
                     "Ошибка",
-                    "Не удалось определить пользователя для сохранения табеля.\n"
-                    "Перезайдите в программу.",
+                    (
+                        "Не удалось определить пользователя "
+                        "для сохранения табеля.\n"
+                        "Перезайдите в программу."
+                    ),
                     parent=self,
                 )
-            if is_auto:
-                self._mark_save_error("Ошибка авто‑сохранения: не определён пользователь")
             return False
-        
+    
+        self._recalc_all_totals()
+    
+        current_summary = calc_rows_summary(
+            self.rows,
+            year,
+            month,
+        )
+    
+        current_row_count = len(self.rows)
+        current_total_hours = float(
+            current_summary.get("hours") or 0
+        )
+    
+        removed_rows = (
+            self._loaded_row_count - current_row_count
+        )
+        removed_hours = (
+            self._loaded_total_hours - current_total_hours
+        )
+    
+        dangerous_change = (
+            removed_rows >= 5
+            or (
+                self._loaded_row_count > 0
+                and current_row_count
+                < self._loaded_row_count * 0.75
+            )
+            or removed_hours >= 40
+            or (
+                self._loaded_total_hours > 0
+                and current_total_hours
+                < self._loaded_total_hours * 0.75
+            )
+        )
+    
+        if dangerous_change:
+            answer = messagebox.askyesno(
+                "Подтверждение массового изменения",
+                (
+                    "Обнаружено существенное уменьшение данных.\n\n"
+                    f"Сотрудников было: {self._loaded_row_count}\n"
+                    f"Сотрудников стало: {current_row_count}\n\n"
+                    f"Часов было: {self._loaded_total_hours:g}\n"
+                    f"Часов стало: {current_total_hours:g}\n\n"
+                    "Если это не было сделано намеренно, "
+                    "нажмите «Нет» и заново откройте табель.\n\n"
+                    "Сохранить изменения?"
+                ),
+                parent=self,
+            )
+    
+            if not answer:
+                return False
+    
         try:
-            header_id = upsert_trip_timesheet_header(
+            (
+                header_id,
+                new_revision,
+            ) = save_trip_timesheet_atomic(
                 object_id=object_id or None,
                 object_addr=object_addr,
                 year=year,
                 month=month,
                 user_id=user_id,
-            )
-        
-            self._recalc_all_totals()
-            replace_trip_timesheet_rows(
-                header_id=header_id,
                 rows=self.rows,
-                year=year,
-                month=month,
+                expected_header_id=self.current_header_id,
+                expected_revision=self.current_revision,
             )
-        
+    
             self.current_header_id = header_id
+            self.current_revision = new_revision
+    
             self._loaded_context = self._capture_current_context()
-        except Exception as exc:
+    
+            self._loaded_row_count = current_row_count
+            self._loaded_total_hours = current_total_hours
+    
+        except TripTimesheetConflictError as exc:
+            logger.warning(
+                "Конфликт сохранения командировочного табеля: %s",
+                exc,
+            )
+    
             if show_messages:
-                messagebox.showerror("Ошибка", f"Не удалось сохранить табель:\n{exc}", parent=self)
-            if is_auto:
-                self._mark_save_error("Ошибка авто‑сохранения")
+                messagebox.showerror(
+                    "Табель изменён другим пользователем",
+                    (
+                        f"{exc}\n\n"
+                        "Ваши изменения не были записаны в базу.\n\n"
+                        "Чтобы не потерять текущие данные, можно сначала "
+                        "выгрузить табель в Excel, затем открыть актуальную "
+                        "версию и повторить изменения."
+                    ),
+                    parent=self,
+                )
+    
+            self._mark_save_error(
+                "Сохранение отменено: табель изменён другим пользователем"
+            )
             return False
-
-        self._mark_saved(auto=is_auto)
+    
+        except Exception as exc:
+            logger.exception(
+                "Не удалось сохранить командировочный табель"
+            )
+    
+            if show_messages:
+                messagebox.showerror(
+                    "Ошибка",
+                    f"Не удалось сохранить табель:\n{exc}",
+                    parent=self,
+                )
+    
+            self._mark_save_error(
+                "Ошибка сохранения командировочного табеля"
+            )
+            return False
+    
+        self._mark_saved(auto=False)
+    
+        self.var_status.set(
+            f"Сохранено: {datetime.now():%d.%m.%Y %H:%M:%S}. "
+            f"Версия: {self.current_revision}."
+        )
+    
         self._update_trip_info_from_selection()
         return True
-
+    
     def _validate_before_save(self) -> List[str]:
         errors: List[str] = []
     
@@ -3254,10 +3453,15 @@ class TripTimesheetPage(tk.Frame):
     
     def _fill_hours_for_all(self) -> None:
         if not self.rows:
-            messagebox.showinfo("Проставить время", "В табеле нет строк.", parent=self)
+            messagebox.showinfo(
+                "Проставить время",
+                "В табеле нет строк.",
+                parent=self,
+            )
             return
     
         params = self._ask_fill_hours_params()
+    
         if not params:
             return
     
@@ -3265,67 +3469,225 @@ class TripTimesheetPage(tk.Frame):
         day_to = int(params["to"])
         value = params["value"]
     
-        real_indexes = list(range(len(self.rows)))
-        applied = self._apply_hour_value_to_indexes(real_indexes, value, day_from, day_to)
-        if applied:
-            if value is None:
-                if day_from == day_to:
-                    self.var_status.set(f"Очищен день {day_from} у всех строк: {applied}")
-                else:
-                    self.var_status.set(f"Очищены дни {day_from}-{day_to} у всех строк: {applied}")
+        if value is None:
+            if day_from == day_to:
+                days_text = f"день {day_from}"
             else:
-                if day_from == day_to:
-                    self.var_status.set(f"Проставлено {value} ч. в день {day_from} у всех строк: {applied}")
-                else:
-                    self.var_status.set(f"Проставлено {value} ч. за дни {day_from}-{day_to} у всех строк: {applied}")
+                days_text = f"дни {day_from}–{day_to}"
+    
+            if not messagebox.askyesno(
+                "Массовая очистка часов",
+                (
+                    f"Будут очищены {days_text} у всех сотрудников, "
+                    "для которых эти даты входят в период командировки.\n\n"
+                    f"Сотрудников в табеле: {len(self.rows)}.\n"
+                    "Изменения автоматически не сохранятся.\n\n"
+                    "Продолжить?"
+                ),
+                parent=self,
+            ):
+                return
+    
+        real_indexes = list(range(len(self.rows)))
+    
+        applied = self._apply_hour_value_to_indexes(
+            real_indexes,
+            value,
+            day_from,
+            day_to,
+        )
+    
+        if not applied:
+            return
+    
+        if value is None:
+            if day_from == day_to:
+                self.var_status.set(
+                    f"Очищен день {day_from} у строк: {applied}. "
+                    "Изменения ещё не сохранены."
+                )
+            else:
+                self.var_status.set(
+                    f"Очищены дни {day_from}–{day_to} "
+                    f"у строк: {applied}. "
+                    "Изменения ещё не сохранены."
+                )
+        else:
+            if day_from == day_to:
+                self.var_status.set(
+                    f"Проставлено {value} ч. в день {day_from} "
+                    f"у строк: {applied}. "
+                    "Изменения ещё не сохранены."
+                )
+            else:
+                self.var_status.set(
+                    f"Проставлено {value} ч. за дни "
+                    f"{day_from}–{day_to} у строк: {applied}. "
+                    "Изменения ещё не сохранены."
+                )
 
     def _delete_selected_rows(self) -> None:
         indexes = self._get_selected_row_indexes()
+    
         if not indexes:
-            messagebox.showinfo("Удаление", "Не выбраны строки.", parent=self)
+            messagebox.showinfo(
+                "Удаление",
+                "Не выбраны строки.",
+                parent=self,
+            )
             return
-
+    
+        visible_rows = self._get_visible_rows()
+        preview: List[str] = []
+    
+        for visible_index in indexes[:10]:
+            if not (0 <= visible_index < len(visible_rows)):
+                continue
+    
+            rec = visible_rows[visible_index]
+            fio = normalize_spaces(rec.get("fio") or "")
+            tbn = normalize_tbn(rec.get("tbn"))
+    
+            preview.append(
+                f"• {fio or 'Без ФИО'}"
+                f"{f' ({tbn})' if tbn else ''}"
+            )
+    
+        text = [
+            f"Будут удалены сотрудники: {len(indexes)}.",
+            "",
+        ]
+        text.extend(preview)
+    
+        if len(indexes) > 10:
+            text.append(
+                f"... и ещё {len(indexes) - 10}"
+            )
+    
+        text.extend(
+            [
+                "",
+                "Вместе со строками будут удалены часы "
+                "и периоды командировок.",
+                "",
+                "Изменения автоматически не сохранятся.",
+                "",
+                "Продолжить?",
+            ]
+        )
+    
         if not messagebox.askyesno(
-            "Удаление",
-            f"Удалить выбранные строки: {len(indexes)} шт.?",
+            "Удаление сотрудников",
+            "\n".join(text),
             parent=self,
         ):
             return
-
-        real_indexes = [self._visible_to_real_index(i) for i in indexes]
-        real_indexes = sorted([i for i in real_indexes if i is not None], reverse=True)
-
+    
+        real_indexes = [
+            self._visible_to_real_index(i)
+            for i in indexes
+        ]
+    
+        real_indexes = sorted(
+            [
+                i
+                for i in real_indexes
+                if i is not None
+            ],
+            reverse=True,
+        )
+    
         for idx in real_indexes:
             del self.rows[idx]
-
+    
         self._refresh_grid()
         self._update_trip_info_from_selection()
-        self.var_status.set(f"Удалено строк: {len(real_indexes)}")
-
+    
         if real_indexes:
             self._mark_dirty()
-            self._schedule_auto_save()
+            self.var_status.set(
+                f"Удалено строк: {len(real_indexes)}. "
+                "Изменения ещё не сохранены."
+            )
 
     def _clear_hours_for_selected(self) -> None:
         indexes = self._get_selected_row_indexes()
+    
         if not indexes:
-            messagebox.showinfo("Очистка часов", "Не выбраны строки.", parent=self)
+            messagebox.showinfo(
+                "Очистка часов",
+                "Не выбраны строки.",
+                parent=self,
+            )
             return
-
+    
+        real_indexes = [
+            self._visible_to_real_index(i)
+            for i in indexes
+        ]
+        real_indexes = [
+            i
+            for i in real_indexes
+            if i is not None
+        ]
+    
+        if not real_indexes:
+            return
+    
+        if not messagebox.askyesno(
+            "Очистка часов",
+            (
+                f"Будут полностью очищены часы у сотрудников: "
+                f"{len(real_indexes)}.\n\n"
+                "Операция затронет все дни текущего месяца.\n"
+                "Автоматически изменения не сохранятся.\n\n"
+                "Продолжить?"
+            ),
+            parent=self,
+        ):
+            return
+    
         year, month = self._get_year_month()
-        real_indexes = [self._visible_to_real_index(i) for i in indexes]
-        real_indexes = [i for i in real_indexes if i is not None]
-
+        changed = 0
+    
         for idx in real_indexes:
-            self.rows[idx]["hours"] = [None] * 31
-            self.rows[idx]["_totals"] = calc_row_totals(self.rows[idx]["hours"], year, month)
-
+            old_hours = normalize_hours_list(
+                self.rows[idx].get("hours"),
+                year,
+                month,
+            )
+    
+            if any(
+                value not in (None, "")
+                for value in old_hours
+            ):
+                changed += 1
+    
+            self.rows[idx]["hours"] = normalize_hours_list(
+                [],
+                year,
+                month,
+            )
+    
+            self.rows[idx]["_totals"] = calc_row_totals(
+                self.rows[idx]["hours"],
+                year,
+                month,
+            )
+    
         self._refresh_grid()
-        self.var_status.set(f"Очищены часы у строк: {len(real_indexes)}")
-
-        if real_indexes:
+        self._update_trip_info_from_selection()
+    
+        if changed:
             self._mark_dirty()
-            self._schedule_auto_save()
+            self.var_status.set(
+                f"Очищены часы у строк: {changed}. "
+                "Изменения ещё не сохранены."
+            )
+        else:
+            self.var_status.set(
+                "В выбранных строках не было заполненных часов."
+            )
 
     def _set_trip_period_for_selected(self) -> None:
         # Для массовой установки логично просто добавлять период к существующим
