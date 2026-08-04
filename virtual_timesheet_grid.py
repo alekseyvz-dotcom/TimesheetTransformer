@@ -36,6 +36,7 @@ class VirtualTimesheetGrid(tk.Frame):
         on_change: Optional[Callable[[int, int], None]] = None,
         on_delete_row: Optional[Callable[[int], None]] = None,
         on_selection_change: Optional[Callable[[Set[int]], None]] = None,
+        is_cell_editable: Optional[Callable[[int, int], bool]] = None,
         on_trip_period_click: Optional[Callable[[int], None]] = None,
         row_height: int = 22,
         colpx: Optional[Dict[str, int]] = None,
@@ -50,6 +51,7 @@ class VirtualTimesheetGrid(tk.Frame):
         self.on_delete_row = on_delete_row
         self.on_selection_change = on_selection_change
         self.on_trip_period_click = on_trip_period_click
+        self.is_cell_editable = is_cell_editable
 
         self.read_only = bool(read_only)
         self.allow_row_select = bool(allow_row_select)
@@ -208,6 +210,61 @@ class VirtualTimesheetGrid(tk.Frame):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def set_read_only(self, value: bool):
+        """
+        Полностью включает или выключает режим просмотра.
+        """
+        self.read_only = bool(value)
+    
+        if self.read_only:
+            try:
+                self.close_editor(commit=False)
+            except Exception:
+                pass
+    
+        try:
+            self.refresh()
+        except Exception:
+            pass
+    
+    
+    def _can_edit_day(self, row_index: int, day_index: int) -> bool:
+        """
+        Проверяет, разрешено ли редактирование конкретной ячейки дня.
+    
+        Если callback не передан, учитывается только общий read_only.
+        Если callback завершился ошибкой, редактирование запрещается.
+        """
+    
+        if self.read_only:
+            return False
+    
+        if not (0 <= row_index < len(self.model_rows)):
+            return False
+    
+        try:
+            year, month = self.get_year_month()
+            days_in_month = month_days(year, month)
+        except Exception:
+            days_in_month = 31
+    
+        if not (0 <= day_index < days_in_month):
+            return False
+    
+        if not callable(self.is_cell_editable):
+            return True
+    
+        try:
+            return bool(
+                self.is_cell_editable(
+                    row_index,
+                    day_index,
+                )
+            )
+        except Exception:
+            # При ошибке проверки безопаснее запретить изменение.
+            return False
+    
     def _on_body_configure(self, _event=None):
         self._refresh()
 
@@ -634,49 +691,68 @@ class VirtualTimesheetGrid(tk.Frame):
     def _on_click(self, event):
         self._hide_tooltip()
         self.body.focus_set()
-
-        row_index, col_data = self._hit_test(event.x, event.y)
-
+    
+        row_index, col_data = self._hit_test(
+            event.x,
+            event.y,
+        )
+    
         if row_index is None:
             self._end_edit(commit=True)
             return
-
+    
         kind, extra = col_data or (None, None)
-
-        if self._editor and kind == "day":
-            if row_index == self._edit_row and int(extra) == self._edit_day:
-                return
-
+    
+        # Клик по уже редактируемой ячейке ничего не меняет.
+        if (
+            self._editor
+            and kind == "day"
+            and extra is not None
+            and row_index == self._edit_row
+            and int(extra) == self._edit_day
+        ):
+            return
+    
+        # Сохраняем ранее редактируемую ячейку.
         self._end_edit(commit=True)
-
+    
         if not col_data:
             return
-
+    
         if kind == "del":
             if callable(self.on_delete_row) and not self.read_only:
                 self.on_delete_row(row_index)
             return
-
+    
         if kind == "trip":
-            if not self.read_only and callable(self.on_trip_period_click):
+            if (
+                not self.read_only
+                and callable(self.on_trip_period_click)
+            ):
                 self.on_trip_period_click(row_index)
             return
-
-        if kind == "day" and not self.read_only:
+    
+        if kind == "day":
+            if extra is None:
+                return
+    
             day_index = int(extra)
-            try:
-                y, m = self.get_year_month()
-                if (day_index + 1) <= month_days(y, m):
-                    self._begin_edit_day(row_index, day_index)
-            except Exception:
-                pass
+    
+            if not self._can_edit_day(row_index, day_index):
+                return
+    
+            self._begin_edit_day(
+                row_index,
+                day_index,
+            )
             return
-
+    
         if self.allow_row_select and kind in ("fio", "tbn"):
             if row_index in self.selected_indices:
                 self.selected_indices.remove(row_index)
             else:
                 self.selected_indices.add(row_index)
+    
             self._draw_row(row_index)
             self._notify_selection_change()
 
@@ -690,26 +766,51 @@ class VirtualTimesheetGrid(tk.Frame):
                 return x0, row_index * self.row_height, x1, (row_index + 1) * self.row_height
         return None
 
-    def _begin_edit_day(self, row_index: int, day_index: int):
+    def _begin_edit_day(
+        self,
+        row_index: int,
+        day_index: int,
+    ):
+        # Повторная обязательная проверка.
+        # Метод вызывается не только мышью, но и клавиатурой.
+        if not self._can_edit_day(row_index, day_index):
+            return
+    
         self._end_edit(commit=True)
-
-        bbox = self._cell_bbox(row_index, "day", day_index)
+    
+        # После сохранения предыдущей ячейки состояние блокировки
+        # теоретически могло измениться, поэтому проверяем ещё раз.
+        if not self._can_edit_day(row_index, day_index):
+            return
+    
+        bbox = self._cell_bbox(
+            row_index,
+            "day",
+            day_index,
+        )
+    
         if not bbox:
             return
+    
         x0, y0, x1, y1 = bbox
-
+    
+        if not (0 <= row_index < len(self.model_rows)):
+            return
+    
         rec = self.model_rows[row_index]
         hours = rec.get("hours") or []
-
+    
         cur_val = ""
+    
         if day_index < len(hours):
-            v = hours[day_index]
-            cur_val = str(v) if v is not None else ""
-
+            value = hours[day_index]
+            cur_val = str(value) if value is not None else ""
+    
         self._edit_row = row_index
         self._edit_day = day_index
-
+    
         self._editor_var = tk.StringVar(value=cur_val)
+    
         self._editor = tk.Entry(
             self.body,
             textvariable=self._editor_var,
@@ -720,22 +821,44 @@ class VirtualTimesheetGrid(tk.Frame):
             bg="#ffffff",
             fg=self.TEXT,
         )
-
-        def _cancel(_ev):
+    
+        def _cancel(_event):
             self._end_edit(commit=False)
             return "break"
-
-        self._editor.bind("<Return>", lambda e: self._commit_and_move(dr=1, dc=0))
-        self._editor.bind("<KP_Enter>", lambda e: self._commit_and_move(dr=1, dc=0))
-        self._editor.bind("<Tab>", lambda e: self._commit_and_move(dr=0, dc=1))
-        self._editor.bind("<Shift-Tab>", lambda e: self._commit_and_move(dr=0, dc=-1))
-        self._editor.bind("<Up>", lambda e: self._commit_and_move(dr=-1, dc=0))
-        self._editor.bind("<Down>", lambda e: self._commit_and_move(dr=1, dc=0))
+    
+        self._editor.bind(
+            "<Return>",
+            lambda event: self._commit_and_move(dr=1, dc=0),
+        )
+        self._editor.bind(
+            "<KP_Enter>",
+            lambda event: self._commit_and_move(dr=1, dc=0),
+        )
+        self._editor.bind(
+            "<Tab>",
+            lambda event: self._commit_and_move(dr=0, dc=1),
+        )
+        self._editor.bind(
+            "<Shift-Tab>",
+            lambda event: self._commit_and_move(dr=0, dc=-1),
+        )
+        self._editor.bind(
+            "<Up>",
+            lambda event: self._commit_and_move(dr=-1, dc=0),
+        )
+        self._editor.bind(
+            "<Down>",
+            lambda event: self._commit_and_move(dr=1, dc=0),
+        )
         self._editor.bind("<Left>", self._on_arrow_left)
         self._editor.bind("<Right>", self._on_arrow_right)
         self._editor.bind("<Escape>", _cancel)
-        self._editor.bind("<FocusOut>", lambda _e: self._end_edit(commit=True))
-
+    
+        self._editor.bind(
+            "<FocusOut>",
+            lambda _event: self._end_edit(commit=True),
+        )
+    
         self._editor_window_id = self.body.create_window(
             x0 + 1,
             y0 + 1,
@@ -744,7 +867,7 @@ class VirtualTimesheetGrid(tk.Frame):
             anchor="nw",
             window=self._editor,
         )
-
+    
         self._editor.focus_set()
         self._editor.selection_range(0, "end")
 
@@ -770,57 +893,84 @@ class VirtualTimesheetGrid(tk.Frame):
     def _end_edit(self, commit: bool):
         if not self._editor:
             return
-
+    
         row_index = self._edit_row
         day_index = self._edit_day
-
-        val = ""
+    
+        value = ""
+    
         try:
             if self._editor_var is not None:
-                val = self._editor_var.get().strip()
+                value = self._editor_var.get().strip()
         except Exception:
             pass
-
-        if self._editor_window_id:
+    
+        if self._editor_window_id is not None:
             try:
                 self.body.delete(self._editor_window_id)
             except Exception:
                 pass
-
+    
         try:
             self._editor.destroy()
         except Exception:
             pass
-
+    
         self._editor = None
         self._editor_window_id = None
         self._editor_var = None
         self._edit_row = None
         self._edit_day = None
-
-        self.body.focus_set()
-
-        if not commit or row_index is None or day_index is None:
+    
+        try:
+            self.body.focus_set()
+        except Exception:
+            pass
+    
+        if not commit:
             return
-
+    
+        if row_index is None or day_index is None:
+            return
+    
         if not (0 <= row_index < len(self.model_rows)):
             return
-
-        rec = self.model_rows[row_index]
-        hours = rec.get("hours") or []
-
-        if len(hours) <= day_index:
-            hours.extend([None] * (day_index - len(hours) + 1))
-
-        new_val = val if val else None
-
-        if hours[day_index] != new_val:
-            hours[day_index] = new_val
-            rec["hours"] = hours
+    
+        # Перед записью в модель повторно проверяем блокировку.
+        # Это защищает от изменения состояния во время открытого редактора.
+        if not self._can_edit_day(row_index, day_index):
             self._draw_row(row_index)
-
-            if callable(self.on_change):
-                self.on_change(row_index, day_index)
+            return
+    
+        rec = self.model_rows[row_index]
+        hours = rec.get("hours")
+    
+        if not isinstance(hours, list):
+            hours = list(hours or [])
+    
+        if len(hours) <= day_index:
+            hours.extend(
+                [None] * (day_index - len(hours) + 1)
+            )
+    
+        new_value = value if value else None
+    
+        if hours[day_index] == new_value:
+            return
+    
+        hours[day_index] = new_value
+        rec["hours"] = hours
+    
+        self._draw_row(row_index)
+    
+        if callable(self.on_change):
+            try:
+                self.on_change(
+                    row_index,
+                    day_index,
+                )
+            except Exception:
+                pass
 
     def _see_row(self, row_index: int):
         if not self.model_rows:
@@ -846,36 +996,68 @@ class VirtualTimesheetGrid(tk.Frame):
     def _commit_and_move(self, dr: int, dc: int):
         row = self._edit_row
         day = self._edit_day
+    
         self._end_edit(commit=True)
-
+    
         if row is None or day is None:
             return "break"
-
-        new_row = row + dr
-        new_day = day + dc
-
+    
         if not self.model_rows:
             return "break"
-
-        if new_row < 0:
-            new_row = 0
-        if new_row >= len(self.model_rows):
-            new_row = len(self.model_rows) - 1
-
+    
         try:
-            y, m = self.get_year_month()
-            dim = month_days(y, m)
+            year, month = self.get_year_month()
+            days_in_month = month_days(year, month)
         except Exception:
-            dim = 31
-
-        if new_day < 0:
-            new_day = 0
-        if new_day >= dim:
-            new_day = dim - 1
-
+            days_in_month = 31
+    
+        new_row = row + dr
+        new_day = day + dc
+    
+        new_row = max(
+            0,
+            min(new_row, len(self.model_rows) - 1),
+        )
+        new_day = max(
+            0,
+            min(new_day, days_in_month - 1),
+        )
+    
+        # Для горизонтального перехода пропускаем закрытые дни.
+        if dc != 0:
+            step = 1 if dc > 0 else -1
+            candidate_day = new_day
+    
+            while 0 <= candidate_day < days_in_month:
+                if self._can_edit_day(new_row, candidate_day):
+                    new_day = candidate_day
+                    break
+    
+                candidate_day += step
+            else:
+                return "break"
+    
+        # Для вертикального перехода ищем ближайшую доступную строку
+        # в том же дне.
+        elif dr != 0:
+            step = 1 if dr > 0 else -1
+            candidate_row = new_row
+    
+            while 0 <= candidate_row < len(self.model_rows):
+                if self._can_edit_day(candidate_row, new_day):
+                    new_row = candidate_row
+                    break
+    
+                candidate_row += step
+            else:
+                return "break"
+    
+        if not self._can_edit_day(new_row, new_day):
+            return "break"
+    
         self._see_row(new_row)
         self._begin_edit_day(new_row, new_day)
-
+    
         return "break"
 
     # ------------------------------------------------------------------
@@ -1022,6 +1204,10 @@ class VirtualTimesheetGrid(tk.Frame):
                             base_bg=base_bg,
                             cell_value=val,
                         )
+                    if not self._can_edit_day(row_index, di):
+                        if not selected:
+                            bg = self.DISABLED_BG
+                        fill = self.MUTED
 
             elif kind == "del":
                 anchor = "center"
