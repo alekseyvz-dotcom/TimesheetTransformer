@@ -67,6 +67,9 @@ from timesheet_db import (
     load_trip_timesheet_rows_by_header_id,
     load_trip_timesheet_rows_with_schedule_by_header_id,
     load_timesheet_users_for_registry_combined,
+    get_timesheet_lock_level,
+    set_timesheet_lock,
+    unlock_timesheet,
 )
 from timesheet_dialogs import (
     AutoCompleteCombobox,
@@ -596,6 +599,178 @@ class TimesheetPage(tk.Frame):
     # --------------------------------------------------------
     # Helpers
     # --------------------------------------------------------
+
+    def _current_user(self) -> dict[str, Any]:
+        return getattr(self.app_ref, "current_user", None) or {}
+    
+    
+    def _is_admin(self) -> bool:
+        role = str(self._current_user().get("role") or "").strip().lower()
+        return role in {"admin", "administrator", "администратор"}
+    
+    
+    def _can_edit_locked_timesheet(self) -> bool:
+        return self._is_admin()
+    
+    
+    def _actual_current_user_id(self) -> Optional[int]:
+        """
+        Возвращает именно текущего вошедшего пользователя.
+    
+        Не использует owner_user_id, потому что закрывать табель должен
+        текущий пользователь, а не владелец открытого табеля.
+        """
+        try:
+            user = self._current_user()
+            user_id = user.get("id")
+            return int(user_id) if user_id else None
+        except Exception:
+            return None
+    
+    
+    def _is_day_locked(self, day_index: int) -> bool:
+        """
+        day_index начинается с нуля:
+        0 — первое число месяца, 14 — пятнадцатое число.
+        """
+    
+        if self._can_edit_locked_timesheet():
+            return False
+    
+        if self._forced_read_only:
+            return True
+    
+        if self.lock_level == 1:
+            return 0 <= day_index < 15
+    
+        if self.lock_level == 2:
+            return True
+    
+        return False
+    
+    
+    def _is_cell_editable(self, row_index: int, day_index: int) -> bool:
+        if self._can_edit_locked_timesheet():
+            return True
+    
+        if self._forced_read_only or self.read_only:
+            return False
+    
+        return not self._is_day_locked(day_index)
+    
+    
+    def _set_grid_read_only(self, value: bool):
+        value = bool(value)
+    
+        try:
+            if hasattr(self.grid, "set_read_only"):
+                self.grid.set_read_only(value)
+            else:
+                self.grid.read_only = value
+    
+                if value and hasattr(self.grid, "close_editor"):
+                    self.grid.close_editor(commit=False)
+        except Exception:
+            logger.exception("Не удалось изменить режим read_only грида")
+    
+    
+    def _disable_editing_toolbar(self):
+        for widget in getattr(self, "_edit_widgets", []):
+            try:
+                widget.configure(state="disabled")
+            except Exception:
+                pass
+    
+        try:
+            self._btn_save_ref.configure(state="disabled")
+        except Exception:
+            pass
+    
+        try:
+            self._btn_lock_ref.configure(state="disabled")
+        except Exception:
+            pass
+    
+    
+    def _enable_editing_toolbar(self):
+        for widget in getattr(self, "_edit_widgets", []):
+            try:
+                widget.configure(state="normal")
+            except Exception:
+                pass
+    
+        try:
+            self._btn_save_ref.configure(state="normal")
+        except Exception:
+            pass
+    
+        try:
+            self._btn_lock_ref.configure(state="normal")
+        except Exception:
+            pass
+    
+    
+    def _apply_lock_state(self):
+        """
+        Применяет блокировку к гриду и кнопкам.
+        """
+    
+        if self._can_edit_locked_timesheet():
+            self.read_only = False
+            self._set_grid_read_only(False)
+            self._enable_editing_toolbar()
+    
+            if self.lock_level == 2:
+                text = "Табель закрыт полностью · администратору редактирование доступно"
+            elif self.lock_level == 1:
+                text = "Закрыты дни 1–15 · администратору редактирование доступно"
+            else:
+                text = "Администратор: редактирование доступно"
+    
+            self._set_status_text(text, fg="#bbdefb")
+            return
+    
+        if self._forced_read_only:
+            self.read_only = True
+            self._set_grid_read_only(True)
+            self._disable_editing_toolbar()
+    
+            self._set_status_text(
+                "Режим просмотра — изменения недоступны",
+                fg="#ffccbc",
+            )
+            return
+    
+        if self.lock_level == 2:
+            self.read_only = True
+            self._set_grid_read_only(True)
+            self._disable_editing_toolbar()
+    
+            self._set_status_text(
+                "Табель полностью закрыт для редактирования",
+                fg="#ffccbc",
+            )
+            return
+    
+        if self.lock_level == 1:
+            self.read_only = False
+            self._set_grid_read_only(False)
+            self._enable_editing_toolbar()
+    
+            self._set_status_text(
+                "Закрыта первая половина месяца: дни 1–15",
+                fg="#ffe082",
+            )
+            return
+    
+        self.read_only = False
+        self._set_grid_read_only(False)
+        self._enable_editing_toolbar()
+    
+        self._set_status_text(
+            "Табель открыт",
+            fg="#bbdefb",
+        )
 
     def _update_selected_count(self):
         try:
@@ -1304,10 +1479,33 @@ class TimesheetPage(tk.Frame):
             bg=TS_COLORS["panel"],
         ).pack(side="left", padx=8)
 
-    def _ts_btn(self, parent, text: str, cmd, side="left", padx=3, pady=0, width=None):
-        b = ttk.Button(parent, text=text, command=cmd, width=width)
-        b.pack(side=side, padx=padx, pady=pady)
-        return b
+    def _ts_btn(
+        self,
+        parent,
+        text: str,
+        cmd,
+        side="left",
+        padx=3,
+        pady=0,
+        width=None,
+        edit_action: bool = True,
+    ):
+        button = ttk.Button(
+            parent,
+            text=text,
+            command=cmd,
+            width=width,
+        )
+        button.pack(
+            side=side,
+            padx=padx,
+            pady=pady,
+        )
+    
+        if edit_action:
+            self._edit_widgets.append(button)
+    
+        return button
 
     def _build_ts_toolbar(self):
         border_color = TS_COLORS.get("border", "#c9d3df")
@@ -1334,7 +1532,14 @@ class TimesheetPage(tk.Frame):
         self._ts_btn(row1, "Время выбранным", self.fill_time_selected, side="left", padx=3)
         self._ts_btn(row1, "Часы всем", self.fill_hours_all, side="left", padx=3)
         self._ts_btn(row1, "Очистить часы", self.clear_all_rows, side="left", padx=3)
-        self._ts_btn(row1, "Снять выделение", self.clear_selection, side="left", padx=3)
+        self._ts_btn(
+            row1,
+            "Снять выделение",
+            self.clear_selection,
+            side="left",
+            padx=3,
+            edit_action=False,
+        )
     
         # --- Нижний ряд ---
         row2 = tk.Frame(left, bg=TS_COLORS["accent_light"])
@@ -1363,6 +1568,32 @@ class TimesheetPage(tk.Frame):
         btn_save.pack(fill="x", pady=(0, 4))
         btn_save.bind("<Enter>", lambda _e: btn_save.config(bg="#0d47a1"))
         btn_save.bind("<Leave>", lambda _e: btn_save.config(bg=TS_COLORS["btn_save_bg"]))
+
+        self._btn_lock_ref = tk.Button(
+            actions,
+            text="Закрыть табель",
+            font=("Segoe UI", 9, "bold"),
+            bg="#c97a20",
+            fg="white",
+            activebackground="#a85f12",
+            activeforeground="white",
+            relief="flat",
+            cursor="hand2",
+            padx=14,
+            pady=4,
+            command=self.close_timesheet,
+            width=14,
+        )
+        self._btn_lock_ref.pack(fill="x", pady=(0, 4))
+
+        if self._is_admin():
+            self._btn_unlock_ref = ttk.Button(
+                actions,
+                text="Разблокировать",
+                command=self.unlock_timesheet,
+                width=16,
+            )
+            self._btn_unlock_ref.pack(fill="x", pady=(0, 4))
     
         self._btn_export_ref = ttk.Button(
             actions,
@@ -1462,7 +1693,12 @@ class TimesheetPage(tk.Frame):
             highlightthickness=1,
             bd=0,
         )
-        main_frame.pack(fill="both", expand=True, padx=10, pady=(4, 4))
+        main_frame.pack(
+            fill="both",
+            expand=True,
+            padx=10,
+            pady=(4, 4),
+        )
         main_frame.grid_rowconfigure(0, weight=1)
         main_frame.grid_columnconfigure(0, weight=1)
     
@@ -1472,20 +1708,23 @@ class TimesheetPage(tk.Frame):
             on_change=self._on_cell_changed,
             on_delete_row=self._grid_delete_row,
             on_selection_change=self._on_grid_selection_changed,
+            is_cell_editable=self._is_cell_editable,
             row_height=22,
             colpx=self.COLPX,
             read_only=self.read_only,
         )
+    
         self.grid.grid(row=0, column=0, sticky="nsew")
+    
         try:
-            self.grid.set_schedule_highlight_enabled(bool(self.var_show_schedule.get()))
+            self.grid.set_schedule_highlight_enabled(
+                bool(self.var_show_schedule.get())
+            )
         except Exception:
             pass
     
-        # Для notebook / вкладок нужно несколько отложенных refresh
         self.after(60, self.grid.refresh)
         self.after(180, self.grid.refresh)
-
 
     def _build_ts_bottom(self):
         bottom = tk.Frame(self, bg=TS_COLORS["accent_light"], pady=5)
@@ -1618,7 +1857,6 @@ class TimesheetPage(tk.Frame):
             self._initializing = False
 
         self._load_existing_rows()
-        self._set_status_text("Авто‑сохранение: нет", fg="#bbdefb")
 
     # --------------------------------------------------------
     # Контекст / переключение
@@ -1899,13 +2137,159 @@ class TimesheetPage(tk.Frame):
 
         messagebox.showwarning("⚠️ Подозрительные значения", msg, parent=self)
 
+    def _reset_lock_state(self):
+        self.lock_level = 0
+        self.locked_at = None
+        self.locked_by = None
+        self._locked_hours_snapshot.clear()
+    
+    
+    def _load_lock_state(self):
+        """
+        Загружает статус блокировки текущего заголовка.
+        """
+    
+        self.lock_level = 0
+        self.locked_at = None
+        self.locked_by = None
+    
+        if not self._active_header_id:
+            return
+    
+        full = load_timesheet_full_by_header_id(
+            int(self._active_header_id)
+        )
+    
+        if not full:
+            return
+    
+        self.lock_level = int(full.get("lock_level") or 0)
+        self.locked_at = full.get("locked_at")
+        self.locked_by = full.get("locked_by")
+    
+    
+    def _capture_locked_hours_snapshot(self):
+        """
+        Сохраняет строки и дни 1–15 в том виде, в котором они были загружены.
+    
+        При закрытой первой половине нельзя:
+        - менять дни 1–15;
+        - удалять сотрудников;
+        - добавлять сотрудников с заполненными закрытыми днями.
+        """
+    
+        self._locked_hours_snapshot.clear()
+    
+        if self.lock_level != 1:
+            return
+    
+        year, month = self.get_year_month()
+    
+        for rec in self.model_rows_all:
+            row_key = self._row_key(rec)
+            hours = normalize_hours_list(
+                rec.get("hours"),
+                year,
+                month,
+            )
+    
+            self._locked_hours_snapshot[row_key] = tuple(hours[:15])
+    
+    
+    def _validate_locked_hours_before_save(self) -> Optional[str]:
+        if self._can_edit_locked_timesheet():
+            return None
+    
+        if self._forced_read_only:
+            return "Табель открыт только для просмотра."
+    
+        if self.lock_level == 2:
+            return "Табель полностью закрыт для редактирования."
+    
+        if self.lock_level != 1:
+            return None
+    
+        year, month = self.get_year_month()
+    
+        current_snapshot: dict[str, tuple[Any, ...]] = {}
+    
+        for rec in self.model_rows_all:
+            row_key = self._row_key(rec)
+            hours = normalize_hours_list(
+                rec.get("hours"),
+                year,
+                month,
+            )
+            current_snapshot[row_key] = tuple(hours[:15])
+    
+        old_keys = set(self._locked_hours_snapshot)
+        current_keys = set(current_snapshot)
+    
+        deleted_keys = old_keys - current_keys
+        if deleted_keys:
+            return (
+                "Нельзя удалять сотрудников после закрытия "
+                "первой половины месяца."
+            )
+    
+        for row_key, old_hours in self._locked_hours_snapshot.items():
+            new_hours = current_snapshot.get(row_key)
+    
+            if new_hours != old_hours:
+                return (
+                    "Обнаружено изменение закрытых дней 1–15. "
+                    "Сохранение отменено."
+                )
+    
+        return None
+    
+    
+    def _refresh_lock_level_before_save(self) -> Optional[str]:
+        """
+        Повторно проверяет блокировку в БД перед сохранением.
+    
+        Это защищает от ситуации, когда табель закрыли в другом окне.
+        """
+    
+        if self._can_edit_locked_timesheet():
+            return None
+    
+        if not self._active_header_id:
+            return None
+    
+        try:
+            db_lock_level = int(
+                get_timesheet_lock_level(
+                    int(self._active_header_id)
+                )
+                or 0
+            )
+        except Exception as exc:
+            logger.exception("Не удалось проверить блокировку перед сохранением")
+            return f"Не удалось проверить состояние блокировки:\n{exc}"
+    
+        if db_lock_level > self.lock_level:
+            self.lock_level = db_lock_level
+            self._apply_lock_state()
+    
+            return (
+                "Табель был закрыт в другом окне. "
+                "Откройте табель заново."
+            )
+    
+        self.lock_level = db_lock_level
+        return None
+
     def _load_existing_rows(self):
+        self._reset_lock_state()
+    
         self.model_rows_all.clear()
         self.model_rows = self.model_rows_all
         self._clear_schedule_cache()
         self._employment_period_cache.clear()
         self._selected_row_keys.clear()
         self._update_selected_count()
+    
         try:
             self.grid.set_selected_indices(set())
         except Exception:
@@ -1923,6 +2307,7 @@ class TimesheetPage(tk.Frame):
             self._recalc_object_total()
             self._loaded_context = self._capture_current_context()
             self._dirty = False
+            self._apply_lock_state()
             return
 
         try:
@@ -1930,6 +2315,11 @@ class TimesheetPage(tk.Frame):
 
             if self._active_header_id:
                 full = load_timesheet_full_by_header_id(self._active_header_id)
+
+                if full:
+                    self.lock_level = int(full.get("lock_level") or 0)
+                    self.locked_at = full.get("locked_at")
+                    self.locked_by = full.get("locked_by")
                 if full:
                     hist_dep = normalize_spaces(full.get("department") or dep)
                     hist_addr = normalize_spaces(full.get("object_addr") or addr)
@@ -1993,6 +2383,8 @@ class TimesheetPage(tk.Frame):
                         user_id=user_id,
                     )
                     self._active_header_id = resolved_header_id
+                    if self._active_header_id:
+                        self._load_lock_state()
 
             for rec in loaded_rows:
                 rec["work_schedule"] = self._get_employee_work_schedule(
@@ -2033,6 +2425,9 @@ class TimesheetPage(tk.Frame):
             self._loaded_context = self._capture_current_context()
             self._loaded_context["header_id"] = self._active_header_id
             self._dirty = False
+            
+            self._capture_locked_hours_snapshot()
+            self._apply_lock_state()
         except Exception as e:
             logger.exception("Ошибка загрузки табеля из БД")
             messagebox.showerror("Загрузка", f"Не удалось загрузить табель из БД:\n{e}", parent=self)
@@ -2184,26 +2579,41 @@ class TimesheetPage(tk.Frame):
         )
 
     def _on_cell_changed(self, row_index: int, day_index: int):
+        if self._is_day_locked(day_index):
+            self._grid_refresh(rows_changed=False)
+            return
+    
         if 0 <= row_index < len(self.model_rows):
             rec = self.model_rows[row_index]
             self._recalc_row_totals_for_rec(rec)
     
             hours_list = rec.get("hours") or []
+    
             if 0 <= day_index < len(hours_list):
                 raw_value = hours_list[day_index]
     
                 if raw_value is not None and str(raw_value).strip() != "":
-                    self._warn_if_employee_has_time_in_other_timesheets(rec, day_index)
+                    self._warn_if_employee_has_time_in_other_timesheets(
+                        rec,
+                        day_index,
+                    )
     
                 parsed = parse_timesheet_cell(raw_value)
+    
                 if parsed.suspicious:
-                    parsed_str = f"{parsed.total_hours:.2f}" if parsed.total_hours is not None else "?"
+                    parsed_str = (
+                        f"{parsed.total_hours:.2f}"
+                        if parsed.total_hours is not None
+                        else "?"
+                    )
                     fio = rec.get("fio", "")
+    
                     messagebox.showwarning(
                         "⚠️ Подозрительное значение",
                         f"Сотрудник: {fio}\n"
                         f"День: {day_index + 1}\n"
-                        f"Значение: '{raw_value}' → {parsed_str} часов\n\n"
+                        f"Значение: '{raw_value}' → "
+                        f"{parsed_str} часов\n\n"
                         f"В сутках максимум {MAX_HOURS_PER_DAY} часов.\n"
                         f"Возможно, пропущена точка/запятая?\n"
                         f"(например: 825 → 8.25)",
@@ -2218,6 +2628,14 @@ class TimesheetPage(tk.Frame):
     def _grid_delete_row(self, row_index: int):
         if self.read_only:
             return
+    
+        if self.lock_level > 0 and not self._can_edit_locked_timesheet():
+            messagebox.showwarning(
+                "Табель закрыт",
+                "После закрытия периода нельзя удалять сотрудников.",
+                parent=self,
+            )
+            return
         if not (0 <= row_index < len(self.model_rows)):
             return
 
@@ -2231,6 +2649,222 @@ class TimesheetPage(tk.Frame):
         self._apply_filter()
         self._mark_dirty()
         self._schedule_auto_save()
+
+    def close_timesheet(self):
+        if self._forced_read_only and not self._is_admin():
+            messagebox.showwarning(
+                "Закрытие табеля",
+                "Табель открыт только для просмотра.",
+                parent=self,
+            )
+            return
+    
+        if not self._active_header_id:
+            if not self._save_all_internal(
+                show_messages=True,
+                is_auto=False,
+            ):
+                return
+    
+        if not self._active_header_id:
+            messagebox.showwarning(
+                "Закрытие табеля",
+                "Сначала сохраните табель.",
+                parent=self,
+            )
+            return
+    
+        if self._dirty:
+            if not self._save_all_internal(
+                show_messages=True,
+                is_auto=False,
+            ):
+                return
+    
+        if self.lock_level >= 2:
+            messagebox.showinfo(
+                "Закрытие табеля",
+                "Табель уже закрыт полностью.",
+                parent=self,
+            )
+            return
+    
+        dialog = tk.Toplevel(self)
+        dialog.title("Закрытие табеля")
+        dialog.transient(self.winfo_toplevel())
+        dialog.grab_set()
+        dialog.resizable(False, False)
+    
+        frame = tk.Frame(
+            dialog,
+            padx=20,
+            pady=20,
+        )
+        frame.pack(fill="both", expand=True)
+    
+        tk.Label(
+            frame,
+            text="Выберите период, который нужно закрыть:",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(anchor="w", pady=(0, 12))
+    
+        selected_level = tk.IntVar(value=2)
+    
+        rb_first_half = ttk.Radiobutton(
+            frame,
+            text="Первую половину месяца — дни 1–15",
+            variable=selected_level,
+            value=1,
+        )
+        rb_first_half.pack(anchor="w", pady=4)
+    
+        ttk.Radiobutton(
+            frame,
+            text="Весь месяц",
+            variable=selected_level,
+            value=2,
+        ).pack(anchor="w", pady=4)
+    
+        if self.lock_level >= 1:
+            rb_first_half.configure(state="disabled")
+            selected_level.set(2)
+    
+        result = {"confirmed": False}
+    
+        def confirm():
+            result["confirmed"] = True
+            dialog.destroy()
+    
+        def cancel():
+            dialog.destroy()
+    
+        buttons = tk.Frame(frame)
+        buttons.pack(fill="x", pady=(16, 0))
+    
+        ttk.Button(
+            buttons,
+            text="Закрыть",
+            command=confirm,
+        ).pack(side="right", padx=(8, 0))
+    
+        ttk.Button(
+            buttons,
+            text="Отмена",
+            command=cancel,
+        ).pack(side="right")
+    
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        self.wait_window(dialog)
+    
+        if not result["confirmed"]:
+            return
+    
+        new_level = int(selected_level.get())
+    
+        if new_level <= self.lock_level:
+            messagebox.showwarning(
+                "Закрытие табеля",
+                "Выбранный период уже закрыт.",
+                parent=self,
+            )
+            return
+    
+        try:
+            current_user_id = self._actual_current_user_id()
+    
+            if not current_user_id:
+                raise RuntimeError(
+                    "Не удалось определить текущего пользователя."
+                )
+    
+            updated = set_timesheet_lock(
+                header_id=int(self._active_header_id),
+                lock_level=new_level,
+                locked_by=current_user_id,
+            )
+    
+            self.lock_level = int(
+                updated.get("lock_level") or new_level
+            )
+            self.locked_at = updated.get("locked_at")
+            self.locked_by = updated.get("locked_by")
+    
+            self._capture_locked_hours_snapshot()
+            self._apply_lock_state()
+    
+            messagebox.showinfo(
+                "Закрытие табеля",
+                "Табель успешно закрыт.",
+                parent=self,
+            )
+    
+        except Exception as exc:
+            logger.exception("Ошибка закрытия табеля")
+    
+            messagebox.showerror(
+                "Закрытие табеля",
+                f"Не удалось закрыть табель:\n{exc}",
+                parent=self,
+            )
+
+    def unlock_timesheet(self):
+        if not self._is_admin():
+            messagebox.showwarning(
+                "Разблокировка",
+                "Разблокировать табель может только администратор.",
+                parent=self,
+            )
+            return
+    
+        if not self._active_header_id:
+            messagebox.showwarning(
+                "Разблокировка",
+                "Сначала сохраните табель.",
+                parent=self,
+            )
+            return
+    
+        if self.lock_level == 0:
+            messagebox.showinfo(
+                "Разблокировка",
+                "Табель уже открыт.",
+                parent=self,
+            )
+            return
+    
+        if not messagebox.askyesno(
+            "Разблокировка",
+            "Полностью открыть табель для редактирования?",
+            parent=self,
+        ):
+            return
+    
+        try:
+            unlock_timesheet(
+                header_id=int(self._active_header_id)
+            )
+    
+            self.lock_level = 0
+            self.locked_at = None
+            self.locked_by = None
+            self._locked_hours_snapshot.clear()
+    
+            self._apply_lock_state()
+    
+            messagebox.showinfo(
+                "Разблокировка",
+                "Табель снова доступен для редактирования.",
+                parent=self,
+            )
+    
+        except Exception as exc:
+            logger.exception("Ошибка разблокировки табеля")
+    
+            messagebox.showerror(
+                "Разблокировка",
+                f"Не удалось разблокировать табель:\n{exc}",
+                parent=self,
+            )
 
     # --------------------------------------------------------
     # Операции с сотрудниками / часами
@@ -2358,6 +2992,13 @@ class TimesheetPage(tk.Frame):
         с учётом hire_date и dismissal_date из employees.
         """
         if self.read_only:
+            return
+        if self.lock_level > 0 and not self._can_edit_locked_timesheet():
+            messagebox.showwarning(
+                "Табель закрыт",
+                "Эта массовая операция недоступна после закрытия периода.",
+                parent=self,
+            )
             return
 
         if not callable(get_schedule_days_map):
@@ -2900,64 +3541,134 @@ class TimesheetPage(tk.Frame):
     def fill_hours_all(self):
         if self.read_only:
             return
+    
         if not self.model_rows_all:
-            messagebox.showinfo("Проставить часы", "Список сотрудников пуст.", parent=self)
+            messagebox.showinfo(
+                "Проставить часы",
+                "Список сотрудников пуст.",
+                parent=self,
+            )
             return
-
+    
         year, month = self.get_year_month()
         max_day = month_days(year, month)
-
+    
         dlg = HoursFillDialog(self, max_day)
+    
         if not dlg.result:
             return
-
+    
         day = dlg.result["day"]
+    
         if not (1 <= day <= max_day):
-            messagebox.showwarning("Проставить часы", f"В этом месяце нет дня №{day}.", parent=self)
+            messagebox.showwarning(
+                "Проставить часы",
+                f"В этом месяце нет дня №{day}.",
+                parent=self,
+            )
             return
-
+    
         day_idx = day - 1
+    
+        if self._is_day_locked(day_idx):
+            messagebox.showwarning(
+                "Табель закрыт",
+                f"День {day} закрыт для редактирования.",
+                parent=self,
+            )
+            return
+    
         is_clear = bool(dlg.result.get("clear", False))
-        hours_val_str = None if is_clear else format_hours_for_cell(float(dlg.result["hours"]))
-
+    
+        hours_val_str = (
+            None
+            if is_clear
+            else format_hours_for_cell(
+                float(dlg.result["hours"])
+            )
+        )
+    
         for rec in self.model_rows_all:
-            hours = normalize_hours_list(rec.get("hours"), year, month)
+            hours = normalize_hours_list(
+                rec.get("hours"),
+                year,
+                month,
+            )
+    
             hours[day_idx] = hours_val_str
             rec["hours"] = hours
-            rec["_totals"] = calc_row_totals(hours, year, month)
-
+            rec["_totals"] = calc_row_totals(
+                hours,
+                year,
+                month,
+            )
+    
         self._apply_filter()
         self._mark_dirty()
         self._schedule_auto_save()
-
+    
         if is_clear:
-            messagebox.showinfo("Проставить часы", f"День {day} очищен у всех сотрудников.", parent=self)
+            messagebox.showinfo(
+                "Проставить часы",
+                f"День {day} очищен у всех сотрудников.",
+                parent=self,
+            )
         else:
             messagebox.showinfo(
                 "Проставить часы",
-                f"Часы '{hours_val_str}' проставлены в день {day} всем сотрудникам.",
+                f"Часы '{hours_val_str}' проставлены "
+                f"в день {day} всем сотрудникам.",
                 parent=self,
             )
 
     def clear_all_rows(self):
         if self.read_only or not self.model_rows_all:
             return
+    
         if not messagebox.askyesno(
             "Очистка табеля",
-            "Вы уверены, что хотите очистить все часы у всех сотрудников?\n\nСами сотрудники останутся в списке.",
+            "Очистить часы во всех доступных днях?\n\n"
+            "Закрытые дни изменены не будут.",
             parent=self,
         ):
             return
-
+    
         year, month = self.get_year_month()
+        changed_cells = 0
+    
         for rec in self.model_rows_all:
-            rec["hours"] = normalize_hours_list([None] * 31, year, month)
-            rec["_totals"] = calc_row_totals(rec["hours"], year, month)
-
+            hours = normalize_hours_list(
+                rec.get("hours"),
+                year,
+                month,
+            )
+    
+            for day_index in range(len(hours)):
+                if self._is_day_locked(day_index):
+                    continue
+    
+                if not self._is_blank_timesheet_cell(hours[day_index]):
+                    hours[day_index] = None
+                    changed_cells += 1
+    
+            rec["hours"] = hours
+            rec["_totals"] = calc_row_totals(
+                hours,
+                year,
+                month,
+            )
+    
         self._apply_filter()
-        self._mark_dirty()
-        self._schedule_auto_save()
-        messagebox.showinfo("Очистка", "Все часы были стерты.", parent=self)
+    
+        if changed_cells > 0:
+            self._mark_dirty()
+            self._schedule_auto_save()
+    
+        messagebox.showinfo(
+            "Очистка",
+            f"Очищено ячеек: {changed_cells}.",
+            parent=self,
+        )
 
     # --------------------------------------------------------
     # Импорт СКУД
@@ -3038,6 +3749,15 @@ class TimesheetPage(tk.Frame):
                 return
 
             day_idx = selected_date.day - 1
+            
+            if self._is_day_locked(day_idx):
+                messagebox.showwarning(
+                    "Табель закрыт",
+                    f"День {selected_date.day} закрыт для редактирования.",
+                    parent=self,
+                )
+                return
+            
             applied = 0
             added = 0
             skipped = 0
@@ -3112,6 +3832,14 @@ class TimesheetPage(tk.Frame):
 
     def import_from_excel(self):
         if self.read_only:
+            return
+
+        if self.lock_level > 0 and not self._can_edit_locked_timesheet():
+            messagebox.showwarning(
+                "Табель закрыт",
+                "Эта массовая операция недоступна после закрытия периода.",
+                parent=self,
+            )
             return
 
         addr = normalize_spaces(self.cmb_address.get() or "")
@@ -3219,6 +3947,13 @@ class TimesheetPage(tk.Frame):
 
     def copy_from_month(self):
         if self.read_only:
+            return
+        if self.lock_level > 0 and not self._can_edit_locked_timesheet():
+            messagebox.showwarning(
+                "Табель закрыт",
+                "Эта массовая операция недоступна после закрытия периода.",
+                parent=self,
+            )
             return
 
         addr = normalize_spaces(self.cmb_address.get() or "")
@@ -3519,8 +4254,19 @@ class TimesheetPage(tk.Frame):
                 except Exception:
                     pass
 
-    def _save_all_internal(self, show_messages: bool, is_auto: bool = False) -> bool:
-        if self.read_only:
+    def _save_all_internal(
+        self,
+        show_messages: bool,
+        is_auto: bool = False,
+    ) -> bool:
+        if self.read_only and not self._can_edit_locked_timesheet():
+            if show_messages:
+                messagebox.showinfo(
+                    "Объектный табель",
+                    "Сохранение недоступно в режиме просмотра.",
+                    parent=self,
+                )
+            return False
             if show_messages:
                 messagebox.showinfo(
                     "Объектный табель",
@@ -3562,7 +4308,17 @@ class TimesheetPage(tk.Frame):
                 if is_auto:
                     self._mark_save_error(msg if len(msg) < 80 else "Ошибка авто‑сохранения")
                 return False
-
+                lock_refresh_error = self._refresh_lock_level_before_save()
+    
+                if lock_refresh_error:
+                    return fail(lock_refresh_error)
+    
+                lock_validation_error = (
+                    self._validate_locked_hours_before_save()
+                )
+    
+                if lock_validation_error:
+                    return fail(lock_validation_error)
             # Изменения здесь: используем точные строки из полей ввода
             object_addr = self.cmb_address.get().strip()
             object_id = self.cmb_object_id.get().strip()
@@ -3695,6 +4451,8 @@ class TimesheetPage(tk.Frame):
                     audit_detail=None,
                 )
                 self._active_header_id = header_id
+                self._load_lock_state()
+                self._capture_locked_hours_snapshot()
             except Exception as e:
                 logger.exception("Ошибка сохранения табеля в БД")
                 return fail(f"Ошибка сохранения в БД:\n{e}", level="error")
@@ -3819,7 +4577,18 @@ class MyTimesheetsPage(tk.Frame):
     def __init__(self, master, app_ref):
         super().__init__(master, bg=TS_COLORS["bg"])
         self.app_ref = app_ref
-
+        self.read_only = bool(read_only)
+        self.owner_user_id = owner_user_id
+        self._active_header_id: Optional[int] = int(init_header_id) if init_header_id else None
+        
+        self._forced_read_only = bool(read_only)
+        
+        self.lock_level = 0
+        self.locked_at = None
+        self.locked_by = None
+        
+        self._locked_hours_snapshot: dict[str, tuple[Any, ...]] = {}
+        self._edit_widgets: list[Any] = []
         self.tree = None
         self._headers: List[Dict[str, Any]] = []
 
@@ -4817,8 +5586,17 @@ class TimesheetRegistryPage(tk.Frame):
         if not h:
             return
     
-        role = (getattr(self.app_ref, "current_user", None) or {}).get("role") or "specialist"
-        read_only = str(role).lower() != "admin"
+        role = (
+            getattr(self.app_ref, "current_user", None) or {}
+        ).get("role") or "specialist"
+        
+        is_admin = str(role).strip().lower() in {
+            "admin",
+            "administrator",
+            "администратор",
+        }
+        
+        read_only = not is_admin
     
         source = h.get("source", "object")
         hid = int(h["id"])
