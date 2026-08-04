@@ -1408,57 +1408,275 @@ class TripTimesheetPage(tk.Frame):
     ) -> str:
         fio = normalize_spaces(imported.get("fio") or "")
         tbn = normalize_tbn(imported.get("tbn"))
-        if not tbn:
+    
+        if not fio and not tbn:
             return "skipped"
-
-        existing_index = self._find_row_index_by_tbn_or_fio(tbn, fio)
-
+    
+        existing_index = self._find_row_index_by_tbn_or_fio(
+            tbn,
+            fio,
+        )
+    
         if existing_index is None:
-            new_row = self._empty_row(fio=fio, tbn=tbn)
+            new_row = self._empty_row(
+                fio=fio,
+                tbn=tbn,
+            )
+    
             new_row["fio"] = fio
             new_row["tbn"] = tbn
-            new_row["department"] = normalize_spaces(imported.get("department") or "")
-            new_row["position"] = normalize_spaces(imported.get("position") or "")
-            new_row["work_schedule"] = normalize_spaces(imported.get("work_schedule") or "")
-            new_row["hours"] = normalize_hours_list(imported.get("hours"), year, month)
-            new_row["trip_periods"] = list(imported.get("trip_periods") or [])
-            new_row["_totals"] = calc_row_totals(new_row["hours"], year, month)
+    
+            new_row["department"] = normalize_spaces(
+                imported.get("department")
+                or new_row.get("department")
+                or ""
+            )
+    
+            new_row["position"] = normalize_spaces(
+                imported.get("position")
+                or new_row.get("position")
+                or ""
+            )
+    
+            new_row["work_schedule"] = normalize_spaces(
+                imported.get("work_schedule")
+                or new_row.get("work_schedule")
+                or ""
+            )
+    
+            new_row["hours"] = normalize_hours_list(
+                imported.get("hours"),
+                year,
+                month,
+            )
+    
+            new_row["trip_periods"] = list(
+                imported.get("trip_periods") or []
+            )
+    
+            new_row["_totals"] = calc_row_totals(
+                new_row["hours"],
+                year,
+                month,
+            )
+    
             self.rows.append(new_row)
             return "added"
-
+    
         rec = self.rows[existing_index]
         changed = False
-
-        for field in ("fio", "department", "position", "work_schedule"):
-            incoming_val = normalize_spaces(imported.get(field) or "")
-            current_val = normalize_spaces(rec.get(field) or "")
-            if incoming_val and not current_val:
-                rec[field] = incoming_val
+    
+        for field in (
+            "fio",
+            "department",
+            "position",
+            "work_schedule",
+        ):
+            incoming_value = normalize_spaces(
+                imported.get(field) or ""
+            )
+            current_value = normalize_spaces(
+                rec.get(field) or ""
+            )
+    
+            if incoming_value and incoming_value != current_value:
+                rec[field] = incoming_value
                 changed = True
-
+    
         merged_periods, added_periods = self._merge_trip_periods(
             rec.get("trip_periods") or [],
             imported.get("trip_periods") or [],
         )
+    
         if added_periods:
             rec["trip_periods"] = merged_periods
             changed = True
-
+    
         merged_hours, hour_changes = self._merge_hours_lists(
             rec.get("hours") or [],
             imported.get("hours") or [],
             year,
             month,
         )
+    
         if hour_changes:
             rec["hours"] = merged_hours
             changed = True
-
+    
         if changed:
-            rec["_totals"] = calc_row_totals(rec["hours"], year, month)
+            rec["_totals"] = calc_row_totals(
+                rec["hours"],
+                year,
+                month,
+            )
             return "updated"
-
+    
         return "unchanged"
+
+    def _normalize_excel_header(self, value: Any) -> str:
+    if value is None:
+        return ""
+
+    text = str(value).strip().lower().replace("ё", "е")
+    text = text.replace("\n", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+    def _parse_trip_period_cell(
+        self,
+        value: Any,
+    ) -> Tuple[List[Dict[str, date]], List[str]]:
+        """
+        Разбирает одну ячейку «Командировка».
+    
+        Поддерживаемые варианты:
+            01.06.2026 - 15.06.2026
+            01.06.2026 – 15.06.2026
+            01.06.2026 — 15.06.2026
+    
+        Несколько периодов могут быть разделены переносом строки,
+        точкой с запятой или просто находиться в одном тексте.
+        """
+        if value is None:
+            return [], []
+    
+        if isinstance(value, datetime):
+            value = value.date()
+    
+        if isinstance(value, date):
+            return [], [
+                "В ячейке командировки указана только одна дата, "
+                "но необходимы начало и окончание."
+            ]
+    
+        text = str(value).strip()
+        if not text:
+            return [], []
+    
+        date_pattern = r"\d{1,2}[./]\d{1,2}[./]\d{2,4}"
+        period_pattern = re.compile(
+            rf"({date_pattern})\s*(?:-|–|—|по)\s*({date_pattern})",
+            flags=re.IGNORECASE,
+        )
+    
+        periods: List[Dict[str, date]] = []
+        issues: List[str] = []
+        seen = set()
+    
+        def parse_date_text(date_text: str) -> Optional[date]:
+            normalized = date_text.strip().replace("/", ".")
+    
+            for fmt in ("%d.%m.%Y", "%d.%m.%y"):
+                try:
+                    return datetime.strptime(normalized, fmt).date()
+                except ValueError:
+                    continue
+    
+            return None
+    
+        matches = list(period_pattern.finditer(text))
+    
+        if not matches:
+            return [], [
+                f"не удалось разобрать период командировки: {text!r}"
+            ]
+    
+        for match in matches:
+            date_from = parse_date_text(match.group(1))
+            date_to = parse_date_text(match.group(2))
+    
+            if date_from is None or date_to is None:
+                issues.append(
+                    f"не удалось разобрать даты периода: {match.group(0)!r}"
+                )
+                continue
+    
+            if date_to < date_from:
+                issues.append(
+                    f"окончание периода раньше начала: "
+                    f"{date_from:%d.%m.%Y} - {date_to:%d.%m.%Y}"
+                )
+                continue
+    
+            key = (date_from, date_to)
+            if key in seen:
+                continue
+    
+            seen.add(key)
+            periods.append(
+                {
+                    "from": date_from,
+                    "to": date_to,
+                }
+            )
+    
+        periods.sort(key=lambda item: (item["from"], item["to"]))
+        return periods, issues
+    
+        def _detect_trip_excel_period(
+        self,
+        ws,
+    ) -> Optional[Tuple[int, int]]:
+        month_by_name = {
+            "январь": 1,
+            "января": 1,
+            "февраль": 2,
+            "февраля": 2,
+            "март": 3,
+            "марта": 3,
+            "апрель": 4,
+            "апреля": 4,
+            "май": 5,
+            "мая": 5,
+            "июнь": 6,
+            "июня": 6,
+            "июль": 7,
+            "июля": 7,
+            "август": 8,
+            "августа": 8,
+            "сентябрь": 9,
+            "сентября": 9,
+            "октябрь": 10,
+            "октября": 10,
+            "ноябрь": 11,
+            "ноября": 11,
+            "декабрь": 12,
+            "декабря": 12,
+        }
+    
+        search_parts: List[str] = []
+    
+        for row in ws.iter_rows(
+            min_row=1,
+            max_row=min(ws.max_row, 15),
+            values_only=True,
+        ):
+            for value in row:
+                if value is not None:
+                    search_parts.append(str(value))
+    
+        search_text = " ".join(search_parts).lower().replace("ё", "е")
+        search_text = re.sub(r"\s+", " ", search_text)
+    
+        month_names_pattern = "|".join(
+            sorted(month_by_name.keys(), key=len, reverse=True)
+        )
+    
+        match = re.search(
+            rf"(?:за\s+)?({month_names_pattern})\s+(\d{{4}})",
+            search_text,
+            flags=re.IGNORECASE,
+        )
+    
+        if not match:
+            return None
+    
+        month_name = match.group(1).lower()
+        detected_year = int(match.group(2))
+        detected_month = month_by_name[month_name]
+    
+        return detected_year, detected_month
 
     def _parse_trip_timesheet_excel(
         self,
@@ -1466,122 +1684,354 @@ class TripTimesheetPage(tk.Frame):
         year: int,
         month: int,
     ) -> Tuple[List[Dict[str, Any]], List[str]]:
-        wb = load_workbook(path, data_only=True)
-        ws = wb.active
-
-        header_row = None
-        for row_idx, values in enumerate(
-            ws.iter_rows(min_row=1, max_row=min(ws.max_row, 40), values_only=True),
-            start=1,
-        ):
-            texts = {
-                normalize_spaces(v).lower()
-                for v in values
-                if normalize_spaces(v)
-            }
-
-            has_tbn = any(("таб" in t and "№" in t) for t in texts)
-            has_fio = any("фамилия имя отчество" in t for t in texts)
-            has_from = any("начало командировки" in t for t in texts)
-            has_to = any("конец командировки" in t for t in texts)
-
-            if has_tbn and has_fio and has_from and has_to:
-                header_row = row_idx
-                break
-
-        if header_row is None:
-            raise ValueError("Не найдена строка заголовков шаблона.")
-
-        imported_by_tbn: Dict[str, Dict[str, Any]] = {}
-        issues: List[str] = []
-        blank_rows = 0
-        days_in_month = month_days(year, month)
-
-        for row_idx in range(header_row + 1, ws.max_row + 1):
-            row = list(ws[row_idx])
-
-            def cell(idx: int) -> Any:
-                return row[idx].value if idx < len(row) else None
-
-            tbn = normalize_tbn(cell(1))  # column B
-            fio = normalize_spaces(cell(2))  # column C
-            department = normalize_spaces(cell(3))  # column D
-            position = normalize_spaces(cell(4))  # column E
-            start_date = self._parse_excel_date_value(cell(5))  # column F
-            end_date = self._parse_excel_date_value(cell(6))  # column G
-            work_schedule = normalize_spaces(cell(7))  # column H
-
-            day_values = [
-                self._parse_excel_day_value(cell(7 + day))  # column I starts at index 8
-                for day in range(1, days_in_month + 1)
-            ]
-
-            has_any_content = any(
-                [
-                    tbn,
-                    fio,
-                    department,
-                    position,
-                    start_date,
-                    end_date,
-                    work_schedule,
-                    any(v is not None for v in day_values),
-                ]
-            )
-
-            if not has_any_content:
-                blank_rows += 1
-                if imported_by_tbn and blank_rows >= 5:
+        wb = load_workbook(path, data_only=True, read_only=False)
+    
+        try:
+            ws = wb.active
+    
+            detected_period = self._detect_trip_excel_period(ws)
+    
+            if detected_period is not None:
+                detected_year, detected_month = detected_period
+    
+                if detected_year != year or detected_month != month:
+                    raise ValueError(
+                        "Период файла не совпадает с открытым табелем.\n\n"
+                        f"В файле: {detected_month:02d}.{detected_year}\n"
+                        f"В программе: {month:02d}.{year}\n\n"
+                        "Выберите в программе правильный месяц и повторите импорт."
+                    )
+    
+            header_row: Optional[int] = None
+            header_columns: Dict[str, int] = {}
+            day_columns: Dict[int, int] = {}
+    
+            days_in_month = month_days(year, month)
+    
+            for row_idx in range(1, min(ws.max_row, 50) + 1):
+                current_columns: Dict[str, int] = {}
+                current_day_columns: Dict[int, int] = {}
+    
+                for col_idx in range(1, ws.max_column + 1):
+                    raw_value = ws.cell(row_idx, col_idx).value
+                    header = self._normalize_excel_header(raw_value)
+    
+                    if not header:
+                        continue
+    
+                    compact = re.sub(r"[\s.]+", "", header)
+    
+                    if (
+                        header in ("фио", "ф.и.о.", "фамилия имя отчество")
+                        or "фамилия имя отчество" in header
+                    ):
+                        current_columns["fio"] = col_idx
+                        continue
+    
+                    if (
+                        ("таб" in header and "№" in header)
+                        or "табельный номер" in header
+                        or compact in ("таб№", "табномер")
+                    ):
+                        current_columns["tbn"] = col_idx
+                        continue
+    
+                    if header.startswith("должност"):
+                        current_columns["position"] = col_idx
+                        continue
+    
+                    if header.startswith("подраздел"):
+                        current_columns["department"] = col_idx
+                        continue
+    
+                    if header.startswith("график"):
+                        current_columns["work_schedule"] = col_idx
+                        continue
+    
+                    if header.startswith("командиров"):
+                        current_columns["trip_period"] = col_idx
+                        continue
+    
+                    if header in ("дни", "итого дней"):
+                        current_columns["total_days"] = col_idx
+                        continue
+    
+                    if header in ("часы", "итого часов"):
+                        current_columns["total_hours"] = col_idx
+                        continue
+    
+                    day_no: Optional[int] = None
+    
+                    if isinstance(raw_value, int):
+                        day_no = raw_value
+                    elif isinstance(raw_value, float) and raw_value.is_integer():
+                        day_no = int(raw_value)
+                    elif re.fullmatch(r"\d{1,2}", header):
+                        day_no = int(header)
+    
+                    if day_no is not None and 1 <= day_no <= 31:
+                        current_day_columns[day_no] = col_idx
+    
+                required_found = (
+                    "fio" in current_columns
+                    and "tbn" in current_columns
+                    and "trip_period" in current_columns
+                    and bool(current_day_columns)
+                )
+    
+                if required_found:
+                    header_row = row_idx
+                    header_columns = current_columns
+                    day_columns = current_day_columns
                     break
-                continue
-
+    
+            if header_row is None:
+                raise ValueError(
+                    "Не найдена строка заголовков командировочного табеля.\n\n"
+                    "Ожидаются столбцы:\n"
+                    "ФИО, Таб. №, Командировка, 1, 2, 3 ..."
+                )
+    
+            missing_days = [
+                day_no
+                for day_no in range(1, days_in_month + 1)
+                if day_no not in day_columns
+            ]
+    
+            if missing_days:
+                raise ValueError(
+                    "В файле отсутствуют столбцы дней текущего месяца:\n"
+                    + ", ".join(str(day_no) for day_no in missing_days)
+                )
+    
+            imported_rows: List[Dict[str, Any]] = []
+            issues: List[str] = []
+    
+            seen_keys: Dict[Tuple[str, str], int] = {}
             blank_rows = 0
-
-            if not tbn:
-                issues.append(f"Строка {row_idx}: нет табельного номера — не добавлена.")
-                continue
-
-            meta = self._find_employee_meta_by_tbn(tbn)
-            if not meta:
+    
+            file_total_days: Optional[float] = None
+            file_total_hours: Optional[float] = None
+    
+            def get_value(row_idx: int, field: str) -> Any:
+                col_idx = header_columns.get(field)
+                if col_idx is None:
+                    return None
+                return ws.cell(row_idx, col_idx).value
+    
+            for row_idx in range(header_row + 1, ws.max_row + 1):
+                first_values = [
+                    ws.cell(row_idx, col_idx).value
+                    for col_idx in range(
+                        1,
+                        min(ws.max_column, 8) + 1,
+                    )
+                ]
+    
+                normalized_first_values = [
+                    self._normalize_excel_header(value)
+                    for value in first_values
+                ]
+    
+                if "итого" in normalized_first_values:
+                    raw_total_days = get_value(row_idx, "total_days")
+                    raw_total_hours = get_value(row_idx, "total_hours")
+    
+                    parsed_total_days = self._parse_excel_day_value(
+                        raw_total_days
+                    )
+                    parsed_total_hours = self._parse_excel_day_value(
+                        raw_total_hours
+                    )
+    
+                    if isinstance(parsed_total_days, (int, float)):
+                        file_total_days = float(parsed_total_days)
+    
+                    if isinstance(parsed_total_hours, (int, float)):
+                        file_total_hours = float(parsed_total_hours)
+    
+                    break
+    
+                fio_from_file = normalize_spaces(
+                    get_value(row_idx, "fio") or ""
+                )
+                tbn = normalize_tbn(
+                    get_value(row_idx, "tbn")
+                )
+    
+                position_from_file = normalize_spaces(
+                    get_value(row_idx, "position") or ""
+                )
+                department_from_file = normalize_spaces(
+                    get_value(row_idx, "department") or ""
+                )
+                work_schedule_from_file = normalize_spaces(
+                    get_value(row_idx, "work_schedule") or ""
+                )
+    
+                trip_cell_value = get_value(row_idx, "trip_period")
+    
+                day_values: List[Any] = []
+    
+                for day_no in range(1, days_in_month + 1):
+                    col_idx = day_columns[day_no]
+                    raw_day_value = ws.cell(row_idx, col_idx).value
+                    parsed_day_value = self._parse_excel_day_value(
+                        raw_day_value
+                    )
+                    day_values.append(parsed_day_value)
+    
+                has_any_content = any(
+                    [
+                        fio_from_file,
+                        tbn,
+                        position_from_file,
+                        department_from_file,
+                        work_schedule_from_file,
+                        normalize_spaces(trip_cell_value or ""),
+                        any(value is not None for value in day_values),
+                    ]
+                )
+    
+                if not has_any_content:
+                    blank_rows += 1
+    
+                    if imported_rows and blank_rows >= 5:
+                        break
+    
+                    continue
+    
+                blank_rows = 0
+    
+                if not fio_from_file and not tbn:
+                    issues.append(
+                        f"Строка {row_idx}: отсутствуют ФИО и табельный номер — "
+                        "строка пропущена."
+                    )
+                    continue
+    
+                meta = self._find_employee_meta(
+                    fio_from_file,
+                    tbn,
+                )
+    
+                if tbn and not self._find_employee_meta_by_tbn(tbn):
+                    issues.append(
+                        f"Строка {row_idx}: "
+                        f"{fio_from_file or tbn} — сотрудник не найден "
+                        "в справочнике по табельному номеру; "
+                        "строка всё равно загружена из файла."
+                    )
+    
+                fio = normalize_spaces(
+                    fio_from_file
+                    or meta.get("fio")
+                    or ""
+                )
+    
+                position = normalize_spaces(
+                    position_from_file
+                    or meta.get("position")
+                    or ""
+                )
+    
+                department = normalize_spaces(
+                    department_from_file
+                    or meta.get("department")
+                    or ""
+                )
+    
+                work_schedule = normalize_spaces(
+                    work_schedule_from_file
+                    or meta.get("work_schedule")
+                    or ""
+                )
+    
+                periods, period_issues = self._parse_trip_period_cell(
+                    trip_cell_value
+                )
+    
+                for period_issue in period_issues:
+                    issues.append(
+                        f"Строка {row_idx}: {fio or tbn} — {period_issue}"
+                    )
+    
+                hours = normalize_hours_list(
+                    day_values,
+                    year,
+                    month,
+                )
+    
+                row_key = self._employee_key(fio, tbn)
+    
+                if row_key in seen_keys:
+                    issues.append(
+                        f"Строка {row_idx}: {fio or tbn} — "
+                        f"дубликат строки {seen_keys[row_key]} в Excel."
+                    )
+                else:
+                    seen_keys[row_key] = row_idx
+    
+                imported_rows.append(
+                    {
+                        "fio": fio,
+                        "tbn": tbn,
+                        "department": department,
+                        "position": position,
+                        "work_schedule": work_schedule,
+                        "hours": hours,
+                        "trip_periods": periods,
+                        "_excel_row": row_idx,
+                    }
+                )
+    
+            if not imported_rows:
+                raise ValueError(
+                    "После строки заголовков не найдено ни одной строки сотрудников."
+                )
+    
+            calculated_summary = calc_rows_summary(
+                imported_rows,
+                year,
+                month,
+            )
+    
+            calculated_days = float(
+                calculated_summary.get("days") or 0
+            )
+            calculated_hours = float(
+                calculated_summary.get("hours") or 0
+            )
+    
+            if (
+                file_total_days is not None
+                and abs(calculated_days - file_total_days) > 0.0001
+            ):
                 issues.append(
-                    f"Строка {row_idx}: {fio or tbn} — не найден в базе по табельному номеру."
+                    "Итог по дням не совпадает: "
+                    f"в строке ИТОГО — {file_total_days:g}, "
+                    f"по загруженным строкам — {calculated_days:g}."
                 )
-                continue
-
-            rec = imported_by_tbn.get(tbn)
-            if rec is None:
-                rec = {
-                    "fio": normalize_spaces(meta.get("fio") or fio),
-                    "tbn": tbn,
-                    "department": normalize_spaces(meta.get("department") or department),
-                    "position": normalize_spaces(meta.get("position") or position),
-                    "work_schedule": normalize_spaces(
-                        meta.get("work_schedule") or work_schedule
-                    ),
-                    "hours": normalize_hours_list([], year, month),
-                    "trip_periods": [],
-                }
-                imported_by_tbn[tbn] = rec
-
-            hours, _ = self._merge_hours_lists(rec["hours"], day_values, year, month)
-            rec["hours"] = hours
-
-            if start_date and end_date:
-                rec["trip_periods"], _ = self._merge_trip_periods(
-                    rec["trip_periods"],
-                    [{"from": start_date, "to": end_date}],
-                )
-            elif start_date or end_date:
+    
+            if (
+                file_total_hours is not None
+                and abs(calculated_hours - file_total_hours) > 0.0001
+            ):
                 issues.append(
-                    f"Строка {row_idx}: {fio or tbn} — неполный период командировки."
+                    "Итог по часам не совпадает: "
+                    f"в строке ИТОГО — {file_total_hours:g}, "
+                    f"по загруженным строкам — {calculated_hours:g}."
                 )
-
-        return list(imported_by_tbn.values()), issues    
-
+    
+            return imported_rows, issues
+    
+        finally:
+            wb.close()
+    
     def _import_from_excel(self) -> None:
         object_id, object_addr = self._parse_selected_object()
         year, month = self._get_year_month()
-
+    
         if not object_addr:
             messagebox.showwarning(
                 "Импорт Excel",
@@ -1589,87 +2039,209 @@ class TripTimesheetPage(tk.Frame):
                 parent=self,
             )
             return
-
+    
+        if self._dirty:
+            answer = messagebox.askyesnocancel(
+                "Импорт Excel",
+                (
+                    "В текущем табеле есть несохранённые изменения.\n\n"
+                    "Сохранить их перед импортом?"
+                ),
+                parent=self,
+            )
+    
+            if answer is None:
+                return
+    
+            if answer is True:
+                if not self._save_timesheet_internal(
+                    show_messages=True,
+                    is_auto=False,
+                ):
+                    return
+    
         path = filedialog.askopenfilename(
             parent=self,
-            title="Выберите Excel по шаблону",
+            title="Выберите выгрузку командировочного табеля",
             filetypes=[
                 ("Excel", "*.xlsx *.xlsm *.xltx *.xltm"),
                 ("Все файлы", "*.*"),
             ],
         )
+    
         if not path:
             return
-
+    
         try:
-            imported_rows, parse_issues = self._parse_trip_timesheet_excel(path, year, month)
+            imported_rows, parse_issues = (
+                self._parse_trip_timesheet_excel(
+                    path,
+                    year,
+                    month,
+                )
+            )
         except Exception as exc:
+            logger.exception("Ошибка чтения командировочного табеля")
+    
             messagebox.showerror(
                 "Импорт Excel",
-                f"Не удалось прочитать файл:\n{exc}",
+                f"Не удалось прочитать файл:\n\n{exc}",
                 parent=self,
             )
             return
-
-        if not imported_rows and not parse_issues:
+    
+        if not imported_rows:
             messagebox.showinfo(
                 "Импорт Excel",
                 "В файле не найдено строк для импорта.",
                 parent=self,
             )
             return
-
-        added = 0
-        updated = 0
-        unchanged = 0
-        not_added_lines = list(parse_issues)
-
-        for imported in imported_rows:
-            status = self._upsert_imported_trip_row(imported, year, month)
-
-            fio = normalize_spaces(imported.get("fio") or "")
-            tbn = normalize_tbn(imported.get("tbn"))
-
-            if status == "added":
-                added += 1
-            elif status == "updated":
-                updated += 1
-            elif status == "unchanged":
-                unchanged += 1
-                not_added_lines.append(f"{fio} ({tbn}) — уже был в табеле, без изменений")
-            else:
-                not_added_lines.append(f"{fio} ({tbn}) — не добавлен")
-
-        self._refresh_grid()
-        self._update_trip_info_from_selection()
-
-        if added > 0 or updated > 0:
-            self._mark_dirty()
-            self._schedule_auto_save()
-
-        self.var_status.set(
-            f"Импорт Excel: добавлено {added}, обновлено {updated}, без изменений {unchanged}"
+    
+        imported_summary = calc_rows_summary(
+            imported_rows,
+            year,
+            month,
         )
-
-        messagebox.showinfo(
-            "Импорт Excel",
+    
+        mode_answer = messagebox.askyesnocancel(
+            "Способ импорта",
             (
-                f"Импорт завершен.\n\n"
-                f"Файл: {path}\n"
-                f"Добавлено сотрудников: {added}\n"
-                f"Обновлено: {updated}\n"
-                f"Без изменений: {unchanged}\n"
-                f"Не добавились: {len(not_added_lines)}"
+                f"Файл успешно прочитан.\n\n"
+                f"Объект: {object_addr}\n"
+                f"Период: {month:02d}.{year}\n"
+                f"Сотрудников в файле: {len(imported_rows)}\n"
+                f"Дней: {format_summary_value(imported_summary.get('days'))}\n"
+                f"Часов: {format_summary_value(imported_summary.get('hours'))}\n"
+                f"Замечаний: {len(parse_issues)}\n\n"
+                "Выберите способ импорта:\n\n"
+                "ДА — полностью заменить текущий табель данными из файла.\n"
+                "НЕТ — добавить и обновить сотрудников, не очищая весь табель.\n"
+                "ОТМЕНА — ничего не менять.\n\n"
+                "Для восстановления повреждённого табеля выберите «Да»."
             ),
             parent=self,
         )
-
-        if not_added_lines:
-            lines = ["Не добавились:"] + [f"• {line}" for line in not_added_lines[:30]]
-            if len(not_added_lines) > 30:
-                lines.append(f"... и ещё {len(not_added_lines) - 30}")
+    
+        if mode_answer is None:
+            return
+    
+        if self._auto_save_job is not None:
+            try:
+                self.after_cancel(self._auto_save_job)
+            except Exception:
+                pass
+    
+            self._auto_save_job = None
+    
+        added = 0
+        updated = 0
+        unchanged = 0
+        skipped = 0
+    
+        if mode_answer is True:
+            # Полная замена.
+            #
+            # Это важно для восстановления: пустая ячейка в Excel должна
+            # очистить старое значение в табеле, а периоды из файла должны
+            # заменить ошибочные периоды, а не добавиться к ним.
+            normalized_imported_rows: List[Dict[str, Any]] = []
+    
+            for imported in imported_rows:
+                normalized = self._normalize_trip_row(
+                    dict(imported)
+                )
+                normalized["_totals"] = calc_row_totals(
+                    normalized["hours"],
+                    year,
+                    month,
+                )
+                normalized_imported_rows.append(normalized)
+    
+            old_count = len(self.rows)
+            self.rows = normalized_imported_rows
+    
+            added = len(self.rows)
+    
+            import_mode_text = (
+                f"полная замена: было строк {old_count}, "
+                f"загружено {len(self.rows)}"
+            )
+    
+        else:
+            # Обычное добавление/обновление.
+            for imported in imported_rows:
+                status = self._upsert_imported_trip_row(
+                    imported,
+                    year,
+                    month,
+                )
+    
+                if status == "added":
+                    added += 1
+                elif status == "updated":
+                    updated += 1
+                elif status == "unchanged":
+                    unchanged += 1
+                else:
+                    skipped += 1
+    
+            import_mode_text = "добавление и обновление"
+    
+        self._refresh_grid()
+        self._update_trip_info_from_selection()
+        self._mark_dirty()
+    
+        # После восстановления намеренно не запускаем автосохранение.
+        # Пользователь сначала должен проверить итоги и нажать «Сохранить».
+        self.var_status.set(
+            f"Excel загружен, но ещё не сохранён: {import_mode_text}"
+        )
+    
+        result_summary = calc_rows_summary(
+            self.rows,
+            year,
+            month,
+        )
+    
+        messagebox.showinfo(
+            "Импорт Excel",
+            (
+                "Импорт в форму завершён.\n\n"
+                f"Режим: {import_mode_text}\n"
+                f"Строк в текущем табеле: {len(self.rows)}\n"
+                f"Добавлено: {added}\n"
+                f"Обновлено: {updated}\n"
+                f"Без изменений: {unchanged}\n"
+                f"Пропущено: {skipped}\n\n"
+                f"Итого дней: "
+                f"{format_summary_value(result_summary.get('days'))}\n"
+                f"Итого часов: "
+                f"{format_summary_value(result_summary.get('hours'))}\n\n"
+                "Данные пока находятся только в форме.\n"
+                "Проверьте табель и нажмите кнопку «Сохранить»."
+            ),
+            parent=self,
+        )
+    
+        if parse_issues:
+            lines = [
+                f"При чтении файла найдено замечаний: {len(parse_issues)}",
+                "",
+            ]
+    
+            lines.extend(
+                f"• {issue}"
+                for issue in parse_issues[:40]
+            )
+    
+            if len(parse_issues) > 40:
+                lines.append(
+                    f"... и ещё {len(parse_issues) - 40}"
+                )
+    
             messagebox.showwarning(
-                "Не добавленные строки",
+                "Замечания при импорте",
                 "\n".join(lines),
                 parent=self,
             )
