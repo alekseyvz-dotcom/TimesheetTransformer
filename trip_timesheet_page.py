@@ -1514,14 +1514,13 @@ class TripTimesheetPage(tk.Frame):
         return "unchanged"
 
     def _normalize_excel_header(self, value: Any) -> str:
-    if value is None:
-        return ""
+        if value is None:
+            return ""
 
-    text = str(value).strip().lower().replace("ё", "е")
-    text = text.replace("\n", " ")
-    text = re.sub(r"\s+", " ", text)
-    return text
-
+        text = str(value).strip().lower().replace("ё", "е")
+        text = text.replace("\n", " ")
+        text = re.sub(r"\s+", " ", text)
+        return text
 
     def _parse_trip_period_cell(
         self,
@@ -1529,80 +1528,81 @@ class TripTimesheetPage(tk.Frame):
     ) -> Tuple[List[Dict[str, date]], List[str]]:
         """
         Разбирает одну ячейку «Командировка».
-    
+
         Поддерживаемые варианты:
             01.06.2026 - 15.06.2026
             01.06.2026 – 15.06.2026
             01.06.2026 — 15.06.2026
-    
-        Несколько периодов могут быть разделены переносом строки,
-        точкой с запятой или просто находиться в одном тексте.
+
+        Несколько периодов могут быть указаны через перенос строки
+        или точку с запятой.
         """
         if value is None:
             return [], []
-    
+
         if isinstance(value, datetime):
             value = value.date()
-    
+
         if isinstance(value, date):
             return [], [
                 "В ячейке командировки указана только одна дата, "
                 "но необходимы начало и окончание."
             ]
-    
+
         text = str(value).strip()
         if not text:
             return [], []
-    
+
         date_pattern = r"\d{1,2}[./]\d{1,2}[./]\d{2,4}"
         period_pattern = re.compile(
             rf"({date_pattern})\s*(?:-|–|—|по)\s*({date_pattern})",
             flags=re.IGNORECASE,
         )
-    
+
         periods: List[Dict[str, date]] = []
         issues: List[str] = []
         seen = set()
-    
+
         def parse_date_text(date_text: str) -> Optional[date]:
             normalized = date_text.strip().replace("/", ".")
-    
+
             for fmt in ("%d.%m.%Y", "%d.%m.%y"):
                 try:
                     return datetime.strptime(normalized, fmt).date()
                 except ValueError:
                     continue
-    
+
             return None
-    
+
         matches = list(period_pattern.finditer(text))
-    
+
         if not matches:
             return [], [
                 f"не удалось разобрать период командировки: {text!r}"
             ]
-    
+
         for match in matches:
             date_from = parse_date_text(match.group(1))
             date_to = parse_date_text(match.group(2))
-    
+
             if date_from is None or date_to is None:
                 issues.append(
                     f"не удалось разобрать даты периода: {match.group(0)!r}"
                 )
                 continue
-    
+
             if date_to < date_from:
                 issues.append(
                     f"окончание периода раньше начала: "
                     f"{date_from:%d.%m.%Y} - {date_to:%d.%m.%Y}"
                 )
                 continue
-    
+
             key = (date_from, date_to)
+
             if key in seen:
                 continue
-    
+
             seen.add(key)
             periods.append(
                 {
@@ -1610,11 +1610,17 @@ class TripTimesheetPage(tk.Frame):
                     "to": date_to,
                 }
             )
-    
-        periods.sort(key=lambda item: (item["from"], item["to"]))
+
+        periods.sort(
+            key=lambda item: (
+                item["from"],
+                item["to"],
+            )
+        )
+
         return periods, issues
-    
-        def _detect_trip_excel_period(
+
+    def _detect_trip_excel_period(
         self,
         ws,
     ) -> Optional[Tuple[int, int]]:
@@ -1644,9 +1650,9 @@ class TripTimesheetPage(tk.Frame):
             "декабрь": 12,
             "декабря": 12,
         }
-    
+
         search_parts: List[str] = []
-    
+
         for row in ws.iter_rows(
             min_row=1,
             max_row=min(ws.max_row, 15),
@@ -1655,27 +1661,32 @@ class TripTimesheetPage(tk.Frame):
             for value in row:
                 if value is not None:
                     search_parts.append(str(value))
-    
-        search_text = " ".join(search_parts).lower().replace("ё", "е")
+
+        search_text = " ".join(search_parts)
+        search_text = search_text.lower().replace("ё", "е")
         search_text = re.sub(r"\s+", " ", search_text)
-    
+
         month_names_pattern = "|".join(
-            sorted(month_by_name.keys(), key=len, reverse=True)
+            sorted(
+                month_by_name.keys(),
+                key=len,
+                reverse=True,
+            )
         )
-    
+
         match = re.search(
             rf"(?:за\s+)?({month_names_pattern})\s+(\d{{4}})",
             search_text,
             flags=re.IGNORECASE,
         )
-    
+
         if not match:
             return None
-    
+
         month_name = match.group(1).lower()
         detected_year = int(match.group(2))
         detected_month = month_by_name[month_name]
-    
+
         return detected_year, detected_month
 
     def _parse_trip_timesheet_excel(
@@ -1950,10 +1961,15 @@ class TripTimesheetPage(tk.Frame):
                 periods, period_issues = self._parse_trip_period_cell(
                     trip_cell_value
                 )
-    
-                for period_issue in period_issues:
-                    issues.append(
-                        f"Строка {row_idx}: {fio or tbn} — {period_issue}"
+                
+                if period_issues:
+                    raise ValueError(
+                        f"Не удалось прочитать период командировки.\n\n"
+                        f"Строка Excel: {row_idx}\n"
+                        f"Сотрудник: {fio or tbn}\n"
+                        f"Значение ячейки: {trip_cell_value!r}\n"
+                        f"Ошибка: {'; '.join(period_issues)}\n\n"
+                        "Исправьте период в файле и повторите импорт."
                     )
     
                 hours = normalize_hours_list(
@@ -1963,15 +1979,18 @@ class TripTimesheetPage(tk.Frame):
                 )
     
                 row_key = self._employee_key(fio, tbn)
-    
+                
                 if row_key in seen_keys:
-                    issues.append(
-                        f"Строка {row_idx}: {fio or tbn} — "
-                        f"дубликат строки {seen_keys[row_key]} в Excel."
+                    raise ValueError(
+                        f"В Excel найден дубликат сотрудника.\n\n"
+                        f"Сотрудник: {fio or tbn}\n"
+                        f"Первая строка: {seen_keys[row_key]}\n"
+                        f"Повторная строка: {row_idx}\n\n"
+                        "Исправьте файл и повторите импорт."
                     )
-                else:
-                    seen_keys[row_key] = row_idx
-    
+                
+                seen_keys[row_key] = row_idx
+                
                 imported_rows.append(
                     {
                         "fio": fio,
@@ -2007,20 +2026,22 @@ class TripTimesheetPage(tk.Frame):
                 file_total_days is not None
                 and abs(calculated_days - file_total_days) > 0.0001
             ):
-                issues.append(
-                    "Итог по дням не совпадает: "
-                    f"в строке ИТОГО — {file_total_days:g}, "
-                    f"по загруженным строкам — {calculated_days:g}."
+                raise ValueError(
+                    "Итог по дням не совпадает.\n\n"
+                    f"В строке ИТОГО: {file_total_days:g}\n"
+                    f"Сумма загруженных строк: {calculated_days:g}\n\n"
+                    "Проверьте файл перед импортом."
                 )
-    
+            
             if (
                 file_total_hours is not None
                 and abs(calculated_hours - file_total_hours) > 0.0001
             ):
-                issues.append(
-                    "Итог по часам не совпадает: "
-                    f"в строке ИТОГО — {file_total_hours:g}, "
-                    f"по загруженным строкам — {calculated_hours:g}."
+                raise ValueError(
+                    "Итог по часам не совпадает.\n\n"
+                    f"В строке ИТОГО: {file_total_hours:g}\n"
+                    f"Сумма загруженных строк: {calculated_hours:g}\n\n"
+                    "Проверьте файл перед импортом."
                 )
     
             return imported_rows, issues
@@ -2031,6 +2052,14 @@ class TripTimesheetPage(tk.Frame):
     def _import_from_excel(self) -> None:
         object_id, object_addr = self._parse_selected_object()
         year, month = self._get_year_month()
+
+        if self._auto_save_job is not None:
+            try:
+                self.after_cancel(self._auto_save_job)
+            except Exception:
+                pass
+        
+            self._auto_save_job = None
     
         if not object_addr:
             messagebox.showwarning(
@@ -2124,15 +2153,7 @@ class TripTimesheetPage(tk.Frame):
         )
     
         if mode_answer is None:
-            return
-    
-        if self._auto_save_job is not None:
-            try:
-                self.after_cancel(self._auto_save_job)
-            except Exception:
-                pass
-    
-            self._auto_save_job = None
+            return    
     
         added = 0
         updated = 0
