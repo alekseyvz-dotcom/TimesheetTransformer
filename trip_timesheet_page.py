@@ -26,30 +26,34 @@ from timesheet_common import (
     parse_hours_value,
     safe_filename,
 )
-from trip_timesheet_db import (
-    TripTimesheetConflictError,
-    find_duplicate_employees_for_trip_timesheet,
-    find_trip_timesheet_header_id,
-    load_trip_timesheet_rows_for_copy,
-    load_trip_timesheet_rows_from_db,
-    load_trip_timesheet_with_revision,
-    save_trip_timesheet_atomic,
+
+from timesheet_db import (
+    find_fired_employees_in_timesheet,
+    load_employees_from_db,
+    load_objects_short_for_timesheet,
 )
+
 from timesheet_dialogs import (
     AutoCompleteCombobox,
     CopyFromDialog,
     SelectEmployeesDialog,
     SelectObjectIdDialog,
 )
-from trip_period_dialog import TripPeriodDialog, EmployeeTripsDialog
-from trip_timesheet_db import (
-    find_duplicate_employees_for_trip_timesheet,
-    find_trip_timesheet_header_id,
-    load_trip_timesheet_rows_for_copy,
-    load_trip_timesheet_rows_from_db,
-    replace_trip_timesheet_rows,
-    upsert_trip_timesheet_header,
+
+from trip_period_dialog import (
+    EmployeeTripsDialog,
+    TripPeriodDialog,
 )
+
+from trip_timesheet_db import (
+    TripTimesheetConflictError,
+    find_duplicate_employees_for_trip_timesheet,
+    load_trip_timesheet_rows_from_db,
+    load_trip_timesheet_rows_for_copy,
+    load_trip_timesheet_with_revision,
+    save_trip_timesheet_atomic,
+)
+
 from virtual_timesheet_grid import VirtualTimesheetGrid
 
 logger = logging.getLogger(__name__)
