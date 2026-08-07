@@ -5,7 +5,7 @@ import logging
 import socket
 from contextlib import contextmanager
 from datetime import date
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Optional
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import psycopg2
 from psycopg2.extras import Json, RealDictCursor, execute_values
@@ -189,6 +189,69 @@ def _find_header_id_by_key(
             (
                 object_addr_norm,
                 department_norm,
+                int(year),
+                int(month),
+                int(user_id),
+            ),
+        )
+
+    row = cur.fetchone()
+    if not row:
+        return None
+
+    return int(row[0])
+
+def _find_header_id_for_copy(
+    cur,
+    object_id: Optional[str],
+    object_addr: str,
+    year: int,
+    month: int,
+    user_id: int,
+) -> Optional[int]:
+    """
+    Ищет табель-источник для копирования без учета подразделения.
+
+    Подразделение намеренно не используется, поскольку название
+    подразделения могло измениться между месяцами.
+    """
+
+    object_id_norm = _norm_header_object_id(object_id)
+    object_addr_norm = _norm_header_address(object_addr)
+
+    if object_id_norm:
+        cur.execute(
+            """
+            SELECT h.id
+            FROM public.timesheet_headers h
+            WHERE COALESCE(h.object_id, '') = %s
+              AND h.year = %s
+              AND h.month = %s
+              AND h.user_id = %s
+            ORDER BY h.updated_at DESC NULLS LAST, h.id DESC
+            LIMIT 1
+            """,
+            (
+                object_id_norm,
+                int(year),
+                int(month),
+                int(user_id),
+            ),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT h.id
+            FROM public.timesheet_headers h
+            WHERE h.object_addr = %s
+              AND h.year = %s
+              AND h.month = %s
+              AND h.user_id = %s
+            ORDER BY h.updated_at DESC NULLS LAST, h.id DESC
+            LIMIT 1
+            """,
+            (
+                object_addr_norm,
                 int(year),
                 int(month),
                 int(user_id),
@@ -821,29 +884,36 @@ def load_timesheet_rows_from_db(
 def load_timesheet_rows_for_copy_from_db(
     object_id: Optional[str],
     object_addr: str,
-    department: str,
+    department: Optional[str],
     year: int,
     month: int,
     user_id: int,
     with_hours: bool,
 ) -> List[Dict[str, Any]]:
+    """
+    Загружает строки табеля-источника для копирования.
+
+    Параметр department оставлен в сигнатуре для совместимости,
+    но при поиске источника намеренно не используется.
+    """
+
     with db_cursor() as (_conn, cur):
-        header_id = _find_header_id_by_key(
+        header_id = _find_header_id_for_copy(
             cur,
-            object_id,
-            object_addr,
-            department,
-            int(year),
-            int(month),
-            int(user_id),
+            object_id=object_id,
+            object_addr=object_addr,
+            year=int(year),
+            month=int(month),
+            user_id=int(user_id),
         )
+
         if header_id is None:
             return []
 
         cur.execute(
             """
             SELECT fio, tbn, hours_raw
-            FROM timesheet_rows
+            FROM public.timesheet_rows
             WHERE header_id = %s
             ORDER BY fio, tbn
             """,
@@ -851,8 +921,14 @@ def load_timesheet_rows_for_copy_from_db(
         )
 
         result: List[Dict[str, Any]] = []
+
         for fio, tbn, hours_raw in cur.fetchall():
-            hours = normalize_hours_list(hours_raw, year, month) if with_hours else [None] * 31
+            hours = (
+                normalize_hours_list(hours_raw, year, month)
+                if with_hours
+                else [None] * 31
+            )
+
             result.append(
                 {
                     "fio": fio or "",
@@ -860,6 +936,7 @@ def load_timesheet_rows_for_copy_from_db(
                     "hours": hours,
                 }
             )
+
         return result
 
 
