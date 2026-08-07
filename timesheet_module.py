@@ -4067,7 +4067,7 @@ class TimesheetPage(tk.Frame):
             found_rows = load_timesheet_rows_for_copy_from_db(
                 object_id=oid or None,
                 object_addr=addr,
-                department=current_dep,
+                department=None,
                 year=src_y,
                 month=src_m,
                 user_id=user_id,
