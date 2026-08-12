@@ -90,6 +90,7 @@ SPECIAL_CODES = {
 
     # твои кастомные коды
     "О": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Отсутствие"},
+    "ВВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Внутревахтовый выходной"},
     "П": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Простой / прочее"},
     "КВ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Командировка выходного дня"},
     "СНЕГ": {"hours": 0.0, "night_hours": 0.0, "counts_day": False, "description": "Снег"},
