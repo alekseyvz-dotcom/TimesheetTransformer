@@ -72,26 +72,42 @@ def find_employee_work_summary(
         return []
 
     conn = None
+
     try:
         conn = get_db_connection()
+
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             where: List[str] = ["1=1"]
             params: List[Any] = []
 
-            if fio:
-                where.append("LOWER(TRIM(r.fio)) = LOWER(TRIM(%s))")
-                params.append(fio)
-            if tbn:
-                where.append("COALESCE(TRIM(r.tbn), '') = TRIM(%s)")
+            # Табельный номер — основной идентификатор сотрудника.
+            # ФИО используется только если табельный номер отсутствует.
+            if tbn and tbn.strip():
+                where.append(
+                    "LOWER(TRIM(COALESCE(r.tbn, ''))) = LOWER(TRIM(%s))"
+                )
                 params.append(tbn)
+            elif fio and fio.strip():
+                where.append(
+                    "LOWER(TRIM(COALESCE(r.fio, ''))) = LOWER(TRIM(%s))"
+                )
+                params.append(fio)
+
             if year is not None:
                 where.append("h.year = %s")
                 params.append(year)
+
             if month is not None:
                 where.append("h.month = %s")
                 params.append(month)
-            if department:
-                where.append("COALESCE(h.department, '') = %s")
+
+            # Подразделение применяется только при явном выборе
+            # пользователем фильтра подразделения.
+            if department and department.strip():
+                where.append(
+                    "LOWER(TRIM(COALESCE(h.department, ''))) = "
+                    "LOWER(TRIM(%s))"
+                )
                 params.append(department)
 
             cur.execute(
@@ -101,27 +117,38 @@ def find_employee_work_summary(
                     h.object_addr,
                     h.year,
                     h.month,
-                    COALESCE(h.department, '')          AS department,
-                    SUM(COALESCE(r.total_days,    0))   AS total_days,
-                    SUM(COALESCE(r.total_hours,   0))   AS total_hours,
-                    SUM(COALESCE(r.night_hours,   0))   AS night_hours,
-                    SUM(COALESCE(r.overtime_day,  0))   AS overtime_day,
-                    SUM(COALESCE(r.overtime_night,0))   AS overtime_night
+                    COALESCE(h.department, '') AS department,
+
+                    SUM(COALESCE(r.total_days, 0)) AS total_days,
+                    SUM(COALESCE(r.total_hours, 0)) AS total_hours,
+                    SUM(COALESCE(r.night_hours, 0)) AS night_hours,
+                    SUM(COALESCE(r.overtime_day, 0)) AS overtime_day,
+                    SUM(COALESCE(r.overtime_night, 0)) AS overtime_night
+
                 FROM timesheet_headers h
-                JOIN timesheet_rows r ON r.header_id = h.id
+                JOIN timesheet_rows r
+                    ON r.header_id = h.id
+
                 WHERE {" AND ".join(where)}
+
                 GROUP BY
-                    h.object_id, h.object_addr,
-                    h.year, h.month,
+                    h.object_id,
+                    h.object_addr,
+                    h.year,
+                    h.month,
                     COALESCE(h.department, '')
+
                 ORDER BY
-                    h.year DESC, h.month DESC,
+                    h.year DESC,
+                    h.month DESC,
                     h.object_addr,
                     COALESCE(h.department, '')
                 """,
                 params,
             )
+
             return [dict(row) for row in cur.fetchall()]
+
     finally:
         if conn:
             release_db_connection(conn)
@@ -157,7 +184,7 @@ class WorkersPage(tk.Frame):
         self._selected_fio: str = ""
         self._selected_tbn: str = ""
 
-        self.var_year = tk.StringVar(value=str(datetime.now().year))
+        self.var_year = tk.StringVar(value="")
         self.var_month = tk.StringVar(value="Все")
         self.var_dep = tk.StringVar(value="Все")
 
@@ -579,9 +606,7 @@ class WorkersPage(tk.Frame):
         except Exception:
             pass
 
-        if emp["dep"] and emp["dep"] in self.departments:
-            self.var_dep.set(emp["dep"])
-
+        self.var_dep.set("Все")
         self._clear_table()
 
     def _clear_table(self):
