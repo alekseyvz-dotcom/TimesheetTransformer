@@ -184,7 +184,7 @@ class WorkersPage(tk.Frame):
         self._selected_fio: str = ""
         self._selected_tbn: str = ""
 
-        self.var_year = tk.StringVar(value="")
+        self.var_year = tk.StringVar(value=str(datetime.now().year))
         self.var_month = tk.StringVar(value="Все")
         self.var_dep = tk.StringVar(value="Все")
 
