@@ -374,7 +374,11 @@ class TimesheetComparePage(tk.Frame):
             state="readonly", 
             width=22,
             textvariable=self.var_compare_mode,
-            values=["Весь месяц", "Первая половина (1-15)"]
+            values=[
+                "Весь месяц",
+                "Первая половина (1-15)",
+                "Вторая половина (16-конец)",
+            ]
         )
         cmb_mode.pack(side="left", padx=(0, 6))
         cmb_mode.bind("<<ComboboxSelected>>", lambda e: self._rebuild_comparison())
@@ -473,39 +477,101 @@ class TimesheetComparePage(tk.Frame):
     #  Вспомогательные методы UI
     # ──────────────────────────────────────────────────────────
 
-    def _configure_compare_columns(self, days_in_month: int):
+    def _get_compare_period(self) -> Tuple[int, int]:
+        """
+        Возвращает границы выбранного периода включительно.
+    
+        Например:
+        - весь январь: (1, 31);
+        - первая половина: (1, 15);
+        - вторая половина февраля: (16, 28) или (16, 29).
+        """
+        days_in_month = max(1, int(self._current_month_days or 31))
+        mode = self.var_compare_mode.get()
+    
+        if mode == "Первая половина (1-15)":
+            return 1, min(15, days_in_month)
+    
+        if mode == "Вторая половина (16-конец)":
+            return 16, days_in_month
+    
+        return 1, days_in_month
+    
+    def _configure_compare_columns(
+        self,
+        days_count: int,
+        first_day: int = 1,
+    ):
+        """
+        Создаёт колонки дней выбранного периода.
+    
+        Внутренние имена колонок всегда d1, d2, d3 и т.д.,
+        но отображаемые заголовки могут начинаться, например, с 16.
+        """
         cols = (
             ["status", "fio", "tbn", "object", "kind"]
-            + [f"d{i}" for i in range(1, days_in_month + 1)]
+            + [f"d{i}" for i in range(1, days_count + 1)]
             + ["total_obj", "total_1c"]
         )
         self.tree_compare["columns"] = cols
-
+    
         self.tree_compare.heading("status", text="")
-        self.tree_compare.column("status", width=26, anchor="center", stretch=False)
-        
+        self.tree_compare.column(
+            "status",
+            width=26,
+            anchor="center",
+            stretch=False,
+        )
+    
         self.tree_compare.heading("fio", text="ФИО")
         self.tree_compare.column("fio", width=200, minwidth=140)
-        
+    
         self.tree_compare.heading("tbn", text="Таб.№")
-        self.tree_compare.column("tbn", width=65, anchor="center", stretch=False)
-        
+        self.tree_compare.column(
+            "tbn",
+            width=65,
+            anchor="center",
+            stretch=False,
+        )
+    
         self.tree_compare.heading("object", text="Объект")
         self.tree_compare.column("object", width=240)
-        
+    
         self.tree_compare.heading("kind", text="Источник")
-        self.tree_compare.column("kind", width=90, anchor="center", stretch=False)
-
-        for i in range(1, days_in_month + 1):
-            col = f"d{i}"
-            self.tree_compare.heading(col, text=str(i))
-            self.tree_compare.column(col, width=34, anchor="center", stretch=False)
-
+        self.tree_compare.column(
+            "kind",
+            width=90,
+            anchor="center",
+            stretch=False,
+        )
+    
+        for position in range(1, days_count + 1):
+            col = f"d{position}"
+            calendar_day = first_day + position - 1
+    
+            self.tree_compare.heading(col, text=str(calendar_day))
+            self.tree_compare.column(
+                col,
+                width=34,
+                anchor="center",
+                stretch=False,
+            )
+    
         self.tree_compare.heading("total_obj", text="∑ Об.")
-        self.tree_compare.column("total_obj", width=52, anchor="center", stretch=False)
-        
+        self.tree_compare.column(
+            "total_obj",
+            width=52,
+            anchor="center",
+            stretch=False,
+        )
+    
         self.tree_compare.heading("total_1c", text="∑ 1С")
-        self.tree_compare.column("total_1c", width=52, anchor="center", stretch=False)
+        self.tree_compare.column(
+            "total_1c",
+            width=52,
+            anchor="center",
+            stretch=False,
+        )
 
     def _update_stat_label(self):
         parts = [f"Всего: {self._stat_total}"]
@@ -1063,29 +1129,61 @@ class TimesheetComparePage(tk.Frame):
         """Пересобирает логику сравнения с учетом агрегации часов по дням."""
         self._merged_groups.clear()
 
-        # Настраиваем колонки: Весь месяц или 1-15
-        mode = self.var_compare_mode.get()
-        active_days = 15 if mode == "Первая половина (1-15)" else self._current_month_days
-        self._configure_compare_columns(active_days)
-
-        if not self._obj_rows and not self._hr_rows: 
-            return
-
-        only_diff = self.var_only_diff.get()
-        days_count = active_days
-
-        # Словарь 1С по табельному номеру.
-        # Важно: один сотрудник может быть в 1С несколько раз,
-        # поэтому строки 1С сначала объединяем по табельному номеру.
-        hr_map = self._merge_hr_rows_by_tbn(self._hr_rows, days_count)
+        # Определяем активный диапазон календарных дней.
+        period_start, period_end = self._get_compare_period()
         
-        # Словарь объектов по табельному номеру
-        obj_map = {}
-        for r in self._obj_rows:
-            tbn_key = normalize_tbn(r["tbn"])
-            if tbn_key not in obj_map:
-                obj_map[tbn_key] = []
-            obj_map[tbn_key].append(r)
+        # Индексы списка Python начинаются с нуля.
+        slice_start = period_start - 1
+        slice_end = period_end
+        
+        days_count = period_end - period_start + 1
+        
+        # Например, для второй половины будут показаны колонки 16, 17, ... 31.
+        self._configure_compare_columns(
+            days_count=days_count,
+            first_day=period_start,
+        )
+        
+        if not self._obj_rows and not self._hr_rows:
+            return
+        
+        only_diff = self.var_only_diff.get()
+
+        # Сначала объединяем строки 1С по всему календарному диапазону,
+        # необходимому для выбранного периода.
+        full_hr_map = self._merge_hr_rows_by_tbn(
+            self._hr_rows,
+            period_end,
+        )
+        
+        # После объединения оставляем только выбранную часть месяца.
+        hr_map: Dict[str, Dict[str, Any]] = {}
+        
+        for tbn_key, row in full_hr_map.items():
+            row_copy = dict(row)
+        
+            full_days = list(row.get("days") or [])
+            row_copy["days"] = full_days[slice_start:slice_end]
+        
+            hr_map[tbn_key] = row_copy
+        
+        # Объектные и командировочные строки также обрезаем
+        # до выбранного диапазона.
+        obj_map: Dict[str, List[Dict[str, Any]]] = {}
+        
+        for row in self._obj_rows:
+            tbn_key = normalize_tbn(row.get("tbn"))
+        
+            # Используем ФИО как резервный ключ, если табельный номер пустой.
+            if not tbn_key:
+                tbn_key = f"fio:{fio_sort_key(row.get('fio'))}"
+        
+            row_copy = dict(row)
+        
+            full_days = list(row.get("days") or [])
+            row_copy["days"] = full_days[slice_start:slice_end]
+        
+            obj_map.setdefault(tbn_key, []).append(row_copy)
 
         stat_total = 0
         stat_diff = 0
@@ -1202,7 +1300,11 @@ class TimesheetComparePage(tk.Frame):
             self._merged_groups.append({
                 "tbn_key": tbn,
                 "display_fio": obj_rows_lst[0]["fio"] if obj_rows_lst else hr_row["fio"],
-                "display_tbn": obj_rows_lst[0]["tbn"] if obj_rows_lst else tbn,
+                "display_tbn": (
+                    obj_rows_lst[0]["tbn"]
+                    if obj_rows_lst
+                    else hr_row.get("tbn", "")
+                ),
                 "hr_row": hr_row,
                 "obj_rows": obj_rows_lst,
                 "situation": situation,
@@ -1281,9 +1383,11 @@ class TimesheetComparePage(tk.Frame):
             ws.append([])
 
             # Шапка
+            period_start, period_end = self._get_compare_period()
+            
             hdr_row = (
-                ["Статус", "ФИО", "Таб.№", "Объект", "Источник"] 
-                + [str(i) for i in range(1, days_cnt + 1)] 
+                ["Статус", "ФИО", "Таб.№", "Объект", "Источник"]
+                + [str(day) for day in range(period_start, period_end + 1)]
                 + ["∑ Объект", "∑ 1С"]
             )
             ws.append(hdr_row)
