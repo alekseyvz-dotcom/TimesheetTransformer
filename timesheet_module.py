@@ -5438,7 +5438,7 @@ class TimesheetRegistryPage(tk.Frame):
         if not self._headers:
             messagebox.showinfo("Экспорт", "Нет данных для выгрузки.", parent=self)
             return
-
+    
         path = filedialog.asksaveasfilename(
             parent=self,
             title="Сохранить реестр табелей в Excel",
@@ -5448,14 +5448,14 @@ class TimesheetRegistryPage(tk.Frame):
         )
         if not path:
             return
-
+    
         codes_map = self._load_internal_codes_map()
-
+    
         try:
             wb = Workbook()
             ws = wb.active
             ws.title = "Реестр табелей"
-
+    
             header_row = (
                 [
                     "Тип табеля",
@@ -5471,26 +5471,40 @@ class TimesheetRegistryPage(tk.Frame):
                     "График работы",
                 ]
                 + [str(i) for i in range(1, 32)]
-                + ["Итого_дней", "Итого_часов", "В т.ч. ночных", "Переработка_день", "Переработка_ночь"]
+                + ["Итого_дней", "Итого_часов", "Дни_МО_К", "В т.ч. ночных", "Переработка_день", "Переработка_ночь"]
             )
             ws.append(header_row)
-
-            widths = [6, 10, 40, 14, 18, 22, 22, 28, 12, 28] + [6] * 31 + [10, 14, 16, 16, 16]
+    
+            widths = [6, 10, 40, 14, 18, 22, 22, 28, 12, 28] + [6] * 31 + [10, 14, 10, 16, 16, 16]
             for i, w in enumerate(widths, 1):
                 ws.column_dimensions[get_column_letter(i)].width = w
-
+    
+            def count_mo_k_days(hours_raw):
+                """Подсчитывает количество дней с отметками МО или К"""
+                if not hours_raw:
+                    return 0
+                count = 0
+                for val in hours_raw:
+                    if val is not None:
+                        val_str = str(val).strip().upper()
+                        if val_str in ("МО", "К"):
+                            count += 1
+                return count
+    
             total_rows = 0
             for h in self._headers:
                 if h.get("source") == "trip":
                     rows = load_trip_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
                 else:
                     rows = load_timesheet_rows_with_schedule_by_header_id(int(h["id"]))
-
+    
                 user_display = h.get("full_name") or h.get("username") or ""
                 obj_id_val = normalize_spaces(str(h.get("object_id") or ""))
                 internal_code = codes_map.get(obj_id_val, "")
-
+    
                 for r in rows:
+                    mo_k_count = count_mo_k_days(r.get("hours_raw"))
+                    
                     ws.append(
                         [
                             h.get("source_label") or ("Командировочный" if h.get("source") == "trip" else "Объектный"),
@@ -5509,13 +5523,14 @@ class TimesheetRegistryPage(tk.Frame):
                         + [
                             r.get("total_days"),
                             r.get("total_hours"),
+                            mo_k_count,
                             r.get("night_hours"),
                             r.get("overtime_day"),
                             r.get("overtime_night"),
                         ]
                     )
                     total_rows += 1
-
+    
             wb.save(path)
             messagebox.showinfo("Экспорт", f"Готово.\nСтрок: {total_rows}\nФайл: {path}", parent=self)
         except Exception as e:
