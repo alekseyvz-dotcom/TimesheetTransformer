@@ -5434,6 +5434,29 @@ class TimesheetRegistryPage(tk.Frame):
 
         return codes
 
+def _load_positions_map(self) -> Dict[str, str]:
+    """
+    Возвращает словарь {tbn: position} для всех сотрудников.
+    """
+    positions: Dict[str, str] = {}
+    
+    try:
+        with db_cursor() as (_conn, cur):
+            cur.execute(
+                """
+                SELECT NULLIF(btrim(tbn), ''), NULLIF(btrim(position), '')
+                FROM public.employees
+                WHERE tbn IS NOT NULL AND tbn != ''
+                """
+            )
+            for tbn, position in cur.fetchall():
+                if tbn:
+                    positions[normalize_spaces(tbn)] = normalize_spaces(position or "")
+    except Exception:
+        logger.exception("Ошибка загрузки должностей сотрудников")
+    
+    return positions
+
     def _export_to_excel(self):
         if not self._headers:
             messagebox.showinfo("Экспорт", "Нет данных для выгрузки.", parent=self)
@@ -5450,6 +5473,7 @@ class TimesheetRegistryPage(tk.Frame):
             return
     
         codes_map = self._load_internal_codes_map()
+        positions_map = self._load_positions_map()
     
         try:
             wb = Workbook()
@@ -5468,6 +5492,7 @@ class TimesheetRegistryPage(tk.Frame):
                     "Пользователь",
                     "ФИО",
                     "Табельный №",
+                    "Должность",
                     "График работы",
                 ]
                 + [str(i) for i in range(1, 32)]
@@ -5475,7 +5500,7 @@ class TimesheetRegistryPage(tk.Frame):
             )
             ws.append(header_row)
     
-            widths = [6, 10, 40, 14, 18, 22, 22, 28, 12, 28] + [6] * 31 + [10, 14, 10, 16, 16, 16]
+            widths = [6, 10, 40, 14, 18, 22, 22, 28, 12, 25, 28] + [6] * 31 + [10, 14, 10, 16, 16, 16]
             for i, w in enumerate(widths, 1):
                 ws.column_dimensions[get_column_letter(i)].width = w
     
@@ -5505,6 +5530,9 @@ class TimesheetRegistryPage(tk.Frame):
                 for r in rows:
                     mo_k_count = count_mo_k_days(r.get("hours_raw"))
                     
+                    tbn = normalize_spaces(str(r.get("tbn") or ""))
+                    position = positions_map.get(tbn, "")
+                    
                     ws.append(
                         [
                             h.get("source_label") or ("Командировочный" if h.get("source") == "trip" else "Объектный"),
@@ -5517,6 +5545,7 @@ class TimesheetRegistryPage(tk.Frame):
                             user_display,
                             r["fio"],
                             r["tbn"],
+                            position,
                             r.get("work_schedule", ""),
                         ]
                         + (r.get("hours_raw") or [None] * 31)
