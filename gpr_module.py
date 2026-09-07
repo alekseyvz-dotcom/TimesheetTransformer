@@ -4738,78 +4738,204 @@ class GprPage(tk.Frame):
             parent=self,
         )
 
-    def _section_dates_map(self) -> Dict[int, Tuple[Optional[date], Optional[date]]]:
+    def _section_dates_map(
+        self,
+    ) -> Dict[int, Tuple[Optional[date], Optional[date]]]:
         """
-        Возвращает фактические сроки каждой группы/титула.
+        Рассчитывает сроки групп и титулов.
     
-        Секция начинается с group/title и заканчивается перед следующей
-        group/title. Сроки секции определяются по вложенным работам.
+        Правила:
     
-        Если внутри секции нет работ с датами, используются даты самой
-        строки group/title.
+        ГРУППА:
+            получает даты только работ от своей строки
+            до следующей группы или следующего титула.
+    
+        ТИТУЛ:
+            получает даты всех работ и групп от своей строки
+            до следующего титула.
+    
+        Пример:
+    
+            ТИТУЛ А
+                ГРУППА 1
+                    Работа 1
+                    Работа 2
+                ГРУППА 2
+                    Работа 3
+    
+            ТИТУЛ Б
+                ГРУППА 3
+                    Работа 4
+    
+        ТИТУЛ А будет охватывать Работа 1, 2, 3.
+        ГРУППА 1 будет охватывать только Работа 1, 2.
+        ГРУППА 2 будет охватывать только Работа 3.
         """
+    
         result: Dict[int, Tuple[Optional[date], Optional[date]]] = {}
     
-        current_header_index: Optional[int] = None
-        current_task_indexes: List[int] = []
+        def add_dates(
+            starts: List[date],
+            finishes: List[date],
+            row: Dict[str, Any],
+        ):
+            ds = _to_date(row.get("plan_start"))
+            df = _to_date(row.get("plan_finish"))
     
-        def flush_section():
-            nonlocal current_header_index, current_task_indexes
+            if ds:
+                starts.append(ds)
     
-            if current_header_index is None:
-                return
+            if df:
+                finishes.append(df)
     
-            header = self.tasks[current_header_index]
-    
-            starts: List[date] = []
-            finishes: List[date] = []
-    
-            for task_index in current_task_indexes:
-                task = self.tasks[task_index]
-    
-                ds = _to_date(task.get("plan_start"))
-                df = _to_date(task.get("plan_finish"))
-    
-                if ds:
-                    starts.append(ds)
-                if df:
-                    finishes.append(df)
-    
-            # Если вложенных работ нет, используем даты самой группы/титула.
-            if not starts:
-                own_start = _to_date(header.get("plan_start"))
+        def get_range(
+            starts: List[date],
+            finishes: List[date],
+            fallback_row: Optional[Dict[str, Any]] = None,
+        ) -> Tuple[Optional[date], Optional[date]]:
+            """
+            Возвращает диапазон по спискам дат.
+            Если дат нет, использует даты самой строки заголовка.
+            """
+            if not starts and fallback_row:
+                own_start = _to_date(fallback_row.get("plan_start"))
                 if own_start:
                     starts.append(own_start)
     
-            if not finishes:
-                own_finish = _to_date(header.get("plan_finish"))
+            if not finishes and fallback_row:
+                own_finish = _to_date(fallback_row.get("plan_finish"))
                 if own_finish:
                     finishes.append(own_finish)
     
-            result[current_header_index] = (
+            return (
                 min(starts) if starts else None,
                 max(finishes) if finishes else None,
             )
     
-            current_header_index = None
-            current_task_indexes = []
+        # ══════════════════════════════════════════════════════
+        # 1. Сначала рассчитываем диапазоны всех групп.
+        #
+        # Группа включает только работы до следующего group/title.
+        # ══════════════════════════════════════════════════════
     
-        for index, task in enumerate(self.tasks):
-            row_kind = (task.get("row_kind") or "task").strip()
+        current_group_index: Optional[int] = None
+        group_starts: List[date] = []
+        group_finishes: List[date] = []
     
-            if row_kind in ("group", "title"):
-                flush_section()
-                current_header_index = index
-                current_task_indexes = []
+        def flush_group():
+            nonlocal current_group_index
+            nonlocal group_starts
+            nonlocal group_finishes
+    
+            if current_group_index is None:
+                return
+    
+            group_row = self.tasks[current_group_index]
+    
+            result[current_group_index] = get_range(
+                list(group_starts),
+                list(group_finishes),
+                fallback_row=group_row,
+            )
+    
+            current_group_index = None
+            group_starts = []
+            group_finishes = []
+    
+        for index, row in enumerate(self.tasks):
+            row_kind = (row.get("row_kind") or "task").strip()
+    
+            if row_kind == "group":
+                # Закрываем предыдущую группу.
+                flush_group()
+    
+                current_group_index = index
+                group_starts = []
+                group_finishes = []
                 continue
     
-            if row_kind == "task" and current_header_index is not None:
-                current_task_indexes.append(index)
+            if row_kind == "title":
+                # Титул также закрывает предыдущую группу.
+                flush_group()
+                continue
     
-        flush_section()
+            if row_kind == "task" and current_group_index is not None:
+                add_dates(
+                    group_starts,
+                    group_finishes,
+                    row,
+                )
+    
+        flush_group()
+    
+        # ══════════════════════════════════════════════════════
+        # 2. Теперь рассчитываем диапазоны титулов.
+        #
+        # Титул включает всё до следующего титула:
+        # - работы;
+        # - группы;
+        # - группы без работ, если у них есть собственные даты.
+        # ══════════════════════════════════════════════════════
+    
+        title_indexes = [
+            index
+            for index, row in enumerate(self.tasks)
+            if (row.get("row_kind") or "task").strip() == "title"
+        ]
+    
+        for title_position, title_index in enumerate(title_indexes):
+            if title_position + 1 < len(title_indexes):
+                next_title_index = title_indexes[title_position + 1]
+            else:
+                next_title_index = len(self.tasks)
+    
+            title_starts: List[date] = []
+            title_finishes: List[date] = []
+    
+            for index in range(title_index + 1, next_title_index):
+                row = self.tasks[index]
+                row_kind = (row.get("row_kind") or "task").strip()
+    
+                # Работы титула.
+                if row_kind == "task":
+                    add_dates(
+                        title_starts,
+                        title_finishes,
+                        row,
+                    )
+                    continue
+    
+                # Группы титула.
+                if row_kind == "group":
+                    group_range = result.get(index)
+    
+                    if group_range:
+                        group_start, group_finish = group_range
+    
+                        if group_start:
+                            title_starts.append(group_start)
+    
+                        if group_finish:
+                            title_finishes.append(group_finish)
+    
+                    # Если группа не получила диапазон,
+                    # используем её собственные даты.
+                    if not group_range:
+                        add_dates(
+                            title_starts,
+                            title_finishes,
+                            row,
+                        )
+    
+            title_row = self.tasks[title_index]
+    
+            result[title_index] = get_range(
+                title_starts,
+                title_finishes,
+                fallback_row=title_row,
+            )
     
         return result
-    
     
     def _rows_with_section_dates(
         self,
@@ -4909,51 +5035,6 @@ class GprPage(tk.Frame):
         self,
     ) -> Dict[int, Tuple[Optional[date], Optional[date]]]:
         return self._section_dates_map()
-
-        def flush_section():
-            nonlocal current_header_index, current_task_indexes
-
-            if current_header_index is None:
-                return
-
-            starts: List[date] = []
-            finishes: List[date] = []
-
-            for task_index in current_task_indexes:
-                task = self.tasks[task_index]
-
-                task_start = _to_date(task.get("plan_start"))
-                task_finish = _to_date(task.get("plan_finish"))
-
-                if task_start:
-                    starts.append(task_start)
-
-                if task_finish:
-                    finishes.append(task_finish)
-
-            result[current_header_index] = (
-                min(starts) if starts else None,
-                max(finishes) if finishes else None,
-            )
-
-            current_header_index = None
-            current_task_indexes = []
-
-        for index, task in enumerate(self.tasks):
-            row_kind = (task.get("row_kind") or "task").strip()
-
-            if row_kind in ("group", "title"):
-                flush_section()
-                current_header_index = index
-                current_task_indexes = []
-                continue
-
-            if row_kind == "task" and current_header_index is not None:
-                current_task_indexes.append(index)
-
-        flush_section()
-
-        return result
     
     def _build_period_slice_rows(
         self,
