@@ -555,8 +555,15 @@ class GprExcelImportService:
                         "name": name_text,
                         "uom_code": None,
                         "plan_qty": None,
-                        "plan_start": _today(),
-                        "plan_finish": _today(),
+                        "plan_start": (
+                            GprExcelImportService._cell_to_date(raw_start)
+                            or _today()
+                        ),
+                        "plan_finish": (
+                            GprExcelImportService._cell_to_date(raw_finish)
+                            or GprExcelImportService._cell_to_date(raw_start)
+                            or _today()
+                        ),
                         "status": "planned",
                         "is_milestone": False,
                         "sort_order": len(tasks) * 10,
@@ -580,8 +587,15 @@ class GprExcelImportService:
                         "name": name_text,
                         "uom_code": None,
                         "plan_qty": None,
-                        "plan_start": _today(),
-                        "plan_finish": _today(),
+                        "plan_start": (
+                            GprExcelImportService._cell_to_date(raw_start)
+                            or _today()
+                        ),
+                        "plan_finish": (
+                            GprExcelImportService._cell_to_date(raw_finish)
+                            or GprExcelImportService._cell_to_date(raw_start)
+                            or _today()
+                        ),
                         "status": "planned",
                         "is_milestone": False,
                         "sort_order": len(tasks) * 10,
@@ -2157,11 +2171,13 @@ class GanttCanvas(tk.Frame):
 
     def _draw_bars(self):
         d0, d1 = self._range
+    
         if d1 < d0:
             return
     
         days = (d1 - d0).days + 1
         tw = max(1, days * self.day_px)
+    
         body_h = self.body.winfo_height()
         if body_h < 10:
             body_h = 600
@@ -2169,25 +2185,45 @@ class GanttCanvas(tk.Frame):
         self.body.delete("all")
         self.body.configure(scrollregion=(0, 0, tw, body_h))
     
+        # Линия сегодняшнего дня.
         td = _today()
+    
         if d0 <= td <= d1:
             tx = (td - d0).days * self.day_px + self.day_px // 2
+    
             self.body.create_line(
-                tx, 0, tx, body_h,
-                fill=C["error"], width=1, dash=(4, 2)
+                tx,
+                0,
+                tx,
+                body_h,
+                fill=C["error"],
+                width=1,
+                dash=(4, 2),
             )
     
+        # Вертикальные линии недель.
         step = 7 if self.day_px >= 10 else 14
+    
         for i in range(0, days, step):
             x = i * self.day_px
-            self.body.create_line(x, 0, x, body_h, fill="#eeeeee")
+            self.body.create_line(
+                x,
+                0,
+                x,
+                body_h,
+                fill="#eeeeee",
+            )
     
         positions = self._get_tree_row_positions()
+    
         if not positions:
             return
     
-        for row_idx, t in enumerate(self._rows):
-            if row_idx >= len(positions) or positions[row_idx] is None:
+        for row_idx, task in enumerate(self._rows):
+            if row_idx >= len(positions):
+                continue
+    
+            if positions[row_idx] is None:
                 continue
     
             y0, y1 = positions[row_idx]
@@ -2195,84 +2231,200 @@ class GanttCanvas(tk.Frame):
             if y1 < -5 or y0 > body_h + 5:
                 continue
     
-            row_kind = (t.get("row_kind") or "task").strip()
+            row_kind = (task.get("row_kind") or "task").strip()
     
             if row_kind == "group":
-                bg = "#eef5ff"
+                row_bg = "#eef5ff"
+                text_color = "#1a3d7c"
+                prefix = "📁 "
+                bar_color = "#5b9bd5"
+                outline_color = "#1f4e78"
+    
             elif row_kind == "title":
-                bg = "#dff1ff"
+                row_bg = "#dff1ff"
+                text_color = "#0b5394"
+                prefix = "🟦 "
+                bar_color = "#70adce"
+                outline_color = "#0b5394"
+    
             else:
-                bg = "#ffffff" if row_idx % 2 == 0 else "#f8f9fa"
+                row_bg = (
+                    "#ffffff"
+                    if row_idx % 2 == 0
+                    else "#f8f9fa"
+                )
+                text_color = "#333333"
+                prefix = ""
+                bar_color = None
+                outline_color = "#5f6368"
     
-            self.body.create_rectangle(0, y0, tw, y1, fill=bg, outline="")
+            # Фон строки.
+            self.body.create_rectangle(
+                0,
+                y0,
+                tw,
+                y1,
+                fill=row_bg,
+                outline="",
+            )
     
+            ts = _to_date(task.get("plan_start"))
+            tf = _to_date(task.get("plan_finish"))
+    
+            # Группы и титулы теперь также получают полноценную полосу.
             if row_kind in ("group", "title"):
-                fg = "#1a3d7c" if row_kind == "group" else "#0b5394"
-                prefix = "📁 " if row_kind == "group" else "🟦 "
                 self.body.create_text(
                     6,
                     (y0 + y1) / 2,
-                    text=prefix + (t.get("name") or ""),
+                    text=prefix + (task.get("name") or ""),
                     anchor="w",
                     font=("Segoe UI", 8, "bold"),
-                    fill=fg,
+                    fill=text_color,
                 )
+    
+                if not ts or not tf:
+                    continue
+    
+                if tf < d0 or ts > d1:
+                    continue
+    
+                clip_start = max(ts, d0)
+                clip_finish = min(tf, d1)
+    
+                bx0 = (clip_start - d0).days * self.day_px
+                bx1 = ((clip_finish - d0).days + 1) * self.day_px
+    
+                by0 = y0 + 5
+                by1 = y1 - 5
+    
+                if by1 <= by0:
+                    by0 = y0 + 2
+                    by1 = y1 - 2
+    
+                # Основная полоса группы/титула.
+                self.body.create_rectangle(
+                    bx0 + 1,
+                    by0,
+                    bx1 - 1,
+                    by1,
+                    fill=bar_color,
+                    outline=outline_color,
+                    width=1,
+                )
+    
+                # Полоса поверх фона с небольшим прозрачным эффектом
+                # заменить невозможно в Canvas, поэтому используем
+                # контрастную внутреннюю линию.
+                self.body.create_line(
+                    bx0 + 2,
+                    (by0 + by1) / 2,
+                    bx1 - 2,
+                    (by0 + by1) / 2,
+                    fill="#ffffff",
+                    width=1,
+                )
+    
+                # Даты группы/титула внутри полосы.
+                date_text = (
+                    f"{_fmt_date(ts)} — {_fmt_date(tf)}"
+                )
+    
+                if bx1 - bx0 >= 150:
+                    self.body.create_text(
+                        bx1 - 5,
+                        (by0 + by1) / 2,
+                        text=date_text,
+                        anchor="e",
+                        font=("Segoe UI", 7, "bold"),
+                        fill="#17365d",
+                    )
+    
                 continue
     
-            ts = _to_date(t.get("plan_start"))
-            tf = _to_date(t.get("plan_finish"))
+            # Обычная задача.
             if not ts or not tf:
                 continue
+    
             if tf < d0 or ts > d1:
                 continue
     
-            s2 = max(ts, d0)
-            f2 = min(tf, d1)
-            bx0 = (s2 - d0).days * self.day_px
-            bx1 = ((f2 - d0).days + 1) * self.day_px
+            clip_start = max(ts, d0)
+            clip_finish = min(tf, d1)
     
-            st = (t.get("status") or "planned").strip()
-            col, _, _ = STATUS_COLORS.get(st, ("#90caf9", "#555", ""))
+            bx0 = (clip_start - d0).days * self.day_px
+            bx1 = ((clip_finish - d0).days + 1) * self.day_px
+    
+            st = (task.get("status") or "planned").strip()
+            bar_color, _, _ = STATUS_COLORS.get(
+                st,
+                ("#90caf9", "#555", ""),
+            )
     
             by0 = y0 + 4
             by1 = y1 - 4
+    
             if by1 - by0 < 4:
                 by0 = y0 + 2
                 by1 = y1 - 2
     
             self.body.create_rectangle(
-                bx0 + 1, by0, bx1 - 1, by1,
-                fill=col, outline="#5f6368"
+                bx0 + 1,
+                by0,
+                bx1 - 1,
+                by1,
+                fill=bar_color,
+                outline=outline_color,
             )
     
-            tid = t.get("id")
-            pq = _safe_float(t.get("plan_qty"))
+            tid = task.get("id")
+            pq = _safe_float(task.get("plan_qty"))
             fq = self._facts.get(tid, 0) if tid else 0
             fact_info = self._fact_info.get(tid, {}) if tid else {}
             workers_last = fact_info.get("workers_last")
     
+            # Прогресс выполнения.
             if pq and pq > 0 and fq > 0:
                 pct = min(1.0, fq / pq)
-                fw = max(2, int((bx1 - bx0 - 2) * pct))
-                self.body.create_rectangle(
-                    bx0 + 1, by0, bx0 + 1 + fw, by1,
-                    fill="#388e3c", outline=""
+                fw = max(
+                    2,
+                    int((bx1 - bx0 - 2) * pct),
                 )
     
-            if t.get("is_milestone"):
+                self.body.create_rectangle(
+                    bx0 + 1,
+                    by0,
+                    bx0 + 1 + fw,
+                    by1,
+                    fill="#388e3c",
+                    outline="",
+                )
+    
+            # Веха.
+            if task.get("is_milestone"):
                 cx = bx0 + 6
                 cy = (y0 + y1) / 2
+    
                 self.body.create_polygon(
-                    cx, cy, cx + 7, cy - 5,
-                    cx + 14, cy, cx + 7, cy + 5,
-                    fill="#1a73e8", outline=""
+                    cx,
+                    cy,
+                    cx + 7,
+                    cy - 5,
+                    cx + 14,
+                    cy,
+                    cx + 7,
+                    cy + 5,
+                    fill="#1a73e8",
+                    outline="",
                 )
     
             bar_w = bx1 - bx0
     
             info_parts = []
+    
             if fq and pq and pq > 0:
-                info_parts.append(f"{_fmt_qty(fq)}/{_fmt_qty(pq)}")
+                info_parts.append(
+                    f"{_fmt_qty(fq)}/{_fmt_qty(pq)}"
+                )
             elif fq:
                 info_parts.append(_fmt_qty(fq))
     
@@ -2288,17 +2440,19 @@ class GanttCanvas(tk.Frame):
                     text=info_text,
                     anchor="e",
                     font=("Segoe UI", 7),
-                    fill="#222"
+                    fill="#222",
                 )
     
             if bar_w > 60:
-                nm = (t.get("name") or "")[:30]
+                name = (task.get("name") or "")[:30]
+    
                 self.body.create_text(
-                    bx0 + 4, (y0 + y1) / 2,
-                    text=nm,
+                    bx0 + 4,
+                    (y0 + y1) / 2,
+                    text=name,
                     anchor="w",
                     font=("Segoe UI", 7),
-                    fill="#333"
+                    fill="#333",
                 )
             elif workers_last and bar_w > 26:
                 self.body.create_text(
@@ -2307,7 +2461,7 @@ class GanttCanvas(tk.Frame):
                     text=f"{workers_last}",
                     anchor="center",
                     font=("Segoe UI", 7, "bold"),
-                    fill="#222"
+                    fill="#222",
                 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -2954,6 +3108,58 @@ class GprPage(tk.Frame):
         self.cmb_filt_wt.bind(
             "<<ComboboxSelected>>", lambda _e: self._apply_filter()
         )
+
+        tk.Label(
+            fbar,
+            text="Группа:",
+            bg=C["bg"],
+            font=("Segoe UI", 8),
+        ).pack(side="left")
+        
+        self.cmb_filt_group = ttk.Combobox(
+            fbar,
+            state="readonly",
+            width=22,
+            values=["Все"],
+        )
+        
+        self.cmb_filt_group.pack(
+            side="left",
+            padx=(4, 12),
+        )
+        
+        self.cmb_filt_group.current(0)
+        
+        self.cmb_filt_group.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self._apply_filter(),
+        )
+        
+        tk.Label(
+            fbar,
+            text="Титул:",
+            bg=C["bg"],
+            font=("Segoe UI", 8),
+        ).pack(side="left")
+        
+        self.cmb_filt_title = ttk.Combobox(
+            fbar,
+            state="readonly",
+            width=22,
+            values=["Все"],
+        )
+        
+        self.cmb_filt_title.pack(
+            side="left",
+            padx=(4, 12),
+        )
+        
+        self.cmb_filt_title.current(0)
+        
+        self.cmb_filt_title.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self._apply_filter(),
+        )
     
         tk.Label(
             fbar, text="Статус:", bg=C["bg"], font=("Segoe UI", 8)
@@ -3357,6 +3563,7 @@ class GprPage(tk.Frame):
             name = str(oid)
     
         self._update_plan_info()
+        self._refresh_section_filter_values()
         self._apply_filter()
         self._update_summary()
         
@@ -3377,41 +3584,122 @@ class GprPage(tk.Frame):
     # ══════════════════════════════════════════════════════
     #  FILTER / RENDER
     # ══════════════════════════════════════════════════════
+
     def _apply_filter(self):
         wt_idx = self.cmb_filt_wt.current()
+    
         wt_name = None
+    
         if wt_idx > 0 and wt_idx <= len(self.work_types):
             wt_name = self.work_types[wt_idx - 1]["name"]
-
+    
         st_idx = self.cmb_filt_st.current()
+    
         st_code = None
+    
         if st_idx > 0 and st_idx <= len(STATUS_LIST):
             st_code = STATUS_LIST[st_idx - 1]
-
-        q = (self.var_search.get() or "").strip().lower()
-
-        res = []
-        for t in self.tasks:
-            row_kind = (t.get("row_kind") or "task").strip()
-
-            if row_kind in ("group", "title"):
-                res.append(t)
-                continue
-
-            if wt_name and (t.get("work_type_name") or "") != wt_name:
-                continue
-            if st_code and (t.get("status") or "") != st_code:
-                continue
-            if q:
-                nm = (t.get("name") or "").lower()
-                wtn = (t.get("work_type_name") or "").lower()
-                if q not in nm and q not in wtn:
+    
+        search_text = (
+            self.var_search.get() or ""
+        ).strip().lower()
+    
+        selected_group = ""
+    
+        if hasattr(self, "cmb_filt_group"):
+            selected_group = (
+                self.cmb_filt_group.get() or ""
+            ).strip()
+    
+        selected_title = ""
+    
+        if hasattr(self, "cmb_filt_title"):
+            selected_title = (
+                self.cmb_filt_title.get() or ""
+            ).strip()
+    
+        selected_group = (
+            selected_group
+            if selected_group and selected_group != "Все"
+            else None
+        )
+    
+        selected_title = (
+            selected_title
+            if selected_title and selected_title != "Все"
+            else None
+        )
+    
+        section_headers = self._row_section_header_indices()
+    
+        selected_section_indexes: Set[int] = set()
+    
+        for index, task in enumerate(self.tasks):
+            row_kind = (task.get("row_kind") or "task").strip()
+            name = (task.get("name") or "").strip()
+    
+            if selected_group and row_kind == "group":
+                if name == selected_group:
+                    selected_section_indexes.add(index)
+    
+            if selected_title and row_kind == "title":
+                if name == selected_title:
+                    selected_section_indexes.add(index)
+    
+        result = []
+    
+        for index, task in enumerate(self.tasks):
+            row_kind = (task.get("row_kind") or "task").strip()
+    
+            # Если выбран фильтр группы/титула,
+            # оставляем только строки соответствующих секций.
+            if selected_group or selected_title:
+                section_header_index = section_headers.get(index)
+    
+                if section_header_index not in selected_section_indexes:
                     continue
-            res.append(t)
-
-        self.tasks_filtered = res
+    
+            # Сами группы и титулы не фильтруются по статусу/типу работ.
+            if row_kind in ("group", "title"):
+                if search_text:
+                    name = (
+                        task.get("name") or ""
+                    ).lower()
+    
+                    if search_text not in name:
+                        continue
+    
+                result.append(task)
+                continue
+    
+            if wt_name:
+                if (task.get("work_type_name") or "") != wt_name:
+                    continue
+    
+            if st_code:
+                if (task.get("status") or "") != st_code:
+                    continue
+    
+            if search_text:
+                name = (
+                    task.get("name") or ""
+                ).lower()
+    
+                work_type_name = (
+                    task.get("work_type_name") or ""
+                ).lower()
+    
+                if (
+                    search_text not in name
+                    and search_text not in work_type_name
+                ):
+                    continue
+    
+            result.append(task)
+    
+        self.tasks_filtered = result
         self._render()
-
+    
     def _gen_iid(self, task: Dict[str, Any]) -> str:
         tid = task.get("id")
         if tid is not None:
@@ -3422,56 +3710,119 @@ class GprPage(tk.Frame):
     def _render(self):
         self.tree.delete(*self.tree.get_children())
     
-        for t in self.tasks_filtered:
-            iid = self._gen_iid(t)
-            row_kind = (t.get("row_kind") or "task").strip()
+        # Важно: даты групп/титулов берутся из полного списка,
+        # а не только из отфильтрованных строк.
+        display_rows = self._rows_with_section_dates(
+            self.tasks_filtered
+        )
+    
+        for task in display_rows:
+            iid = self._gen_iid(task)
+            row_kind = (task.get("row_kind") or "task").strip()
     
             if row_kind == "group":
-                values = ("", f"📁 {t.get('name', '')}", "", "", "", "", "", "", "")
-                self.tree.insert("", "end", iid=iid, values=values, tags=("group",))
-            elif row_kind == "title":
-                values = ("", f"🟦 {t.get('name', '')}", "", "", "", "", "", "", "")
-                self.tree.insert("", "end", iid=iid, values=values, tags=("title",))
-            else:
-                st_label = STATUS_LABELS.get(
-                    t.get("status", ""), t.get("status", "")
+                values = (
+                    "ГРУППА",
+                    f"📁 {task.get('name', '')}",
+                    _fmt_date(task.get("plan_start")),
+                    _fmt_date(task.get("plan_finish")),
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
                 )
     
-                tid = t.get("id")
+                self.tree.insert(
+                    "",
+                    "end",
+                    iid=iid,
+                    values=values,
+                    tags=("group",),
+                )
+    
+            elif row_kind == "title":
+                values = (
+                    "ТИТУЛ",
+                    f"🟦 {task.get('name', '')}",
+                    _fmt_date(task.get("plan_start")),
+                    _fmt_date(task.get("plan_finish")),
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                )
+    
+                self.tree.insert(
+                    "",
+                    "end",
+                    iid=iid,
+                    values=values,
+                    tags=("title",),
+                )
+    
+            else:
+                st_label = STATUS_LABELS.get(
+                    task.get("status", ""),
+                    task.get("status", ""),
+                )
+    
+                tid = task.get("id")
                 workers_last = ""
+    
                 if tid is not None:
                     info = self.fact_info.get(tid) or {}
+    
                     if info.get("workers_last") is not None:
-                        workers_last = str(info["workers_last"])
+                        workers_last = str(
+                            info["workers_last"]
+                        )
     
                 self.tree.insert(
                     "",
                     "end",
                     iid=iid,
                     values=(
-                        t.get("work_type_name", ""),
-                        t.get("name", ""),
-                        _fmt_date(t.get("plan_start")),
-                        _fmt_date(t.get("plan_finish")),
-                        t.get("uom_code") or "",
-                        _fmt_qty(t.get("plan_qty")),
-                        _fmt_qty(t.get("labor_hours_per_unit")),
+                        task.get("work_type_name", ""),
+                        task.get("name", ""),
+                        _fmt_date(task.get("plan_start")),
+                        _fmt_date(task.get("plan_finish")),
+                        task.get("uom_code") or "",
+                        _fmt_qty(task.get("plan_qty")),
+                        _fmt_qty(task.get("labor_hours_per_unit")),
                         workers_last,
                         st_label,
                     ),
                     tags=("task",),
                 )
     
-        self.tree.tag_configure("group", font=("Segoe UI", 9, "bold"))
+        self.tree.tag_configure(
+            "group",
+            font=("Segoe UI", 9, "bold"),
+            background="#eef5ff",
+        )
+    
         self.tree.tag_configure(
             "title",
             font=("Segoe UI", 9, "bold"),
-            background="#e3f2fd",
+            background="#dff1ff",
         )
     
-        self.gantt.set_data(self.tasks_filtered, self.facts, self.fact_info)
-        self.after_idle(self._sync_tree_header_spacer)
-        self.after_idle(self.gantt.redraw_bars_only)
+        # Для диаграммы передаём строки уже с датами секций.
+        self.gantt.set_data(
+            display_rows,
+            self.facts,
+            self.fact_info,
+        )
+    
+        self.after_idle(
+            self._sync_tree_header_spacer
+        )
+    
+        self.after_idle(
+            self.gantt.redraw_bars_only
+        )
 
     # ══════════════════════════════════════════════════════
     #  RANGE / ZOOM
@@ -3903,18 +4254,60 @@ class GprPage(tk.Frame):
         row_kind = (t0.get("row_kind") or "task").strip()
     
         if row_kind in ("group", "title"):
-            title = "Группа" if row_kind == "group" else "Титульная строка"
+            title = (
+                "Группа"
+                if row_kind == "group"
+                else "Титульная строка"
+            )
+        
             name = simpledialog.askstring(
                 title,
                 "Введите новый текст:",
                 initialvalue=t0.get("name", ""),
                 parent=self,
             )
+        
             if not name:
                 return
-            t0["name"] = name.strip()
+        
+            name = name.strip()
+        
+            if not name:
+                return
+        
+            old_start = (
+                _to_date(t0.get("plan_start"))
+                or self.range_from
+            )
+        
+            old_finish = (
+                _to_date(t0.get("plan_finish"))
+                or old_start
+            )
+        
+            date_dlg = DateRangeDialog(
+                self,
+                old_start,
+                old_finish,
+            )
+        
+            if not date_dlg.result:
+                return
+        
+            t0["name"] = name
+            t0["plan_start"] = date_dlg.result[0]
+            t0["plan_finish"] = date_dlg.result[1]
+        
             self._apply_filter()
             self._update_summary()
+        
+            self.lbl_bottom.config(
+                text=(
+                    f"{title} изменена. "
+                    "Нажмите «СОХРАНИТЬ» для записи в БД."
+                )
+            )
+        
             return
     
         result = self._open_task_dialog(init=t0)
@@ -4214,6 +4607,7 @@ class GprPage(tk.Frame):
                 self.object_db_id, uid
             )
             self._update_plan_info()
+            self._refresh_section_filter_values()
             self._apply_filter()
             self._update_summary()
             if hasattr(self, "planning_panel"):
@@ -4320,6 +4714,7 @@ class GprPage(tk.Frame):
     
         self.tasks = tasks
         self._recalc_sort_order()
+        self._refresh_section_filter_values()
         self._apply_filter()
         self._update_summary()
     
@@ -4343,24 +4738,177 @@ class GprPage(tk.Frame):
             parent=self,
         )
 
+    def _section_dates_map(self) -> Dict[int, Tuple[Optional[date], Optional[date]]]:
+        """
+        Возвращает фактические сроки каждой группы/титула.
+    
+        Секция начинается с group/title и заканчивается перед следующей
+        group/title. Сроки секции определяются по вложенным работам.
+    
+        Если внутри секции нет работ с датами, используются даты самой
+        строки group/title.
+        """
+        result: Dict[int, Tuple[Optional[date], Optional[date]]] = {}
+    
+        current_header_index: Optional[int] = None
+        current_task_indexes: List[int] = []
+    
+        def flush_section():
+            nonlocal current_header_index, current_task_indexes
+    
+            if current_header_index is None:
+                return
+    
+            header = self.tasks[current_header_index]
+    
+            starts: List[date] = []
+            finishes: List[date] = []
+    
+            for task_index in current_task_indexes:
+                task = self.tasks[task_index]
+    
+                ds = _to_date(task.get("plan_start"))
+                df = _to_date(task.get("plan_finish"))
+    
+                if ds:
+                    starts.append(ds)
+                if df:
+                    finishes.append(df)
+    
+            # Если вложенных работ нет, используем даты самой группы/титула.
+            if not starts:
+                own_start = _to_date(header.get("plan_start"))
+                if own_start:
+                    starts.append(own_start)
+    
+            if not finishes:
+                own_finish = _to_date(header.get("plan_finish"))
+                if own_finish:
+                    finishes.append(own_finish)
+    
+            result[current_header_index] = (
+                min(starts) if starts else None,
+                max(finishes) if finishes else None,
+            )
+    
+            current_header_index = None
+            current_task_indexes = []
+    
+        for index, task in enumerate(self.tasks):
+            row_kind = (task.get("row_kind") or "task").strip()
+    
+            if row_kind in ("group", "title"):
+                flush_section()
+                current_header_index = index
+                current_task_indexes = []
+                continue
+    
+            if row_kind == "task" and current_header_index is not None:
+                current_task_indexes.append(index)
+    
+        flush_section()
+    
+        return result
+    
+    
+    def _rows_with_section_dates(
+        self,
+        rows: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Возвращает копии строк с корректными датами групп и титулов.
+    
+        Даты рассчитываются по полному self.tasks, поэтому фильтрация
+        отдельных работ не ломает сроки групп и титулов.
+        """
+        source_rows = rows if rows is not None else self.tasks
+        section_dates = self._section_dates_map()
+    
+        source_index_by_identity = {
+            id(task): index
+            for index, task in enumerate(self.tasks)
+        }
+    
+        result: List[Dict[str, Any]] = []
+    
+        for task in source_rows:
+            row = dict(task)
+            row_kind = (row.get("row_kind") or "task").strip()
+    
+            if row_kind in ("group", "title"):
+                original_index = source_index_by_identity.get(id(task))
+    
+                if original_index is not None:
+                    ds, df = section_dates.get(
+                        original_index,
+                        (
+                            _to_date(row.get("plan_start")),
+                            _to_date(row.get("plan_finish")),
+                        ),
+                    )
+    
+                    row["plan_start"] = ds
+                    row["plan_finish"] = df
+    
+            result.append(row)
+    
+        return result
+    
+    
+    def _refresh_section_filter_values(self):
+        """
+        Обновляет списки фильтров групп и титулов.
+        """
+        if not hasattr(self, "cmb_filt_group"):
+            return
+    
+        groups = []
+        titles = []
+    
+        for task in self.tasks:
+            row_kind = (task.get("row_kind") or "task").strip()
+            name = (task.get("name") or "").strip()
+    
+            if not name:
+                continue
+    
+            if row_kind == "group" and name not in groups:
+                groups.append(name)
+    
+            if row_kind == "title" and name not in titles:
+                titles.append(name)
+    
+        self.cmb_filt_group.configure(values=["Все"] + groups)
+        self.cmb_filt_title.configure(values=["Все"] + titles)
+    
+        if self.cmb_filt_group.get() not in (["Все"] + groups):
+            self.cmb_filt_group.current(0)
+    
+        if self.cmb_filt_title.get() not in (["Все"] + titles):
+            self.cmb_filt_title.current(0)
+    
+    
+    def _row_section_header_indices(self) -> Dict[int, Optional[int]]:
+        """
+        Для каждой строки определяет индекс текущей группы/титула.
+        """
+        result: Dict[int, Optional[int]] = {}
+        current_header_index: Optional[int] = None
+    
+        for index, task in enumerate(self.tasks):
+            row_kind = (task.get("row_kind") or "task").strip()
+    
+            if row_kind in ("group", "title"):
+                current_header_index = index
+    
+            result[index] = current_header_index
+    
+        return result
+    
     def _build_section_date_ranges(
         self,
     ) -> Dict[int, Tuple[Optional[date], Optional[date]]]:
-        """
-        Определяет сроки для строк ГРУППА/ТИТУЛ.
-
-        Раздел начинается со строки group/title и продолжается
-        до следующей строки group/title.
-
-        Для раздела:
-        - начало = минимальная дата начала входящих работ;
-        - окончание = максимальная дата окончания входящих работ.
-        """
-
-        result: Dict[int, Tuple[Optional[date], Optional[date]]] = {}
-
-        current_header_index: Optional[int] = None
-        current_task_indexes: List[int] = []
+        return self._section_dates_map()
 
         def flush_section():
             nonlocal current_header_index, current_task_indexes
@@ -5137,6 +5685,8 @@ class GprPage(tk.Frame):
         if d1 < d0:
             d0, d1 = d1, d0
 
+        rows = self._rows_with_section_dates(rows)
+
         days = (d1 - d0).days + 1
 
         ws = wb.create_sheet("Гант среза")
@@ -5321,28 +5871,68 @@ class GprPage(tk.Frame):
 
             if row_kind == "group":
                 for col in range(1, total_cols + 1):
-                    ws.cell(row_num, col).fill = group_fill
-                    ws.cell(row_num, col).border = thin_border
-
+                    cell = ws.cell(row_num, col)
+                    cell.fill = group_fill
+                    cell.border = thin_border
+            
                 ws.cell(row_num, 2, "ГРУППА").font = Font(bold=True)
                 ws.cell(row_num, 3, r.get("name", "")).font = Font(bold=True)
+                ws.cell(row_num, 4, _fmt_date(r.get("plan_start")))
+                ws.cell(row_num, 5, _fmt_date(r.get("plan_finish")))
+            
                 ws.cell(row_num, 3).alignment = Alignment(
                     horizontal="left",
                     vertical="center",
                 )
+            
+                ds = _to_date(r.get("plan_start"))
+                df = _to_date(r.get("plan_finish"))
+            
+                if ds and df and not (df < d0 or ds > d1):
+                    clip_start = max(ds, d0)
+                    clip_finish = min(df, d1)
+            
+                    col_start = gantt_col_start + (clip_start - d0).days
+                    col_finish = gantt_col_start + (clip_finish - d0).days
+            
+                    for col in range(col_start, col_finish + 1):
+                        cell = ws.cell(row_num, col)
+                        cell.fill = self._xl_fill("#5B9BD5")
+                        cell.border = thin_border
+            
                 continue
 
             if row_kind == "title":
                 for col in range(1, total_cols + 1):
-                    ws.cell(row_num, col).fill = title_fill
-                    ws.cell(row_num, col).border = thin_border
-
+                    cell = ws.cell(row_num, col)
+                    cell.fill = title_fill
+                    cell.border = thin_border
+            
                 ws.cell(row_num, 2, "ТИТУЛ").font = Font(bold=True)
                 ws.cell(row_num, 3, r.get("name", "")).font = Font(bold=True)
+                ws.cell(row_num, 4, _fmt_date(r.get("plan_start")))
+                ws.cell(row_num, 5, _fmt_date(r.get("plan_finish")))
+            
                 ws.cell(row_num, 3).alignment = Alignment(
                     horizontal="left",
                     vertical="center",
                 )
+            
+                ds = _to_date(r.get("plan_start"))
+                df = _to_date(r.get("plan_finish"))
+            
+                if ds and df and not (df < d0 or ds > d1):
+                    clip_start = max(ds, d0)
+                    clip_finish = min(df, d1)
+            
+                    col_start = gantt_col_start + (clip_start - d0).days
+                    col_finish = gantt_col_start + (clip_finish - d0).days
+            
+                    for col in range(col_start, col_finish + 1):
+                        cell = ws.cell(row_num, col)
+                        cell.fill = self._xl_fill("#70ADCE")
+                        cell.border = thin_border
+            
                 continue
 
             excel_no += 1
@@ -5478,7 +6068,7 @@ class GprPage(tk.Frame):
         Создаёт второй лист Excel с диаграммой Ганта.
         Использует текущий диапазон self.range_from / self.range_to.
         """
-        rows = self.tasks
+        rows = self._rows_with_section_dates(self.tasks)
     
         ws = wb.create_sheet("Диаграмма Ганта")
     
@@ -5612,18 +6202,70 @@ class GprPage(tk.Frame):
     
             if row_kind == "group":
                 for col in range(1, total_cols + 1):
-                    ws.cell(row_num, col).fill = group_fill
+                    cell = ws.cell(row_num, col)
+                    cell.fill = group_fill
+                    cell.border = thin_border
+            
                 ws.cell(row_num, 2, "ГРУППА").font = Font(bold=True)
                 ws.cell(row_num, 3, t.get("name", "")).font = Font(bold=True)
-                ws.cell(row_num, 3).alignment = Alignment(horizontal="left", vertical="center")
+            
+                ws.cell(row_num, 4, _fmt_date(t.get("plan_start")))
+                ws.cell(row_num, 5, _fmt_date(t.get("plan_finish")))
+            
+                ws.cell(row_num, 3).alignment = Alignment(
+                    horizontal="left",
+                    vertical="center",
+                )
+            
+                ds = _to_date(t.get("plan_start"))
+                df = _to_date(t.get("plan_finish"))
+            
+                if ds and df and not (df < d0 or ds > d1):
+                    clip_start = max(ds, d0)
+                    clip_finish = min(df, d1)
+            
+                    col_start = gantt_col_start + (clip_start - d0).days
+                    col_finish = gantt_col_start + (clip_finish - d0).days
+            
+                    for col in range(col_start, col_finish + 1):
+                        cell = ws.cell(row_num, col)
+                        cell.fill = self._xl_fill("#5B9BD5")
+                        cell.border = thin_border
+            
                 continue
     
             if row_kind == "title":
                 for col in range(1, total_cols + 1):
-                    ws.cell(row_num, col).fill = title_fill
+                    cell = ws.cell(row_num, col)
+                    cell.fill = title_fill
+                    cell.border = thin_border
+            
                 ws.cell(row_num, 2, "ТИТУЛ").font = Font(bold=True)
                 ws.cell(row_num, 3, t.get("name", "")).font = Font(bold=True)
-                ws.cell(row_num, 3).alignment = Alignment(horizontal="left", vertical="center")
+            
+                ws.cell(row_num, 4, _fmt_date(t.get("plan_start")))
+                ws.cell(row_num, 5, _fmt_date(t.get("plan_finish")))
+            
+                ws.cell(row_num, 3).alignment = Alignment(
+                    horizontal="left",
+                    vertical="center",
+                )
+            
+                ds = _to_date(t.get("plan_start"))
+                df = _to_date(t.get("plan_finish"))
+            
+                if ds and df and not (df < d0 or ds > d1):
+                    clip_start = max(ds, d0)
+                    clip_finish = min(df, d1)
+            
+                    col_start = gantt_col_start + (clip_start - d0).days
+                    col_finish = gantt_col_start + (clip_finish - d0).days
+            
+                    for col in range(col_start, col_finish + 1):
+                        cell = ws.cell(row_num, col)
+                        cell.fill = self._xl_fill("#70ADCE")
+                        cell.border = thin_border
+            
                 continue
     
             excel_no += 1
@@ -5840,15 +6482,69 @@ class GprPage(tk.Frame):
                 if row_kind == "group":
                     ws.cell(row_num, 2, "ГРУППА").font = Font(bold=True)
                     ws.cell(row_num, 3, t.get("name", "")).font = Font(bold=True)
+                
+                    ws.cell(
+                        row_num,
+                        6,
+                        _fmt_date(t.get("plan_start")),
+                    )
+                
+                    ws.cell(
+                        row_num,
+                        7,
+                        _fmt_date(t.get("plan_finish")),
+                    )
+                
                     for c in range(1, 13):
-                        ws.cell(row_num, c).fill = PatternFill("solid", fgColor="EEF5FF")
+                        cell = ws.cell(row_num, c)
+                        cell.fill = PatternFill(
+                            "solid",
+                            fgColor="EEF5FF",
+                        )
+                        cell.alignment = Alignment(
+                            horizontal="center",
+                            vertical="center",
+                        )
+                
+                    ws.cell(row_num, 3).alignment = Alignment(
+                        horizontal="left",
+                        vertical="center",
+                    )
+                
                     continue
     
                 if row_kind == "title":
                     ws.cell(row_num, 2, "ТИТУЛ").font = Font(bold=True)
                     ws.cell(row_num, 3, t.get("name", "")).font = Font(bold=True)
+                
+                    ws.cell(
+                        row_num,
+                        6,
+                        _fmt_date(t.get("plan_start")),
+                    )
+                
+                    ws.cell(
+                        row_num,
+                        7,
+                        _fmt_date(t.get("plan_finish")),
+                    )
+                
                     for c in range(1, 13):
-                        ws.cell(row_num, c).fill = PatternFill("solid", fgColor="DFF1FF")
+                        cell = ws.cell(row_num, c)
+                        cell.fill = PatternFill(
+                            "solid",
+                            fgColor="DFF1FF",
+                        )
+                        cell.alignment = Alignment(
+                            horizontal="center",
+                            vertical="center",
+                        )
+                
+                    ws.cell(row_num, 3).alignment = Alignment(
+                        horizontal="left",
+                        vertical="center",
+                    )
+                
                     continue
     
                 excel_no += 1
