@@ -4,6 +4,7 @@ import calendar
 import difflib
 import logging
 import re
+from datetime import time as datetime_time
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -801,6 +802,508 @@ def round_hours_nearest(duration_minutes: int) -> int:
     return int((duration_minutes + 30) // 60)
 
 
+# ============================================================
+# Импорт СКУД Валдай
+# ============================================================
+
+def normalize_skud_employee_id(value: Any) -> str:
+    """
+    Нормализует ID сотрудника из СКУД Валдай.
+
+    Примеры:
+        "00059"       -> "59"
+        59             -> "59"
+        "Т-00059"     -> "59"
+        "таб. № 00059" -> "59"
+
+    Сравнение выполняется именно по цифровой части ID.
+    """
+    if value is None:
+        return ""
+
+    # Excel может передать число как 59.0
+    if isinstance(value, float) and value.is_integer():
+        raw = str(int(value))
+    else:
+        raw = str(value)
+
+    digits = re.sub(r"\D+", "", raw)
+
+    if not digits:
+        return ""
+
+    # Убираем ведущие нули.
+    # Для "0000" возвращаем "0", а не пустую строку.
+    normalized = digits.lstrip("0")
+    return normalized or "0"
+
+
+def _parse_valday_date(value: Any) -> Optional[date]:
+    """
+    Читает дату из разных вариантов выгрузки Валдай:
+        2026-09-23
+        23.09.2026
+        23/09/2026
+        datetime
+        date
+    """
+    if isinstance(value, datetime):
+        return value.date()
+
+    if isinstance(value, date):
+        return value
+
+    raw = normalize_spaces(str(value or ""))
+    if not raw:
+        return None
+
+    formats = (
+        "%Y-%m-%d",
+        "%d.%m.%Y",
+        "%d/%m/%Y",
+        "%Y/%m/%d",
+        "%d-%m-%Y",
+    )
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except Exception:
+            continue
+
+    # Иногда дата содержит время:
+    # 2026-09-23 00:00:00
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%d.%m.%Y %H:%M:%S",
+        "%d.%m.%Y %H:%M",
+    ):
+        try:
+            return datetime.strptime(raw, fmt).date()
+        except Exception:
+            continue
+
+    return None
+
+
+def _parse_valday_time(value: Any) -> Optional[datetime_time]:
+    """
+    Преобразует одно значение времени в datetime.time.
+
+    Поддерживает:
+        07:47
+        07:47:08
+        Excel datetime.time
+        Excel datetime
+        строки с дополнительным текстом
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        return value.time().replace(microsecond=0)
+
+    if isinstance(value, datetime_time):
+        return value.replace(microsecond=0)
+
+    raw = normalize_spaces(str(value or ""))
+    if not raw:
+        return None
+
+    # Ищем время внутри строки.
+    match = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?::(\d{2}))?(?!\d)", raw)
+    if not match:
+        return None
+
+    try:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        second = int(match.group(3) or 0)
+
+        if not (0 <= hour <= 23):
+            return None
+        if not (0 <= minute <= 59):
+            return None
+        if not (0 <= second <= 59):
+            return None
+
+        return datetime_time(hour, minute, second)
+    except Exception:
+        return None
+
+
+def _extract_valday_times(value: Any) -> List[datetime_time]:
+    """
+    Извлекает все отметки времени из одной ячейки.
+
+    Примеры:
+        "10:15:59,19:53:16"
+        "19:51:20,07:47:08"
+        "07:47:08"
+    """
+    if value is None:
+        return []
+
+    if isinstance(value, (datetime, datetime_time)):
+        parsed = _parse_valday_time(value)
+        return [parsed] if parsed else []
+
+    raw = normalize_spaces(str(value))
+    if not raw:
+        return []
+
+    result: List[datetime_time] = []
+
+    # В выгрузке используется запятая.
+    # Дополнительно поддерживаем ;, пробел и перенос строки.
+    matches = re.findall(
+        r"(?<!\d)(\d{1,2}:\d{2}(?::\d{2})?)(?!\d)",
+        raw,
+    )
+
+    for token in matches:
+        parsed = _parse_valday_time(token)
+        if parsed is not None:
+            result.append(parsed)
+
+    return result
+
+
+def _valday_time_to_minutes(value: datetime_time) -> int:
+    return value.hour * 60 + value.minute
+
+
+def _calculate_valday_day_summary(
+    times: Sequence[datetime_time],
+) -> Dict[str, Any]:
+    """
+    Рассчитывает рабочее время по набору отметок одного сотрудника за день.
+
+    Правила:
+    - приход ищется среди отметок до 12:00;
+    - уход ищется среди отметок после 12:00;
+    - порядок отметок в исходной строке не имеет значения;
+    - если отметка только одна — фиксируется проблема;
+    - после 4 часов вычитается 1 час обеда;
+    - результат округляется до ближайшего целого часа.
+    """
+    unique_times = sorted(
+        set(times),
+        key=lambda value: (
+            value.hour,
+            value.minute,
+            value.second,
+        ),
+    )
+
+    if not unique_times:
+        return {
+            "first_in": None,
+            "last_out": None,
+            "minutes_raw": 0,
+            "minutes": 0,
+            "hours_rounded": 0,
+            "has_in": False,
+            "has_out": False,
+            "anomaly": True,
+        }
+
+    lunch_boundary = 12 * 60
+
+    morning_times = [
+        value
+        for value in unique_times
+        if _valday_time_to_minutes(value) < lunch_boundary
+    ]
+
+    evening_times = [
+        value
+        for value in unique_times
+        if _valday_time_to_minutes(value) >= lunch_boundary
+    ]
+
+    first_in = min(morning_times) if morning_times else None
+    last_out = max(evening_times) if evening_times else None
+
+    has_in = first_in is not None
+    has_out = last_out is not None
+    anomaly = False
+
+    if not has_in or not has_out:
+        anomaly = True
+
+    raw_minutes = 0
+
+    if has_in and has_out:
+        first_in_minutes = _valday_time_to_minutes(first_in)
+        last_out_minutes = _valday_time_to_minutes(last_out)
+
+        raw_minutes = last_out_minutes - first_in_minutes
+
+        if raw_minutes <= 0:
+            raw_minutes = 0
+            anomaly = True
+
+    # Сохраняем существующую логику приложения:
+    # если присутствие больше 4 часов — вычитаем 1 час обеда.
+    minutes = _apply_default_skud_break(raw_minutes)
+
+    return {
+        "first_in": first_in,
+        "last_out": last_out,
+        "minutes_raw": raw_minutes,
+        "minutes": minutes,
+        "hours_rounded": round_hours_nearest(minutes),
+        "has_in": has_in,
+        "has_out": has_out,
+        "anomaly": anomaly,
+    }
+
+
+def read_valday_events_from_xlsx(path: str) -> List[Dict[str, Any]]:
+    """
+    Читает выгрузку СКУД Валдай.
+
+    Поддерживаются оба варианта из предоставленного файла:
+
+    Вариант 1:
+        ID сотрудника | Имя | Фамилия | Отдел | Дата | Кол-во | Время
+        00059         | Иван | Антонов | ...   | ...  | 2      | 08:12:56,19:53:46
+
+    Вариант 2:
+        ID сотрудника | Фамилия | Имя | Отдел | Дата | Кол-во | Время | ...
+        00059         | Антонов | Иван | ...   | ...  | 2      |       | 08:12:56 | 19:53:46
+    """
+    wb = load_workbook(path, data_only=True, read_only=True)
+
+    events: List[Dict[str, Any]] = []
+
+    required_headers = {
+        "ID сотрудника",
+        "Дата",
+    }
+
+    for ws in wb.worksheets:
+        header_row: Optional[int] = None
+        header_map: Dict[str, int] = {}
+
+        max_scan_rows = min(ws.max_row or 0, 60)
+        max_cols = ws.max_column or 0
+
+        for row_number in range(1, max_scan_rows + 1):
+            values = [
+                normalize_spaces(
+                    str(ws.cell(row_number, column_number).value or "")
+                )
+                for column_number in range(1, max_cols + 1)
+            ]
+
+            if not required_headers.issubset(set(values)):
+                continue
+
+            header_row = row_number
+
+            for column_number, header in enumerate(values, start=1):
+                if header:
+                    header_map[header] = column_number
+
+            break
+
+        if header_row is None:
+            continue
+
+        id_column = header_map.get("ID сотрудника")
+        date_column = header_map.get("Дата")
+        time_column = header_map.get("Время")
+
+        if not id_column or not date_column:
+            continue
+
+        for row_number in range(header_row + 1, (ws.max_row or 0) + 1):
+            employee_id_raw = ws.cell(row_number, id_column).value
+            employee_id = normalize_skud_employee_id(employee_id_raw)
+
+            row_date = _parse_valday_date(
+                ws.cell(row_number, date_column).value
+            )
+
+            if not employee_id or row_date is None:
+                continue
+
+            # Собираем ФИО, если колонки присутствуют.
+            first_name_column = header_map.get("Имя")
+            last_name_column = header_map.get("Фамилия")
+
+            first_name = ""
+            last_name = ""
+
+            if first_name_column:
+                first_name = normalize_spaces(
+                    str(ws.cell(row_number, first_name_column).value or "")
+                )
+
+            if last_name_column:
+                last_name = normalize_spaces(
+                    str(ws.cell(row_number, last_name_column).value or "")
+                )
+
+            fio = normalize_spaces(
+                f"{last_name} {first_name}"
+            )
+
+            if not fio:
+                fio = normalize_spaces(
+                    f"{first_name} {last_name}"
+                )
+
+            # Вариант 1: все отметки находятся в одной ячейке "Время".
+            values_to_parse: List[Any] = []
+
+            if time_column:
+                values_to_parse.append(
+                    ws.cell(row_number, time_column).value
+                )
+
+            # Вариант 2: отдельные отметки находятся в колонках
+            # после "Время". В предоставленном файле это H, I и далее.
+            if time_column:
+                for column_number in range(
+                    time_column + 1,
+                    max_cols + 1,
+                ):
+                    cell_value = ws.cell(
+                        row_number,
+                        column_number,
+                    ).value
+
+                    if cell_value not in (None, ""):
+                        values_to_parse.append(cell_value)
+
+            times: List[datetime_time] = []
+
+            for value in values_to_parse:
+                times.extend(_extract_valday_times(value))
+
+            if not times:
+                continue
+
+            events.append(
+                {
+                    "employee_id": employee_id,
+                    "employee_id_raw": employee_id_raw,
+                    "fio": fio,
+                    "date": row_date,
+                    "times": times,
+                    "sheet": ws.title,
+                    "row": row_number,
+                }
+            )
+
+    if not events:
+        raise RuntimeError(
+            "В файле не найдены данные СКУД Валдай. "
+            "Проверьте наличие колонок 'ID сотрудника' и 'Дата'."
+        )
+
+    return events
+
+
+def compute_valday_day_summary(
+    events: Sequence[Mapping[str, Any]],
+    target_date: date,
+) -> Tuple[Dict[str, Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Группирует события СКУД Валдай по ID сотрудника за выбранную дату.
+
+    Возвращает:
+        summary_by_employee_id
+        problems
+    """
+    by_employee_id: Dict[str, Dict[str, Any]] = {}
+
+    for event in events:
+        event_date = event.get("date")
+
+        if not isinstance(event_date, date):
+            continue
+
+        if event_date != target_date:
+            continue
+
+        employee_id = normalize_skud_employee_id(
+            event.get("employee_id")
+        )
+
+        if not employee_id:
+            continue
+
+        item = by_employee_id.setdefault(
+            employee_id,
+            {
+                "employee_id": employee_id,
+                "employee_id_raw": event.get("employee_id_raw"),
+                "fio": normalize_spaces(
+                    str(event.get("fio") or "")
+                ),
+                "times": [],
+                "rows": [],
+            },
+        )
+
+        item["times"].extend(event.get("times") or [])
+        item["rows"].append(event.get("row"))
+
+        event_fio = normalize_spaces(
+            str(event.get("fio") or "")
+        )
+        if not item.get("fio") and event_fio:
+            item["fio"] = event_fio
+
+    summary: Dict[str, Dict[str, Any]] = {}
+    problems: List[Dict[str, Any]] = []
+
+    for employee_id, item in by_employee_id.items():
+        calculated = _calculate_valday_day_summary(
+            item.get("times") or []
+        )
+
+        result = {
+            "employee_id": employee_id,
+            "employee_id_raw": item.get("employee_id_raw"),
+            "fio": item.get("fio") or "",
+            "first_in": calculated["first_in"],
+            "last_out": calculated["last_out"],
+            "minutes_raw": calculated["minutes_raw"],
+            "minutes": calculated["minutes"],
+            "hours_rounded": calculated["hours_rounded"],
+            "times": sorted(
+                set(item.get("times") or []),
+                key=lambda value: (
+                    value.hour,
+                    value.minute,
+                    value.second,
+                ),
+            ),
+            "rows": item.get("rows") or [],
+            "has_in": calculated["has_in"],
+            "has_out": calculated["has_out"],
+            "anomaly": calculated["anomaly"],
+        }
+
+        if calculated["minutes"] > 0:
+            summary[employee_id] = result
+
+        if (
+            calculated["anomaly"]
+            or not calculated["has_in"]
+            or not calculated["has_out"]
+        ):
+            problems.append(result)
+
+    return summary, problems
+
+
 def _parse_skud_datetime(value: Any) -> Optional[datetime]:
     if isinstance(value, datetime):
         return value
@@ -1028,6 +1531,9 @@ __all__ = [
     "round_hours_nearest",
     "read_skud_events_from_xlsx",
     "compute_day_summary_from_events",
+    "normalize_skud_employee_id",
+    "read_valday_events_from_xlsx",
+    "compute_valday_day_summary",
     "ensure_current_month_date",
     "rows_have_unsaved_content",
 ]
