@@ -36,7 +36,9 @@ from timesheet_common import (
     normalize_tbn,
     parse_timesheet_cell,
     parse_hours_value,
-    read_skud_events_from_xlsx,
+    read_valday_events_from_xlsx,
+    compute_valday_day_summary,
+    normalize_skud_employee_id,
     safe_filename,
     validate_rows_before_save,
 )
@@ -3754,7 +3756,115 @@ class TimesheetPage(tk.Frame):
     # Импорт СКУД
     # --------------------------------------------------------
 
-    def import_from_skud(self):
+    def _choose_skud_format(self) -> Optional[str]:
+        """
+        Показывает выбор формата СКУД.
+
+        Возвращает:
+            "school" — формат СКУД школ
+            "valday" — формат СКУД Валдай
+            None — отмена
+        """
+        dialog = tk.Toplevel(self)
+        dialog.title("Выбор формата СКУД")
+        dialog.transient(self.winfo_toplevel())
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        result = {
+            "format": None,
+        }
+
+        frame = tk.Frame(
+            dialog,
+            bg="#ffffff",
+            padx=22,
+            pady=18,
+        )
+        frame.pack(fill="both", expand=True)
+
+        tk.Label(
+            frame,
+            text="Выберите формат выгрузки:",
+            font=("Segoe UI", 10, "bold"),
+            bg="#ffffff",
+            fg="#1f2937",
+        ).pack(anchor="w", pady=(0, 12))
+
+        selected_format = tk.StringVar(
+            value="school"
+        )
+
+        ttk.Radiobutton(
+            frame,
+            text="СКУД школ",
+            variable=selected_format,
+            value="school",
+        ).pack(anchor="w", pady=4)
+
+        ttk.Radiobutton(
+            frame,
+            text="СКУД Валдай",
+            variable=selected_format,
+            value="valday",
+        ).pack(anchor="w", pady=4)
+
+        buttons = tk.Frame(
+            frame,
+            bg="#ffffff",
+        )
+        buttons.pack(
+            fill="x",
+            pady=(16, 0),
+        )
+
+        def confirm():
+            result["format"] = selected_format.get()
+            dialog.destroy()
+
+        def cancel():
+            result["format"] = None
+            dialog.destroy()
+
+        ttk.Button(
+            buttons,
+            text="Продолжить",
+            command=confirm,
+        ).pack(side="right", padx=(8, 0))
+
+        ttk.Button(
+            buttons,
+            text="Отмена",
+            command=cancel,
+        ).pack(side="right")
+
+        dialog.protocol(
+            "WM_DELETE_WINDOW",
+            cancel,
+        )
+
+        dialog.update_idletasks()
+
+        parent = self.winfo_toplevel()
+
+        try:
+            x = parent.winfo_rootx() + (
+                parent.winfo_width() - dialog.winfo_width()
+            ) // 2
+
+            y = parent.winfo_rooty() + (
+                parent.winfo_height() - dialog.winfo_height()
+            ) // 2
+
+            dialog.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        except Exception:
+            pass
+
+        self.wait_window(dialog)
+
+        return result["format"]
+    
+    def _import_from_skud_school(self):
         if self.read_only:
             return
 
@@ -3896,6 +4006,419 @@ class TimesheetPage(tk.Frame):
         except Exception as e:
             logger.exception("Ошибка импорта СКУД")
             messagebox.showerror("СКУД", f"Ошибка при загрузке СКУД:\n{e}", parent=self)
+
+    def _import_from_skud_valday(self):
+        """
+        Импортирует часы из выгрузки СКУД Валдай.
+
+        ID сотрудника из выгрузки сопоставляется с цифровой частью
+        табельного номера сотрудника в базе.
+        """
+        if self.read_only:
+            return
+
+        current_dep = normalize_spaces(
+            self.cmb_department.get() or ""
+        )
+
+        if current_dep == "Все":
+            messagebox.showwarning(
+                "СКУД Валдай",
+                "Выберите конкретное подразделение (не 'Все').",
+                parent=self,
+            )
+            return
+
+        year, month = self.get_year_month()
+
+        dlg_date = SelectDateDialog(
+            self,
+            init_date=date(year, month, 1),
+        )
+
+        selected_date = dlg_date.result
+
+        if selected_date is None:
+            return
+
+        if not ensure_current_month_date(
+            selected_date,
+            year,
+            month,
+        ):
+            messagebox.showwarning(
+                "СКУД Валдай",
+                f"Выбрана дата "
+                f"{selected_date.strftime('%d.%m.%Y')}, "
+                f"но открыт табель за "
+                f"{month_name_ru(month)} {year}.\n"
+                "Выберите дату из текущего месяца.",
+                parent=self,
+            )
+            return
+
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Выберите выгрузку СКУД Валдай",
+            filetypes=[
+                ("Excel", "*.xlsx"),
+                ("Все файлы", "*.*"),
+            ],
+        )
+
+        if not path:
+            return
+
+        try:
+            events = read_valday_events_from_xlsx(path)
+
+            summary_by_employee_id, problems = (
+                compute_valday_day_summary(
+                    events,
+                    target_date=selected_date,
+                )
+            )
+
+            if not summary_by_employee_id and not problems:
+                messagebox.showinfo(
+                    "СКУД Валдай",
+                    "В отчёте нет событий за выбранную дату.",
+                    parent=self,
+                )
+                return
+
+            # ------------------------------------------------
+            # Строим индекс сотрудников из текущего подразделения
+            # ------------------------------------------------
+            employees_by_skud_id: Dict[
+                str,
+                List[Tuple[str, str, str, str, str]],
+            ] = {}
+
+            for employee in self.employees:
+                fio, tbn, position, department, schedule = employee
+
+                if current_dep != "Все":
+                    if normalize_spaces(department) != current_dep:
+                        continue
+
+                employee_id = normalize_skud_employee_id(tbn)
+
+                if not employee_id:
+                    continue
+
+                employees_by_skud_id.setdefault(
+                    employee_id,
+                    [],
+                ).append(employee)
+
+            day_idx = selected_date.day - 1
+
+            if self._is_day_locked(day_idx):
+                messagebox.showwarning(
+                    "Табель закрыт",
+                    f"День {selected_date.day} закрыт "
+                    "для редактирования.",
+                    parent=self,
+                )
+                return
+
+            # ------------------------------------------------
+            # Формируем список найденных и проблемных сотрудников
+            # ------------------------------------------------
+            prepared_rows: List[Dict[str, Any]] = []
+
+            for employee_id, info in sorted(
+                summary_by_employee_id.items(),
+                key=lambda item: (
+                    str(item[0]),
+                    str(item[1].get("fio") or "").lower(),
+                ),
+            ):
+                candidates = employees_by_skud_id.get(
+                    normalize_skud_employee_id(employee_id),
+                    [],
+                )
+
+                matched_employee = None
+
+                if len(candidates) == 1:
+                    matched_employee = candidates[0]
+
+                source_fio = normalize_spaces(
+                    info.get("fio") or ""
+                )
+
+                if matched_employee:
+                    matched_fio = normalize_spaces(
+                        matched_employee[0]
+                    )
+                    matched_tbn = normalize_tbn(
+                        matched_employee[1]
+                    )
+                    match_status = "Найден по ID"
+                elif not candidates:
+                    matched_fio = ""
+                    matched_tbn = ""
+                    match_status = "ID не найден в подразделении"
+                else:
+                    matched_fio = ""
+                    matched_tbn = ""
+                    match_status = (
+                        f"Найдено совпадений: {len(candidates)}"
+                    )
+
+                first_in = info.get("first_in")
+                last_out = info.get("last_out")
+
+                first_in_text = (
+                    first_in.strftime("%H:%M:%S")
+                    if first_in
+                    else "—"
+                )
+
+                last_out_text = (
+                    last_out.strftime("%H:%M:%S")
+                    if last_out
+                    else "—"
+                )
+
+                prepared_rows.append(
+                    {
+                        "employee_id": employee_id,
+                        "source_fio": source_fio,
+                        "matched_fio": matched_fio,
+                        "matched_tbn": matched_tbn,
+                        "match_status": match_status,
+                        "hours_rounded": info.get(
+                            "hours_rounded",
+                            0,
+                        ),
+                        "minutes": info.get(
+                            "minutes",
+                            0,
+                        ),
+                        "first_in": first_in_text,
+                        "last_out": last_out_text,
+                        "has_in": bool(
+                            info.get("has_in")
+                        ),
+                        "has_out": bool(
+                            info.get("has_out")
+                        ),
+                        "anomaly": bool(
+                            info.get("anomaly")
+                        ),
+                    }
+                )
+
+            # ------------------------------------------------
+            # Показываем пользователю найденные данные
+            # ------------------------------------------------
+            preview_lines: List[str] = []
+
+            for item in prepared_rows[:30]:
+                status = item["match_status"]
+                fio = item["matched_fio"] or item["source_fio"] or "—"
+                tbn = item["matched_tbn"] or "—"
+                hours = item["hours_rounded"]
+
+                preview_lines.append(
+                    f"ID {item['employee_id']}: "
+                    f"{fio}, таб.№ {tbn}, "
+                    f"{item['first_in']}–{item['last_out']}, "
+                    f"{hours} ч. — {status}"
+                )
+
+            if len(prepared_rows) > 30:
+                preview_lines.append(
+                    f"... и ещё "
+                    f"{len(prepared_rows) - 30}"
+                )
+
+            warning_count = len(problems)
+
+            message = (
+                f"Дата: "
+                f"{selected_date.strftime('%d.%m.%Y')}\n"
+                f"Найдено сотрудников: "
+                f"{len(prepared_rows)}\n"
+                f"Проблемных записей: "
+                f"{warning_count}\n\n"
+            )
+
+            if preview_lines:
+                message += "\n".join(preview_lines)
+
+            if not messagebox.askyesno(
+                "Проверка СКУД Валдай",
+                message
+                + "\n\nПрименить найденные часы?",
+                parent=self,
+            ):
+                return
+
+            # ------------------------------------------------
+            # Применяем часы к табелю
+            # ------------------------------------------------
+            applied = 0
+            added = 0
+            skipped = 0
+            ambiguous = 0
+            not_found = 0
+            invalid_time = 0
+
+            problem_ids = {
+                normalize_skud_employee_id(
+                    item.get("employee_id")
+                )
+                for item in problems
+            }
+
+            for item in prepared_rows:
+                employee_id = normalize_skud_employee_id(
+                    item.get("employee_id")
+                )
+
+                hours_value = item.get("hours_rounded")
+
+                if (
+                    not isinstance(hours_value, int)
+                    or hours_value <= 0
+                ):
+                    invalid_time += 1
+                    skipped += 1
+                    continue
+
+                candidates = employees_by_skud_id.get(
+                    employee_id,
+                    [],
+                )
+
+                if not candidates:
+                    not_found += 1
+                    skipped += 1
+                    continue
+
+                if len(candidates) != 1:
+                    ambiguous += 1
+                    skipped += 1
+                    continue
+
+                fio, tbn, _position, _department, schedule = (
+                    candidates[0]
+                )
+
+                # Ищем существующую строку прежде всего по табельному
+                # номеру, а затем по ФИО.
+                tbn_norm = normalize_tbn(tbn)
+                fio_norm = normalize_spaces(fio)
+
+                rec = None
+
+                for existing_rec in self.model_rows_all:
+                    existing_tbn = normalize_tbn(
+                        existing_rec.get("tbn")
+                    )
+
+                    if (
+                        tbn_norm
+                        and existing_tbn == tbn_norm
+                    ):
+                        rec = existing_rec
+                        break
+
+                if rec is None:
+                    rec = self._find_unique_row_by_fio(
+                        fio_norm
+                    )
+
+                if rec is None:
+                    rec = {
+                        "fio": fio_norm,
+                        "tbn": tbn_norm,
+                        "hours": [None] * 31,
+                        "work_schedule": schedule or "",
+                    }
+
+                    self._apply_schedule_maps_to_rows(
+                        [rec]
+                    )
+
+                    self.model_rows_all.append(rec)
+                    added += 1
+
+                hours = normalize_hours_list(
+                    rec.get("hours"),
+                    year,
+                    month,
+                )
+
+                hours[day_idx] = format_hours_for_cell(
+                    hours_value
+                )
+
+                rec["hours"] = hours
+                rec["_totals"] = calc_row_totals(
+                    hours,
+                    year,
+                    month,
+                )
+
+                applied += 1
+
+            self._recalc_all_row_totals()
+            self._apply_filter()
+
+            if applied > 0 or added > 0:
+                self._mark_dirty()
+                self._schedule_auto_save()
+
+            result_message = (
+                "Импорт СКУД Валдай завершён.\n\n"
+                f"Применено записей: {applied}\n"
+                f"Добавлено сотрудников: {added}\n"
+                f"Пропущено записей: {skipped}\n"
+                f"ID не найдены: {not_found}\n"
+                f"Неоднозначных ID: {ambiguous}\n"
+                f"Некорректных/неполных времён: "
+                f"{invalid_time}\n"
+                f"Проблемных записей: {len(problem_ids)}"
+            )
+
+            messagebox.showinfo(
+                "СКУД Валдай",
+                result_message,
+                parent=self,
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "Ошибка импорта СКУД Валдай"
+            )
+
+            messagebox.showerror(
+                "СКУД Валдай",
+                f"Ошибка при загрузке выгрузки:\n{exc}",
+                parent=self,
+            )
+
+    def import_from_skud(self):
+        """
+        Выбор формата и запуск соответствующего импорта.
+        """
+        if self.read_only:
+            return
+
+        selected_format = self._choose_skud_format()
+
+        if selected_format == "school":
+            self._import_from_skud_school()
+            return
+
+        if selected_format == "valday":
+            self._import_from_skud_valday()
+            return
 
     # --------------------------------------------------------
     # Импорт Excel / копирование
